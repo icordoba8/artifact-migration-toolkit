@@ -5,6 +5,25 @@ tagging, publication, commits and pushes are not part of this change.
 
 ## Installation contract
 
+The normal user path is now standard Agent Skills installation followed by the
+installed skill's first-use preflight:
+
+```sh
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools --skill start-migration
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools --skill migrate-artifact
+```
+
+Both skills carry byte-identical generated copies of
+`scripts/runtime-bootstrap.mjs`, because either skill must remain independently
+installable. That preflight owns only immutable GitHub Release resolution and
+transport. It uses existing `gh`, token, or Git credential authentication,
+verifies the release/tag/asset identity, and delegates the release store,
+receipt, MCP merge, adapter doctor and engine doctor to the shared adapter below.
+It never opens or writes consumer migration state. A valid receipt short-circuits
+before GitHub resolution, so a second invocation is offline.
+
+The following explicit bundle CLI remains the advanced CI/admin surface.
+
 Each provider owns `providers/<provider>/install.mjs`. These generated entry
 points share file/config mechanics in `providers/install-support.mjs`; that
 module has no standalone CLI and contains no migration rules. Engine commands
@@ -101,7 +120,7 @@ forwarding and interrupted-install lock refusal. Generator checks cover the same
 projection before installation. No skipped provider installation proofs remain
 in the engine contract suite.
 
-The update fixture is a synthetic compatible `1.0.1` identity, not a published
+The update fixture is a synthetic compatible `1.1.1` identity, not a published
 second release. Acceptance builds use the working tree with `force: true`; a
 clean committed release and protected tag remain separate release gates.
 

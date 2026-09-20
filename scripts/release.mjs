@@ -267,6 +267,21 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
   return { identity, stagingRoot, manifest, blockers: check.blockers };
 };
 
+/** Build the one GitHub Release asset consumed by the skill bootstrap. */
+export const buildReleaseArchive = async (built) => {
+  const archive = path.join(
+    path.dirname(built.stagingRoot),
+    `${TOOLKIT_NAME}-v${built.identity.version}.tar.gz`,
+  );
+  await rm(archive, { force: true });
+  await execFileAsync(
+    "tar",
+    ["-czf", archive, "-C", path.dirname(built.stagingRoot), path.basename(built.stagingRoot)],
+    { maxBuffer: 64 * 1024 * 1024 },
+  );
+  return { archive, digest: `sha256:${sha256(await readFile(archive))}` };
+};
+
 /**
  * The supported persisted migration versions, read from the engine rather than
  * restated here. A release manifest that carried its own copy of these numbers
@@ -303,6 +318,19 @@ export const verifyRelease = async (stagingRoot) => {
   if (JSON.stringify(identity) !== JSON.stringify(manifest.toolkit)) {
     mismatched.push("packages/migration-engine/build-identity.json (identity disagrees with the manifest)");
   }
+  const sums = Object.fromEntries(
+    (await readFile(path.join(stagingRoot, "SHA256SUMS"), "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const match = line.match(/^([a-f0-9]{64})  (.+)$/);
+        return match ? [match[2], `sha256:${match[1]}`] : [line, "invalid"];
+      }),
+  );
+  if (JSON.stringify(sums) !== JSON.stringify(manifest.files)) {
+    mismatched.push("SHA256SUMS (disagrees with the manifest)");
+  }
   return { toolkit: manifest.toolkit, mismatched, verified: mismatched.length === 0 };
 };
 
@@ -323,8 +351,9 @@ const main = async (argv) => {
   }
   if (argv.includes("--build")) {
     const built = await buildRelease({ force: argv.includes("--allow-dirty") });
+    const asset = await buildReleaseArchive(built);
     process.stdout.write(
-      `${JSON.stringify({ toolkit: built.identity, stagingRoot: built.stagingRoot, blockers: built.blockers }, null, 2)}\n`,
+      `${JSON.stringify({ toolkit: built.identity, stagingRoot: built.stagingRoot, asset, blockers: built.blockers }, null, 2)}\n`,
     );
     return;
   }

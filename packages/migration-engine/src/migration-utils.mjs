@@ -1294,8 +1294,18 @@ export const runDoctor = async ({
       "writable .agents/knowledge/migrations/",
       async () => {
         const root = path.join(knowledgeRoot, ".agents/knowledge/migrations");
-        await access(root, fsConstants.W_OK);
-        return root;
+        let writable = root;
+        while (true) {
+          try {
+            await access(writable, fsConstants.W_OK);
+            return writable === root ? root : `${root} (creatable from ${writable})`;
+          } catch (error) {
+            if (error.code !== "ENOENT") throw error;
+          }
+          const parent = path.dirname(writable);
+          if (parent === writable) throw new Error(`${root} has no writable ancestor`);
+          writable = parent;
+        }
       },
     ),
   ];

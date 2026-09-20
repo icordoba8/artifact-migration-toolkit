@@ -2556,9 +2556,9 @@ const PROVIDER_SKILL_ROOTS = [
  * The original also ran `<configured-root>/start-migration/scripts/discover-module.mjs`,
  * because in the consumer a copy that existed but could not execute was the same
  * outage as a missing one. That half is now unsatisfiable *by design*: a provider
- * tree carries documents only, and `providers-sync.mjs` refuses to project an
- * executable module into one at all. The property that replaced it -- no engine
- * source anywhere under `providers/**` -- is asserted in
+ * tree carries documents plus the first-use runtime preflight, and
+ * `providers-sync.mjs` refuses every other executable module. The property that
+ * replaced it -- no engine source anywhere under `providers/**` -- is asserted in
  * `test/providers-sync.test.mjs`, and the inverse guard is below.
  */
 test("P2-7: every provider skill root is generated, documented, and free of engine source", async () => {
@@ -2593,15 +2593,16 @@ test("P2-7: every provider skill root is generated, documented, and free of engi
     }
   }
 
-  // No provider skill root may hold anything a runtime could execute. This is
-  // the assertion the removed half became: the adapters install one engine
-  // package, so there is no provider copy to keep in step.
+  // The only executable in a provider skill is the bootstrap standard
+  // `skills add` must carry. It resolves a release and delegates to the one
+  // adapter; no provider gets a copy of the engine.
   const executable = manifest.filter(
     (entry) =>
       PROVIDER_SKILL_ROOTS.some((root) => entry.startsWith(`${root}/`)) &&
       /\.(mjs|cjs|js|ts|mts|cts)$/.test(entry),
   );
-  assert.deepEqual(executable, [], "a provider skill tree carries engine source");
+  assert.ok(executable.length > 0, "the installed skills must carry their bootstrap");
+  assert.ok(executable.every((entry) => entry.endsWith("/scripts/runtime.mjs")), "a provider skill tree carries engine source");
 });
 
 // --- P3-2: every declared contract suite is deliverable --------------------
@@ -2665,14 +2666,22 @@ test("P3-4: every generated output has a consumer, and every canonical skill fil
 
   // Provider trees used to carry copies of the engine suites. The runners
   // execute the canonical ones only, so every copy was an output no official
-  // command would ever run. The one executable that reaches a provider tree is
-  // its adapter entry point, which `providers:test` installs and executes; it
-  // has a consumer, so it stays. Anything else code-shaped does not.
-  assert.deepEqual(
-    manifest.filter((entry) => /\.(test\.mjs|mjs|cjs|js|ts|mts|cts)$/.test(entry)),
-    ["claude", "codex", "copilot", "opencode"].map(
+  // command would ever run. Adapter entry points and the skill runtime preflight
+  // are both invoked by supported installation paths; anything else code-shaped
+  // does not belong here.
+  const expectedExecutables = [
+    ...["claude", "codex", "copilot", "opencode"].map(
       (provider) => `providers/${provider}/install.mjs`,
     ),
+    ...["claude", "codex", "copilot", "opencode"].flatMap((provider) =>
+      ["migrate-artifact", "start-migration"].map(
+        (skill) => `providers/${provider}/skills/${skill}/scripts/runtime.mjs`,
+      ),
+    ),
+  ].sort();
+  assert.deepEqual(
+    manifest.filter((entry) => /\.(test\.mjs|mjs|cjs|js|ts|mts|cts)$/.test(entry)),
+    expectedExecutables,
     "a generated tree carries code no official command runs",
   );
   // And it is an entry point, not a second implementation: it delegates to the
@@ -14398,10 +14407,9 @@ test("R-W6-a / R-W6-b: an unanchored history tail is bounded to one event at thi
  * *generator's* output against its input, and that suite already owns the
  * generator. Restating them here would give one property two owners.
  *
- * R-W8-e -- "every provider tree's `discover-module.mjs` loads and runs" -- has
- * no successor and must not get one. It proved four engine copies were each
- * executable; a provider tree carries no executable now, which is the stronger
- * property and is asserted by P2-7 and P3-4 above.
+ * R-W8-e -- "every provider tree's `discover-module.mjs` loads and runs" -- is
+ * replaced by the stronger boundary below: the skill-local scripts directory
+ * contains only the runtime preflight, never an engine entry point.
  */
 const PROVIDER_ROOTS = ["claude", "codex", "copilot", "opencode"];
 const MIGRATION_SKILLS = ["start-migration", "migrate-artifact"];
@@ -14409,12 +14417,11 @@ const MIGRATION_SKILLS = ["start-migration", "migrate-artifact"];
 test("R-W8-e: no provider tree has an engine entry point to run", async () => {
   for (const provider of PROVIDER_ROOTS) {
     for (const skill of MIGRATION_SKILLS) {
-      assert.equal(
-        await exists(
-          path.join(repositoryRoot, "providers", provider, "skills", skill, "scripts"),
-        ),
-        false,
-        `providers/${provider}/skills/${skill} has a scripts directory`,
+      const scripts = path.join(repositoryRoot, "providers", provider, "skills", skill, "scripts");
+      assert.deepEqual(
+        await readdir(scripts),
+        ["runtime.mjs"],
+        `providers/${provider}/skills/${skill} carries engine code`,
       );
     }
   }

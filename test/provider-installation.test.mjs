@@ -25,7 +25,7 @@ async function bundles() {
   const second = path.join(scratch, 'release two');
   await cp(first, second, { recursive: true });
   const manifest = JSON.parse(await readFile(path.join(second, 'release-manifest.json')));
-  manifest.toolkit = { ...manifest.toolkit, version: '1.0.1', commit: '1'.repeat(40), contentHash: `sha256:${'2'.repeat(64)}` };
+  manifest.toolkit = { ...manifest.toolkit, version: '1.1.1', commit: '1'.repeat(40), contentHash: `sha256:${'2'.repeat(64)}` };
   const replace = async (relative, value) => {
     const bytes = `${JSON.stringify(value, null, 2)}\n`;
     await writeFile(path.join(second, relative), bytes);
@@ -38,6 +38,7 @@ async function bundles() {
     source.toolkit = manifest.toolkit; source.engine.version = manifest.toolkit.version;
     await replace(file, source);
   }
+  await writeFile(path.join(second, 'SHA256SUMS'), `${Object.entries(manifest.files).map(([relative, hash]) => `${hash.slice(7)}  ${relative}`).join('\n')}\n`);
   await writeFile(path.join(second, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   releases = { first, pin, second, nextPin: digest(await readFile(path.join(second, 'release-manifest.json'))), identity: built.identity };
   return releases;
@@ -121,7 +122,7 @@ for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
       const wrappers = provider === 'opencode' ? 'commands' : 'prompts';
       const surfaces = new Set();
       for (const relative of Object.keys(receipt.files)) {
-        assert.ok(!/\.(mjs|js|ts)$/.test(relative), relative);
+        assert.ok(!/\.(mjs|js|ts)$/.test(relative) || relative.endsWith('/scripts/runtime.mjs'), relative);
         const text = await readFile(path.join(root, relative), 'utf8');
         assert.ok(!text.includes('{{ENGINE_MCP_ENTRY}}'), relative);
         const skill = relative.match(/(?:^|\/)(start-migration|migrate-artifact)\/(.+)$/);
@@ -282,4 +283,33 @@ test('provider-owned CLI forwards argv and cwd; interrupted install locks fail c
   await assert.rejects(adapter('opencode', { ...options, action: 'doctor' }), /locked/);
   await rm(lock);
   await adapter('opencode', { ...options, action: 'remove' });
+});
+
+test('v1.0.0 stores without a mode or SHA256SUMS remain valid, updatable and removable', async () => {
+  const b = await bundles();
+  const root = path.join(scratch, 'v1 receipt root');
+  const options = { scope: 'project', root, store: path.join(scratch, 'v1 receipt store'), bundle: b.first, pin: b.pin };
+  const receipt = await adapter('codex', options);
+  const receiptFile = path.join(root, '.artifact-migration-tools/codex.json');
+  delete receipt.mode;
+  await writeFile(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`);
+  // v1.0.0 staged no SHA256SUMS alongside the pinned release manifest.
+  await rm(path.join(receipt.release, 'SHA256SUMS'));
+  assert.equal((await adapter('codex', { ...options, action: 'doctor' })).outcome, 'OK');
+  const next = await adapter('codex', { ...options, action: 'update', bundle: b.second, pin: b.nextPin });
+  assert.equal(next.toolkit.version, '1.1.1');
+  assert.equal((await adapter('codex', { ...options, action: 'rollback' })).pin, b.pin);
+  assert.equal((await adapter('codex', { ...options, action: 'remove' })).removed, true);
+});
+
+test('SHA256SUMS disagreeing with the release manifest fails closed', async () => {
+  const b = await bundles();
+  const root = path.join(scratch, 'sums mismatch root');
+  const options = { scope: 'project', root, store: path.join(scratch, 'sums mismatch store'), bundle: b.first, pin: b.pin };
+  const receipt = await adapter('codex', options);
+  const sums = path.join(receipt.release, 'SHA256SUMS');
+  const [first, ...rest] = (await readFile(sums, 'utf8')).split('\n');
+  await writeFile(sums, [`${'0'.repeat(64)}  ${first.slice(66)}`, ...rest].join('\n'));
+  await assert.rejects(verifyBundle(receipt.release, b.pin), /SHA256SUMS does not match/);
+  await assert.rejects(adapter('codex', { ...options, action: 'doctor' }), /SHA256SUMS does not match/);
 });

@@ -159,7 +159,11 @@ identity to adopt onto an unstamped one.
 
 `pnpm release:build` stages `dist/<name>-<version>/` from the committed tree,
 renders the four provider-manifest placeholders, and writes
-`release-manifest.json` plus `SHA256SUMS`. `pnpm release:verify <dir>` re-hashes
+`release-manifest.json` plus `SHA256SUMS`, then creates the sole bootstrap asset
+`dist/artifact-migration-tools-v<version>.tar.gz`. Publish that asset only on a
+stable GitHub Release whose immutable flag is enabled; the first-use bootstrap
+refuses mutable releases and assets without GitHub's SHA-256 digest.
+`pnpm release:verify <dir>` re-hashes
 a staged bundle against its own manifest. `pnpm release:check` is the gate: a
 clean protected tree, agreeing versions, fully committed payload.
 

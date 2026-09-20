@@ -11,6 +11,24 @@ user-invocable: true
 Run one validated standalone artifact iteration at a time. The persisted record,
 not conversation memory or a module migration, owns progress and resume.
 
+Before status or any other migration work, run this installed skill's shared
+runtime preflight:
+
+```bash
+node <skill-directory>/scripts/runtime.mjs ensure --provider <claude|codex|opencode|copilot> --root <current-working-directory>
+```
+
+Use the provider running this invocation. A valid pinned receipt is reused with
+no network access; otherwise the preflight installs and verifies the latest
+stable immutable GitHub Release in the user release store, registers MCP, runs
+the adapter and engine doctors, and returns absolute engine commands. Continue
+this invocation with the returned `artifact-migrate` command (a host restart may
+be needed before newly registered MCP is visible). Stop on preflight failure;
+never use a checkout, branch, mutable `latest` URL, or ambient `PATH` instead.
+An exact admin/CI override is available as `--version X.Y.Z` or
+`ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z`; changing the provider runtime never
+changes a migration record's `toolkitIdentity`.
+
 ```bash
 artifact-migrate <source> \
   [--type <type>] [--target <path>] \

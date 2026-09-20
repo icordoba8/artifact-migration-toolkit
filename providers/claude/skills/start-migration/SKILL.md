@@ -12,6 +12,29 @@ Execute exactly one validated migration checkpoint, or one implementation/
 verification slice, per iteration. A later session — possibly a different model
 or provider — resumes from the saved state, never from conversation memory.
 
+## Runtime preflight
+
+Before migration status or any other migration work, run the installed skill's
+`scripts/runtime.mjs` from this skill directory:
+
+```bash
+node <skill-directory>/scripts/runtime.mjs ensure --provider <claude|codex|opencode|copilot> --root <current-working-directory>
+```
+
+Use the provider running this invocation. This preflight is the only normal
+runtime installer: it reuses a valid pinned receipt without network access, or
+installs the latest stable immutable GitHub Release into the user release store,
+registers MCP, and runs both doctors. On success, use the absolute commands in
+its JSON result and continue the original invocation. The current host may need
+a restart before the new MCP registration is visible, so use the returned CLI
+command during this first invocation. Stop on preflight failure; never fall back
+to a checkout, branch, `latest` URL, package-manager install, or ambient `PATH`.
+
+`--version X.Y.Z` and `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z` are explicit
+admin/CI overrides. They select another immutable release but never update a
+migration record's `toolkitIdentity`; use the engine's explicit toolkit
+update/rollback operation separately when intended.
+
 ## Runtime requirements
 
 Run `artifact-migration-discover --doctor` first on any host you have not used before.

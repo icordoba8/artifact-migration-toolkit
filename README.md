@@ -54,6 +54,31 @@ docs/release.md           release gate, format-bump and approval-boundary rules
 
 ## Install
 
+Normal users install either skill with the standard Agent Skills CLI:
+
+```bash
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools \
+  --skill start-migration
+
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools \
+  --skill migrate-artifact
+```
+
+On first use, the installed skill's small `scripts/runtime.mjs` preflight
+resolves the latest stable immutable GitHub Release, verifies its asset digest,
+tag commit, manifest, `SHA256SUMS`, files and toolkit identity, then delegates
+installation and MCP registration to the release's provider adapter. The exact
+release is retained outside the consumer repository. Later invocations validate
+and reuse that receipt without network access. `skills add` remains the sole
+owner of skill discovery and installation.
+
+For an exact admin/CI selection, invoke the installed preflight with
+`--version X.Y.Z` or set `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z`. The explicit
+provider installer documented below remains available for local bundles,
+updates and rollback; it is not the normal skill-install UX.
+
+### Development checkout
+
 Requires Node >= 22 and pnpm 11.21.0.
 
 ```bash
@@ -156,11 +181,11 @@ pnpm skills:lock       # recompute skills-lock.json
 ```
 
 Generated provider trees contain **no engine source**: `providers-sync.mjs`
-refuses to project an executable module into one, so the four-copies-of-the-engine
-layout is not reachable by editing a canonical file. Each tree holds `SKILL.md`,
-the skill's references, at most one thin wrapper per invocable skill, one MCP
-template, and `adapter.json`. Claude gets no wrapper — its skill is directly
-user-invocable.
+refuses executable modules other than the byte-identical runtime preflight each
+independently installable skill must carry. Each tree holds `SKILL.md`, the
+skill's references and preflight, at most one thin wrapper per invocable skill,
+one MCP template, and `adapter.json`. Claude gets no wrapper — its skill is
+directly user-invocable.
 
 `providers/generated-files.json` is the ownership manifest and the **only** set
 of paths a sync may delete. Hand-authored files under `providers/**` survive

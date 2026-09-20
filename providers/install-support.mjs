@@ -51,6 +51,18 @@ export async function verifyBundle(bundle, pin) {
   for (const [relative, hash] of Object.entries(manifest.files)) {
     if (digest(await readFile(await safePath(bundle, relative))) !== hash) throw new Error(`Release checksum mismatch: ${relative}`);
   }
+  // Pre-v1.1.0 stores staged no SHA256SUMS. The pinned release-manifest.json is
+  // already fully verified above, so its absence is tolerated; present but
+  // disagreeing still fails closed. New installs keep staging the file.
+  const sums = await optional(await safePath(bundle, 'SHA256SUMS'));
+  if (sums !== null) {
+    const checksums = sums.toString('utf8').trim().split('\n').filter(Boolean).map(line => {
+      const match = line.match(/^([a-f0-9]{64})  (.+)$/);
+      if (!match) throw new Error('Invalid SHA256SUMS');
+      return [match[2], `sha256:${match[1]}`];
+    });
+    if (!same(Object.fromEntries(checksums), manifest.files)) throw new Error('SHA256SUMS does not match release manifest');
+  }
   const runtime = await filesBelow(path.join(bundle, 'packages/migration-engine'));
   for (const relative of runtime) {
     if (!manifest.files[`packages/migration-engine/${relative}`]) throw new Error(`Unverified engine file: ${relative}`);
@@ -112,16 +124,16 @@ async function validateSelection(receipt, provider, layout) {
   const owned = mergeConfig(null, layout, null, server).owned;
   if (!same(receipt.configOwned, owned) && !(typeof owned === 'string' && receipt.configOwned === `\n${owned}`)) throw new Error('Invalid configuration ownership');
   const source = JSON.parse(await readFile(path.join(receipt.release, `providers/${provider}/adapter.json`)));
-  const expectedFiles = source.files.flatMap(relative => {
+  const expectedFiles = (receipt.mode === 'runtime' ? [] : source.files).flatMap(relative => {
     if (relative.startsWith('skills/')) return [`${layout[0]}/${relative.slice(7)}`];
     if (/^(prompts|commands)\//.test(relative) && layout[1]) return [`${layout[1]}/${relative.split('/').at(-1)}`];
     return [];
   });
-  if (provider === 'claude') expectedFiles.push('.claude-plugin/plugin.json');
+  if (provider === 'claude' && receipt.mode !== 'runtime') expectedFiles.push('.claude-plugin/plugin.json');
   if (!same(Object.keys(receipt.files).sort(), expectedFiles.sort())) throw new Error('Invalid ownership manifest');
 }
 
-async function applyAdapter(provider, { action = 'install', scope, root, store, bundle, pin } = {}) {
+async function applyAdapter(provider, { action = 'install', scope, root, store, bundle, pin, runtimeOnly = false } = {}) {
   const layout = layouts[provider]?.[scope];
   if (!layout || !root || !store) throw new Error('Supported scope, explicit root and external store are required');
   root = path.resolve(root); store = path.resolve(store);
@@ -129,7 +141,8 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const receiptFile = await safePath(root, `.artifact-migration-tools/${provider}.json`);
   const rawReceipt = await optional(receiptFile);
   const previous = rawReceipt ? JSON.parse(rawReceipt) : null;
-  if (previous && (previous.provider !== provider || previous.scope !== scope || previous.root !== root || previous.store !== store)) throw new Error('Installation selection conflict');
+  const mode = runtimeOnly ? 'runtime' : 'provider';
+  if (previous && (previous.provider !== provider || previous.scope !== scope || previous.root !== root || previous.store !== store || (previous.mode ?? 'provider') !== mode)) throw new Error('Installation selection conflict');
   if (!['install', 'update', 'rollback', 'remove', 'doctor'].includes(action)) throw new Error(`Unknown action: ${action}`);
   if (previous) await validateSelection(previous, provider, layout);
   if (action !== 'install' && !previous) throw new Error('No installation selected');
@@ -160,14 +173,19 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(engine, entry)]]));
     const mcp = { command: process.execPath, args: [path.join(engine, 'src/mcp-server.mjs')] };
     server = provider === 'opencode' ? { type: 'local', command: [mcp.command, ...mcp.args], enabled: true } : provider === 'copilot' ? { type: 'stdio', ...mcp } : mcp;
-    for (const relative of source.files) {
+    for (const relative of mode === 'runtime' ? [] : source.files) {
       let destination;
       if (relative.startsWith('skills/')) destination = `${layout[0]}/${relative.slice(7)}`;
       else if (/^(prompts|commands)\//.test(relative) && layout[1]) destination = `${layout[1]}/${relative.split('/').at(-1)}`;
       else continue;
       if (!ownedPath(destination, provider, layout)) throw new Error(`Unexpected adapter path: ${relative}`);
       if (!manifest.files[`providers/${provider}/${relative}`]) throw new Error(`Unverified adapter file: ${relative}`);
-      let text = (await readFile(await safePath(bundle, `providers/${provider}/${relative}`), 'utf8')).replaceAll('{{ENGINE_MCP_ENTRY}}', mcp.args[0]);
+      let text = await readFile(await safePath(bundle, `providers/${provider}/${relative}`), 'utf8');
+      if (relative.endsWith('/scripts/runtime.mjs')) {
+        writes.set(destination, Buffer.from(text));
+        continue;
+      }
+      text = text.replaceAll('{{ENGINE_MCP_ENTRY}}', mcp.args[0]);
       // Render installed CLI paths too: skill invocation never depends on PATH.
       for (const [name, argv] of Object.entries(commands).sort(([a], [b]) => b.length - a.length)) {
         const quote = value => process.platform === 'win32' ? `"${value.replaceAll('"', '""')}"` : `'${value.replaceAll("'", "'\\''")}'`;
@@ -175,8 +193,8 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
       }
       writes.set(destination, Buffer.from(text));
     }
-    if (provider === 'claude') writes.set('.claude-plugin/plugin.json', Buffer.from(json({ name: 'artifact-migration-tools', version: manifest.toolkit.version, description: 'Pinned migration skills and MCP engine' })));
-    receipt = { provider, scope, root, store, toolkit: manifest.toolkit, skills: manifest.skills, release, pin, commands, mcp: server, files: Object.fromEntries([...writes].map(([name, bytes]) => [name, digest(bytes)])), releases: [...(previous?.releases ?? []).filter(item => item.release !== release), { release, pin }] };
+    if (provider === 'claude' && mode !== 'runtime') writes.set('.claude-plugin/plugin.json', Buffer.from(json({ name: 'artifact-migration-tools', version: manifest.toolkit.version, description: 'Pinned migration skills and MCP engine' })));
+    receipt = { provider, scope, mode, root, store, toolkit: manifest.toolkit, skills: manifest.skills, release, pin, commands, mcp: server, files: Object.fromEntries([...writes].map(([name, bytes]) => [name, digest(bytes)])), releases: [...(previous?.releases ?? []).filter(item => item.release !== release), { release, pin }] };
     // Check ownership/config before staging any release or changing a consumer.
   }
   const merged = mergeConfig(rawConfig, layout, previous?.configOwned, server);
@@ -197,7 +215,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
       const staging = `${receipt.release}.${randomUUID()}.tmp`;
       try {
         const manifest = await verifyBundle(bundle, pin);
-        for (const relative of [...Object.keys(manifest.files), 'release-manifest.json']) await replace(await safePath(staging, relative), await readFile(await safePath(bundle, relative)));
+        for (const relative of [...Object.keys(manifest.files), 'release-manifest.json', 'SHA256SUMS']) await replace(await safePath(staging, relative), await readFile(await safePath(bundle, relative)));
         await verifyBundle(staging, pin);
         await rename(staging, receipt.release);
       } finally { await rm(staging, { recursive: true, force: true }); }
@@ -236,7 +254,9 @@ export async function main(provider) {
   const action = requested === '--doctor' ? 'doctor' : requested;
   const separator = args.indexOf('--');
   const forwarded = separator < 0 ? [] : args.splice(separator).slice(1);
-  const options = { action: action === 'exec' ? 'doctor' : action };
+  const options = { action: action === 'exec' ? 'doctor' : action, runtimeOnly: false };
+  const runtimeIndex = args.indexOf('--runtime-only');
+  if (runtimeIndex >= 0) { options.runtimeOnly = true; args.splice(runtimeIndex, 1); }
   for (let i = 0; i < args.length; i += 2) {
     if (!/^--(scope|root|store|bundle|pin)$/.test(args[i]) || !args[i + 1]) throw new Error('Expected --scope/--root/--store/--bundle/--pin values');
     options[args[i].slice(2)] = args[i + 1];

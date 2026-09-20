@@ -158,11 +158,15 @@ description: Migrate one standalone artifact
 Run the canonical artifact workflow.
 `,
   );
+  for (const skill of SKILLS) {
+    await writeText(root, `skills/${skill}/scripts/runtime.mjs`, "export {};\n");
+  }
   return root;
 };
 
 const EXPECTED = [
   ...PROVIDERS.map(provider => `providers/${provider}/install.mjs`),
+  ...PROVIDERS.flatMap(provider => SKILLS.map(skill => `providers/${provider}/skills/${skill}/scripts/runtime.mjs`)),
   "providers/claude/.mcp.json",
   "providers/claude/adapter.json",
   "providers/claude/skills/migrate-artifact/SKILL.md",
@@ -422,7 +426,7 @@ test("no provider tree carries engine source, engine tests, or a skill package m
 
   for (const relative of await readManifest(root)) {
     assert.ok(
-      (!/\.(mjs|cjs|js|ts|mts|cts)$/.test(relative) || relative.endsWith("/install.mjs")),
+      (!/\.(mjs|cjs|js|ts|mts|cts)$/.test(relative) || relative.endsWith("/install.mjs") || relative.endsWith("/scripts/runtime.mjs")),
       `${relative} is executable source inside a provider tree`,
     );
     assert.ok(!relative.endsWith("/package.json"), `${relative} is a skill package manifest`);
@@ -430,7 +434,7 @@ test("no provider tree carries engine source, engine tests, or a skill package m
   // And the committed tree agrees, which is the claim a release makes.
   for (const relative of await readManifest(repositoryRoot)) {
     assert.ok(
-      (!/\.(mjs|cjs|js|ts|mts|cts)$/.test(relative) || relative.endsWith("/install.mjs")) && !relative.endsWith(".test.mjs"),
+      (!/\.(mjs|cjs|js|ts|mts|cts)$/.test(relative) || relative.endsWith("/install.mjs") || relative.endsWith("/scripts/runtime.mjs")) && !relative.endsWith(".test.mjs"),
       `${relative} is engine source or a test inside a provider tree`,
     );
   }
