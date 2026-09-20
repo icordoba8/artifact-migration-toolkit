@@ -1,0 +1,42 @@
+{
+  "name": "artifact-migration-tools-claude",
+  "provider": "claude",
+  "toolkit": {
+    "name": "artifact-migration-tools",
+    "version": "{{TOOLKIT_VERSION}}",
+    "commit": "{{TOOLKIT_COMMIT}}",
+    "contentHash": "{{TOOLKIT_CONTENT_HASH}}"
+  },
+  "engine": {
+    "package": "@artifact-migration-tools/migration-engine",
+    "version": "{{TOOLKIT_VERSION}}",
+    "mcpEntry": "{{ENGINE_MCP_ENTRY}}"
+  },
+  "skills": [
+    "migrate-artifact",
+    "start-migration"
+  ],
+  "install": {
+    "mechanism": "plugin-marketplace",
+    "skillRoot": {
+      "user": null,
+      "project": null
+    },
+    "mcpConfig": {
+      "user": null,
+      "project": null
+    }
+  },
+  "mcpTemplate": ".mcp.json",
+  "files": [
+    ".mcp.json",
+    "install.mjs",
+    "skills/migrate-artifact/SKILL.md",
+    "skills/migrate-artifact/references/artifact-contract.md",
+    "skills/start-migration/SKILL.md",
+    "skills/start-migration/references/discovery-checklist.md",
+    "skills/start-migration/references/migration-contract.md",
+    "skills/start-migration/references/provider-compatibility.md",
+    "skills/start-migration/references/v5-contract.md"
+  ]
+}

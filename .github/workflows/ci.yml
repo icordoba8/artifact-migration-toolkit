@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  toolkit:
+    # The engine drives real file locking, atomic renames, `git ls-files`, child
+    # processes and path rendering. Windows has no flock (module-lock.mjs) and
+    # quotes command tokens differently (engine-paths.mjs), so it is a different
+    # system under test, not the same one twice. Neither platform is optional.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # providers-sync.mjs imports `yaml` and the engine requires
+      # `ts-discovery-compiler`. A clean checkout that runs providers:check
+      # before installing crashes on a missing module, so install comes first.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Byte-identical regeneration of all four provider trees, the ownership
+      # manifest included. Reports MISSING / CHANGED / STALE and writes nothing.
+      - name: Verify generated provider trees
+        run: pnpm providers:check
+
+      # R-1: no canonical or generated surface may name a consumer-relative
+      # engine root. An operator who pastes one runs an engine that is not the
+      # installed toolkit, or none at all. Repository-wide, no carve-outs --
+      # the two files that discuss the retired literal write it split.
+      - name: Scan for consumer-relative engine paths
+        shell: bash
+        run: |
+          if git grep -n -E '\.agents/skills/(start-migration|migrate-artifact)/scripts' -- \
+               skills providers scripts docs README.md .github; then
+            echo "::error::a canonical or generated surface names a consumer-relative engine path"
+            exit 1
+          fi
+
+      # Provider projection, ownership-safe pruning, the no-engine-in-providers
+      # boundary, the canonical skill hashes in skills-lock.json, and the
+      # installed adapter acceptance matrix for all four providers.
+      - name: Run the provider generation and installation suites
+        run: pnpm providers:test
+
+      # Lifecycle, formats, decisions, integrity, MCP, discovery, artifact, and
+      # the external-installation / rendered-command path suites.
+      - name: Run the engine suites
+        run: pnpm engine:test
+
+      - name: Run the TypeScript artifact suites
+        run: pnpm engine:test:ts
+
+      # Release identity: the payload hashes, the versions agree, and the tree
+      # is clean. A dirty or partially committed tree cannot produce an identity
+      # whose commit SHA names the tree that was hashed, so this must fail the
+      # build rather than warn. `engine:test` already builds and verifies a
+      # staged bundle; this is the gate that says the bundle is *releasable*.
+      - name: Verify release identity
+        run: pnpm release:check

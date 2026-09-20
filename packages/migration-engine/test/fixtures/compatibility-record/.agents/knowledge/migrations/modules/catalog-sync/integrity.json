@@ -1,0 +1,12 @@
+{
+  "revision": 61,
+  "artifactHashesSha256": "b1e0ea18dc8c26221236d7e5c75f95a385944a8effb905a15d479acceec92f1f",
+  "history": {
+    "bytes": 16013,
+    "sha256": "1304adc6d82a049cab287e304c77cea3c0485c5bce42b5263472da86dfb324c7"
+  },
+  "decisions": {
+    "bytes": 38610,
+    "sha256": "8f5520642fef3114bc24e9b94a17a899f8bb55c99df496fe20cac7d0cfdc5543"
+  }
+}

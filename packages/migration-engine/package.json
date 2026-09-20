@@ -1,0 +1,34 @@
+{
+  "name": "@artifact-migration-tools/migration-engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Canonical provider-neutral migration engine: lifecycle, state, operator decisions, integrity, resumability, upgrades, evidence, and the MCP runtime. The discovery scanner and the artifact structural census both parse with a pinned classic-API TypeScript that is deliberately independent of whatever compiler the analyzed project uses, so the engine owns it here instead of borrowing a host devDependency alias.",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/core.mjs",
+    "./package.json": "./package.json",
+    "./src/*": "./src/*"
+  },
+  "bin": {
+    "artifact-migration-discover": "src/cli/discover-module.mjs",
+    "artifact-migration-run": "src/cli/run-migration.mjs",
+    "artifact-migration-advance": "src/cli/advance-migration.mjs",
+    "artifact-migration-validate": "src/cli/validate-migration.mjs",
+    "artifact-migration-registry": "src/cli/update-migration-registry.mjs",
+    "artifact-migration-decision": "src/record-decision.mjs",
+    "artifact-migration-upgrade": "src/upgrades/upgrade-migration.mjs",
+    "artifact-migrate": "src/artifact/run-artifact.mjs",
+    "artifact-migration-mcp": "src/mcp-server.mjs",
+    "artifact-migration-toolkit": "src/cli/toolkit-identity.mjs"
+  },
+  "files": [
+    "src",
+    "references"
+  ],
+  "dependencies": {
+    "ts-discovery-compiler": "npm:typescript@5.9.3"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "start-migration": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "{{ENGINE_MCP_ENTRY}}"
+      ]
+    }
+  }
+}

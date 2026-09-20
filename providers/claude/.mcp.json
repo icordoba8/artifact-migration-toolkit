@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "start-migration": {
+      "command": "node",
+      "args": [
+        "{{ENGINE_MCP_ENTRY}}"
+      ]
+    }
+  }
+}

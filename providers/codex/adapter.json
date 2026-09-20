@@ -1,0 +1,44 @@
+{
+  "name": "artifact-migration-tools-codex",
+  "provider": "codex",
+  "toolkit": {
+    "name": "artifact-migration-tools",
+    "version": "{{TOOLKIT_VERSION}}",
+    "commit": "{{TOOLKIT_COMMIT}}",
+    "contentHash": "{{TOOLKIT_CONTENT_HASH}}"
+  },
+  "engine": {
+    "package": "@artifact-migration-tools/migration-engine",
+    "version": "{{TOOLKIT_VERSION}}",
+    "mcpEntry": "{{ENGINE_MCP_ENTRY}}"
+  },
+  "skills": [
+    "migrate-artifact",
+    "start-migration"
+  ],
+  "install": {
+    "mechanism": "agent-skills-directory",
+    "skillRoot": {
+      "user": "~/.agents/skills",
+      "project": ".agents/skills"
+    },
+    "mcpConfig": {
+      "user": "~/.codex/config.toml",
+      "project": ".codex/config.toml"
+    }
+  },
+  "mcpTemplate": "config.toml",
+  "files": [
+    "config.toml",
+    "install.mjs",
+    "prompts/migrate-artifact.md",
+    "prompts/start-migration.md",
+    "skills/migrate-artifact/SKILL.md",
+    "skills/migrate-artifact/references/artifact-contract.md",
+    "skills/start-migration/SKILL.md",
+    "skills/start-migration/references/discovery-checklist.md",
+    "skills/start-migration/references/migration-contract.md",
+    "skills/start-migration/references/provider-compatibility.md",
+    "skills/start-migration/references/v5-contract.md"
+  ]
+}

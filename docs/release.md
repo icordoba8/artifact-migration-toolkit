@@ -1,0 +1,214 @@
+# Artifact Migration Tools — Release Procedure
+
+This repository owns the canonical `skills/**` and
+`packages/migration-engine/**` sources. Consumer application gates are outside
+this release contract.
+
+Release identity (`scripts/release.mjs`, `build-identity.json`,
+`release-manifest.json`) and toolkit-identity stamping landed in Phase 3; see
+*Toolkit identity* below.
+
+## The three runners
+
+| Runner | Command | Owns |
+| --- | --- | --- |
+| `node --test` | `pnpm engine:test` | the 15 engine suites under `packages/migration-engine/test/{unit,integration,external}` |
+| `node --test` | `pnpm providers:test` | `test/providers-sync.test.mjs` and `test/provider-installation.test.mjs` — projection and installed acceptance |
+| vitest | `pnpm engine:test:ts` | the two TypeScript artifact filesystem/recovery specs under `test/integration/artifact` |
+
+`pnpm test` runs all three. The `node:test` suites drive real file locking,
+atomic renames, `git ls-files` and child processes, which a jsdom environment
+cannot host — so they stay on Node's runner and are named **explicitly** by their
+script. An unnamed suite is an unrun suite. Adding a suite means adding it to a
+runner in the same change; `P3-2` asserts every named suite exists and is not
+git-ignored, and CI runs all three on both platforms.
+
+The two provider-installation proofs now run in
+`test/provider-installation.test.mjs`: R-W9-a starts the rendered installed MCP
+entry and checks a retained consumer launcher; R-W9-c reports the installed
+registration and retained Playwright/Figma entries without launching them.
+The adapter never installs the consumer's browser/design services. The same
+suite covers every supported provider/scope, exact pins, CLI/MCP identity,
+update refusal, explicit identity update/rollback and ownership-safe removal.
+See [Phase 4 acceptance](phase-4-acceptance.md) for the matrix and limitations.
+
+## Release acceptance gate
+
+A change under `skills/**` or `packages/migration-engine/**` is releasable only
+when **all** of the following hold.
+
+1. `pnpm install --frozen-lockfile` succeeds from a clean checkout.
+2. `pnpm engine:test` — passes on `ubuntu-latest` **and** `windows-latest`.
+   Both platforms are required: the engine drives real file locking and
+   `module-lock.mjs` documents that Windows has no `flock`, so they are
+   different systems under test, not the same one twice.
+3. `pnpm engine:test:ts` — passes.
+4. `pnpm providers:check` — all four provider trees and the ownership manifest
+   regenerate byte-identically, on `ubuntu-latest` **and** `windows-latest`.
+5. `pnpm providers:test` — provider projection, ownership-safe pruning, the
+   no-engine-in-a-provider-tree boundary, and the canonical skill hashes.
+6. Every regression in the release matrix has a passing owning test.
+7. If `MIGRATION_FORMAT_VERSION` changed — see *Format bump* below.
+8. If the operator-approval boundary changed — see *Approval boundary* below.
+9. A change under `skills/**` is not releasable until `pnpm providers:sync` and
+   `pnpm skills:lock` have been re-run and their output committed. The generated
+   trees and the lock are part of the change, not a follow-up.
+
+## Format bump
+
+Bumping `MIGRATION_FORMAT_VERSION` requires editing **one constant plus one
+table row**. If you find yourself editing a third place, the derivation is
+broken — fix the derivation, not the third place.
+
+1. Add the constant and its `usesX(state)` predicate in `resumable-migration.mjs`.
+2. Add one row to `FORMAT_FEATURES`, highest-first.
+3. If the bump is non-promoting, add it to `NON_PROMOTING_FORMAT_VERSIONS` with
+   the reason at its definition.
+4. Add one row to the `SKILL.md` compatibility table. `R-W10-a` parses that
+   table and compares it against `SUPPORTED_FORMAT_VERSIONS`, so it cannot drift.
+
+Then prove the bump did not disturb the previous format: `R-W10-b`/`R-W10-d`
+run a full lifecycle on a prior-format fixture and assert it is stamped at its
+own format, gains none of the new vocabulary, and is refused from the new
+transition.
+
+**Which kind of bump is it?**
+
+- *Additive and derivable* → self-healing. The feature has a default an older
+  record satisfies by omission. No explicit upgrade command. Formats 12–16.
+- *New authored artifact, or a new lifecycle step* → non-promoting. The record
+  runs the lifecycle it was born under, for its whole life. Formats 10 and 11.
+
+Two different questions live here and must not be conflated: *may this record
+run* (`formatIsSupported`) and *may an advance promote its stamp into this
+format* (`formatIsPromoting`). Merging them makes every non-promoting format
+unexecutable.
+
+Toolkit version and migration format version vary independently. A toolkit
+release never implies a format bump, and a format bump never implies a major
+toolkit release.
+
+## Approval boundary
+
+Any change to `src/record-decision.mjs`, `src/mcp-server.mjs`'s elicitation
+path, or `src/cli/run-migration.mjs`'s approval handling requires the full
+`R-W2-*` set plus both integration specs under
+`packages/migration-engine/test/integration/`.
+
+Non-negotiable properties, each with an owning test:
+
+- The elicitation schema stays a **required free-text field**, never an enum. An
+  enum is answerable from the schema alone and can authorize multiple lines
+  without an operator transcribing the challenge.
+- `ask` stays an in-process function reference — never an argv option, an
+  environment variable, or a tool argument.
+- One recorder body serves both ledgers. Two copies of a security boundary is
+  one more than can be reviewed at once.
+- Refusal by *shape* as well as by name: an approval-shaped argument on any tool
+  but `migration_run` is refused.
+
+The confirmation phrase is a transcription barrier against schema-derived
+auto-answers, **not** proof of humanity. Do not describe it to an operator as
+more than that. The named upgrade path is a detached signature verified against
+a key pinned at `RESOLVE`.
+
+## Evidence and drift invariants
+
+Never weaken these without a plan revision:
+
+- Preserved failed attempts under `rework/<slice>-<n>/` are pinned in
+  `artifactHashes` and released by **no** later transition, including
+  `--refresh`. Deletion refuses as `REWORK_EVIDENCE_MISSING`; mutation refuses
+  as a hash mismatch. The two are different forensics and stay distinguishable.
+- `COMPLETE` means every modified target byte is attributable to a validated
+  slice, an authorized rework, an authorized delegation, an engine-authored
+  file, or a ledger-backed operator acceptance.
+- Drift acceptance is an operator decision under the standard challenge phrase,
+  bound to the path's SHA-256 — never a CLI flag. A flag is what turns a
+  security boundary into a formality.
+
+## The v5 upgrade contract is a hashed input
+
+`src/upgrades/upgrade-migration.mjs` hashes `references/v5-contract.md` into
+every upgrade transaction's `contractDigest`. That file is therefore **persisted
+material, not documentation**: editing a byte changes a digest recorded in
+consumer state. `packages/migration-engine/references/v5-contract.md` is the
+runtime copy the engine reads; `skills/start-migration/references/v5-contract.md`
+is the canonical operator-facing copy. They are asserted byte-identical by
+`test/unit/v5-contract-parity.test.mjs`. Change both or neither.
+
+## Versioning
+
+`pnpm skills:lock` → `scripts/skills-lock.mjs` recomputes `skills-lock.json`
+over each canonical skill directory (path **and** bytes, so a rename moves the
+hash), so a downstream target can detect that a skill moved without diffing tens
+of thousands of lines. `pnpm providers:test` fails if the committed lock and the
+canonical bytes disagree.
+
+The engine package release content hash is separate from the skill hashes; a
+skill hash does not identify the engine package.
+
+## Toolkit identity
+
+A built toolkit has one immutable identity — `name`, `version`, `commit`,
+`contentHash` — written to `build-identity.json` beside the engine's `src/` at
+packaging time and never committed. A source checkout has no such file and is
+*unidentified*: it may read, validate and report on any record, and may mutate
+none. It cannot prove it is the release a stamped record pinned, and it has no
+identity to adopt onto an unstamped one.
+
+`pnpm release:build` stages `dist/<name>-<version>/` from the committed tree,
+renders the four provider-manifest placeholders, and writes
+`release-manifest.json` plus `SHA256SUMS`. `pnpm release:verify <dir>` re-hashes
+a staged bundle against its own manifest. `pnpm release:check` is the gate: a
+clean protected tree, agreeing versions, fully committed payload.
+
+The content hash is **acyclic**. Inputs: canonical skills, engine payload,
+lockfile, and the committed provider payload with its placeholders *unrendered*.
+Everything identity-bearing is derived afterwards and is never an input, so no
+committed file contains the hash it contributes to. `providers:check` is
+unaffected: it compares committed generated output, which still carries
+placeholders.
+
+### The compatibility contract
+
+| Record | Behavior |
+| --- | --- |
+| Unstamped, read-only status/validation | reads, reports `UNSTAMPED`, writes nothing |
+| Unstamped, mutation under a *released* toolkit | fails closed, naming one adoption command |
+| Unstamped, mutation under a source checkout | fails closed — a checkout has no identity to adopt, so it is told to install a release rather than given a command that cannot succeed |
+| Stamped, exact match | proceeds |
+| Stamped, any field differs | status may report `MISMATCH`; every mutation and approval blocks before a write |
+| Explicit update/rollback | a separate locked maintenance operation between two immutable releases |
+
+Adoption, update and rollback run under the **existing** record lock, journal
+and integrity transaction, append exactly one `TOOLKIT_IDENTITY_ADOPTED` /
+`TOOLKIT_IDENTITY_CHANGED` event, and then **stop** — the lifecycle resumes on
+the next invocation. They move no step, slice or pin and touch no decision id,
+sequence, rationale digest, decision digest or ledger hash. Identity is anchored
+by the append-only history, not by `state.json` alone: replay derives the final
+identity from the events and compares it with the persisted field, and the
+integrity anchor pins its digest outside `state.json`.
+
+Toolkit SemVer stays independent of every migration version. A toolkit release
+never implies a format bump and a format bump never implies a toolkit release;
+`test/unit/toolkit-identity.test.mjs` asserts the identity module reads no
+migration version constant in either direction.
+
+Owning suites: `packages/migration-engine/test/unit/toolkit-identity.test.mjs`
+(identity semantics, adoption, mismatch, update/rollback, lock serialization,
+release identity) and
+`packages/migration-engine/test/external/format-17-acceptance.test.mjs` (an
+installed bundle against a scratch consumer in a path with spaces, containing no
+engine source: unstamped resume through adoption, decisions and MCP, plus
+upgrade preview/execute, interrupted-upgrade recovery, rollback, and interrupted
+artifact journal recovery).
+
+## Sign-off
+
+| Change | Reviewer |
+| --- | --- |
+| Format bump | Engine owner + one reviewer who did not write it |
+| Approval boundary | Engine owner + security review |
+| Provider generation / `providers-sync.mjs` | Engine owner |
+| Docs, tests, CI only | One reviewer |

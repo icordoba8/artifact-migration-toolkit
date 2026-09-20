@@ -1,0 +1,30 @@
+{
+  "name": "artifact-migration-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone, versioned migration toolkit: canonical start-migration and migrate-artifact skills plus the one canonical migration engine.",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "engine:test": "node scripts/engine-test.mjs packages/migration-engine/test/external/bin-mappings.test.mjs packages/migration-engine/test/external/format-17-acceptance.test.mjs packages/migration-engine/test/external/engine-paths.test.mjs packages/migration-engine/test/integration/artifact-delegation.test.mjs packages/migration-engine/test/integration/inline-approval.integration.spec.mjs packages/migration-engine/test/integration/operator-approval-authority.integration.spec.mjs packages/migration-engine/test/unit/artifact-migration.test.mjs packages/migration-engine/test/unit/v5-contract-parity.test.mjs packages/migration-engine/test/unit/discovery-scan.test.mjs packages/migration-engine/test/unit/evidence-provenance.test.mjs packages/migration-engine/test/unit/mcp-server.test.mjs packages/migration-engine/test/unit/content-identity.test.mjs packages/migration-engine/test/unit/live-history-replay.test.mjs packages/migration-engine/test/unit/migration-contract.test.mjs packages/migration-engine/test/unit/migration-policy.test.mjs packages/migration-engine/test/unit/record-decision.test.mjs packages/migration-engine/test/unit/registry-resolution.test.mjs packages/migration-engine/test/unit/toolkit-identity.test.mjs packages/migration-engine/test/unit/run-migration.test.mjs",
+    "engine:test:ts": "vitest run",
+    "providers:test": "node --test --test-concurrency=1 test/providers-sync.test.mjs test/provider-installation.test.mjs",
+    "test": "pnpm engine:test && pnpm engine:test:ts && pnpm providers:test",
+    "providers:sync": "node scripts/providers-sync.mjs",
+    "providers:check": "node scripts/providers-sync.mjs --check",
+    "skills:lock": "node scripts/skills-lock.mjs",
+    "release:check": "node scripts/release.mjs --check",
+    "release:build": "node scripts/release.mjs --build",
+    "release:verify": "node scripts/release.mjs --verify"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10",
+    "yaml": "2.9.0"
+  },
+  "dependencies": {
+    "@artifact-migration-tools/migration-engine": "workspace:*"
+  }
+}
