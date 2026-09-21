@@ -34,6 +34,7 @@ import {
   nextOutcome,
   pendingDecisionCandidates,
   previewAdvance,
+  renderProgress,
   renderLoopDirective,
   resolveRegistryPath,
   validateResumableMigration,
@@ -264,20 +265,22 @@ export const runMigration = async (
   let latestState = null;
   let nextWork = null;
   const finish = (outcome, extra = {}) => {
+    const progress = latestState
+      ? migrationProgress(latestState, {
+          mode: options.mode ?? DEFAULT_MODE,
+          outcome,
+          reason: extra.reason ?? null,
+          nextWorkKind: nextWork?.kind ?? null,
+          artifactMigration: nextWork?.artifactMigration ?? null,
+        })
+      : null;
     const result = {
       outcome,
       request: null,
       decisionReferences,
       ...extra,
-      progress: latestState
-        ? migrationProgress(latestState, {
-            mode: options.mode ?? DEFAULT_MODE,
-            outcome,
-            reason: extra.reason ?? null,
-            nextWorkKind: nextWork?.kind ?? null,
-            artifactMigration: nextWork?.artifactMigration ?? null,
-          })
-        : null,
+      progress,
+      progressChecklist: progress ? renderProgress(progress) : null,
     };
     if (options.json) {
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);

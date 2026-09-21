@@ -22,6 +22,7 @@ import {
   MIGRATION_MODES,
   pendingDecisionCandidates,
   PONYTAIL_TARGETS,
+  renderProgress,
 } from "../../src/core.mjs";
 import { challengeFor } from "../../src/record-decision.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
@@ -688,6 +689,39 @@ test("one migration_run moves the revision by one and appends one history event"
     await fixture.cleanup();
   }
 });
+
+for (const [label, prepare, outcome] of [
+  [
+    "CONTINUE",
+    async (fixture) => {
+      await initialize(fixture);
+      await authorDiscoverLegacy(fixture);
+    },
+    "CONTINUE",
+  ],
+  [
+    "STOP",
+    (fixture) => atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION),
+    "OPERATOR_DECISION",
+  ],
+]) {
+  test(`migration_run exposes canonical progressChecklist on ${label}`, async () => {
+    const fixture = await createFixture();
+    try {
+      await prepare(fixture);
+      const result = structured(
+        await only(fixture, call(1, "migration_run", { module: "auth" })),
+      );
+
+      assert.equal(result.outcome, outcome);
+      assert.ok(result.progress);
+      assert.equal(result.progressChecklist, renderProgress(result.progress));
+      assert.equal(result.progressChecklist.includes("%"), false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
 
 test("an unauthored checkpoint returns CONTINUE with an authoring request and no advance", async () => {
   const fixture = await createFixture();

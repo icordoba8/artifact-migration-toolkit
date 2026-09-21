@@ -356,6 +356,7 @@ const runTool = async (arguments_, session) => {
     reason: result.reason ?? null,
     request: result.request ?? null,
     progress: result.progress ?? null,
+    progressChecklist: result.progressChecklist ?? null,
     decisionReferences: result.decisionReferences ?? [],
     // The core's own fallback contract, crossing verbatim (D6-8). The adapter
     // does not decide when it is offered and does not compose its commands: it

@@ -576,8 +576,8 @@ infers nothing from source files, and carries no provider-specific UI field.
 Deleting it would leave the engine unchanged.
 
 `migration_status` returns it as `progress`, plus the same object rendered by
-`renderProgress` as `progressChecklist`. `migration_run` returns `progress` on
-every outcome (`null` only when the iteration failed before reading a record).
+`renderProgress` as `progressChecklist`. `migration_run` returns both on every
+outcome (`null` only when the iteration failed before reading a record).
 `--status` and `--json` carry the identical payloads, so the CLI path is read
 exactly like the MCP path.
 

@@ -472,7 +472,7 @@ Stop and hand back rather than looping.
 The engine owns migration progress. Every command that touches a record hands
 it back already computed: `migration_status` returns `progress` (the canonical
 projection) and `progressChecklist` (that same projection rendered as text),
-and `migration_run` returns `progress` on every outcome. Display one of those.
+and `migration_run` returns both on every outcome. Display one of those.
 Never derive displayed progress from source files, changed files, git state,
 test results, or conversation memory.
 
@@ -701,8 +701,8 @@ not emit a handoff block, do not print a `Next command:` line, and never ask
 the operator to say "continue" — a successful checkpoint or slice advance is
 not a stopping point.
 
-On `STOP`, and only then, render canonical progress (see Progress
-presentation) followed by:
+On every iteration, render canonical progress (see Progress presentation).
+On `STOP`, follow it with:
 
 ```text
 Migration: <module>
