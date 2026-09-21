@@ -208,9 +208,10 @@ test("this file runs as an unidentified runtime, which is the premise of every c
 
 test("release identity is derived from the payload and is checksum-verifiable", async (t) => {
   const check = await releaseCheck();
+  const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
   assert.match(check.contentHash, /^sha256:[0-9a-f]{64}$/);
   assert.match(check.commit, /^[0-9a-f]{40}$/);
-  assert.equal(check.version, "1.1.0");
+  assert.equal(check.version, manifest.version);
   validateToolkitIdentity({
     name: "artifact-migration-tools",
     version: check.version,
