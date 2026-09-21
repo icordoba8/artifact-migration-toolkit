@@ -1,6 +1,6 @@
 {
   "name": "@artifact-migration-tools/migration-engine",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Canonical provider-neutral migration engine: lifecycle, state, operator decisions, integrity, resumability, upgrades, evidence, and the MCP runtime. The discovery scanner and the artifact structural census both parse with a pinned classic-API TypeScript that is deliberately independent of whatever compiler the analyzed project uses, so the engine owns it here instead of borrowing a host devDependency alias.",
