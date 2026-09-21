@@ -6972,7 +6972,7 @@ export const pendingVisualUnbackedCandidates = async (root, state) => {
     );
 };
 
-const validateFigmaContext = async (
+export const validateFigmaContext = async (
   root,
   state,
   contextFile = FIGMA_CONTEXT_FILE,
@@ -7189,7 +7189,7 @@ const MAX_TOLERANCE_RATIO = 0.1;
  * explicit row binds a state to Figma; an explicitly backed state cannot be
  * unbacked, and nothing is inferred from frame names or states.
  */
-const validateVisualAcceptance = async (
+export const validateVisualAcceptance = async (
   root,
   state,
   legacy,

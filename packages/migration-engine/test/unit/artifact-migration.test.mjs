@@ -3904,3 +3904,177 @@ test("R-W7-d: the artifact front ends carry no second copy of a shared rule", as
   );
   assert.throws(() => parseArtifactArguments([]), /Usage: run-artifact\.mjs/);
 });
+
+const writeFigmaContext = async (fixture, fidelity = "COMPLETE") => {
+  const base = "inventories/figma/12-34";
+  const files = {
+    metadata: await writeJson(fixture.artifactRoot, `${base}/metadata.xml`, {
+      xml: '<frame id="12:34" name="Dialog" width="1280" height="720"></frame>',
+    }),
+    design: await writeJson(fixture.artifactRoot, `${base}/design-context.json`, { component: "Dialog" }),
+    variables: await writeJson(fixture.artifactRoot, `${base}/variables.json`, { spacing: 8 }),
+  };
+  // Metadata is the one Figma output whose contract is verbatim XML, not JSON.
+  await writeFile(files.metadata, '<frame id="12:34" name="Dialog" width="1280" height="720"></frame>');
+  const screenshot = path.join(fixture.artifactRoot, `${base}/screenshot.png`);
+  await writeFile(screenshot, Buffer.from([137, 80, 78, 71]));
+  const reference = async (file) => ({
+    reference: path.relative(fixture.artifactRoot, file).replaceAll("\\", "/"),
+    hash: `sha256:${await digest(file)}`,
+  });
+  await writeJson(fixture.artifactRoot, "inventories/figma-context.json", {
+    frames: [
+      {
+        fileKey: "File123",
+        nodeId: "12:34",
+        name: "Dialog",
+        type: "FRAME",
+        viewport: { width: 1280, height: 720 },
+        states: ["default"],
+        extraction: {
+          retrievedAt: "2026-09-21T00:00:00.000Z",
+          fidelity,
+          limitations: fidelity === "COMPLETE" ? [] : ["get_design_context was truncated"],
+        },
+        sources: {
+          metadata: await reference(files.metadata),
+          designContext: [await reference(files.design)],
+          variableDefs: await reference(files.variables),
+          screenshot: await reference(screenshot),
+        },
+      },
+    ],
+  });
+};
+
+const writeVisualAcceptance = (fixture) =>
+  writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", {
+    rows: [
+      {
+        id: "VA-1",
+        uiBehaviorId: "B-1",
+        state: "DEFAULT",
+        figmaNodeId: "12:34",
+        figmaState: "default",
+        viewport: { width: 1280, height: 720 },
+        tolerance: { px: 8, ratio: 0.02 },
+        expect: {
+          dialogWidth: { locator: "[role=dialog]", kind: "px", value: 360 },
+        },
+      },
+    ],
+    unbacked: [],
+  });
+
+test("Figma parity: CLI validation, persisted canonical sources, shared evidence contract, and deterministic visual verdict", async () => {
+  const parsed = parseArtifactArguments([
+    "widget",
+    "--design-source",
+    "figma-mcp",
+    "--figma",
+    "https://figma.com/design/File123/Dialog?node-id=12-34&token=discarded",
+    "--figma",
+    "https://www.figma.com/design/File123/Dialog?node-id=12-34",
+  ]);
+  assert.equal(parsed.designSource, "figma-mcp");
+  assert.equal(parsed.figma.length, 2);
+  assert.throws(
+    () => parseArtifactArguments(["widget", "--design-source", "sketch"]),
+    /--design-source accepts target-system or figma-mcp/,
+  );
+
+  const fixture = await createFixture();
+  const options = {
+    ...fixture.options,
+    designSource: parsed.designSource,
+    figma: parsed.figma,
+  };
+  try {
+    await bootstrap(fixture, options);
+    let state = await stateOf(fixture);
+    assert.equal(state.designSource, "figma-mcp");
+    assert.deepEqual(state.figmaSources, [
+      {
+        fileKey: "File123",
+        nodeId: "12:34",
+        kind: "design",
+        raw: "https://www.figma.com/design/File123?node-id=12-34",
+      },
+    ]);
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    const missing = await runArtifact(fixture.options);
+    assert.match(missing.reason, /figma-context\.json does not exist/);
+
+    await writeFigmaContext(fixture);
+    const assessed = await runArtifact(fixture.options);
+    assert.equal(assessed.outcome, "CONTINUE", assessed.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "BUILD_BASELINE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeVisualAcceptance(fixture);
+    const baseline = await runArtifact(fixture.options);
+    assert.equal(baseline.outcome, "CONTINUE", baseline.reason);
+    await advancePlan(fixture, "TARGET_REUSE");
+    await advanceImplementation(fixture, "TARGET_REUSE");
+
+    const measurementPath = "evidence/slice-1/ui/measurements.json";
+    const measurement = await writeJson(fixture.artifactRoot, measurementPath, {
+      viewport: { width: 1280, height: 720 },
+      values: { dialogWidth: 230 },
+    });
+    const verification = await verificationDocument(fixture, { ui: true });
+    state = await stateOf(fixture);
+    Object.assign(verification.runtimeEvidence[0], {
+      figmaNodeId: "12:34",
+      measurements: { path: measurementPath, sha256: await digest(measurement) },
+    });
+    verification.runtimeEvidence[0].boundTo.figmaContextDigest =
+      state.artifactHashes["inventories/figma-context.json"];
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    const failed = await runArtifact(fixture.options);
+    assert.match(failed.reason, /VISUAL_ACCEPTANCE_FAIL.*expected 360px/);
+
+    await writeJson(fixture.artifactRoot, measurementPath, {
+      viewport: { width: 1280, height: 720 },
+      values: { dialogWidth: 360 },
+    });
+    verification.runtimeEvidence[0].measurements.sha256 = await digest(measurement);
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    const passed = await runArtifact(fixture.options);
+    assert.equal(passed.outcome, "CONTINUE", passed.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("Figma parity: DEGRADED frames cannot back acceptance and pinned evidence rejects tampering", async () => {
+  const fixture = await createFixture();
+  const options = {
+    ...fixture.options,
+    designSource: "figma-mcp",
+    figma: ["https://www.figma.com/design/File123?node-id=12-34"],
+  };
+  try {
+    await bootstrap(fixture, options);
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    await writeFigmaContext(fixture, "DEGRADED");
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeVisualAcceptance(fixture);
+    const degraded = await runArtifact(fixture.options);
+    assert.match(degraded.reason, /extraction is DEGRADED/);
+
+    const screenshot = path.join(fixture.artifactRoot, "inventories/figma/12-34/screenshot.png");
+    await writeFile(screenshot, Buffer.from([137, 80, 78, 72]));
+    const tampered = await getArtifactStatus(fixture.options);
+    assert.notEqual(tampered.validation?.ready, true);
+    assert.match(
+      tampered.reason ?? tampered.validation?.reason,
+      /no longer matches its recorded hash|Pinned artifact changed/,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});

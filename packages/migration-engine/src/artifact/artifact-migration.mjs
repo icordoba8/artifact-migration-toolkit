@@ -30,10 +30,20 @@ import {
   migrationProgress,
   readOperatorDecisions,
   renderProgress,
+  resolveDesignSource,
   runDiscoveryScan,
   structuralUnits as structuralUnitsRaw,
   UI_RUNTIME_STATES,
 } from "../core.mjs";
+import {
+  compareVisualFact,
+  FIGMA_CONTEXT_FILE,
+  pendingVisualUnbackedCandidates,
+  validateFigmaContext,
+  validateVisualAcceptance,
+  VISUAL_ACCEPTANCE_FILE,
+  VISUAL_ACCEPTANCE_FORMAT,
+} from "../resumable-migration.mjs";
 import {
   approveWithOperator,
   artifactApprover,
@@ -892,7 +902,11 @@ const KNOWN_STATE_KEYS = [
 // format 13 / workflow 1.0 meaning. Genuinely optional, so it is declared as
 // optional rather than smuggled into the required set -- an unstamped record
 // stays byte-identical to what it always was.
-const OPTIONAL_STATE_KEYS = ["toolkitIdentity"];
+const OPTIONAL_STATE_KEYS = [
+  "toolkitIdentity",
+  "designSource",
+  "figmaSources",
+];
 const RESOLUTION_KIND = {
   TARGET_REUSE: "REUSE",
   TARGET_EXTEND: "EXTEND",
@@ -928,7 +942,7 @@ const samePath = (left, right) => {
       : path.resolve(value);
   return normalize(left) === normalize(right);
 };
-export const artifactArgumentsFor = ({ artifactType, source, target }) => [
+export const artifactArgumentsFor = ({ artifactType, source, target, designSource, figmaSources }) => [
   source.path,
   "--type",
   artifactType,
@@ -938,6 +952,13 @@ export const artifactArgumentsFor = ({ artifactType, source, target }) => [
   source.root,
   "--target-root",
   target.root,
+  ...(designSource === "figma-mcp"
+    ? [
+        "--design-source",
+        designSource,
+        ...(figmaSources ?? []).flatMap((item) => ["--figma", item.raw]),
+      ]
+    : []),
 ];
 
 export const artifactCommandFor = (binding) =>
@@ -1169,6 +1190,8 @@ export const resolveArtifact = async ({
   sourceRoot = process.cwd(),
   targetRoot = process.cwd(),
   formatVersion = ARTIFACT_FORMAT_VERSION,
+  designSource,
+  figma,
 } = {}) => {
   const resolvedSourceRoot = path.resolve(sourceRoot);
   const resolvedTargetRoot = path.resolve(targetRoot);
@@ -1191,6 +1214,7 @@ export const resolveArtifact = async ({
   if (formatVersion !== ARTIFACT_FORMAT_VERSION) {
     throw new Error(`Unsupported artifact migration format ${formatVersion}.`);
   }
+  const design = resolveDesignSource({ designSource, figma });
   return {
     id,
     artifactType,
@@ -1198,6 +1222,7 @@ export const resolveArtifact = async ({
     source: { root: resolvedSourceRoot, path: sourcePath },
     target: { root: resolvedTargetRoot, path: targetPath },
     root: artifactRoot(resolvedTargetRoot, id),
+    ...design,
   };
 };
 
@@ -1246,6 +1271,17 @@ const validateState = (state, expectedId) => {
     throw new Error(`Unknown artifact resolution '${state.resolution}'.`);
   }
   if (state.hasVisibleUi !== null) boolean(state.hasVisibleUi, "hasVisibleUi");
+  if (state.designSource !== undefined) {
+    const design = resolveDesignSource({
+      designSource: state.designSource,
+      figma: (state.figmaSources ?? []).map((source) => source?.raw),
+    });
+    if (canonical(design.figmaSources) !== canonical(state.figmaSources ?? [])) {
+      throw new Error("Artifact state figmaSources are not canonical.");
+    }
+  } else if (state.figmaSources !== undefined) {
+    throw new Error("Artifact state figmaSources require designSource.");
+  }
   if (!["ACTIVE", "COMPLETE"].includes(state.status)) throw new Error(`Invalid artifact status '${state.status}'.`);
   if (state.currentStep !== "COMPLETE" && !MIGRATION_STEPS.includes(state.currentStep)) {
     throw new Error(`Unknown artifact checkpoint '${state.currentStep}'.`);
@@ -1503,6 +1539,9 @@ const initialArtifactState = (resolved, sourceBinding, targetBinding, timestamp)
   artifactType: resolved.artifactType,
   source: resolved.source,
   target: resolved.target,
+  ...(resolved.designSource
+    ? { designSource: resolved.designSource, figmaSources: resolved.figmaSources }
+    : {}),
   resolution: null,
   hasVisibleUi: null,
   status: "ACTIVE",
@@ -1541,12 +1580,26 @@ const EMPTY_HISTORY = { events: [] };
 const validateTransactionInput = (input, label) => {
   plainObject(input, label);
   if (input.kind === "BOOTSTRAP") {
-    exactObject(input, label, ["kind", "artifactType", "source", "target"]);
+    exactObject(
+      input,
+      label,
+      ["kind", "artifactType", "source", "target"],
+      ["designSource", "figmaSources"],
+    );
     assertSafeName(input.artifactType, `${label}.artifactType`);
     for (const key of ["source", "target"]) {
       exactObject(input[key], `${label}.${key}`, ["root", "path"]);
       nonEmpty(input[key].root, `${label}.${key}.root`);
       normalizeRelative(input[key].path, `${label}.${key}.path`);
+    }
+    if (input.designSource !== undefined) {
+      const design = resolveDesignSource({
+        designSource: input.designSource,
+        figma: (input.figmaSources ?? []).map((source) => source?.raw),
+      });
+      if (canonical(design.figmaSources) !== canonical(input.figmaSources ?? [])) {
+        throw new Error(`${label}.figmaSources are not canonical.`);
+      }
     }
   } else if (input.kind === "ADVANCE") {
     exactObject(input, label, ["kind", "selectedSlice"]);
@@ -1678,6 +1731,9 @@ const proveBootstrapTransaction = async (root, transaction) => {
     formatVersion: state.formatVersion,
     source: input.source,
     target: input.target,
+    ...(input.designSource
+      ? { designSource: input.designSource, figmaSources: input.figmaSources }
+      : {}),
   };
   const [sourceBinding, targetBinding] = await Promise.all([
     captureBinding(resolved.source.root, [resolved.source.path], "source"),
@@ -1763,6 +1819,12 @@ const reconstructLegacyTransaction = async (root, transaction) => {
         artifactType: transaction.state.artifactType,
         source: transaction.state.source,
         target: transaction.state.target,
+        ...(transaction.state.designSource
+          ? {
+              designSource: transaction.state.designSource,
+              figmaSources: transaction.state.figmaSources,
+            }
+          : {}),
       },
       state: transaction.state,
       event: transaction.event,
@@ -1971,6 +2033,8 @@ export const previewArtifact = async (options = {}) => {
     formatVersion: resolved.formatVersion,
     source: resolved.source,
     target: resolved.target,
+    designSource: resolved.designSource,
+    figmaSources: resolved.figmaSources,
     sourceBinding,
     targetBinding,
   };
@@ -1996,7 +2060,14 @@ const createArtifactRecord = async (resolved, options, confirmExecution) => {
     version: TRANSACTION_VERSION,
     previousState: null,
     previousIntegrity: null,
-    input: { kind: "BOOTSTRAP", artifactType: resolved.artifactType, source: resolved.source, target: resolved.target },
+    input: {
+      kind: "BOOTSTRAP",
+      artifactType: resolved.artifactType,
+      source: resolved.source,
+      target: resolved.target,
+      designSource: resolved.designSource,
+      figmaSources: resolved.figmaSources,
+    },
     state,
     event,
   };
@@ -2479,6 +2550,56 @@ const validateTargetInventory = async (root, state) => {
   return { relative, document, source, nativeIds, targetFiles };
 };
 
+// Artifact records keep format 13 for compatibility; the shared Figma
+// validators receive the format-17 view that opts into the existing strict
+// start-migration contract without creating a second contract.
+const strictFigmaState = (state) => ({
+  ...state,
+  formatVersion: VISUAL_ACCEPTANCE_FORMAT,
+  migrationId: state.artifactId,
+});
+
+const artifactVisualAcceptance = async (root, state, source, target) =>
+  validateVisualAcceptance(
+    root,
+    strictFigmaState(state),
+    {
+      uiBehaviors: source.document.behaviors
+        .filter((row) => row.visible)
+        .map((row) => ({
+          id: row.id,
+          runtimeStates: row.runtimeStates,
+          conditional: false,
+        })),
+    },
+    { uiMismatches: [] },
+  );
+
+const artifactVisualDecisions = async (root, state) => {
+  if (state.designSource !== "figma-mcp") return [];
+  const candidates = await pendingVisualUnbackedCandidates(
+    root,
+    strictFigmaState(state),
+  );
+  if (candidates.length === 0) return [];
+  const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
+  const { byId, decisions } = await readOperatorDecisions(root);
+  return candidates.map((candidate) => {
+    const item = (matrix.unbacked ?? []).find(
+      (row) => `${row.uiBehaviorId}::${row.state}` === candidate.subject.path,
+    );
+    const recorded = decisions.find((row) => decisionAppliesToCandidate(row, candidate)) ?? null;
+    return {
+      id: candidate.id,
+      subject: candidate.subject.path,
+      decisionId: item?.decisionId ?? null,
+      candidate,
+      satisfied: decisionAppliesToCandidate(byId.get(item?.decisionId), candidate),
+      recorded,
+    };
+  });
+};
+
 const validateBaseline = async (root, state, { final = false } = {}) => {
   const target = await validateTargetInventory(root, state);
   const resolution = state.resolution ?? target.document.resolution;
@@ -2607,7 +2728,11 @@ const validateBaseline = async (root, state, { final = false } = {}) => {
     }
   }
   sameMembers(globalIds, target.source.contractIds, "global-contract source coverage");
-  return { files, parity, native, design, global, target };
+  const visualRows =
+    state.designSource === "figma-mcp"
+      ? await artifactVisualAcceptance(root, state, target.source, target)
+      : null;
+  return { files, parity, native, design, global, target, visualRows };
 };
 
 const validatePlan = async (root, state) => {
@@ -2728,11 +2853,66 @@ const validateImplementation = async (root, state, capability) => {
 };
 
 const validateBoundTo = (boundTo, state, label, sliceDigest) => {
-  exactObject(boundTo, label, ["sourceDigest", "targetDigest", "sliceDigest"]);
+  exactObject(
+    boundTo,
+    label,
+    ["sourceDigest", "targetDigest", "sliceDigest"],
+    state.designSource === "figma-mcp" ? ["figmaContextDigest"] : [],
+  );
   if (boundTo.sourceDigest !== state.bindings.source.digest || boundTo.targetDigest !== state.bindings.target.digest) {
     throw new Error(`${label} is stale for the current source/target binding.`);
   }
   if (boundTo.sliceDigest !== sliceDigest) throw new Error(`${label}.sliceDigest is stale.`);
+  if (
+    state.designSource === "figma-mcp" &&
+    boundTo.figmaContextDigest !== state.artifactHashes[FIGMA_CONTEXT_FILE]
+  ) {
+    throw new Error(`${label}.figmaContextDigest is stale.`);
+  }
+};
+
+const validateArtifactVisualEvidence = async (root, state, row, visualRow, label) => {
+  const fail = (problem) => {
+    throw new Error(
+      `VISUAL_ACCEPTANCE_FAIL: ${label} (${visualRow.id}, Figma node ${visualRow.figmaNodeId}) ${problem}.`,
+    );
+  };
+  const node = (value) => String(value ?? "").trim().replace("-", ":");
+  if (node(row.figmaNodeId) !== node(visualRow.figmaNodeId)) {
+    fail(`names figmaNodeId '${row.figmaNodeId}'`);
+  }
+  const expectedViewport = `${visualRow.viewport.width}x${visualRow.viewport.height}`;
+  if (`${row.viewport.width}x${row.viewport.height}` !== expectedViewport) {
+    fail(`ran at viewport ${row.viewport.width}x${row.viewport.height}, the contract requires ${expectedViewport}`);
+  }
+  exactObject(row.measurements, `${label}.measurements`, ["path", "sha256"], ["pointer"]);
+  const measurementPath = normalizeRelative(row.measurements.path, `${label}.measurements.path`);
+  if (!measurementPath.startsWith(`evidence/${state.activeSlice}/ui/`)) {
+    fail("measurements are not persisted under the active slice evidence/ui directory");
+  }
+  if ((await secureHash(root, measurementPath, `${label}.measurements.path`)) !== row.measurements.sha256) {
+    fail("measurement evidence is missing, stale, or tampered");
+  }
+  let observation;
+  try {
+    const document = JSON.parse(await readFile(path.join(root, measurementPath), "utf8"));
+    observation = row.measurements.pointer === undefined
+      ? document
+      : document?.[row.measurements.pointer];
+  } catch (error) {
+    fail(`references measurements that are not JSON (${error.message})`);
+  }
+  if (!plainObject(observation, `${label}.measurements observation`) || !plainObject(observation.values, `${label}.measurements values`)) {
+    fail('references measurements without a "values" object');
+  }
+  if (`${observation.viewport?.width}x${observation.viewport?.height}` !== expectedViewport) {
+    fail(`was measured by Playwright at viewport ${observation.viewport?.width}x${observation.viewport?.height}, the contract requires ${expectedViewport}`);
+  }
+  const failures = Object.entries(visualRow.expect).flatMap(([name, fact]) => {
+    const miss = compareVisualFact(fact, observation.values[name], visualRow.tolerance);
+    return miss ? [`${name} ${miss}`] : [];
+  });
+  if (failures.length > 0) fail(`diverges from the design: ${failures.join("; ")}`);
 };
 
 const validateVerification = async (root, state, capability) => {
@@ -2775,7 +2955,7 @@ const validateVerification = async (root, state, capability) => {
       "artifacts",
       "boundTo",
       "provider",
-    ], ["sessionId"]);
+    ], ["sessionId", "figmaNodeId", "measurements"]);
     const behaviorId = nonEmpty(row.behaviorId, `runtimeEvidence[${index}].behaviorId`);
     if (row.origin !== "LEGACY" && row.origin !== "TARGET") throw new Error(`runtimeEvidence[${index}].origin must be 'LEGACY' or 'TARGET'.`);
     nonEmpty(row.state, `runtimeEvidence[${index}].state`);
@@ -2810,6 +2990,21 @@ const validateVerification = async (root, state, capability) => {
     }
     sameMembers(kinds, ["ACCESSIBILITY_SNAPSHOT", "SCREENSHOT"], `runtime evidence '${row.behaviorId}' artifact kinds`);
     validateBoundTo(row.boundTo, state, `runtime evidence '${row.behaviorId}' boundTo`, sliceDigest);
+    const visualRow =
+      row.origin === "TARGET"
+        ? implementation.plan.baseline.visualRows?.find(
+            (item) => item.uiBehaviorId === behaviorId && item.state === row.state,
+          )
+        : null;
+    if (visualRow) {
+      await validateArtifactVisualEvidence(
+        root,
+        state,
+        row,
+        visualRow,
+        `runtimeEvidence[${index}]`,
+      );
+    }
     // Logical observation identity: origin + behavior + runtime state. A given
     // logical slot is captured at most once; byte-identical images across
     // distinct slots stay legal (no pixel-equality rule is carried over).
@@ -2988,12 +3183,16 @@ export const checkpointArtifacts = (state) => {
     case "RESOLVE": return ["state.json"];
     case "DISCOVER_LEGACY": return ["inventories/source.json"];
     case "DISCOVERY_COMPLETENESS": return ["inventories/completeness.json"];
-    case "ASSESS_TARGET": return ["inventories/target.json"];
+    case "ASSESS_TARGET": return [
+      "inventories/target.json",
+      ...(state.designSource === "figma-mcp" ? [FIGMA_CONTEXT_FILE] : []),
+    ];
     case "BUILD_BASELINE": return [
       "matrices/parity.json",
       "matrices/target-native.json",
       "matrices/design-system.json",
       "matrices/global-contract.json",
+      ...(state.designSource === "figma-mcp" ? [VISUAL_ACCEPTANCE_FILE] : []),
     ];
     case "PLAN": return ["slices/index.json"];
     case "IMPLEMENT_SLICES": return [`slices/${state.activeSlice}.json`];
@@ -3038,16 +3237,16 @@ export const reconcileArtifactDecisions = (state, decisions) => {
     approvable,
     citable,
     candidates: approvable.map((row) => ({
-      ...row.candidate,
+      ...(row.candidate ?? artifactDecisionCandidate(state, row)),
       approvable: Boolean(String(row.subject ?? "").trim()),
       blockers: String(row.subject ?? "").trim()
         ? []
         : ["The operator decision has no reviewable subject."],
-      command: commandFor(row.candidate),
+      command: commandFor(row.candidate ?? artifactDecisionCandidate(state, row)),
     })),
     references: citable.map((row) => ({
-      candidateId: row.candidate.id,
-      subject: row.candidate.subject,
+      candidateId: (row.candidate ?? artifactDecisionCandidate(state, row)).id,
+      subject: (row.candidate ?? artifactDecisionCandidate(state, row)).subject,
       decisionId: row.recorded.id,
       decisionDigest: decisionLineDigest(row.recorded),
     })),
@@ -3055,9 +3254,9 @@ export const reconcileArtifactDecisions = (state, decisions) => {
     pendingDecisions: pending.map((row) => ({
       id: row.id,
       subject: row.subject,
-      candidateId: row.candidate.id,
+      candidateId: (row.candidate ?? artifactDecisionCandidate(state, row)).id,
       recordedDecisionId: row.recorded?.id ?? null,
-      command: commandFor(row.candidate),
+      command: commandFor(row.candidate ?? artifactDecisionCandidate(state, row)),
     })),
   };
 };
@@ -3090,8 +3289,38 @@ const runCheckpointValidation = async (root, state, capability) => {
         return { ready: true, result };
       }
       case "DISCOVERY_COMPLETENESS": return { ready: true, result: await validateCompleteness(root, state) };
-      case "ASSESS_TARGET": return { ready: true, result: await validateTargetInventory(root, state) };
-      case "BUILD_BASELINE": return { ready: true, result: await validateBaseline(root, state) };
+      case "ASSESS_TARGET": {
+        const result = await validateTargetInventory(root, state);
+        if (state.designSource === "figma-mcp") {
+          await validateFigmaContext(root, strictFigmaState(state));
+        }
+        return { ready: true, result };
+      }
+      case "BUILD_BASELINE": {
+        const visual = reconcileArtifactDecisions(
+          state,
+          await artifactVisualDecisions(root, state),
+        );
+        if (visual.approvable.length > 0) {
+          return {
+            ready: false,
+            outcome: "OPERATOR_DECISION",
+            reason: `${visual.approvable.length} visual state(s) require operator approval.`,
+            pendingDecisions: visual.pendingDecisions,
+            decisionReferences: visual.references,
+            operatorApproval: { cwd: process.cwd(), candidates: visual.candidates },
+          };
+        }
+        if (visual.citable.length > 0) {
+          return {
+            ready: false,
+            reason: `${visual.citable.length} recorded visual decision(s) are not cited in ${VISUAL_ACCEPTANCE_FILE}.`,
+            pendingDecisions: visual.pendingDecisions,
+            decisionReferences: visual.references,
+          };
+        }
+        return { ready: true, result: await validateBaseline(root, state) };
+      }
       case "PLAN": return { ready: true, result: await validatePlan(root, state) };
       case "IMPLEMENT_SLICES": return { ready: true, result: await validateImplementation(root, state, capability) };
       case "VERIFY_SLICES": return { ready: true, result: await validateVerification(root, state, capability) };
@@ -3212,6 +3441,18 @@ const assertInvocationMatches = (state, options) => {
   if (options.sourceRoot && !samePath(options.sourceRoot, state.source.root)) throw new Error("Invocation sourceRoot conflicts with persisted state.");
   if (options.target && normalizeRelative(options.target, "target") !== state.target.path) throw new Error("Invocation target conflicts with persisted state.");
   if (options.targetRoot && !samePath(options.targetRoot, state.target.root)) throw new Error("Invocation targetRoot conflicts with persisted state.");
+  const designExplicit =
+    options.designSource !== undefined ||
+    (Array.isArray(options.figma) ? options.figma.length > 0 : options.figma !== undefined);
+  if (designExplicit) {
+    const requested = resolveDesignSource(options);
+    if (
+      requested.designSource !== (state.designSource ?? "target-system") ||
+      canonical(requested.figmaSources) !== canonical(state.figmaSources ?? [])
+    ) {
+      throw new Error("Invocation design source conflicts with persisted state.");
+    }
+  }
 };
 
 // Every status path -- recoverable transaction, blocked record, stale drift,
@@ -3329,9 +3570,13 @@ const pinsFor = async (root, state, validation) => {
   switch (state.currentStep) {
     case "DISCOVER_LEGACY": await add("inventories/source.json"); break;
     case "DISCOVERY_COMPLETENESS": await add("inventories/completeness.json"); break;
-    case "ASSESS_TARGET": await add("inventories/target.json"); break;
+    case "ASSESS_TARGET":
+      await add("inventories/target.json");
+      if (state.designSource === "figma-mcp") await add(FIGMA_CONTEXT_FILE);
+      break;
     case "BUILD_BASELINE":
       for (const relative of Object.values(validation.result.files)) await add(`${relative}#immutable`);
+      if (state.designSource === "figma-mcp") await add(VISUAL_ACCEPTANCE_FILE);
       break;
     case "PLAN": await add("slices/index.json"); break;
     case "IMPLEMENT_SLICES": await add(validation.result.relative); break;
@@ -3659,13 +3904,15 @@ export const artifactOperatorDecisions = async (options = {}) => {
   const state = await readArtifactState(location.targetRoot, location.id);
   assertInvocationMatches(state, options);
   const source = await validateSourceInventory(location.root, state);
+  const visual = await artifactVisualDecisions(location.root, state);
+  const decisions = [...source.decisions, ...visual];
   return {
     state,
     root: location.root,
     targetRoot: location.targetRoot,
     id: location.id,
-    decisions: source.decisions,
-    reconciled: reconcileArtifactDecisions(state, source.decisions),
+    decisions,
+    reconciled: reconcileArtifactDecisions(state, decisions),
   };
 };
 

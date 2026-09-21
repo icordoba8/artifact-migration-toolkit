@@ -37,6 +37,8 @@ export const parseArtifactArguments = (arguments_) => {
       status: { type: "boolean", default: false },
       mode: { type: "string" },
       slice: { type: "string" },
+      "design-source": { type: "string" },
+      figma: { type: "string", multiple: true },
       json: { type: "boolean", default: false },
     },
   });
@@ -50,6 +52,8 @@ export const parseArtifactArguments = (arguments_) => {
     status: values.status,
     mode: values.mode,
     slice: values.slice,
+    designSource: values["design-source"],
+    figma: values.figma,
     json: values.json,
   };
 };
@@ -114,6 +118,8 @@ export const runArtifactCli = async (
     targetRoot: parsed.targetRoot,
     mode: parsed.mode,
     slice: parsed.slice,
+    designSource: parsed.designSource,
+    figma: parsed.figma,
   };
   // No interactive consent prompt here. `AWAITING_CONFIRMATION` returns to the
   // agent under the same rule as every other confirmation in this workflow, so
