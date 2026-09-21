@@ -254,11 +254,12 @@ test('tampered release asset is refused before receipt, MCP, or migration-state 
 test('admin exact-version override reaches the immutable resolver unchanged', async () => {
   const f = await releaseFixture();
   const root = path.join(scratch, 'exact version consumer');
+  const version = f.resolved.version;
   await mkdir(root, { recursive: true });
   const result = await ensureRuntime(
-    { provider: 'codex', root, store: path.join(scratch, 'exact version store'), version: '1.1.0' },
-    { resolve: async version => { assert.equal(version, '1.1.0'); return f.resolved; }, download: f.download },
+    { provider: 'codex', root, store: path.join(scratch, 'exact version store'), version },
+    { resolve: async requested => { assert.equal(requested, version); return f.resolved; }, download: f.download },
   );
-  assert.equal(result.toolkit.version, '1.1.0');
+  assert.equal(result.toolkit.version, version);
   await assert.rejects(ensureRuntime({ provider: 'codex', root, version: 'latest' }), /Exact version override/);
 });
