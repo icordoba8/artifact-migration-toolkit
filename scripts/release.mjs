@@ -35,7 +35,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -289,10 +289,10 @@ export const buildReleaseArchive = async (built) => {
  */
 const supportedMigrationVersions = async (root) => {
   const core = await import(
-    new URL(`${path.join(root, "packages/migration-engine/src/core.mjs")}`, "file:").href
+    pathToFileURL(path.join(root, "packages/migration-engine/src/core.mjs")).href
   );
   const artifact = await import(
-    new URL(`${path.join(root, "packages/migration-engine/src/artifact/artifact-migration.mjs")}`, "file:").href
+    pathToFileURL(path.join(root, "packages/migration-engine/src/artifact/artifact-migration.mjs")).href
   );
   return {
     moduleContract: core.RESUMABLE_CONTRACT_VERSION,
