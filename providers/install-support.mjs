@@ -76,25 +76,60 @@ export async function verifyBundle(bundle, pin) {
 // spellings. Ambiguous start-migration declarations fail closed.
 const begin = '# BEGIN artifact-migration-tools\n';
 const end = '# END artifact-migration-tools\n';
+/**
+ * The marked region only. The separator newline install may put in front of it
+ * belongs to the file, not to the block: consuming it here would delete a
+ * newline the consumer wrote. Ownership is still decided by exact receipt
+ * bytes; this pattern only tells "absent" apart from "there but not ours".
+ */
+const ownedBlock = /# BEGIN artifact-migration-tools\n[\s\S]*?\n# END artifact-migration-tools\n/;
+/**
+ * Provider configuration is a shared, consumer-owned resource: a consumer tool
+ * may regenerate it and drop the registration this toolkit installed. So the
+ * three states are distinguished rather than collapsed into one failure.
+ *
+ * present  -- byte/semantically equal to what the receipt proves we wrote.
+ * missing  -- absent entirely. Reported as `missing` so the caller can restore
+ *             exactly the receipt-owned registration and nothing else.
+ * modified -- present at the owned location but different. Never overwritten.
+ *
+ * Ownership is always `previous` (the receipt's `configOwned`), never the
+ * `start-migration` name: an entry under that name that the receipt does not
+ * prove is ours is a conflict, not something to repair.
+ */
 function mergeConfig(raw, layout, previous, server) {
   if (layout[3] === null) {
     let text = raw?.toString() ?? '';
+    let missing = false;
     if (previous) {
-      if (text.split(previous).length !== 2) throw new Error('Owned MCP configuration was modified');
-      text = text.replace(previous, '');
+      // Exact receipt bytes, removed exactly, exactly once -- unchanged from
+      // v1.0-v1.2, so removal still restores the consumer's file byte for byte.
+      const parts = text.split(previous);
+      if (parts.length === 2) text = parts.join('');
+      else if (ownedBlock.test(text)) throw new Error('Owned MCP configuration was modified');
+      else missing = true;
     }
     if (/start-migration|BEGIN artifact-migration-tools|END artifact-migration-tools/.test(text)) throw new Error('Conflicting MCP configuration');
-    const owned = server ? `${text && !text.endsWith('\n') ? '\n' : ''}${begin}[mcp_servers.start-migration]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n${end}` : null;
-    return { bytes: Buffer.from(text + (owned ?? '')), owned };
+    const separator = text && !text.endsWith('\n') ? '\n' : '';
+    const fresh = server ? `${begin}[mcp_servers.start-migration]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n${end}` : null;
+    // Restoring re-emits the receipt's own bytes, so the repair adds nothing of
+    // its own and the next validation matches exactly. A merge that genuinely
+    // changes the registration (update/rollback) writes the new block instead
+    // and records it as the new ownership.
+    const owned = fresh && missing && previous.replace(/^\n/, '') === fresh
+      ? `${previous.startsWith('\n') ? '' : separator}${previous}`
+      : fresh && `${separator}${fresh}`;
+    return { bytes: Buffer.from(text + (owned ?? '')), owned: owned ?? null, missing };
   }
   const config = raw ? JSON.parse(raw) : {};
   const key = layout[3];
   if (!config || Array.isArray(config) || typeof config !== 'object' || (config[key] && (Array.isArray(config[key]) || typeof config[key] !== 'object'))) throw new Error('MCP config must be an object');
   const existing = config[key]?.['start-migration'];
-  if (previous ? !same(existing, previous) : existing !== undefined) throw new Error('Conflicting or modified MCP configuration');
+  const missing = Boolean(previous) && existing === undefined;
+  if (!missing && (previous ? !same(existing, previous) : existing !== undefined)) throw new Error('Conflicting or modified MCP configuration');
   if (server) (config[key] ??= {})['start-migration'] = server;
   else if (config[key]) { delete config[key]['start-migration']; if (!Object.keys(config[key]).length) delete config[key]; }
-  return { bytes: Buffer.from(json(config)), owned: server };
+  return { bytes: Buffer.from(json(config)), owned: server, missing };
 }
 
 async function replace(file, bytes) {
@@ -154,10 +189,20 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     if (digest(await readFile(await safePath(root, relative))) !== hash) throw new Error(`Owned file modified: ${relative}`);
   }
   if (action === 'doctor') {
-    if (await optional(await safePath(root, '.artifact-migration-tools/install.lock'))) throw new Error('Installation locked; inspect interrupted installation');
-    mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp);
-    const servers = layout[3] ? JSON.parse(rawConfig)[layout[3]] : { 'start-migration': previous.mcp };
-    return { ...previous, outcome: 'OK', mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
+    // Self-healing registration. `mergeConfig` has already refused a modified
+    // one; only a provably absent registration is restored, and only from the
+    // receipt, so unrelated servers and unrelated provider configuration are
+    // carried through untouched.
+    const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp);
+    let mcpRepair = null;
+    if (merged.missing) {
+      await replace(configFile, merged.bytes);
+      // A host that cannot load an MCP server mid-process needs a restart. The
+      // runtime still succeeds: this invocation continues on absolute CLI paths.
+      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: configFile, restartRequired: true };
+    }
+    const servers = layout[3] ? JSON.parse(merged.bytes)[layout[3]] ?? {} : { 'start-migration': previous.mcp };
+    return { ...previous, outcome: 'OK', mcpRepair, mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
   }
   const writes = new Map();
   let receipt = null;
@@ -234,8 +279,9 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   return receipt ?? { provider, removed: true };
 }
 
+// Doctor repairs a missing registration, so it is a config writer too and takes
+// the same single lock per host root instead of racing an install.
 export async function adapter(provider, options = {}) {
-  if (options.action === 'doctor') return applyAdapter(provider, options);
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
   const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
   await mkdir(path.dirname(lock), { recursive: true });

@@ -69,3 +69,52 @@ test("every provider routes start-migration through the canonical progress contr
     }
   }
 });
+
+/**
+ * The execution contract every provider must receive identically. The progress
+ * rules above are part of it; these are the rest, asserted by clause so a
+ * provider cannot quietly lose one while still "matching the canonical skill".
+ */
+const CONTRACT = {
+  "runtime preflight first":
+    "## Runtime preflight Before migration status or any other migration work",
+  "status first":
+    "START -> STATUS FIRST",
+  "absolute commands from ensure":
+    "use the absolute commands in its JSON result",
+  "prefer MCP when connected":
+    "MCP — preferred whenever the `start-migration` MCP server is connected",
+  "CLI fallback when MCP is unavailable or repaired in this process":
+    "prefer MCP only while the `start-migration` server is actually connected, and use those absolute CLI commands as the fallback for the rest of this invocation when it is not",
+  "progress after migration_status":
+    "-> migration_status -> render canonical progress",
+  "progress after migration_run":
+    "-> migration_run -> render canonical progress",
+  "progress on every CONTINUE iteration":
+    "On every iteration, render canonical progress",
+  "no percentages":
+    "add percentages to either form",
+  "no provider-authored migration plan":
+    "### Never author a migration plan",
+  "no provider-specific checkpoint interpretation":
+    "Providers never decide checkpoint progression themselves",
+};
+
+test("every provider receives the same canonical execution contract", async () => {
+  const canonical = (await read("skills/start-migration/SKILL.md")).replace(/\s+/g, " ");
+  for (const [rule, clause] of Object.entries(CONTRACT)) {
+    assert.ok(canonical.includes(clause), `canonical skill lost: ${rule}`);
+  }
+  for (const [provider, paths] of Object.entries(providers)) {
+    const prose = (await read(paths.skill)).replace(/\s+/g, " ");
+    for (const [rule, clause] of Object.entries(CONTRACT)) {
+      assert.ok(prose.includes(clause), `${provider} lost contract rule: ${rule}`);
+    }
+    // The self-healing/reuse preflight is a runtime behavior, not a per-provider one.
+    assert.ok(prose.includes("reported as `mcpRepair`"), `${provider} omits repair reporting`);
+    assert.ok(
+      prose.includes("reuses a verified runtime another provider already installed in this same consumer without network access"),
+      `${provider} omits cross-provider offline reuse`,
+    );
+  }
+});

@@ -21,13 +21,28 @@ node <skill-directory>/scripts/runtime.mjs ensure --provider <claude|codex|openc
 ```
 
 Use the provider running this invocation. This preflight is the only normal
-runtime installer: it reuses a valid pinned receipt without network access, or
-installs the latest stable immutable GitHub Release into the user release store,
-registers MCP, and runs both doctors. On success, use the absolute commands in
-its JSON result and continue the original invocation. The current host may need
-a restart before the new MCP registration is visible, so use the returned CLI
-command during this first invocation. Stop on preflight failure; never fall back
-to a checkout, branch, `latest` URL, package-manager install, or ambient `PATH`.
+runtime installer: it reuses a valid pinned receipt without network access, it
+reuses a verified runtime another provider already installed in this same
+consumer without network access, or it installs the latest stable immutable
+GitHub Release into the user release store. Then it registers MCP and runs both
+doctors. Switching providers never redownloads a runtime this consumer already
+has.
+
+It also re-validates the MCP registration it owns on every run. A registration
+that is absent — a consumer tool regenerated the provider configuration, for
+instance — is restored from the receipt alone, preserving every unrelated
+server and every unrelated provider setting, and reported as `mcpRepair`. A
+registration that exists at the owned location but differs from the receipt
+fails closed and is never overwritten.
+
+On success, use the absolute commands in its JSON result and continue the
+original invocation. A newly installed or repaired registration may not be
+loadable by the host that is already running, so prefer MCP only while the
+`start-migration` server is actually connected, and use those absolute CLI
+commands as the fallback for the rest of this invocation when it is not —
+`mcpRepair.restartRequired` means exactly that, and never that the migration
+must stop. Stop on preflight failure; never fall back to a checkout, branch,
+`latest` URL, package-manager install, or ambient `PATH`.
 
 `--version X.Y.Z` and `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z` are explicit
 admin/CI overrides. They select another immutable release but never update a

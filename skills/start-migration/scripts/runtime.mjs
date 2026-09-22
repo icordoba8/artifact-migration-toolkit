@@ -5,7 +5,7 @@
 // ownership stay in the release's provider adapter.
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { access, constants as fsConstants, mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises';
+import { access, constants as fsConstants, mkdtemp, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -137,16 +137,65 @@ async function adapterRun(provider, release, options) {
   return support.adapter(provider, options);
 }
 
-async function validateReceiptLauncher(receipt) {
-  if (!exactVersion(receipt.toolkit?.version) || !/^sha256:[a-f0-9]{64}$/.test(receipt.pin ?? '')) throw new Error('Invalid runtime receipt identity');
-  const expected = path.join(receipt.store, `${receipt.toolkit.version}-${receipt.pin.slice(7)}`);
-  if (receipt.release !== expected) throw new Error('Runtime receipt release path conflict');
-  const manifestBytes = await readFile(path.join(expected, 'release-manifest.json'));
-  if (sha256(manifestBytes) !== receipt.pin) throw new Error('Runtime receipt manifest checksum mismatch');
+/**
+ * The exact toolkit identity a `{store, release, pin}` triple actually resolves
+ * to on disk, taken from the pinned manifest and never from the store folder
+ * name -- the name is only *checked* against the verified manifest. The release
+ * adapter's own `verifyBundle` re-verifies every file before anything installs;
+ * this is the cheap identity read that selection needs first.
+ */
+async function pinnedToolkit(store, release, pin) {
+  if (typeof release !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(pin ?? '')) throw new Error('Invalid runtime receipt identity');
+  const manifestBytes = await readFile(path.join(release, 'release-manifest.json'));
+  if (sha256(manifestBytes) !== pin) throw new Error('Runtime receipt manifest checksum mismatch');
   const manifest = JSON.parse(manifestBytes);
-  if (JSON.stringify(manifest.toolkit) !== JSON.stringify(receipt.toolkit)) throw new Error('Runtime receipt toolkit identity mismatch');
-  const launcher = await readFile(path.join(expected, 'providers/install-support.mjs'));
+  const toolkit = manifest.toolkit;
+  if (!exactVersion(toolkit?.version) || release !== path.join(store, `${toolkit.version}-${pin.slice(7)}`)) throw new Error('Runtime receipt release path conflict');
+  const launcher = await readFile(path.join(release, 'providers/install-support.mjs'));
   if (sha256(launcher) !== manifest.files?.['providers/install-support.mjs']) throw new Error('Runtime installer checksum mismatch');
+  return toolkit;
+}
+
+async function validateReceiptLauncher(receipt) {
+  const toolkit = await pinnedToolkit(receipt.store, receipt.release, receipt.pin);
+  if (JSON.stringify(toolkit) !== JSON.stringify(receipt.toolkit)) throw new Error('Runtime receipt toolkit identity mismatch');
+}
+
+/**
+ * A verified runtime another provider already installed in THIS consumer.
+ *
+ * Switching providers is not a reason to resolve, download and verify a release
+ * that is already present and provably identical. Candidates come only from
+ * sibling receipts under the same root and store; each one is re-verified from
+ * its pinned manifest, and the five identity fields must agree exactly across
+ * all of them. Disagreement fails closed rather than picking a winner.
+ *
+ * An explicit exact version never adopts a sibling's version: it filters to
+ * that version alone, and may also select a release the sibling still retains
+ * for rollback -- those are receipt-proven and verified the same way.
+ */
+async function siblingSelection({ provider, root, store, version }) {
+  const directory = path.join(root, '.artifact-migration-tools');
+  let names;
+  try { names = await readdir(directory); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const candidates = new Map();
+  for (const name of names.sort()) {
+    const sibling = name.endsWith('.json') && PROVIDERS.get(name.slice(0, -5));
+    if (!sibling || sibling === provider) continue;
+    let receipt;
+    try { receipt = JSON.parse(await readFile(path.join(directory, name), 'utf8')); } catch { continue; }
+    if (receipt?.provider !== sibling || receipt.root !== root || receipt.store !== store) continue;
+    for (const item of [{ release: receipt.release, pin: receipt.pin }, ...(version ? receipt.releases ?? [] : [])]) {
+      let toolkit;
+      try { toolkit = await pinnedToolkit(store, item.release, item.pin); } catch { continue; }
+      if (version && toolkit.version !== version) continue;
+      const identity = { version: toolkit.version, commit: toolkit.commit, contentHash: toolkit.contentHash, release: item.release, pin: item.pin };
+      candidates.set(JSON.stringify(identity), { ...identity, toolkit, provider: sibling });
+    }
+  }
+  if (candidates.size > 1) throw new Error(`Sibling ${TOOLKIT} receipts disagree on the installed toolkit identity; reinstall or remove the conflicting providers explicitly`);
+  return candidates.size === 1 ? [...candidates.values()][0] : null;
 }
 
 // v1.0.0's engine doctor required `.agents/knowledge/migrations` to already
@@ -215,9 +264,27 @@ export async function ensureRuntime(
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (previous && (previous.provider !== provider || previous.root !== root || previous.store !== store)) throw new Error('Runtime receipt selection conflict');
 
+  const result = (receipt, extra, doctors) => ({
+    outcome: 'OK', toolkit: receipt.toolkit, commands: receipt.commands, mcp: receipt.mcp,
+    // Structured repair/restart state. The registration was restored, so this
+    // invocation continues on the absolute CLI commands above and the host may
+    // need a restart before the MCP server itself is reachable.
+    mcpRepair: doctors.adapterDoctor?.mcpRepair ?? null, ...extra, ...doctors,
+  });
+
   if (previous && (!version || previous.toolkit?.version === version)) {
-    const doctors = await localPreflight(previous);
-    return { outcome: 'OK', bootstrapped: false, toolkit: previous.toolkit, commands: previous.commands, mcp: previous.mcp, ...doctors };
+    return result(previous, { bootstrapped: false }, await localPreflight(previous));
+  }
+
+  // Another provider in this consumer may already have a verified runtime. A
+  // provider switch must not require the network to install the same release.
+  const sibling = previous ? null : await siblingSelection({ provider, root, store, version });
+  if (sibling) {
+    const receipt = await adapterRun(provider, sibling.release, {
+      provider, scope: 'project', root, store, action: 'install',
+      bundle: sibling.release, pin: sibling.pin, runtimeOnly: true,
+    });
+    return result(receipt, { bootstrapped: true, reusedFrom: sibling.provider }, await localPreflight(receipt));
   }
 
   const resolved = await resolve(version);
@@ -236,8 +303,7 @@ export async function ensureRuntime(
       ...selection, action: previous ? 'update' : 'install', bundle,
       pin: sha256(manifestBytes), runtimeOnly,
     });
-    const doctors = await localPreflight(receipt);
-    return { outcome: 'OK', bootstrapped: true, toolkit: receipt.toolkit, commands: receipt.commands, mcp: receipt.mcp, ...doctors };
+    return result(receipt, { bootstrapped: true }, await localPreflight(receipt));
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
