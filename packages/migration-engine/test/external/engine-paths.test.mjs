@@ -491,6 +491,10 @@ for (const layout of ["legacy", "ancestor", "unrelated", "spaced"]) {
           "auth",
           "--target",
           "auth",
+          // `--mode step` keeps this a read-only preview; under the default
+          // auto principal the registration would execute on its own authority.
+          "--mode",
+          "step",
         ],
         install.consumerRoot,
       );

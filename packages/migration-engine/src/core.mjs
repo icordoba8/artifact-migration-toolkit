@@ -17,6 +17,7 @@
 export {
   assertOptionCombination,
   exitCodeFor,
+  isAutoAuthority,
   maySelfConfirm,
   MIGRATION_MODES,
   MIGRATION_OUTCOMES,
@@ -64,6 +65,7 @@ export {
 // -- artifact and file identity
 export {
   BASELINE_ROWS_PIN,
+  AUTO_DECISIONS_FILE,
   CAPABILITY_OWNERSHIP_FILE,
   DECISIONS_FILE,
   DISCOVERY_PIN,
@@ -132,8 +134,11 @@ export {
   decisionLineDigest,
   decisionRationaleDigest,
   edgeDecisionSubject,
+  decisionChannelOf,
   rawDecisionLedgerDigest,
+  readAutoDecisions,
   readOperatorDecisions,
+  readRecordedDecisions,
 } from "./resumable-migration.mjs";
 export { LATE_DECISION_KINDS } from "./resumable-migration.mjs";
 
@@ -233,6 +238,7 @@ export { lockPathFor, withModuleLock } from "./module-lock.mjs";
 // toolkit SemVer to a migration version number.
 export {
   activeToolkitIdentity,
+  autoAdoptableToolkitTransition,
   BUILD_IDENTITY_FILE,
   digestToolkitIdentity,
   renderToolkitIdentity,
@@ -248,6 +254,7 @@ export {
 export {
   assertRecordToolkitIdentity,
   assertToolkitIdentityNotMismatched,
+  autoAdoptToolkitIdentity,
   changeModuleToolkitIdentity,
   toolkitAdoptCommand,
 } from "./resumable-migration.mjs";

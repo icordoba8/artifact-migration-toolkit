@@ -864,6 +864,11 @@ test("HISTORICAL_ARTIFACT_FORMATS no longer exists and format 11 is refused", as
   }
 });
 
+// AUTO is its own principal and continues on its own evidence; these two
+// tests pin the *human* authority guarantee, so they run under `--mode step`.
+// The AUTO side is proven in `test/unit/auto-authority.test.mjs`.
+const STEP_OPTIONS = (fixture) => ({ ...fixture.options, mode: "step" });
+
 test("pending operator decisions block advance and no approval API exists on the engine", async () => {
   const fixture = await createFixture();
   try {
@@ -872,7 +877,7 @@ test("pending operator decisions block advance and no approval API exists on the
     const stateBefore = await stateOf(fixture);
     const historyFile = path.join(fixture.artifactRoot, "history/history.ndjson");
     const historyBefore = await readFile(historyFile, "utf8");
-    const result = await runArtifact(fixture.options);
+    const result = await runArtifact(STEP_OPTIONS(fixture));
     assert.equal(result.outcome, "OPERATOR_DECISION");
     assert.equal(result.pendingDecisions.length, 1);
     assert.equal(result.pendingDecisions[0].id, "DEC-1");
@@ -895,7 +900,7 @@ test("an agent cannot mint its own artifact approval; a real ledger approval adv
   try {
     await bootstrap(fixture);
     await authorSource(fixture, { pendingDecision: true });
-    const pending = await runArtifact(fixture.options);
+    const pending = await runArtifact(STEP_OPTIONS(fixture));
     assert.equal(pending.outcome, "OPERATOR_DECISION");
     const appId = pending.pendingDecisions[0].candidateId;
 
@@ -903,7 +908,7 @@ test("an agent cannot mint its own artifact approval; a real ledger approval adv
     const forged = JSON.parse(await readFile(sourcePath, "utf8"));
     forged.operatorDecisions[0].decisionId = "DEC-001";
     await writeJson(fixture.artifactRoot, "inventories/source.json", forged);
-    assert.equal((await runArtifact(fixture.options)).outcome, "OPERATOR_DECISION");
+    assert.equal((await runArtifact(STEP_OPTIONS(fixture))).outcome, "OPERATOR_DECISION");
 
     const clean = JSON.parse(await readFile(sourcePath, "utf8"));
     delete clean.operatorDecisions[0].decisionId;

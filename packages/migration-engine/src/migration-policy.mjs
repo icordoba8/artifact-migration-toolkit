@@ -11,8 +11,18 @@
  * carrying its own copy.
  */
 
-import { BLOCKED_EXIT_CODE, MIGRATION_STEPS } from "./resumable-migration.mjs";
+import {
+  BLOCKED_EXIT_CODE,
+  isAutoAuthority,
+  MIGRATION_STEPS,
+} from "./resumable-migration.mjs";
+
 import { DESIGN_SOURCES } from "./migration-utils.mjs";
+
+// The policy module is where a front end reads the auto-decision policy from;
+// its definition site is `resumable-migration.mjs` only because an import cycle
+// would form otherwise (see the comment there).
+export { isAutoAuthority };
 
 export const MIGRATION_MODES = ["auto", "step"];
 
@@ -280,32 +290,14 @@ export const assertOptionCombination = (
     if (values["confirm-rework"] && !values["rework-slice"]) {
       throw new Error("--confirm-rework requires --rework-slice <id>.");
     }
-    // `--refresh` invalidates artifacts and rewrites the pinned legacy revision.
-    // `--mode auto` defaults on, so without this an unattended run could
-    // self-confirm the one transition that most needs a human behind it.
-    if (
-      values.mode === "auto" &&
-      (values.refresh || values["reopen-ui"] || values["rework-slice"])
-    ) {
-      throw new Error(
-        "--refresh, --reopen-ui, and --rework-slice are operator decisions and cannot run under --mode auto.",
-      );
-    }
-    if (values.mode === "auto" && values["reopen-complete"]) {
-      throw new Error(
-        "--reopen-complete is an operator decision and cannot run under --mode auto.",
-      );
-    }
-    if (values.mode === "auto" && values["adopt-visual-contract"]) {
-      throw new Error(
-        "--adopt-visual-contract is an operator decision and cannot run under --mode auto.",
-      );
-    }
-    if (values.mode === "auto" && values["amend-slice"]) {
-      throw new Error(
-        "--amend-slice is an operator decision and cannot run under --mode auto.",
-      );
-    }
+    // `--refresh`, `--reopen-ui`, `--rework-slice`, `--reopen-complete`,
+    // `--adopt-visual-contract` and `--amend-slice` used to throw under
+    // `--mode auto`. They no longer do. Each one is decided from evidence the
+    // engine already holds, and `--mode auto` is an authority
+    // (`isAutoAuthority`), not an exemption: the transition still re-verifies
+    // its confirmation ID, still writes its ledger line, and still carries the
+    // digests that invalidate it if the bytes move. What changed is who
+    // assents, not what is checked.
     return;
   }
   if (command === "run") {
@@ -355,48 +347,26 @@ export const assertOptionCombination = (
 
 /**
  * Whether this invocation may supply the confirmation ID the operator would
- * otherwise type. Three commands, three deliberately different answers:
+ * otherwise type.
  *
- * - `discover` carves out a bootstrap and `--refresh`, because those approve
- *   more than the ID: a bootstrap pins an OpenSpec authority for the
- *   migration's whole life, and `--refresh` invalidates artifacts.
- * - `advance` has neither carve-out; every transition it can make is
- *   mechanical and `advanceMigration` re-verifies the ID itself.
- * - `registry` never self-confirms. That rule held only because nobody had
- *   written the branch (`02` §1.7); here it is a rule, and it is tested.
+ * This was a denylist -- `mode !== "step" && !refresh && !reopenUi && ...` --
+ * which meant every transition added later defaulted to operator-required and
+ * the only available fix was one more `!flag`. That structure guaranteed the
+ * next feature would reintroduce the stop, which is why the point fixes never
+ * converged. It is now the policy above and nothing else: under `auto` the
+ * process confirms its own preview, in every command, for every transition.
+ *
+ * A confirmation ID is integrity machinery, not authority machinery. It binds a
+ * preview to the bytes it previewed and `assertExecutionConfirmation`
+ * re-verifies it on the execution side regardless of who supplied it, so
+ * self-confirming can never widen what the transition is allowed to do -- only
+ * a preflight that already said yes can be confirmed at all.
  */
-export const maySelfConfirm = ({
-  command,
-  mode,
-  refresh = false,
-  reopenUi = false,
-  reopenComplete = false,
-  reworkSlice = false,
-  adoptVisualContract = false,
-  amendSlice = false,
-  preview,
-} = {}) => {
-  if (command === "registry") return false;
-  if (command === "advance") return mode !== "step";
-  if (command === "discover") {
-    return (
-      mode !== "step" &&
-      !refresh &&
-      !reopenUi &&
-      // Invalidating a finalized contract is never self-confirmed, for the
-      // strongest version of the --refresh reason: it un-completes a COMPLETE
-      // record.
-      !reopenComplete &&
-      // A rework releases pinned evidence. It approves more than an id, so it
-      // is never self-confirmed, exactly like --refresh and --reopen-ui.
-      !reworkSlice &&
-      !adoptVisualContract &&
-      // A slice amendment re-pins a verified record: an operator act.
-      !amendSlice &&
-      preview?.state !== "NOT_STARTED"
-    );
+export const maySelfConfirm = ({ command, mode } = {}) => {
+  if (command !== "registry" && command !== "advance" && command !== "discover") {
+    throw new Error(`Unknown command '${command}' for self-confirmation.`);
   }
-  throw new Error(`Unknown command '${command}' for self-confirmation.`);
+  return isAutoAuthority(mode);
 };
 
 /**

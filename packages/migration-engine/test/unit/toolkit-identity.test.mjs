@@ -331,11 +331,11 @@ const runEngine = async (engineRoot, script, args, cwd) => {
  * to come from its own preview -- an unconfirmed preview writes nothing and
  * would prove nothing about the gate.
  */
-const confirmedRefresh = async (engineRoot, cwd) => {
+const confirmedRefresh = async (engineRoot, cwd, extra = []) => {
   const preview = await runEngine(
     engineRoot,
     "cli/discover-module.mjs",
-    ["auth", "--refresh", "--confirm-mismatch"],
+    ["auth", "--refresh", "--confirm-mismatch", ...extra],
     cwd,
   );
   const confirmationId = preview.output.match(/Confirmation ID: ([0-9a-f]+)/)?.[1];
@@ -343,7 +343,7 @@ const confirmedRefresh = async (engineRoot, cwd) => {
   return runEngine(
     engineRoot,
     "cli/discover-module.mjs",
-    ["auth", "--refresh", "--confirm-mismatch", "--confirm-execution", confirmationId],
+    ["auth", "--refresh", "--confirm-mismatch", ...extra, "--confirm-execution", confirmationId],
     cwd,
   );
 };
@@ -501,7 +501,12 @@ test("an installed toolkit refuses to mutate an unstamped record and names one c
   // *advance* and *approval* entry points are proven against a driven record in
   // the external acceptance fixture, where a ready checkpoint and a genuine
   // pending candidate exist.
-  const blocked = await confirmedRefresh(engineIn(bundle, "."), consumer.root);
+  // AUTO adopts an unstamped record on its own evidence; the refusal is a
+  // `--mode step` guarantee. See `test/unit/auto-authority.test.mjs`.
+  const blocked = await confirmedRefresh(engineIn(bundle, "."), consumer.root, [
+    "--mode",
+    "step",
+  ]);
   assert.notEqual(blocked.code, 0, blocked.output);
   assert.match(blocked.output, /carries no toolkit identity/);
   assert.match(blocked.output, /toolkit-identity\.mjs.*adopt.*--module auth/s);

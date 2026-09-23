@@ -4227,7 +4227,7 @@ test("EXCLUDED_APPROVED without a real operator decision is refused", async () =
     });
     await assert.rejects(
       advance(fixture),
-      /not recorded in .*can never author its own approval/s,
+      /recorded in neither .*can never author its own approval/s,
     );
   } finally {
     await fixture.cleanup();
@@ -6994,7 +6994,7 @@ test("a step-mode discover invocation stops for confirmation and writes nothing"
     assert.ok(
       run.stdout.endsWith(
         `Confirmation ID: ${run.preview.confirmationId}\n` +
-          "Proceed with this invocation? Reply Yes or No. No execution has started.\n",
+          "Mode: step — awaiting explicit confirmation. No execution has started.\n",
       ),
       run.stdout,
     );
@@ -7017,7 +7017,7 @@ test("a step-mode advance invocation stops for confirmation and writes nothing",
     assert.ok(
       run.stdout.endsWith(
         `Confirmation ID: ${run.preview.confirmationId}\n` +
-          "Proceed with this advance? Reply Yes or No. No execution has started.\n",
+          "Mode: step — awaiting explicit confirmation. No execution has started.\n",
       ),
       run.stdout,
     );
@@ -7176,7 +7176,7 @@ test("--refresh without --confirm-mismatch is refused and writes nothing", async
     await initialize(fixture);
     const before = await snapshot(fixture.root);
     await assert.rejects(
-      discoverCli(fixture, ["--refresh"]),
+      discoverCli(fixture, [...STEP, "--refresh"]),
       /Refresh requires explicit mismatch confirmation/,
     );
     assert.deepEqual(await snapshot(fixture.root), before);
@@ -7489,7 +7489,7 @@ test("--mode auto still refuses a blocked preview on both entry points", async (
   }
 });
 
-test("--mode auto never self-confirms a bootstrap", async () => {
+test("--mode step never self-confirms a bootstrap", async () => {
   const fixture = await createFixture();
   try {
     const before = await snapshot(fixture.root);
@@ -7504,7 +7504,7 @@ test("--mode auto never self-confirms a bootstrap", async () => {
           "--registry",
           fixture.registryPath,
           "--mode",
-          "auto",
+          "step",
           "--openspec-proposal-stdin",
         ],
         { cwd: fixture.root },
@@ -7525,7 +7525,7 @@ test("--mode auto never self-confirms a bootstrap", async () => {
     assert.match(run.stdout, /Current state: NOT_STARTED/);
     assert.match(
       run.stdout,
-      /Proceed with this invocation\? Reply Yes or No\. No execution has started\./,
+      /Mode: step — awaiting explicit confirmation\. No execution has started\./,
     );
     assert.doesNotMatch(run.stdout, /self-confirmed/);
     assert.deepEqual(await snapshot(fixture.root), before);
@@ -7534,29 +7534,36 @@ test("--mode auto never self-confirms a bootstrap", async () => {
   }
 });
 
-test("--mode auto refuses --refresh, and the auto default leaves --refresh two-phase", async () => {
+test("--mode auto owns --refresh, and --mode step leaves it two-phase", async () => {
   const fixture = await createFixture();
   try {
-    assert.throws(
-      () =>
-        parseDiscoverArguments([
-          "auth",
-          "--mode",
-          "auto",
-          "--refresh",
-          "--confirm-mismatch",
-        ]),
-      /--refresh, --reopen-ui, and --rework-slice are operator decisions/,
+    // The AUTO principal decides `--refresh` on its own evidence: argv accepts
+    // it, and the invocation executes in one phase.
+    assert.deepEqual(
+      parseDiscoverArguments([
+        "auth",
+        "--mode",
+        "auto",
+        "--refresh",
+        "--confirm-mismatch",
+      ]).mode,
+      "auto",
     );
 
     await initialize(fixture);
     const before = await snapshot(fixture.root);
-    // The assertion that matters: `--mode` defaults to `auto`, and that default
-    // must not have made the artifact-invalidating path autonomous.
-    const run = await discoverCli(fixture, ["--refresh", "--confirm-mismatch"]);
-    assert.equal(run.awaitingConfirmation, true);
-    assert.doesNotMatch(run.stdout, /self-confirmed/);
-    assert.deepEqual(await snapshot(fixture.root), before);
+    const auto = await discoverCli(fixture, ["--refresh", "--confirm-mismatch"]);
+    assert.equal(auto.awaitingConfirmation, undefined, auto.stdout);
+    assert.notDeepEqual(await snapshot(fixture.root), before);
+
+    // `--mode step` is byte-identical to the pre-AUTO behaviour.
+    const stepped = await discoverCli(fixture, [
+      ...STEP,
+      "--refresh",
+      "--confirm-mismatch",
+    ]);
+    assert.equal(stepped.awaitingConfirmation, true);
+    assert.doesNotMatch(stepped.stdout, /self-confirmed/);
   } finally {
     await fixture.cleanup();
   }
@@ -8387,17 +8394,12 @@ test("a genuine stop names a typed reason instead of continuing", async () => {
     assert.equal(blockedDiscover.blocked, true);
     assert.equal(loopDirective(blockedDiscover), "loop: STOP reason=BLOCKED");
 
-    // `--refresh` is an operator decision, so auto hands back rather than
-    // self-confirming, and says so in the directive.
-    const refresh = await discoverCli(fixture, [
-      "--refresh",
-      "--confirm-mismatch",
-    ]);
-    assert.equal(refresh.awaitingConfirmation, true);
-    assert.equal(
-      loopDirective(refresh),
-      "loop: STOP reason=AWAITING_CONFIRMATION",
-    );
+    // `--refresh` is no longer one of them: it is the AUTO principal's own
+    // decision, so it continues rather than handing back. See
+    // `test/unit/auto-authority.test.mjs`.
+    const refresh = await discoverCli(fixture, ["--refresh", "--confirm-mismatch"]);
+    assert.equal(refresh.awaitingConfirmation, undefined, refresh.stdout);
+    assert.notEqual(loopDirective(refresh), "loop: STOP reason=AWAITING_CONFIRMATION");
   } finally {
     await fixture.cleanup();
   }
@@ -9399,7 +9401,7 @@ test("a delegated artifact decision is recorded through one migration_run elicit
   }
 });
 
-test("without elicitation the same migration_run refuses to approve the delegated decision", async () => {
+test("without elicitation the same migration_run decides as AUTO and writes no human artifact line", async () => {
   const fixture = await createFixture();
   try {
     await stagedDelegatedSlice(fixture);
@@ -9410,7 +9412,9 @@ test("without elicitation the same migration_run refuses to approve the delegate
     const response = await rpc(fixture, runCall(1), createSession());
 
     const result = response.result.structuredContent;
-    assert.equal(result.outcome, "OPERATOR_DECISION");
+    // AUTO is a principal, not a simulated human: it may continue, but the
+    // human artifact ledger must be untouched.
+    assert.notEqual(result.outcome, "OPERATOR_DECISION");
     assert.deepEqual(await artifactLedger(ledgerPath), []);
   } finally {
     await fixture.cleanup();
@@ -9669,11 +9673,13 @@ test("figma-mcp: confirmed refresh preserves authorities and invalidates old-rev
     );
 
     const offered = await discoverCli(fixture, [
+      ...STEP,
       "--refresh",
       "--confirm-mismatch",
     ]);
     assert.equal(offered.awaitingConfirmation, true);
     const refreshed = await discoverCli(fixture, [
+      ...STEP,
       "--refresh",
       "--confirm-mismatch",
       "--confirm-execution",
@@ -13359,18 +13365,17 @@ test("R-W3-b: a FAIL without defects is refused and nothing is written", async (
   }
 });
 
-test("R-W3-c: --rework-slice under --mode auto is refused by assertOptionCombination", () => {
-  assert.throws(
-    () =>
-      parseDiscoverArguments([
-        "auth",
-        "--rework-slice",
-        "slice-a",
-        "--confirm-rework",
-        "--mode",
-        "auto",
-      ]),
-    /--rework-slice are operator decisions and cannot run under --mode auto/,
+test("R-W3-c: --rework-slice under --mode auto is the AUTO principal's own decision", () => {
+  assert.equal(
+    parseDiscoverArguments([
+      "auth",
+      "--rework-slice",
+      "slice-a",
+      "--confirm-rework",
+      "--mode",
+      "auto",
+    ]).reworkSlice,
+    "slice-a",
   );
   // And it cannot be typed without its own confirmation.
   assert.throws(
@@ -14988,7 +14993,7 @@ test("R1-1: COMPLETE is immutable by default", async () => {
       refusal(["--confirm-reopen"]),
       /--confirm-reopen requires --reopen-complete/,
     );
-    assert.match(
+    assert.equal(
       refusal([
         "--reopen-complete",
         "slice-a",
@@ -15000,18 +15005,19 @@ test("R1-1: COMPLETE is immutable by default", async () => {
         "--mode",
         "auto",
       ]),
-      /--reopen-complete is an operator decision and cannot run under --mode auto/,
+      null,
+      "the AUTO principal may reach --reopen-complete",
     );
     assert.throws(
       () => parseRunArguments(["auth", "--reopen-complete", "slice-a"]),
       /--reopen-complete is not accepted by run-migration\.mjs/,
     );
-    // It is never self-confirmed, for the strongest version of the --refresh
-    // reason: it un-completes a COMPLETE record.
+    // Under `--mode step` it is never self-confirmed, for the strongest
+    // version of the --refresh reason: it un-completes a COMPLETE record.
     assert.equal(
       maySelfConfirm({
         command: "discover",
-        mode: "auto",
+        mode: "step",
         reopenComplete: true,
         preview: { state: "COMPLETE" },
       }),
@@ -15281,13 +15287,14 @@ test("R1-5: a COMPLETE reopen acknowledges legacy drift, keeps every unaffected 
     ];
 
     // Missing, wrong, or preview-bypassing acknowledgements fail closed.
-    const missing = await discoverCli(fixture, reopenArguments);
+    const missing = await discoverCli(fixture, [...STEP, ...reopenArguments]);
     assert.equal(missing.blocked, true);
     assert.match(
       missing.preview.blockers.join("\n"),
       new RegExp(`--confirm-legacy-revision ${newRevision}`),
     );
     const wrong = await discoverCli(fixture, [
+      ...STEP,
       ...reopenArguments,
       "--confirm-legacy-revision",
       oldRevision,
@@ -15297,7 +15304,12 @@ test("R1-5: a COMPLETE reopen acknowledges legacy drift, keeps every unaffected 
       wrong.preview.blockers.join("\n"),
       /does not match the current legacy revision/,
     );
-    const bypass = await reopenComplete(fixture, ["slice-a"], { evidence });
+    // Under `--mode step` the acknowledgement must be typed; AUTO reads the
+    // revision itself -- see `test/unit/auto-authority.test.mjs`.
+    const bypass = await reopenComplete(fixture, ["slice-a"], {
+      evidence,
+      options: { mode: "step" },
+    });
     await assert.rejects(
       bypass.run(),
       /Legacy revision changed .*--confirm-legacy-revision.*Nothing was written/s,
@@ -15307,6 +15319,7 @@ test("R1-5: a COMPLETE reopen acknowledges legacy drift, keeps every unaffected 
 
     // The acknowledged revision is part of what the operator confirms.
     const acknowledged = [
+      ...STEP,
       ...reopenArguments,
       "--confirm-legacy-revision",
       newRevision,

@@ -48,6 +48,7 @@ import {
 import { withModuleLock, writeJournalAtomic } from "./module-lock.mjs";
 import {
   activeToolkitIdentity,
+  autoAdoptableToolkitTransition,
   digestToolkitIdentity,
   renderToolkitIdentity,
   sameToolkitIdentity,
@@ -425,6 +426,29 @@ export const BLOCKED_EXIT_CODE = 2;
 export const DEFAULT_MODE = "auto";
 
 /**
+ * The one canonical auto-decision policy, and the only definition of it.
+ *
+ * `auto` is a *principal*, not an exemption list. A process running under it is
+ * the authority for every decision derivable from evidence the engine already
+ * holds -- the preflight verdict, the confirmation ID the engine itself minted,
+ * the slice plan, the decision ledger, the dirty manifest, the git revision,
+ * `build-identity.json`. `step` hands that authority to a human.
+ *
+ * Nothing about integrity moves with it. Whichever principal answers, the
+ * confirmation ID is still re-verified, the ledger line is still appended and
+ * chained, and every digest that invalidates a stale decision still invalidates
+ * it. This decides *who assents*, never *what is checked*.
+ *
+ * It lives here, beside `DEFAULT_MODE`, rather than in `migration-policy.mjs`
+ * where it reads more naturally, because `migration-policy.mjs` imports from
+ * this file and the gates that need the policy -- `operator-approval.mjs`,
+ * `operation-sequence.mjs`, this module -- would otherwise close an import
+ * cycle around it. `migration-policy.mjs` re-exports it, so front ends still
+ * read the policy from the policy module.
+ */
+export const isAutoAuthority = (mode) => (mode ?? DEFAULT_MODE) !== "step";
+
+/**
  * The last line of an iteration, and the only thing that decides whether
  * another one runs. The agent obeys it literally instead of inferring
  * continuation from prose -- which is what made autonomy model-volition
@@ -731,6 +755,22 @@ export const DISCOVERY_SCAN_FILE = "inventories/discovery-scan.json";
 export const MODULE_CLASSIFICATION_FILE =
   "inventories/module-classification.json";
 export const DECISIONS_FILE = "decisions/operator-decisions.ndjson";
+/**
+ * The AUTO principal's own ledger, and the reason there are two files.
+ *
+ * `decisions/operator-decisions.ndjson` is the *human* record: every line in it
+ * is an act a person performed, at a terminal or through a host they answered.
+ * That is the whole value of the file -- "a human approved this" is only worth
+ * something if nothing else can write it -- so `--mode auto` does not get to
+ * append there, not even with an honest label. It writes here instead.
+ *
+ * Same line shape, same digest function, same append-only hash chain, its own
+ * `integrity.json` anchor, and a distinct `AUTO-` id prefix so a citation can
+ * never be mistaken for a human one at a glance or by a reader. Two ledgers,
+ * two principals, no forgery surface: `readOperatorDecisions` refuses a line
+ * that claims `AUTO`, and `readAutoDecisions` refuses one that does not.
+ */
+export const AUTO_DECISIONS_FILE = "decisions/auto-decisions.ndjson";
 export const CAPABILITY_OWNERSHIP_FILE = "matrices/capability-ownership.json";
 export const UI_REMEDIATION_FILE = "ui-remediation.json";
 // Agent-authored (never engine-generated): the normalized, Figma-MCP-derived
@@ -1213,7 +1253,7 @@ const historyAnchorNow = async (root) => {
   );
 };
 
-const renderIntegrity = (state, history, decisions) =>
+const renderIntegrity = (state, history, decisions, autoDecisions) =>
   `${JSON.stringify(
     {
       revision: state.revision,
@@ -1225,6 +1265,10 @@ const renderIntegrity = (state, history, decisions) =>
       // identity existed stays byte-identical and no existing record is
       // retroactively invalidated by this field's introduction.
       toolkitIdentitySha256: digestToolkitIdentity(state.toolkitIdentity) ?? undefined,
+      // Last for the same reason, and dropped on a record with no AUTO ledger:
+      // a record that never ran under `--mode auto` writes the same bytes it
+      // wrote before the AUTO principal existed.
+      autoDecisions: autoDecisions ?? undefined,
     },
     null,
     2,
@@ -1246,16 +1290,30 @@ const decisionsAnchorNow = async (root) => {
 };
 
 /**
+ * The AUTO ledger gets the identical anchor, because it carries the identical
+ * risk: an unattended decision that can be deleted afterwards is not a record
+ * of anything. `null` when the file does not exist, so a record that never ran
+ * under `--mode auto` writes no field at all.
+ */
+const autoDecisionsAnchorNow = async (root) => {
+  const file = path.join(root, AUTO_DECISIONS_FILE);
+  return (await fileExists(file))
+    ? historyAnchorOf(await readFile(file))
+    : null;
+};
+
+/**
  * One definition site for what an integrity anchor covers. Every transition
- * computes both anchors at the same instant -- immediately before the state
+ * computes every anchor at the same instant -- immediately before the state
  * write and therefore before its own history append -- so a caller cannot
- * accidentally anchor one and forget the other.
+ * accidentally anchor one and forget another.
  */
 const renderIntegrityNow = async (root, state) =>
   renderIntegrity(
     state,
     await historyAnchorNow(root),
     await decisionsAnchorNow(root),
+    await autoDecisionsAnchorNow(root),
   );
 
 const readIntegrity = async (root) => {
@@ -1334,7 +1392,12 @@ const assertIntegrityAnchor = async (root, state) => {
     );
   }
   await assertHistoryAppendOnly(root, state, integrity.history);
-  await assertDecisionsAppendOnly(root, integrity.decisions);
+  await assertDecisionsAppendOnly(root, DECISIONS_FILE, integrity.decisions);
+  await assertDecisionsAppendOnly(
+    root,
+    AUTO_DECISIONS_FILE,
+    integrity.autoDecisions,
+  );
 };
 
 /**
@@ -1346,16 +1409,16 @@ const assertIntegrityAnchor = async (root, state) => {
  * chain, but a chain re-derived over a *truncated* file is internally
  * consistent and says nothing about the lines that were removed.
  */
-const assertDecisionsAppendOnly = async (root, anchor) => {
+const assertDecisionsAppendOnly = async (root, relativePath, anchor) => {
   if (!anchor) return;
-  const file = path.join(root, DECISIONS_FILE);
+  const file = path.join(root, relativePath);
   const content = (await fileExists(file)) ? await readFile(file) : Buffer.alloc(0);
   if (
     content.length < anchor.bytes ||
     historyAnchorOf(content.subarray(0, anchor.bytes)).sha256 !== anchor.sha256
   ) {
     throw new Error(
-      `Migration ${DECISIONS_FILE} must still contain, unchanged, the ${anchor.bytes} bytes integrity.json pinned outside it; the operator decision ledger is append-only and every checkpoint that cites an approval is anchored to it. It was truncated or rewritten; restore it before continuing.`,
+      `Migration ${relativePath} must still contain, unchanged, the ${anchor.bytes} bytes integrity.json pinned outside it; the ${relativePath === AUTO_DECISIONS_FILE ? "AUTO" : "operator"} decision ledger is append-only and every checkpoint that cites an approval is anchored to it. It was truncated or rewritten; restore it before continuing.`,
     );
   }
 };
@@ -3787,15 +3850,26 @@ export const rawDecisionLedgerBytes = async (root) => {
   return (await fileExists(file)) ? (await readFile(file)).length : 0;
 };
 
+/** Which principal a recorded line claims. Absent means the original human one. */
+export const decisionChannelOf = (decision) =>
+  decision?.authorizedBy?.channel ?? "TERMINAL";
+
 /**
- * Reads `decisions/operator-decisions.ndjson` and verifies its hash chain.
- * Absent file is legal: a module with nothing to approve records nothing.
+ * Reads one decision ledger and verifies its hash chain. Absent file is legal:
+ * a module with nothing to approve records nothing.
+ *
+ * `principal` is the segregation guard, and it is the reason this is one
+ * function over two files rather than two functions. A line is only ever read
+ * back out of the ledger its principal owns, so appending an `AUTO` line to the
+ * human record -- or a forged `TERMINAL` line to the auto record -- does not
+ * quietly become authority; it makes the file unreadable and every command that
+ * opens the record says so.
  */
-export const readOperatorDecisions = async (root) => {
-  const file = path.join(root, DECISIONS_FILE);
-  if (!(await fileExists(file))) return { decisions: [], byId: new Map() };
+const readDecisionLedger = async (root, file, principal) => {
+  const absolute = path.join(root, file);
+  if (!(await fileExists(absolute))) return { decisions: [], byId: new Map() };
   const decisions = [];
-  const lines = (await readFile(file, "utf8")).split("\n");
+  const lines = (await readFile(absolute, "utf8")).split("\n");
   for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue;
     let decision;
@@ -3803,19 +3877,25 @@ export const readOperatorDecisions = async (root) => {
       decision = JSON.parse(line);
     } catch (error) {
       throw new Error(
-        `${DECISIONS_FILE} line ${index + 1} is not valid JSON: ${error.message}. The operator decision record was truncated or rewritten.`,
+        `${file} line ${index + 1} is not valid JSON: ${error.message}. The operator decision record was truncated or rewritten.`,
+      );
+    }
+    const channel = decisionChannelOf(decision);
+    if (principal === "AUTO" ? channel !== "AUTO" : channel === "AUTO") {
+      throw new Error(
+        `${file} line ${index + 1} ('${decision.id ?? "unknown"}') records channel '${channel}', which does not belong in this ledger. ${DECISIONS_FILE} is the human operator record and ${AUTO_DECISIONS_FILE} is the AUTO principal's; a line in the wrong one is a forged principal, not a misfile.`,
       );
     }
     const previous = decisions.at(-1) ?? null;
     const expectedPrev = previous ? decisionLineDigest(previous) : "genesis";
     if (decision.prevDigest !== expectedPrev) {
       throw new Error(
-        `${DECISIONS_FILE} line ${index + 1} ('${decision.id ?? "unknown"}') chains to '${decision.prevDigest}', but the preceding line digests to '${expectedPrev}'. A decision was edited, reordered, or removed; the whole record is untrusted.`,
+        `${file} line ${index + 1} ('${decision.id ?? "unknown"}') chains to '${decision.prevDigest}', but the preceding line digests to '${expectedPrev}'. A decision was edited, reordered, or removed; the whole record is untrusted.`,
       );
     }
     if (decision.seq !== decisions.length + 1) {
       throw new Error(
-        `${DECISIONS_FILE} line ${index + 1} records seq ${decision.seq} at position ${decisions.length + 1}.`,
+        `${file} line ${index + 1} records seq ${decision.seq} at position ${decisions.length + 1}.`,
       );
     }
     decisions.push(decision);
@@ -3823,6 +3903,37 @@ export const readOperatorDecisions = async (root) => {
   return {
     decisions,
     byId: new Map(decisions.map((decision) => [decision.id, decision])),
+  };
+};
+
+/** The human record, and only ever the human record. */
+export const readOperatorDecisions = async (root) =>
+  readDecisionLedger(root, DECISIONS_FILE, "OPERATOR");
+
+/** The AUTO principal's record, and only ever that. */
+export const readAutoDecisions = async (root) =>
+  readDecisionLedger(root, AUTO_DECISIONS_FILE, "AUTO");
+
+/**
+ * Every recorded decision, whoever made it, for *resolving a citation*.
+ *
+ * Validation asks "does the id this row cites resolve to a line that binds to
+ * this candidate", and that question has the same answer for both principals --
+ * the binding digests, the rationale digest and the candidate identity are what
+ * make a line authority, and they are checked identically. Which principal
+ * decided stays legible in the id prefix and in `authorizedBy.channel`; it is
+ * never erased by this union, only looked up through it.
+ */
+export const readRecordedDecisions = async (root) => {
+  const [operator, auto] = await Promise.all([
+    readOperatorDecisions(root),
+    readAutoDecisions(root),
+  ]);
+  return {
+    operator: operator.decisions,
+    auto: auto.decisions,
+    decisions: [...operator.decisions, ...auto.decisions],
+    byId: new Map([...operator.byId, ...auto.byId]),
   };
 };
 
@@ -3901,7 +4012,7 @@ const requireDecision = ({ byId, row, label, candidate }) => {
   const decision = byId.get(decisionId);
   if (!decision) {
     throw new Error(
-      `${label} cites operator decision '${decisionId}', which is not recorded in ${DECISIONS_FILE}. Only an operator at a terminal can record one (record-decision.mjs); an agent can never author its own approval.`,
+      `${label} cites decision '${decisionId}', which is recorded in neither ${DECISIONS_FILE} nor ${AUTO_DECISIONS_FILE}. Only record-decision.mjs writes either -- a human answering a challenge into the first, the AUTO principal under --mode auto into the second -- and an agent can never author its own approval into either.`,
     );
   }
   if (decision.kind !== candidate.kind) {
@@ -4220,7 +4331,7 @@ export const validateDiscoveryCompleteness = async (
     await readCanonicalModuleBoundary(root, state, roots, {
       scan: precomputed,
     });
-  const { byId } = await readOperatorDecisions(root);
+  const { byId } = await readRecordedDecisions(root);
   // The canonical migration identity, not `state.legacyModule`: the recorder
   // binds every approval to `migrationId`, so validation has to recompute the
   // candidate under the same key or a multi-source record (where `migrationId
@@ -7241,7 +7352,7 @@ export const validateVisualAcceptance = async (
   const contextDigest = `sha256:${await hashFile(
     path.join(root, contextFile ?? FIGMA_CONTEXT_FILE),
   )}`;
-  const decisions = await readOperatorDecisions(root);
+  const decisions = await readRecordedDecisions(root);
   const matrix = assertPlainObject(
     await readJson(
       path.join(root, VISUAL_ACCEPTANCE_FILE),
@@ -7728,8 +7839,47 @@ const DRIFT_CLASSES = Object.freeze({
   AUTHORIZED_REWORK: "AUTHORIZED_REWORK",
   AUTHORIZED_DELEGATION: "AUTHORIZED_DELEGATION",
   OPERATOR_ACCEPTED: "OPERATOR_ACCEPTED",
+  // Modified, inside a subtree some planned slice owns, and claimed by none of
+  // them. This migration's business, and the only unaccounted class FINALIZE
+  // refuses.
   UNCLAIMED_TARGET_DRIFT: "UNCLAIMED_TARGET_DRIFT",
+  // Modified, and outside every subtree any planned slice owns.
+  //
+  // This used to be `UNCLAIMED_TARGET_DRIFT` as well, which made "the migration
+  // cannot account for this file" and "somebody edited an unrelated file in
+  // this repository" the same refusal. They are not the same fact, and
+  // conflating them let an ordinary edit elsewhere in the target -- a README, a
+  // sibling feature's work in progress -- hold COMPLETE hostage until a human
+  // accepted a file the migration never touched.
+  //
+  // The engine reports these and does nothing else with them: it does not
+  // claim them, accept them, modify them, or count them against the guarantee.
+  // The guarantee is about bytes *this migration* changed, and these are not
+  // those bytes.
+  UNRELATED_USER_CHANGE: "UNRELATED_USER_CHANGE",
 });
+
+/**
+ * The target subtrees the plan says this migration owns -- `targetOwner` and
+ * `targetPaths`, read off the slice plan, never guessed.
+ */
+const plannedTargetOwners = (slices) =>
+  slices
+    .flatMap((slice) => [
+      slice.targetOwner,
+      ...(Array.isArray(slice.targetPaths) ? slice.targetPaths : []),
+    ])
+    .filter((owner) => typeof owner === "string" && owner)
+    .map((owner) => owner.replaceAll("\\", "/").replace(/\/+$/, ""));
+
+/**
+ * A plan that declares no owners at all cannot answer the ownership question,
+ * so every finding stays unclaimed: *unable to tell* is not *outside*, and only
+ * one of those may be waved through.
+ */
+const withinPlannedScope = (relative, owners) =>
+  owners.length === 0 ||
+  owners.some((owner) => relative === owner || relative.startsWith(`${owner}/`));
 
 /** Every target path any planned slice claims, in canonical target-relative form. */
 const claimedTargetPaths = async (root, slices) => {
@@ -7790,7 +7940,7 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
   // carries the path's SHA-256, so editing the file after acceptance
   // invalidates the decision the same way a changed candidate invalidates a
   // classification approval.
-  const { decisions } = await readOperatorDecisions(root);
+  const { decisions } = await readRecordedDecisions(root);
   const accepted = new Map(
     decisions
       .filter(
@@ -7812,12 +7962,32 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       .map((value) => value.replaceAll("\\", "/")),
   );
 
+  const owners = plannedTargetOwners(slices);
+  // Whether ownership is a question this record can answer at all. With owners,
+  // "inside the migration's scope" and "outside it" are both decidable, and a
+  // finding that lands inside is deterministic drift the AUTO principal may
+  // resolve. With none, neither answer is derivable -- so every finding stays
+  // unclaimed *and* stays a human decision. Ambiguity is the one drift case
+  // `--mode auto` must not decide, and this is where that is recorded.
+  const autoResolvable = owners.length > 0;
   const findings = [];
   for (const entry of dirty.entries) {
     const relative = entry.path.replaceAll("\\", "/");
     if (claimed.has(relative)) continue;
     if (engineAuthored.has(relative)) {
       findings.push({ path: relative, class: DRIFT_CLASSES.ENGINE_AUTHORED });
+      continue;
+    }
+    // Outside every owned subtree: somebody else's edit. Ordered ahead of the
+    // rework, delegation and acceptance branches so a path this migration never
+    // owned cannot pick up a claim from one of them by accident.
+    if (!withinPlannedScope(relative, owners)) {
+      findings.push({
+        path: relative,
+        class: DRIFT_CLASSES.UNRELATED_USER_CHANGE,
+        reason:
+          "modified outside every target subtree this migration's slice plan owns; preserved and not attributed to this migration",
+      });
       continue;
     }
     // Brownfield: already dirty before the migration started and unchanged
@@ -7848,6 +8018,7 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       findings.push({
         path: relative,
         class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
+        autoResolvable,
         reason:
           "an operator accepted this path, but its bytes changed since; the acceptance no longer applies",
       });
@@ -7856,6 +8027,13 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
     findings.push({
       path: relative,
       class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
+      autoResolvable,
+      ...(autoResolvable
+        ? {}
+        : {
+            reason:
+              "the slice plan declares no target owner, so whether this path belongs to the migration cannot be derived; only a human can say",
+          }),
     });
   }
   return findings;
@@ -8167,6 +8345,10 @@ export const pendingTargetDriftCandidates = async (root, state, roots) => {
       pathDigest: `sha256:${await hashFile(
         path.join(roots.targetRoot, finding.path),
       ).catch(() => "0".repeat(64))}`,
+      // Carried, not recomputed: whether ownership was derivable is a fact
+      // about the plan `classifyTargetDrift` already read, and re-deriving it
+      // here is how the two answers drift apart.
+      autoResolvable: finding.autoResolvable !== false,
       rationale:
         finding.reason ??
         `${finding.path} was modified in the target but is claimed by no validated slice, no authorized rework, and no delegated artifact.`,
@@ -8645,7 +8827,11 @@ export const previewMigrationExecution = async ({
   if (designSourceExplicit({ designSource, figma })) {
     assertDesignSourceUnchanged(state, design);
   }
-  if (refresh && !confirmMismatch) {
+  // Under `auto` the principal that would type `--confirm-mismatch` is the one
+  // running: the mismatch it would be confirming is the revision pair the
+  // engine read itself, so retyping it proves nothing the record does not
+  // already hold. `step` keeps the refusal exactly.
+  if (refresh && !confirmMismatch && !isAutoAuthority(mode)) {
     throw new Error(
       "Refresh requires explicit mismatch confirmation. Use --refresh --confirm-mismatch only after confirming that the migration no longer matches the legacy behavior.",
     );
@@ -8657,6 +8843,18 @@ export const previewMigrationExecution = async ({
   await assertSliceStateConsistent(root, state);
   const legacyRevisionChanged =
     state.legacyRevision.revision !== currentLegacyRevision.revision;
+  const autoRefresh = autoRefreshesLegacyDrift({
+    mode,
+    drifted: legacyRevisionChanged,
+    refresh,
+    reopenDiscovery,
+    reopenUi,
+    reopenComplete,
+    reworkSlice,
+    amendSlice,
+    adoptVisualContract,
+  });
+  const refreshing = refresh || autoRefresh;
   const blockers = requirementsBlocker ? [requirementsBlocker] : [];
   if (!requirementsBlocker) {
     try {
@@ -8669,7 +8867,7 @@ export const previewMigrationExecution = async ({
   // the operator may acknowledge the exact new revision.
   if (
     legacyRevisionChanged &&
-    !refresh &&
+    !refreshing &&
     reopenUi.length === 0 &&
     reopenComplete.length === 0
   ) {
@@ -8799,6 +8997,7 @@ export const previewMigrationExecution = async ({
         evidence: reopenEvidence,
         legacyRevision: currentLegacyRevision,
         confirmLegacyRevision,
+        autoAcknowledge: isAutoAuthority(mode),
       },
     );
     blockers.push(...plan.blockers);
@@ -8813,7 +9012,7 @@ export const previewMigrationExecution = async ({
       ...(plan.legacyDrift ? { legacyRevision: plan.legacyDrift } : {}),
     };
     action = "Invalidate the named slices' finalized verification and reopen the completed migration";
-    reason = `Post-finalization evidence (${plan.claim ?? reopenEvidence ?? "none"}) proves part of the finalized contract wrong: ${typeof reopenReason === "string" ? reopenReason.trim() : "no reason given"}. The superseded verification is preserved under ${REOPEN_ROOT}/${attempt}/ and stays pinned for life; every unnamed slice, every inventory and every operator decision keeps its pin.${plan.legacyDrift && confirmLegacyRevision === currentLegacyRevision.revision ? ` The operator acknowledges the legacy revision change '${plan.legacyDrift.fromLegacyRevision.revision}' -> '${plan.legacyDrift.toLegacyRevision.revision}'; the reopened slices and FINALIZE are reverified against the new revision.` : ""}`;
+    reason = `Post-finalization evidence (${plan.claim ?? reopenEvidence ?? "none"}) proves part of the finalized contract wrong: ${typeof reopenReason === "string" ? reopenReason.trim() : "no reason given"}. The superseded verification is preserved under ${REOPEN_ROOT}/${attempt}/ and stays pinned for life; every unnamed slice, every inventory and every operator decision keeps its pin.${plan.legacyDrift && plan.acknowledgedBy ? ` ${plan.acknowledgedBy === "AUTO" ? "The AUTO principal acknowledges" : "The operator acknowledges"} the legacy revision change '${plan.legacyDrift.fromLegacyRevision.revision}' -> '${plan.legacyDrift.toLegacyRevision.revision}'; the reopened slices and FINALIZE are reverified against the new revision.` : ""}`;
     artifacts = [
       "state.json",
       "history/history.ndjson",
@@ -8912,9 +9111,11 @@ export const previewMigrationExecution = async ({
       : null;
   }
 
-  if (refresh) {
+  if (refreshing) {
     action = "Refresh legacy evidence and reopen DISCOVER_LEGACY";
-    reason = `The user confirmed a legacy mismatch; the recorded revision is '${state.legacyRevision.revision}' and the current revision is '${currentLegacyRevision.revision}'.`;
+    reason = autoRefresh
+      ? `The AUTO principal resolved repository evidence drift under --mode auto; the recorded revision is '${state.legacyRevision.revision}' and the current revision is '${currentLegacyRevision.revision}'.`
+      : `The user confirmed a legacy mismatch; the recorded revision is '${state.legacyRevision.revision}' and the current revision is '${currentLegacyRevision.revision}'.`;
     artifacts = [
       "steps/01-resolve.md",
       "state.json",
@@ -9595,6 +9796,10 @@ export const bootstrapMigration = async ({
   mock = false,
   boundInputs,
   hooks = {},
+  // The principal this invocation runs as. It reaches exactly one decision
+  // here -- whether AUTO may acknowledge a legacy revision it read itself --
+  // and it reaches it through `isAutoAuthority`, like every other gate.
+  mode,
 }) => {
   if (ponytail !== undefined) assertPonytailTarget(ponytail);
   // Adoption changes what a record means, so its challenge is re-derived here
@@ -9659,6 +9864,7 @@ export const bootstrapMigration = async ({
       mock,
       boundInputs,
       hooks,
+      mode,
     }),
   );
 };
@@ -10168,6 +10374,61 @@ export const assertRecordToolkitIdentity = (state, name, action, kind = "module"
 };
 
 /**
+ * Adoption under `--mode auto`, run before the gate rather than instead of it.
+ *
+ * Which build may write to a record is implementation metadata, not a migration
+ * decision -- no contract, format, workflow value or pin depends on it -- and
+ * the running toolkit is the authoritative source for its own identity. So
+ * "this record pins 1.2.3 and I am 1.2.4" is answerable from evidence already
+ * in hand, and making a human type the adopt command added a stop without
+ * adding a judgement.
+ *
+ * It routes through `changeModuleToolkitIdentity`, so an auto adoption is the
+ * same journalled transaction as a typed one and leaves the same
+ * `TOOLKIT_IDENTITY_ADOPTED`/`TOOLKIT_IDENTITY_CHANGED` history event naming
+ * `previous` and `next`. Nothing is adopted silently; it is adopted and
+ * recorded.
+ *
+ * Returns `null` without writing when there is nothing to decide from: under
+ * `step` a human owns the call, and a source checkout carries no
+ * `build-identity.json`, so it has no identity to prove or stamp. That second
+ * case is a genuine external blocker -- the gate below still refuses it, and
+ * the remedy is to install a released toolkit.
+ */
+export const autoAdoptToolkitIdentity = async ({
+  registryPath,
+  moduleName,
+  mode,
+  // A bootstrap has no record to stamp yet; `bootstrapMigration` stamps the one
+  // it creates. Passed rather than probed so this never swallows a read error
+  // that means something else.
+  started = true,
+}) => {
+  if (!started || !isAutoAuthority(mode)) return null;
+  const active = activeToolkitIdentity();
+  if (!active) return null;
+  const { registryData, resolved } = await readContext({ registryPath, moduleName });
+  const { state } = await readState(registryData.targetRoot, resolved.canonical);
+  // `autoAdoptableToolkitTransition` is the whole decision, and it is narrow:
+  // an unstamped record, or a strictly newer release of the same toolkit. A
+  // mismatch that is not a forward upgrade -- a downgrade, or the same version
+  // built twice -- returns `null` and falls through to the gate below, which
+  // refuses it exactly as it always has. AUTO adopts what is verifiable; it
+  // never adopts its way past a safety check.
+  const transition = autoAdoptableToolkitTransition(state.toolkitIdentity ?? null, active);
+  if (!transition) return null;
+  return changeModuleToolkitIdentity({ registryPath, moduleName, mode: transition });
+};
+
+/** The one line an auto adoption prints, so both CLIs report it identically. */
+export const renderToolkitAdoption = (adoption) =>
+  adoption?.changed
+    ? `Toolkit identity: ${
+        adoption.previous ? renderToolkitIdentity(adoption.previous) : "none"
+      } -> ${renderToolkitIdentity(adoption.next)} (adopted under --mode auto).\n`
+    : "";
+
+/**
  * Mismatch-only refusal, for the paths that legitimately operate on a record no
  * identity can have been adopted on yet.
  *
@@ -10664,6 +10925,44 @@ const reopenUiUnderLock = async ({
  * ------------------------------------------------------------------ */
 
 /**
+ * `--mode auto` and the legacy repository moved underneath a live migration.
+ *
+ * The recorded revision and the current one are both facts the engine just
+ * read, and the remedy is one deterministic transition it already implements:
+ * reopen DISCOVER_LEGACY against the new revision and re-derive. Nothing is
+ * lost that git does not still hold, every pin the refresh releases is
+ * re-proven afterwards, and the alternative -- stopping to ask a human to
+ * retype `--refresh --confirm-mismatch` -- adds no judgement, only a stop.
+ *
+ * Narrow on purpose. It applies only when the invocation asked for no other
+ * transition: a reopen, a rework, an amendment or an adoption each have their
+ * own drift rule, and an invocation that named one of them is not asking for a
+ * refresh. `step` is untouched, and the refusal it gets is unchanged.
+ */
+const autoRefreshesLegacyDrift = ({
+  mode,
+  drifted,
+  refresh,
+  reopenDiscovery,
+  reopenUi,
+  reopenComplete,
+  reworkSlice,
+  amendSlice,
+  adoptVisualContract,
+}) =>
+  Boolean(
+    drifted &&
+      !refresh &&
+      isAutoAuthority(mode) &&
+      !reopenDiscovery &&
+      (reopenUi?.length ?? 0) === 0 &&
+      (reopenComplete?.length ?? 0) === 0 &&
+      !reworkSlice &&
+      !amendSlice &&
+      !adoptVisualContract,
+  );
+
+/**
  * One definition site for what a reopen is allowed to do, read by the preview
  * (as blockers) and re-derived under the lock (as refusals) from fresh reads.
  */
@@ -10671,11 +10970,33 @@ const reopenCompletePlan = async (
   root,
   state,
   roots,
-  { slices, reason, evidence, legacyRevision, confirmLegacyRevision = null },
+  {
+    slices,
+    reason,
+    evidence,
+    legacyRevision,
+    confirmLegacyRevision = null,
+    // `--mode auto`. What `--confirm-legacy-revision` proves is that whoever
+    // typed it had read the *current* revision -- and the engine read it, from
+    // git, in this call. There is no judgement in retyping a SHA the engine
+    // just computed, so AUTO acknowledges it on its own authority and the
+    // acknowledgement names AUTO in the reopen record and the history event.
+    // Everything the acknowledgement releases is re-proven against the new
+    // revision regardless of who acknowledged.
+    autoAcknowledge = false,
+  },
 ) => {
   const blockers = [];
   const drifted = state.legacyRevision.revision !== legacyRevision.revision;
-  if (drifted && confirmLegacyRevision !== legacyRevision.revision) {
+  const acknowledged =
+    confirmLegacyRevision ??
+    (autoAcknowledge && drifted ? legacyRevision.revision : null);
+  const acknowledgedBy = !acknowledged
+    ? null
+    : confirmLegacyRevision
+      ? "OPERATOR"
+      : "AUTO";
+  if (drifted && acknowledged !== legacyRevision.revision) {
     blockers.push(
       confirmLegacyRevision
         ? `--confirm-legacy-revision '${confirmLegacyRevision}' does not match the current legacy revision '${legacyRevision.revision}'. Nothing was acknowledged.`
@@ -10731,9 +11052,12 @@ const reopenCompletePlan = async (
     ? {
         fromLegacyRevision: state.legacyRevision,
         toLegacyRevision: legacyRevision,
+        // Who acknowledged, persisted with the drift it acknowledges. A record
+        // that moved revisions must say on whose authority, forever.
+        acknowledgedBy,
       }
     : null;
-  return { blockers, ordered, claim, evidenceIdentity, legacyDrift };
+  return { blockers, ordered, claim, evidenceIdentity, legacyDrift, acknowledgedBy };
 };
 
 /** How many reopens this record has already recorded, read off the audit log. */
@@ -10753,6 +11077,7 @@ const reopenCompleteUnderLock = async ({
   evidence,
   legacyRevision,
   confirmLegacyRevision,
+  autoAcknowledge = false,
 }) => {
   const roots = {
     legacyRoot: registryData.legacyRoot,
@@ -10764,6 +11089,7 @@ const reopenCompleteUnderLock = async ({
     evidence,
     legacyRevision,
     confirmLegacyRevision,
+    autoAcknowledge,
   });
   if (plan.blockers.length > 0) {
     throw new Error(`${plan.blockers.join(" ")} Nothing was written.`);
@@ -10957,6 +11283,7 @@ const bootstrapUnderLock = async ({
   mock,
   boundInputs,
   hooks,
+  mode,
 }) => {
   const design = resolveDesignSource({ designSource, figma });
   await assertNoPendingTransaction(registryData.targetRoot, resolved.canonical);
@@ -10998,16 +11325,30 @@ const bootstrapUnderLock = async ({
     if (designSourceExplicit({ designSource, figma })) {
       assertDesignSourceUnchanged(state, design);
     }
-    if (refresh && !confirmMismatch) {
+    // The mirror of the preview's rule, re-derived here from fresh reads rather
+    // than carried across: the preview is advice, this is the gate.
+    if (refresh && !confirmMismatch && !isAutoAuthority(mode)) {
       throw new Error(
         "Refresh requires explicit mismatch confirmation. Use --refresh --confirm-mismatch only after confirming that the migration no longer matches the legacy behavior.",
       );
     }
     await assertCurrentOpenSpecAuthority(registryData.targetRoot, state);
     const legacyRevision = await gitRevision(registryData.legacyRoot);
+    const autoRefresh = autoRefreshesLegacyDrift({
+      mode,
+      drifted: state.legacyRevision.revision !== legacyRevision.revision,
+      refresh,
+      reopenDiscovery,
+      reopenUi,
+      reopenComplete,
+      reworkSlice,
+      amendSlice,
+      adoptVisualContract: Boolean(adoption),
+    });
+    const refreshing = refresh || autoRefresh;
     if (
       state.legacyRevision.revision !== legacyRevision.revision &&
-      !refresh &&
+      !refreshing &&
       reopenUi.length === 0 &&
       reopenComplete.length === 0
     ) {
@@ -11034,12 +11375,12 @@ const bootstrapUnderLock = async ({
       reopenComplete.length > 0 ||
       reworkSlice ||
       adoption ||
-      refresh
+      refreshing
     ) {
       assertRecordToolkitIdentity(
         state,
         resolved.canonical,
-        refresh
+        refreshing
           ? "Refreshing this migration"
           : adoption
             ? "Adopting the visual contract"
@@ -11078,6 +11419,7 @@ const bootstrapUnderLock = async ({
         evidence: reopenEvidence,
         legacyRevision,
         confirmLegacyRevision,
+        autoAcknowledge: isAutoAuthority(mode),
       });
     }
     if (amendSlice) {
@@ -11113,7 +11455,7 @@ const bootstrapUnderLock = async ({
         adoption,
       });
     }
-    if (!refresh) {
+    if (!refreshing) {
       return {
         changed: false,
         statePath,
@@ -11189,6 +11531,10 @@ const bootstrapUnderLock = async ({
       toLegacyRevision: legacyRevision,
       invalidatedFrom: "DISCOVER_LEGACY",
       revision: refreshed.revision,
+      // Who decided this refresh happens, in the permanent audit record. An
+      // operator-typed `--refresh --confirm-mismatch` and an AUTO resolution of
+      // the same drift are different acts and the history says which.
+      principal: autoRefresh ? "AUTO" : "OPERATOR",
     };
     const integrityPath = path.join(root, INTEGRITY_FILE);
     const integrityBefore = (await fileExists(integrityPath))

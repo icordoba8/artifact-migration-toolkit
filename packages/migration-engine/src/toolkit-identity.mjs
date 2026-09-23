@@ -187,6 +187,64 @@ export const toolkitIdentityBlocker = (recorded, active, { action, adoptCommand 
   return null;
 };
 
+const parseToolkitVersion = (version) => {
+  const [noBuild] = String(version).split("+");
+  const dash = noBuild.indexOf("-");
+  const core = dash === -1 ? noBuild : noBuild.slice(0, dash);
+  const [major, minor, patch] = core.split(".").map(Number);
+  return {
+    major,
+    minor,
+    patch,
+    prerelease: dash === -1 ? null : noBuild.slice(dash + 1),
+  };
+};
+
+/**
+ * Strictly newer by SemVer precedence, and nothing looser. Two prereleases of
+ * the same core are deliberately *not* ordered here: their precedence rules are
+ * real but the answer is not obvious to a reader, and an unobvious answer is
+ * the wrong basis for a gate that decides whether a build may write.
+ */
+const isNewerToolkitVersion = (active, recorded) => {
+  const left = parseToolkitVersion(active);
+  const right = parseToolkitVersion(recorded);
+  for (const key of ["major", "minor", "patch"]) {
+    if (left[key] !== right[key]) return left[key] > right[key];
+  }
+  return right.prerelease !== null && left.prerelease === null;
+};
+
+/**
+ * Whether `--mode auto` may move this record's pin on its own authority, and
+ * what kind of move it is: `"adopt"`, `"update"`, or `null` for "it may not".
+ *
+ * The user-facing rule is "compatible and verifiable transitions are adopted,
+ * unsafe ones are blocked", and this is where the line sits:
+ *
+ * - **no identity to stamp** (`active === null`, a source checkout) -- `null`.
+ *   Nothing can be verified, so nothing is adopted. A genuine external blocker:
+ *   the remedy is to install a released toolkit, and no approval substitutes.
+ * - **unstamped record** -- `"adopt"`. Nothing is being overridden, and the
+ *   running release is the authoritative source for its own identity.
+ * - **already this build** -- `null`. There is no transition.
+ * - **a strictly newer release of the same toolkit** -- `"update"`. The forward
+ *   direction is the one a release stream actually takes and it is verifiable
+ *   from the two version strings alone.
+ * - **anything else** -- `null`, and the gate refuses. A downgrade, a different
+ *   toolkit, and above all *the same version with a different commit or content
+ *   hash* -- two builds claiming one version is precisely the silent swap this
+ *   whole module exists to refuse, and "automatically" is the worst possible
+ *   way to resolve it.
+ */
+export const autoAdoptableToolkitTransition = (recorded, active) => {
+  if (!active) return null;
+  if (!recorded) return "adopt";
+  if (sameToolkitIdentity(recorded, active)) return null;
+  if (recorded.name !== active.name) return null;
+  return isNewerToolkitVersion(active.version, recorded.version) ? "update" : null;
+};
+
 /** `UNSTAMPED` / `MATCH` / `MISMATCH` / `UNIDENTIFIED_TOOLKIT`, for read-only reporting. */
 export const toolkitIdentityStatus = (recorded, active) => {
   if (!recorded) return "UNSTAMPED";

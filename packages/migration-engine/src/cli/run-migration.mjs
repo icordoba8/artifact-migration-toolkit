@@ -258,7 +258,7 @@ export const runMigration = async (
   { stdout = process.stdout, recordTrustedDecision } = {},
 ) => {
   const options = parseRunArguments(arguments_);
-  const recorder = recorderFor({ recordTrustedDecision });
+  const recorder = recorderFor({ recordTrustedDecision, mode: options.mode });
   const approver = moduleApprover(recorder, options.moduleName);
   // The most recent persisted record this iteration saw. It is only ever read
   // to project progress from -- `finish` never writes it and never consults it

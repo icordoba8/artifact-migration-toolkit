@@ -955,7 +955,7 @@ export const runUpgradeCli = async (arguments_) => {
     if (!options.confirmRollback) {
       process.stdout.write(
         `Confirmation ID: ${preview.confirmationId}\n` +
-          "Proceed with this rollback? Reply Yes or No. No execution has started.\n",
+          "Awaiting explicit confirmation of this rollback. No execution has started.\n",
       );
       return { preview, awaitingConfirmation: true };
     }
@@ -978,7 +978,7 @@ export const runUpgradeCli = async (arguments_) => {
   if (!options.confirmUpgrade) {
     process.stdout.write(
       `Confirmation ID: ${preview.confirmationId}\n` +
-        "Proceed with this upgrade? Reply Yes or No. No execution has started.\n",
+        "Awaiting explicit confirmation of this upgrade. No execution has started.\n",
     );
     return { preview, awaitingConfirmation: true };
   }

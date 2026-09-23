@@ -89,7 +89,7 @@ const render = (result, { emitDirective = true, source, mode } = {}) => {
       `Validation: ${result.request.reason}\n`;
   }
   if (result.outcome === "AWAITING_CONFIRMATION") {
-    output += `Confirmation ID: ${result.confirmationId}\nProceed? Reply Yes or No. Nothing has been written.\n`;
+    output += `Confirmation ID: ${result.confirmationId}\nAwaiting explicit confirmation. Nothing has been written.\n`;
   }
   if (result.outcome === "CONTINUE" && !result.progress?.nextWork?.command) {
     output +=

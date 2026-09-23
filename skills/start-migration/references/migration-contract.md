@@ -667,11 +667,16 @@ confirmation ID stale.
 
 Under `--mode step`, the user must explicitly approve the displayed action. The
 agent then passes the confirmation ID back to the helper through internal
-`--confirm-execution <id>`. Under `--mode auto` (the default) the helper
-supplies that same ID for mechanical previews, with two carve-outs that still
-require the user: a bootstrap (`NOT_STARTED`), because initialization pins the
-OpenSpec authority for the migration's whole life, and `--refresh`, which is
-refused outright when combined with `--mode auto`.
+`--confirm-execution <id>`; the helper never prints a question it has already
+exited before anyone could answer. Under `--mode auto` (the default) the AUTO
+principal supplies that same ID for every transition it can derive from the
+preview it just computed — including `--refresh`, `--reopen-ui`,
+`--reopen-complete`, `--rework-slice`, `--amend-slice` and
+`--adopt-visual-contract` — and records the decision in
+`decisions/auto-decisions.ndjson`. The carve-out is a bootstrap
+(`NOT_STARTED`): initialization pins the OpenSpec authority for the migration's
+whole life and there is no prior record to decide from, so it stays two-phase
+under either mode.
 
 Either way the helper recomputes the preflight and rejects a missing or stale
 ID. Confirmation is therefore scoped to one action and cannot be reused after
@@ -904,8 +909,10 @@ A completed migration may reopen only affected slices with:
 artifact-migration-discover <module> --reopen-ui <slice[,slice...]>
 ```
 
-`--reopen-ui` is an operator-only, two-phase transition: it is legal only from
-`COMPLETE`, cannot run with `--mode auto`, and does not reopen unrelated slices.
+`--reopen-ui` is legal only from `COMPLETE` and does not reopen unrelated
+slices. Under `--mode step` it is operator-only and two-phase; under `--mode
+auto` the AUTO principal decides it on its own evidence and records it in the
+auto ledger.
 It creates editable `ui-remediation.json`. Each mismatch must use one of
 `REQUIRED_BEHAVIOR`, `LEGACY_DEFECT`, `INTENTIONAL_FIX`,
 `INTENTIONAL_DESIGN_ADAPTATION`, or `NOT_APPLICABLE`; design adaptations
@@ -930,11 +937,14 @@ artifact-migration-discover <module> --reopen-complete <slice[,slice...]> \
   [--confirm-legacy-revision <current legacy revision>]
 ```
 
-It is operator-only and two-phase like `--reopen-ui`: legal only from status
-`COMPLETE`, refused under `--mode auto` and by `run-migration.mjs`, never
-self-confirmed, and combinable with no other transition. All four parts must be
-typed — which slices, why, the evidence, and the confirmation — and any one of
-them alone fails closed. The reason must be at least 12 characters and the
+It is legal only from status `COMPLETE`, refused by `run-migration.mjs`, and
+combinable with no other transition. Under `--mode step` it is operator-only,
+two-phase and never self-confirmed: all four parts must be typed — which slices,
+why, the evidence, and the confirmation — and any one of them alone fails
+closed, as does a missing or wrong `--confirm-legacy-revision`. Under `--mode
+auto` the AUTO principal supplies the confirmation and reads the current legacy
+revision itself; the reason and the evidence still have to exist and still fail
+closed if they do not. The reason must be at least 12 characters and the
 evidence must be a real persisted file under the legacy or target repository (the
 record's own tree counts); the confirmation ID binds the slices, the reason and
 that file's exact bytes.
@@ -977,8 +987,9 @@ A `COMPLETE` figma-mcp record below format 17 adopts the visual contract with:
 artifact-migration-discover <module> --adopt-visual-contract --confirm-adopt-visual-contract
 ```
 
-It is operator-only and two-phase like `--reopen-ui`, refused under
-`--mode auto` and by `run-migration.mjs`, and never self-confirmed.
+It is refused by `run-migration.mjs`. Under `--mode step` it is operator-only,
+two-phase and never self-confirmed; under `--mode auto` the AUTO principal
+decides it from the evidence below and records it in the auto ledger.
 Eligibility: `designSource: figma-mcp`, format below 17, status `COMPLETE`
 (so no transition is in flight), no prior `visual-contract-adoption/`, and fresh
 evidence at `inventories/figma-context.adopted.json` plus
@@ -1154,8 +1165,10 @@ at every verification):
 - `unbacked` is never an agent's call: a state with no row must cite a
   `VISUAL_UNBACKED` operator decision
   (`decisionId`, `decisionDigest`) recorded through `record-decision.mjs`
-  (`--pending`, then `--approve` at a terminal; `--mode auto` and non-TTY
-  callers cannot approve). Its candidate subject is `<uiBehaviorId>::<state>`,
+  (`--pending`, then `--approve` at a terminal). `unbacked` is a judgement
+  about design that was never supplied, so it is not derivable evidence: the
+  AUTO principal cannot approve it either, and an agent can never author a line
+  in the human ledger. Its candidate subject is `<uiBehaviorId>::<state>`,
   its rationale the entry's `reason` plus every persisted frame (node, name,
   viewport, states) and every DEGRADED frame's limitations, so the operator
   judges the absence against the evidence (degraded evidence is never absence

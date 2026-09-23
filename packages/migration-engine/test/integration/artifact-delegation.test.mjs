@@ -513,7 +513,9 @@ test("OPERATOR-CHILD uses the trusted recorder and rejects wrong or replayed cha
         { id: "OD-1", subject: "Approve the bounded shared-widget decision." },
       ],
     });
-    const pending = await runArtifact(options);
+    // The human-authority guarantee is a `--mode step` guarantee; AUTO decides
+    // on its own ledger. See `test/unit/auto-authority.test.mjs`.
+    const pending = await runArtifact({ ...options, mode: "step" });
     assert.equal(pending.outcome, "OPERATOR_DECISION");
     const candidateId = pending.pendingDecisions[0].candidateId;
     const decisionArguments = [

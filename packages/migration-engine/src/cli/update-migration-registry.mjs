@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
-import { maySelfConfirm } from "../migration-policy.mjs";
+import { maySelfConfirm, MIGRATION_MODES } from "../migration-policy.mjs";
 import {
   previewRegistryUpdate,
   renderRegistryPreview,
@@ -21,20 +21,25 @@ export const parseRegistryArguments = (arguments_) => {
     options: {
       alias: { type: "string", multiple: true, default: [] },
       "confirm-execution": { type: "string" },
+      mode: { type: "string" },
       registry: { type: "string" },
       target: { type: "string" },
     },
   });
   if (positionals.length !== 1 || !values.target) {
     throw new Error(
-      "Usage: update-migration-registry.mjs <module> --target <target> [--registry <path>] [--alias <alias>]",
+      "Usage: update-migration-registry.mjs <module> --target <target> [--registry <path>] [--alias <alias>] [--mode auto|step]",
     );
+  }
+  if (values.mode && !MIGRATION_MODES.includes(values.mode)) {
+    throw new Error("--mode accepts 'auto' or 'step'.");
   }
   return {
     moduleName: positionals[0],
     target: values.target,
     aliases: values.alias,
     confirmExecution: values["confirm-execution"],
+    mode: values.mode,
     registryOption: values.registry,
   };
 };
@@ -50,21 +55,26 @@ export const runRegistryCli = async (arguments_) => {
   );
   const preview = await previewRegistryUpdate(options);
   process.stdout.write(renderRegistryPreview(preview));
-  // Registration is never self-confirmed, in any mode: `maySelfConfirm` answers
-  // `false` for this command by rule, not by the absence of a branch.
+  // Registration answers to the same policy as every other command: under
+  // `auto` the process confirms its own preview, under `step` a human does. It
+  // used to be the one hard-coded `false`, which made an unattended bootstrap
+  // stop at the most mechanical transition in the toolkit.
   const confirmation =
     options.confirmExecution ??
-    (maySelfConfirm({ command: "registry", mode: options.mode, preview })
+    (maySelfConfirm({ command: "registry", mode: options.mode })
       ? preview.confirmationId
       : null);
   if (!confirmation) {
     process.stdout.write(
       `Confirmation ID: ${preview.confirmationId}\n` +
-        "Proceed with this registration? Reply Yes or No. No execution has started.\n",
+        "Mode: step — awaiting explicit confirmation. No execution has started.\n",
     );
     return { preview, awaitingConfirmation: true };
   }
-  const result = await updateRegistry(options);
+  // The confirmation the policy just decided on, not the one argv carried:
+  // under `auto` those differ, and `updateRegistry` re-verifies whichever it is
+  // given against its own freshly computed preview either way.
+  const result = await updateRegistry({ ...options, confirmExecution: confirmation });
   process.stdout.write(
     `${result.changed ? "Updated" : "Unchanged"} ${result.moduleName} -> ${result.target}\n`,
   );

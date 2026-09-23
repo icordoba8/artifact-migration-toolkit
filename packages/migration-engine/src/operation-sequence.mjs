@@ -35,9 +35,10 @@
  * approved a sequence against one record; a record that moved out from under it
  * is not that record any more.
  *
- * `maySelfConfirm` stays false for `--amend-slice`. This does not make an
- * amendment self-confirmable; it makes one deliberate human act cover an
- * ordered set of them.
+ * Under `--mode step` this lets one deliberate human act cover an ordered set
+ * of amendments instead of one act each. Under `--mode auto` the principal is
+ * the engine; see `authorizeOperationSequence`. Which principal approved is
+ * recorded in `channel`, and every re-proof listed above runs either way.
  *
  * ponytail: the sequence is derived and verified, never persisted. There is no
  * on-disk authorization to reconcile, expire, or leak, and an interrupted
@@ -53,6 +54,7 @@ import {
   bootstrapMigration,
   brandSequenceAuthorization,
   decisionRationaleDigest,
+  isAutoAuthority,
   lifecycleBinding,
   previewMigrationExecution,
   readState,
@@ -274,19 +276,23 @@ export const renderOperationSequence = (sequence) =>
   `Type the challenge phrase to approve the whole sequence, anything else to abort.\n`;
 
 /**
- * The trusted approval boundary, reached exactly as `record-decision.mjs`
- * reaches it: `ask` is an in-process function a front end may pass only when it
- * has itself obtained a human answer through a channel the model does not
- * control, and it returns an *answer*, never a verdict. Omitting it asks for
- * the TTY probe instead.
+ * The approval boundary, reached exactly as `record-decision.mjs` reaches it,
+ * and with the same three principals. `ask` is an in-process function a front
+ * end may pass only when it has itself obtained a human answer through a
+ * channel the model does not control; `mode: "auto"` is the engine answering on
+ * its own declared authority; omitting both asks for the TTY probe.
  *
- * The comparison below is the whole gate. A front end that returns something it
- * composed rather than something a human supplied has approved nothing on its
- * own authority -- it has only moved the forgery one file over.
+ * The comparison below is the whole gate, and all three go through it. What
+ * `AUTO` changes is the principal recorded in `channel`, not what a sequence is
+ * allowed to do: `approvable` is still required here, and every member is still
+ * re-derived, re-proven and expired on any drift by `operationSequenceRunner`.
+ * A front end that returns something it composed rather than something a human
+ * supplied, while claiming `ELICITATION`, has approved nothing on its own
+ * authority -- it has only moved the forgery one file over.
  */
 export const authorizeOperationSequence = async (
   sequence,
-  { ask, stdin = process.stdin, stdout = process.stdout } = {},
+  { ask, mode, stdin = process.stdin, stdout = process.stdout } = {},
 ) => {
   if (!sequence.approvable) {
     throw new Error(
@@ -295,9 +301,13 @@ export const authorizeOperationSequence = async (
   }
   const challenge = challengeForOperationSequence(sequence);
   const summary = renderOperationSequence(sequence);
+  const auto = !ask && isAutoAuthority(mode);
   let answer = "";
   if (ask) {
     answer = String((await ask({ challenge, summary })) ?? "");
+  } else if (auto) {
+    stdout.write(summary);
+    answer = challenge;
   } else if (stdin.isTTY && stdout.isTTY) {
     const readline = createInterface({ input: stdin, output: stdout });
     try {
@@ -326,7 +336,7 @@ export const authorizeOperationSequence = async (
     sequenceId: sequence.id,
     sequenceDigest: sequence.digest,
     operations: sequence.members.length,
-    channel: ask ? "ELICITATION" : "TERMINAL",
+    channel: ask ? "ELICITATION" : auto ? "AUTO" : "TERMINAL",
     approvedAt: new Date().toISOString(),
   });
 };

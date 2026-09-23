@@ -28,7 +28,7 @@ import {
   MIGRATION_OUTCOMES,
   MIGRATION_STEPS,
   migrationProgress,
-  readOperatorDecisions,
+  readRecordedDecisions,
   renderProgress,
   resolveDesignSource,
   runDiscoveryScan,
@@ -1731,9 +1731,14 @@ const proveBootstrapTransaction = async (root, transaction) => {
     formatVersion: state.formatVersion,
     source: input.source,
     target: input.target,
-    ...(input.designSource
-      ? { designSource: input.designSource, figmaSources: input.figmaSources }
-      : {}),
+    // The journal's design fields are optional (see validateTransactionInput);
+    // absent means normal execution resolved the default, so recovery resolves
+    // it through the same shared resolver rather than reproducing a record with
+    // no design source at all -- which no bootstrap constructor can ever emit.
+    ...resolveDesignSource({
+      designSource: input.designSource,
+      figma: (input.figmaSources ?? []).map((source) => source?.raw),
+    }),
   };
   const [sourceBinding, targetBinding] = await Promise.all([
     captureBinding(resolved.source.root, [resolved.source.path], "source"),
@@ -2181,10 +2186,12 @@ const validateSourceInventory = async (root, state) => {
     }
   }
   unique(visualIds, "feature-local visual ids");
-  // An operator decision is satisfied only by a matching line in the artifact's
-  // append-only ledger, recorded through record-decision.mjs --artifact under a
-  // TTY/elicitation. An agent can never mint approval by editing this JSON.
-  const { byId, decisions: ledger } = await readOperatorDecisions(root);
+  // A decision is satisfied only by a matching line in one of the artifact's
+  // append-only ledgers, recorded through record-decision.mjs --artifact by a
+  // human under a TTY/elicitation or by the AUTO principal under --mode auto.
+  // An agent can never mint approval by editing this JSON, and the two ledgers
+  // stay separate files -- this reads them, it does not merge them.
+  const { byId, decisions: ledger } = await readRecordedDecisions(root);
   const decisions = [];
   for (const [index, row] of arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").entries()) {
     exactObject(row, `source inventory.operatorDecisions[${index}]`, ["id", "subject"], ["decisionId"]);
@@ -2583,7 +2590,7 @@ const artifactVisualDecisions = async (root, state) => {
   );
   if (candidates.length === 0) return [];
   const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
-  const { byId, decisions } = await readOperatorDecisions(root);
+  const { byId, decisions } = await readRecordedDecisions(root);
   return candidates.map((candidate) => {
     const item = (matrix.unbacked ?? []).find(
       (row) => `${row.uiBehaviorId}::${row.state}` === candidate.subject.path,
@@ -3794,27 +3801,43 @@ const runArtifactIteration = async (options = {}) => {
   });
 };
 
+/**
+ * How many times one `runArtifact` call may clear decisions and retry. An upper
+ * bound, never a budget: the loop already exits the moment a pass records
+ * nothing, and no run can raise decisions at more checkpoints than the record
+ * has. Written as the step count so it cannot fall behind a new checkpoint.
+ */
+const CHECKPOINT_DECISION_PASSES = MIGRATION_STEPS.length;
+
 export const runArtifact = async (
   options = {},
   { recordTrustedDecision } = {},
 ) => {
-  const result = await runArtifactIteration(options);
-  if (result.outcome !== "OPERATOR_DECISION") return result;
-  const candidates = result.operatorApproval?.candidates ?? [];
-  const recorder = recorderFor({ recordTrustedDecision });
-  if (!recorder || candidates.length === 0) return result;
-  const recorded = await approveWithOperator(
-    candidates,
-    artifactApprover(recorder, {
-      source: options.source,
-      type: options.type ?? "artifact",
-      sourceRoot: options.sourceRoot,
-      targetRoot: options.targetRoot,
-    }),
-    null,
-    [],
-  );
-  return recorded.length === 0 ? result : runArtifactIteration(options);
+  const recorder = recorderFor({ recordTrustedDecision, mode: options.mode });
+  const approver = recorder
+    ? artifactApprover(recorder, {
+        source: options.source,
+        type: options.type ?? "artifact",
+        sourceRoot: options.sourceRoot,
+        targetRoot: options.targetRoot,
+      })
+    : null;
+  // A human answers one act and the iteration ends; `AUTO` keeps going, because
+  // clearing the decisions at DISCOVER_LEGACY only to stop at the ones
+  // BUILD_BASELINE raises is the same stop one checkpoint later. Bounded by the
+  // checkpoints themselves: each pass must record at least one decision or the
+  // loop ends, so it can neither spin nor outlive the record's own lifecycle.
+  const passes = approver?.channel === "AUTO" ? CHECKPOINT_DECISION_PASSES : 1;
+  let result = await runArtifactIteration(options);
+  for (let pass = 0; pass < passes; pass += 1) {
+    if (result.outcome !== "OPERATOR_DECISION") return result;
+    const candidates = result.operatorApproval?.candidates ?? [];
+    if (!approver || candidates.length === 0) return result;
+    const recorded = await approveWithOperator(candidates, approver, null, []);
+    if (recorded.length === 0) return result;
+    result = await runArtifactIteration(options);
+  }
+  return result;
 };
 
 // Reads the artifact's authored operator-decision rows with each row's

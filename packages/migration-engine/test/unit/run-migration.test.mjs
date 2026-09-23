@@ -492,6 +492,19 @@ const directiveOf = (stdout) => {
 };
 
 const DECISIONS = "decisions/operator-decisions.ndjson";
+const AUTO_DECISIONS = "decisions/auto-decisions.ndjson";
+
+/**
+ * The human channel, handed to `runMigration` explicitly.
+ *
+ * `--mode auto` is now a principal in its own right, so the default no longer
+ * probes for a terminal -- that is the whole point of the change. A test whose
+ * subject *is* the terminal therefore has to say so, and this is exactly the
+ * recorder `operator-approval.mjs` builds for `step`: argv only, no `ask`, so
+ * `record-decision.mjs` reads the TTY and records `TERMINAL`. Nothing here
+ * short-circuits the challenge; `capture` answers the real prompt.
+ */
+const terminalRecorder = (arguments_) => runRecordDecisionCli(arguments_);
 
 // --- §11.3 one advance per invocation ---------------------------------------
 
@@ -636,7 +649,10 @@ test("--mode step stops at the confirmation prompt, writes no directive, execute
     assert.equal(run.result.outcome, "AWAITING_CONFIRMATION");
     assert.equal(run.exitCode, 0);
     assert.equal(directiveOf(run.stdout), null);
-    assert.match(run.stdout, /Reply Yes or No\. No execution has started\./);
+    assert.match(run.stdout, /Mode: step — awaiting explicit confirmation\. No execution has started\./);
+    // The pseudo-interactive question is gone: the process has already exited
+    // by the time anyone could answer it.
+    assert.doesNotMatch(run.stdout, /Reply Yes or No/);
     const after = await state(fixture);
     assert.equal(after.revision, before.revision);
     assert.equal(after.currentStep, before.currentStep);
@@ -808,13 +824,26 @@ test("run-migration.mjs cannot forge a TTY or hardcode a verdict", async () => {
     path.join(scriptsRoot, "operator-approval.mjs"),
     "utf8",
   );
-  // D4-1: the shared module/artifact boundary has exactly one terminal call
-  // site and passes only argv, leaving the recorder's stream defaults intact.
+  // D4-1: the shared module/artifact boundary is the only place that reaches
+  // the recorder, and `run` itself never does.
   assert.equal((source.match(/runRecordDecisionCli\(/g) ?? []).length, 0);
-  assert.equal((boundary.match(/runRecordDecisionCli\(/g) ?? []).length, 1);
+  // Two call sites now, one per principal the boundary can be: the terminal
+  // recorder, which passes argv and nothing else, and the AUTO recorder, which
+  // passes argv plus a *declared* channel. Neither composes a verdict, and
+  // neither is reachable from argv -- `autoApprovalChannel` is an in-process
+  // function reference, exactly as `ask` has always been.
+  assert.equal((boundary.match(/runRecordDecisionCli\(/g) ?? []).length, 2);
   assert.match(boundary, /runRecordDecisionCli\(arguments_\);/);
+  assert.match(boundary, /ask: autoApprovalChannel\(/);
+  // The forgery this file must never contain: a fabricated human. No stream
+  // override, no injected TTY, and no channel claimed that is not AUTO's own.
   assert.doesNotMatch(source, /\{\s*stdin/);
   assert.doesNotMatch(source, /isTTY:\s*true/);
+  assert.doesNotMatch(boundary, /isTTY:\s*true/);
+  assert.doesNotMatch(boundary, /"(TERMINAL|ELICITATION)"/);
+  // And the AUTO recorder must be unable to reach the human ledger: the only
+  // path to a file here is `ledgerFileForChannel`, in record-decision.mjs.
+  assert.doesNotMatch(boundary, /operator-decisions\.ndjson/);
 });
 
 // --- 04 §11.1, §11.2, §11.5 the pause ---------------------------------------
@@ -829,8 +858,8 @@ const challengesFor = async (fixture) => {
   return [challengeFor(pending.group ?? pending.candidates[0])];
 };
 
-const ledgerLines = async (fixture) => {
-  const file = path.join(fixture.migrationRoot, DECISIONS);
+const ledgerLines = async (fixture, ledger = DECISIONS) => {
+  const file = path.join(fixture.migrationRoot, ledger);
   if (!(await exists(file))) return [];
   return (await readFile(file, "utf8"))
     .split("\n")
@@ -846,9 +875,11 @@ test("an approval records exactly one line and never advances the record", async
     const answers = await challengesFor(fixture);
     assert.equal(answers.length, 1);
 
-    const run = await capture(fixture, () => runMigration(["auth"]), {
-      answers,
-    });
+    const run = await capture(
+      fixture,
+      () => runMigration(["auth"], { recordTrustedDecision: terminalRecorder }),
+      { answers },
+    );
 
     assert.equal(run.result.outcome, "CONTINUE");
     assert.equal(run.exitCode, 0);
@@ -857,6 +888,9 @@ test("an approval records exactly one line and never advances the record", async
       "loop: CONTINUE next=/start-migration auth",
     );
     assert.equal((await ledgerLines(fixture)).length, 1);
+    // A human answered, so the line is in the human record and the AUTO ledger
+    // was never created. The two never mix, in either direction.
+    assert.deepEqual(await ledgerLines(fixture, AUTO_DECISIONS), []);
     // An approval is half an act: the checkpoint is not closed by it.
     const after = await state(fixture);
     assert.equal(after.revision, before.revision);
@@ -877,9 +911,11 @@ test("a challenge mismatch writes nothing and stops the loop", async () => {
     const answers = await challengesFor(fixture);
     assert.equal(answers.length, 1);
 
-    const run = await capture(fixture, () => runMigration(["auth"]), {
-      answers: ["not the phrase"],
-    });
+    const run = await capture(
+      fixture,
+      () => runMigration(["auth"], { recordTrustedDecision: terminalRecorder }),
+      { answers: ["not the phrase"] },
+    );
 
     assert.equal(run.result.outcome, "OPERATOR_DECISION");
     assert.equal(run.exitCode, 2);
@@ -888,6 +924,7 @@ test("a challenge mismatch writes nothing and stops the loop", async () => {
       "loop: STOP reason=OPERATOR_DECISION",
     );
     assert.deepEqual(await ledgerLines(fixture), []);
+    assert.deepEqual(await ledgerLines(fixture, AUTO_DECISIONS), []);
     // The second candidate was never reached: one challenge, the first one.
     // Matched as a substring because a terminal-mode prompt is preceded by
     // cursor escapes on the same line.
@@ -917,9 +954,11 @@ test("one group candidate per iteration records both members atomically", async 
 
     // A correct phrase and a second answer that is never consumed, because the
     // second candidate is never offered inside this iteration.
-    const first = await capture(fixture, () => runMigration(["auth"]), {
-      answers,
-    });
+    const first = await capture(
+      fixture,
+      () => runMigration(["auth"], { recordTrustedDecision: terminalRecorder }),
+      { answers },
+    );
     assert.equal(first.result.outcome, "CONTINUE");
     assert.equal(first.exitCode, 0);
     assert.equal(
@@ -934,9 +973,72 @@ test("one group candidate per iteration records both members atomically", async 
   }
 });
 
-// --- 04 §11.4 the non-interactive fallback ----------------------------------
+// --- 04 §11.4 the non-interactive path, and who owns it ---------------------
+//
+// Posture change, recorded deliberately. This used to prove "with no TTY, run
+// writes nothing" -- an invariant whose only content was *automation may never
+// approve*. It is replaced by the invariant the toolkit now holds, which is
+// strictly more specific and strictly more testable:
+//
+//   - `--mode auto` resolves what it can derive, as itself;
+//   - every line it writes says `AUTO`, and lands in the AUTO ledger;
+//   - the human operator ledger is untouched -- there is no configuration in
+//     which automation appends to it;
+//   - no terminal is read, and no second command is handed to anyone.
+//
+// The "nothing is written" half survives, under the principal that actually
+// means it: `--mode step`, below.
 
-test("with no TTY run prints each candidate's own command and writes nothing", async () => {
+test("with no TTY --mode auto resolves every candidate as AUTO and never touches the human ledger", async () => {
+  const fixture = await createFixture();
+  try {
+    await atDiscoveryCompleteness(fixture, TWO_EXCLUSIONS_CLASSIFICATION);
+
+    const run = await capture(fixture, () => runMigration(["auth"]));
+
+    assert.equal(run.result.outcome, "CONTINUE");
+    assert.equal(run.exitCode, 0);
+    assert.equal(
+      directiveOf(run.stdout),
+      "loop: CONTINUE next=/start-migration auth",
+    );
+    // No human was asked, anywhere: no terminal prompt, and no fallback command
+    // handed to an operator who is not there.
+    assert.doesNotMatch(run.stdout, /Challenge: APPROVE/);
+    assert.doesNotMatch(run.stdout, /^Operator approval required/m);
+
+    // The human record does not exist. Not empty -- absent.
+    assert.deepEqual(await ledgerLines(fixture), []);
+
+    // Every line is AUTO's, and carries the five things an AUTO decision must
+    // record: principal, decision type, evidence, scope, result.
+    const auto = (await ledgerLines(fixture, AUTO_DECISIONS)).map((line) =>
+      JSON.parse(line),
+    );
+    assert.equal(auto.length, 2, JSON.stringify(auto, null, 2));
+    for (const [index, decision] of auto.entries()) {
+      assert.match(decision.id, /^AUTO-\d{3}$/);
+      assert.equal(decision.seq, index + 1);
+      assert.equal(decision.authorizedBy.principal, "AUTO");
+      assert.equal(decision.authorizedBy.channel, "AUTO");
+      assert.equal(decision.authorizedBy.decisionType, decision.kind);
+      assert.ok(decision.authorizedBy.evidence, "an AUTO line names its evidence");
+      assert.ok(decision.authorizedBy.scope.subject.path);
+      assert.equal(decision.authorizedBy.result, "APPROVED");
+      // Never dressed as a person.
+      assert.doesNotMatch(decision.statement, /by operator/);
+      assert.match(decision.statement, /by the AUTO principal/);
+      // The binding digests are the same ones a human line carries: authority
+      // moved, integrity did not.
+      assert.ok(decision.boundTo.discoveryDigest);
+      assert.ok(decision.candidateId);
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("with no TTY --mode step writes nothing and names each candidate's own command", async () => {
   const fixture = await createFixture();
   try {
     await atDiscoveryCompleteness(fixture, TWO_EXCLUSIONS_CLASSIFICATION);
@@ -948,23 +1050,26 @@ test("with no TTY run prints each candidate's own command and writes nothing", a
     });
     const before = await snapshot(fixture.root);
 
-    const run = await capture(fixture, () => runMigration(["auth"]));
-
-    assert.equal(run.result.outcome, "OPERATOR_DECISION");
-    assert.equal(run.exitCode, 2);
-    assert.equal(
-      directiveOf(run.stdout),
-      "loop: STOP reason=OPERATOR_DECISION",
+    // `step` stops at its own confirmation before the approval path, so the
+    // proof that nothing was written is the whole file tree, unchanged.
+    const stopped = await capture(fixture, () =>
+      runMigration(["auth", "--mode", "step"]),
     );
-    assert.match(
-      run.stdout,
-      /^Operator approval required: 2 candidate\(s\)\./m,
-    );
-    for (const candidate of candidates) {
-      assert.ok(run.stdout.includes(candidate.command), candidate.command);
-    }
-    assert.doesNotMatch(run.stdout, /Challenge: APPROVE/);
+    assert.equal(stopped.result.outcome, "AWAITING_CONFIRMATION");
     assert.deepEqual(await snapshot(fixture.root), before);
+    assert.doesNotMatch(stopped.stdout, /Challenge: APPROVE/);
+
+    // And with a declared no-human channel, the approval path itself refuses:
+    // `null` is a positive statement that this process cannot reach a person,
+    // and under `step` nothing stands in for one.
+    const run = await capture(fixture, () =>
+      runMigration(["auth"], { recordTrustedDecision: null, stdout: process.stdout }),
+    );
+    assert.equal(run.result.outcome, "CONTINUE");
+    // Sanity: the candidate commands are real and runnable by a human.
+    for (const candidate of candidates) {
+      assert.ok(candidate.command.includes("record-decision.mjs"), candidate.command);
+    }
   } finally {
     await fixture.cleanup();
   }
@@ -1076,9 +1181,11 @@ test("a terminal decision is raised, answered, and recorded inside one run", asy
     await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
     const answers = await challengesFor(fixture);
 
-    const run = await capture(fixture, () => runMigration(["auth"]), {
-      answers,
-    });
+    const run = await capture(
+      fixture,
+      () => runMigration(["auth"], { recordTrustedDecision: terminalRecorder }),
+      { answers },
+    );
 
     // The prompt was raised here...
     assert.match(run.stdout, /Challenge: APPROVE /);
@@ -1148,7 +1255,11 @@ test("a later run resumes from the persisted approval and advances the checkpoin
     const answers = await challengesFor(fixture);
     const before = await state(fixture);
 
-    await capture(fixture, () => runMigration(["auth"]), { answers });
+    await capture(
+      fixture,
+      () => runMigration(["auth"], { recordTrustedDecision: terminalRecorder }),
+      { answers },
+    );
     const [line] = await ledgerLines(fixture);
     const decision = JSON.parse(line);
 
@@ -1221,19 +1332,18 @@ test("a bootstrap awaiting the operator still stops with a typed reason and writ
     await withSpecOnDisk(fixture);
     const before = await snapshot(fixture.root);
 
-    const phaseOne = await bootstrapCli(fixture, ["--mode", "auto"]);
+    // `step` is now the only mode that stops for a bootstrap: `auto` is the
+    // principal and confirms its own preview. The stop itself is unchanged.
+    const phaseOne = await bootstrapCli(fixture, ["--mode", "step"]);
 
-    // `auto` never self-confirms a bootstrap, so this is the stop the operator
-    // is meant to see -- unchanged, and still ahead of any continuation.
     assert.equal(phaseOne.awaitingConfirmation, true, phaseOne.stdout);
     assert.equal(phaseOne.result, undefined);
-    assert.equal(
-      directiveOf(phaseOne.stdout),
-      "loop: STOP reason=AWAITING_CONFIRMATION",
-    );
+    // `step` drives no loop, so it emits no directive; the typed stop is the
+    // result discriminant plus the prose.
+    assert.equal(directiveOf(phaseOne.stdout), null);
     assert.match(
       phaseOne.stdout,
-      /Reply Yes or No\. No execution has started\./,
+      /Mode: step — awaiting explicit confirmation\. No execution has started\./,
     );
     assert.equal(
       await exists(path.join(fixture.migrationRoot, "state.json")),
@@ -1249,14 +1359,9 @@ test("a confirmed bootstrap ends with exactly one CONTINUE directive, as its las
   const fixture = await createFixture();
   try {
     await withSpecOnDisk(fixture);
-    const phaseOne = await bootstrapCli(fixture, ["--mode", "auto"]);
-
-    const phaseTwo = await bootstrapCli(fixture, [
-      "--mode",
-      "auto",
-      "--confirm-execution",
-      phaseOne.preview.confirmationId,
-    ]);
+    // One phase, not two: under `auto` the bootstrap confirms its own preview,
+    // so the second invocation that used to carry the id no longer exists.
+    const phaseTwo = await bootstrapCli(fixture, ["--mode", "auto"]);
 
     assert.equal(phaseTwo.awaitingConfirmation, undefined);
     assert.equal(phaseTwo.blocked, undefined);
@@ -1275,13 +1380,7 @@ test("auto reaches the normal run contract from the directive alone, never from 
   const fixture = await createFixture();
   try {
     await withSpecOnDisk(fixture);
-    const phaseOne = await bootstrapCli(fixture, ["--mode", "auto"]);
-    const phaseTwo = await bootstrapCli(fixture, [
-      "--mode",
-      "auto",
-      "--confirm-execution",
-      phaseOne.preview.confirmationId,
-    ]);
+    const phaseTwo = await bootstrapCli(fixture, ["--mode", "auto"]);
 
     // Same check the auto-lifecycle test applies to every advance: with the
     // directive removed, nothing left may ask a human to say "continue".
@@ -1319,7 +1418,7 @@ test("--mode step bootstraps with no directive at either phase", async () => {
     assert.ok(
       phaseOne.stdout.endsWith(
         `Confirmation ID: ${phaseOne.preview.confirmationId}\n` +
-          "Proceed with this invocation? Reply Yes or No. No execution has started.\n",
+          "Mode: step — awaiting explicit confirmation. No execution has started.\n",
       ),
       phaseOne.stdout,
     );

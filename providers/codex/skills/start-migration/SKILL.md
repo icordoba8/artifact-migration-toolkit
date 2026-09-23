@@ -243,10 +243,16 @@ outcome a human rejection: a host that auto-declines without showing anyone and
 a person who genuinely refused are indistinguishable on the wire, so the only
 claim you may make is that no approval arrived.
 
-**Never treat `--mode auto` as consent.** Autonomy governs the loop, never the
-operator decisions inside it. Each pending decision costs its own iteration and
-its own human act; an iteration that reports several still pending has approved
-none of them, whatever any host answered.
+**`--mode auto` is a principal, not consent on a human's behalf.** AUTO is a
+distinct, auditable principal: it decides what it can derive from evidence it
+already holds, records every such decision in its own
+`decisions/auto-decisions.ndjson` ledger under its own hash chain, and may never
+write, forge or impersonate a line in the human `decisions/operator-decisions.ndjson`.
+A decision that is genuinely ambiguous, or that needs something only a person
+can supply, is not AUTO's to make: it stays `BLOCKED` or `OPERATOR_DECISION`,
+costs its own iteration and its own human act. An iteration that reports several
+still pending has approved none of them, whatever any host answered. `--mode
+step` keeps the human-confirmation semantics unchanged.
 
 The migration is never left with nowhere to go. The result carries
 `operatorApproval` with a `cwd` and one candidate per pending approval, each
@@ -412,26 +418,23 @@ memory, and pass the same bytes to both helper calls through the internal
 its SHA-256 digest during preview; the digest is part of the confirmation ID.
 Do not write a temporary/placeholder spec or restore a deleted one manually.
 
-The design source is a bootstrap input, collected with the others. When the
-preflight reports `NOT_STARTED` and the invocation named no `--design-source`,
-ask the user which visual authority this migration uses — `target-system`, the
-target project's own design system and the default, or `figma-mcp`, which makes
-Figma authoritative for visual/UX intent — and wait for the answer. Only when
-that answer is `figma-mcp` and no link was supplied, ask in the same exchange
-for one or more Figma design links (`/design/` or `/make/`); `target-system`
-needs none and is never asked for one. Settle both before the first preview
-call: they are bound into the confirmation ID, so naming them afterwards only
-invalidates it.
+The design source is a bootstrap input, collected with the others. It defaults
+to `target-system` — the target project's own design system — and a bootstrap
+that named no `--design-source` takes that default without asking. Only
+`figma-mcp`, which makes Figma authoritative for visual/UX intent, needs the
+user, and only because a Figma link is a value you cannot supply yourself: when
+the request asks for Figma but carries no link, ask in one exchange for one or
+more design links (`/design/` or `/make/`). `target-system` needs none and is
+never asked for one. Settle both before the first preview call: they are bound
+into the confirmation ID, so naming them afterwards only invalidates it.
 
 Pass every link the user gives unmodified, one `--figma` value each. Never
 invent, guess, complete, shorten, or parse a Figma URL — the engine is the only
 Figma URL parser; relay its refusal verbatim and ask again.
 
-Never ask for a value the invocation already carries, and never on a resume:
-status comes first, and a bootstrap-fixed input is never re-requested once
-state exists. This obligation is `/start-migration`'s alone — a direct engine
-invocation that omits `--design-source` still defaults to `target-system`
-without a prompt.
+Never ask for a value the invocation already carries, never on a resume, and
+never for a value that has a default: status comes first, and a bootstrap-fixed
+input is never re-requested once state exists.
 
 Under `--mode step`, relay the summary to the user and wait. Treat only an
 explicit affirmative reply (`Yes`, `Sí`, `Proceed`, `Continue`) as approval; a
@@ -873,9 +876,10 @@ a Figma token or author a fidelity claim you did not derive from the design.
 Screenshots are never compared pixel for pixel. No new checkpoint and no eighth
 gate. A format-16 figma-mcp record keeps the older provenance-only behavior.
 
-A **completed** pre-17 figma-mcp record can opt in without restarting — an
-operator decision, never taken on your own initiative, never under `--mode auto`
-and never self-confirmed:
+A **completed** pre-17 figma-mcp record can opt in without restarting. Under
+`--mode step` it is an operator decision, never taken on your own initiative and
+never self-confirmed; under `--mode auto` the AUTO principal decides it on the
+evidence below and records it in the auto ledger:
 
 1. Fetch fresh evidence through the Figma MCP (never reuse the old context's
    prose) and author it at `inventories/figma-context.adopted.json` under the

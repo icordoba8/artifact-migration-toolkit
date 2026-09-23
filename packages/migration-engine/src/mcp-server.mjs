@@ -18,8 +18,14 @@
  * answer is compared inside `record-decision.mjs` under the module lock.
  * That is why there is still no `migration_approve` tool and no approval
  * argument on any schema: an approval is not something a model can call.
- * A client that declares no elicitation keeps D6-4's behavior exactly --
- * `migration_run` stops at `OPERATOR_DECISION` and nothing is written.
+ * A client that declares no elicitation declares only that *it* has no human
+ * channel. Under `--mode step` that is the end of it: `migration_run` stops at
+ * `OPERATOR_DECISION` and nothing is written, exactly as D6-4 specified. Under
+ * `--mode auto` -- the default -- the AUTO principal answers instead, on the
+ * engine's own authority, and its lines land in the AUTO ledger, never in the
+ * human operator record. What a missing elicitation capability can never do is
+ * fall back to the transport's own stdio: that is the JSON-RPC channel, not an
+ * operator's terminal, and nothing here reads a challenge off it.
  *
  * ponytail: a hand-rolled tools-only stdio server (D6-1). Ceiling: one
  * transport, elicitation as the only server-to-client request, no sampling, no
@@ -342,7 +348,11 @@ const runTool = async (arguments_, session) => {
   try {
     result = await runMigration(runArguments(arguments_), {
       stdout: buffer,
-      // No elicitation, no approver: `run` falls back to D4-4 and stops.
+      // A human channel when the client declared one, and `null` -- never
+      // `undefined` -- when it did not. `null` is a positive statement that
+      // this transport has no human to ask, which is what stops `recorderFor`
+      // from probing the process's own TTY. Whether the AUTO principal answers
+      // instead is decided by `mode`, in the core, from one policy.
       recordTrustedDecision: session?.elicitation
         ? trustedDecisionRecorder(session, buffer)
         : null,

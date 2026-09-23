@@ -404,9 +404,10 @@ test("no sequence of tool calls appends to the operator decisions ledger", async
     const { raw } = await converse(
       fixture,
       names.flatMap((name, index) => [
-        call(index * 2 + 1, name, { module: "auth" }),
+        call(index * 2 + 1, name, { module: "auth", mode: "step" }),
         call(index * 2 + 2, name, {
           module: "auth",
+          mode: "step",
           approve: "any",
           decisionId: "OD-1",
           confirm: true,
@@ -422,28 +423,50 @@ test("no sequence of tool calls appends to the operator decisions ledger", async
     });
     // The candidate is still pending: nothing approved it.
     assert.ok(pending.candidates.length > 0);
+
+    // And the invariant that matters most, under the mode where something
+    // *does* get decided: `auto` resolves as the AUTO principal, and the human
+    // operator ledger is still byte-identical afterwards. No tool call, in any
+    // mode, with any argument shape, appends a human approval.
+    await converse(
+      fixture,
+      names.flatMap((name, index) => [
+        call(index * 2 + 1, name, { module: "auth" }),
+        call(index * 2 + 2, name, {
+          module: "auth",
+          approve: "any",
+          decisionId: "OD-1",
+          confirm: true,
+        }),
+      ]),
+    );
+    assert.equal(await decisionLedger(fixture), before);
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("a run against a pending operator decision stops at OPERATOR_DECISION without approving", async () => {
+// Posture change, recorded deliberately. The old invariant was "a transport
+// with no human channel can never resolve a decision". The invariant now is
+// narrower and stronger: it can never resolve one *as a human*. Under `auto`
+// the AUTO principal resolves it as itself, into its own ledger; the human
+// operator record stays absent, and no approval tool exists in either mode.
+test("a run against a pending decision resolves as AUTO and never writes the human ledger", async () => {
   const fixture = await createFixture();
   try {
     await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
-    const before = await state(fixture);
 
     const result = structured(
       await only(fixture, call(1, "migration_run", { module: "auth" })),
     );
 
-    assert.equal(result.outcome, "OPERATOR_DECISION");
-    assert.equal(result.exitCode, exitCodeFor("OPERATOR_DECISION"));
+    assert.equal(result.outcome, "CONTINUE");
+    assert.equal(result.exitCode, exitCodeFor("CONTINUE"));
+    // The human record does not exist: AUTO wrote to its own ledger.
     assert.equal(await decisionLedger(fixture), null);
-    assert.equal((await state(fixture)).revision, before.revision);
-    // D4-4's non-interactive fallback reached the capture buffer, not the wire.
-    assert.match(result.log, /Operator approval required/);
-    assert.match(result.log, /record-decision\.mjs auth --approve/);
+    // No terminal was read and no second command was handed to anyone.
+    assert.doesNotMatch(result.log, /Challenge: APPROVE/);
+    assert.doesNotMatch(result.log, /Operator approval required/);
   } finally {
     await fixture.cleanup();
   }
@@ -598,15 +621,18 @@ for (const [label, prepare, expected] of [
     "CONTINUE",
   ],
   [
-    "OPERATOR_DECISION",
+    // A pending decision: AUTO resolves it under the default mode, and the two
+    // transports must reach the same outcome by the same path. Parity is the
+    // subject here, not which outcome it is.
+    "a pending decision",
     (fixture) => atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION),
-    "OPERATOR_DECISION",
+    "CONTINUE",
   ],
   [
-    // A committed legacy change moves the pinned revision, and only `--refresh`
-    // resolves that -- an operator act with no MCP tool (D6-3). Both transports
-    // must stop.
-    "BLOCKED",
+    // A committed legacy change moves the pinned revision. Under `auto` that is
+    // repository evidence drift with one deterministic remedy, and the engine
+    // takes it as the AUTO principal -- on both transports, identically.
+    "legacy revision drift",
     async (fixture) => {
       await initialize(fixture);
       await writeFile(
@@ -629,7 +655,7 @@ for (const [label, prepare, expected] of [
         { cwd: fixture.root },
       );
     },
-    "BLOCKED",
+    "CONTINUE",
   ],
 ]) {
   test(`migration_run and the CLI agree on ${label}`, async () => {
@@ -700,9 +726,11 @@ for (const [label, prepare, outcome] of [
     "CONTINUE",
   ],
   [
-    "STOP",
+    // A checklist is projected for every outcome; the decision-bearing
+    // checkpoint reaches CONTINUE now that AUTO resolves it.
+    "a resolved decision",
     (fixture) => atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION),
-    "OPERATOR_DECISION",
+    "CONTINUE",
   ],
 ]) {
   test(`migration_run exposes canonical progressChecklist on ${label}`, async () => {
@@ -892,10 +920,12 @@ test("the canonical skill prefers the MCP front end", async () => {
     "MCP is documented before the Bash fallback",
   );
 
-  // The two bootstrap-fixed design inputs are gathered from the user, not
-  // defaulted silently. They are hashed into the bootstrap confirmation ID, so
-  // a question asked after the preview would only invalidate it -- and the
-  // engine cannot ask, being pure. The obligation is stated here or nowhere.
+  // Only the design input the agent cannot supply itself is gathered from the
+  // user: a Figma link. The design source itself has an engine default, so
+  // asking for it is friction, not authority. What is asked is hashed into the
+  // bootstrap confirmation ID, so a question asked after the preview would only
+  // invalidate it -- and the engine cannot ask, being pure. The obligation is
+  // stated here or nowhere.
   //
   // Matched against whitespace-collapsed prose: a rule must survive being
   // rewrapped at a different column, which is an editing artifact, not a
@@ -907,16 +937,16 @@ test("the canonical skill prefers the MCP front end", async () => {
       "The design source is a bootstrap input, collected with the others.",
     ],
     [
-      "the condition is a fresh record with no explicit flag",
-      "preflight reports `NOT_STARTED` and the invocation named no `--design-source`",
+      "an unnamed design source is defaulted, not asked",
+      "a bootstrap that named no `--design-source` takes that default without asking",
     ],
     [
-      "both choices are offered",
-      "`target-system`, the target project's own design system and the default, or `figma-mcp`",
+      "the default is the target project's own design system",
+      "It defaults to `target-system` — the target project's own design system",
     ],
     [
-      "links are requested only after figma-mcp is chosen and absent",
-      "Only when that answer is `figma-mcp` and no link was supplied",
+      "links are requested only when figma is asked for and absent",
+      "when the request asks for Figma but carries no link, ask in one exchange",
     ],
     [
       "target-system is never asked for a link",
@@ -931,12 +961,8 @@ test("the canonical skill prefers the MCP front end", async () => {
       "Never invent, guess, complete, shorten, or parse a Figma URL",
     ],
     [
-      "pre-supplied inputs and resumes never re-prompt",
-      "Never ask for a value the invocation already carries, and never on a resume",
-    ],
-    [
-      "the engine default is orchestration-independent",
-      "a direct engine invocation that omits `--design-source` still defaults to `target-system`",
+      "pre-supplied inputs, resumes, and defaulted values never prompt",
+      "Never ask for a value the invocation already carries, never on a resume, and never for a value that has a default",
     ],
   ]) {
     assert.ok(
@@ -1067,9 +1093,12 @@ test("without client elicitation the server asks nothing and stops safely", asyn
 
     assert.deepEqual(originated, []);
     const result = structured(raw.find((frame) => frame.id === 2));
-    assert.equal(result.outcome, "OPERATOR_DECISION");
+    // No human was asked, because there is none to ask. What answers instead is
+    // the AUTO principal, by mode, in the core -- never a synthesized human.
+    assert.equal(result.outcome, "CONTINUE");
+    // The human record is still absent -- the AUTO ledger is a different file.
     assert.equal(await decisionLedger(fixture), null);
-    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    assert.notDeepEqual(await snapshot(fixture.migrationRoot), before);
   } finally {
     await fixture.cleanup();
   }
@@ -1114,10 +1143,12 @@ test("an MCP run never falls back to the transport's own TTY", async () => {
       else process.stdout.isTTY = previousStdoutTty;
       terminal.end();
     }
-    assert.equal(result.outcome, "OPERATOR_DECISION");
+    // The preserved half: no readline prompt ever reached the transport, and
+    // the human operator ledger was never written. The replaced half: the run
+    // no longer stops, because AUTO is a principal and `auto` is the default.
+    assert.equal(result.outcome, "CONTINUE");
     assert.doesNotMatch(result.log, /Challenge: APPROVE/);
     assert.equal(await decisionLedger(fixture), null);
-    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
   } finally {
     await fixture.cleanup();
   }

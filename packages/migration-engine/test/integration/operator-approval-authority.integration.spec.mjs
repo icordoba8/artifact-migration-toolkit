@@ -208,16 +208,6 @@ test("a host that cannot deliver a human answer still leaves a trusted worktree-
       "the operator is never asked to carry a decision id",
     );
 
-    // Case 3, no elicitation declared at all: same contract, same command.
-    const silent = await runThroughHost(fixture, null);
-    assert.equal(silent.outcome, "OPERATOR_DECISION");
-    assert.equal(silent.operatorApproval.cwd, fixture.root);
-    assert.equal(
-      silent.operatorApproval.candidates[0].command,
-      offered.command,
-    );
-    assert.equal(await decisionLedger(fixture), null);
-    assert.deepEqual(await state(fixture), before);
 
     // Case 4. The operator runs exactly that command in exactly that directory.
     const { decision } = await approveAtTerminal(fixture, offered.id);
@@ -237,6 +227,29 @@ test("a host that cannot deliver a human answer still leaves a trusted worktree-
     // And the receipt is the whole citation: nothing else has to be learned.
     await cite(fixture, reference);
     await validateResumableMigration(await contextFor(fixture));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/**
+ * A host that *declines* refused a reachable human, so the run above still
+ * stops and hands back the terminal path. A host that declares no human channel
+ * at all is "no human here", not "nobody": the AUTO principal answers by mode,
+ * never by reading the transport's stdio. Either way the human operator ledger
+ * stays empty -- an agent may never mint a human approval.
+ */
+test("a host with no human channel is answered by AUTO and writes no human ledger line", async () => {
+  const fixture = await createFixture();
+  try {
+    await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+    const silent = await runThroughHost(fixture, null);
+    assert.notEqual(silent.outcome, "OPERATOR_DECISION");
+    assert.equal(
+      await decisionLedger(fixture),
+      null,
+      "a host with no human channel minted a human approval",
+    );
   } finally {
     await fixture.cleanup();
   }

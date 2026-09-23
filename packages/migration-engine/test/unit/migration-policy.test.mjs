@@ -13,6 +13,7 @@ import {
   authoringRequest,
   checkpointArtifacts,
   exitCodeFor,
+  isAutoAuthority,
   MIGRATION_OUTCOMES,
   MIGRATION_STEPS,
   maySelfConfirm,
@@ -108,24 +109,46 @@ test("--reopen-discovery and --refresh are exclusive transitions", () => {
   assert.equal(refusal("discover", { "reopen-discovery": true }), null);
 });
 
-test("--refresh never runs under --mode auto", () => {
-  assert.equal(
-    refusal("discover", { mode: "auto", refresh: true }),
-    "--refresh, --reopen-ui, and --rework-slice are operator decisions and cannot run under --mode auto.",
-  );
-  assert.equal(refusal("discover", { mode: "step", refresh: true }), null);
-  assert.equal(refusal("discover", { refresh: true }), null);
+// Posture change, recorded deliberately: these four transitions used to *throw*
+// under `--mode auto`, on the theory that automation may never take them. The
+// theory the toolkit now holds is that AUTO is a principal rather than an
+// exemption -- it takes them on its own declared authority, every gate they
+// pass still runs, and the act is recorded as AUTO's. What must never happen is
+// an agent taking them while wearing an operator's name, and that is proven
+// separately (`record-decision.test.mjs`, `run-migration.test.mjs`).
+test("--refresh is a transition either principal may take", () => {
+  for (const mode of ["auto", "step", undefined]) {
+    assert.equal(refusal("discover", { mode, refresh: true }), null, String(mode));
+  }
 });
 
-test("--reopen-ui is operator-only and exclusive", () => {
-  assert.equal(
-    refusal("discover", { mode: "auto", "reopen-ui": "slice-a" }),
-    "--refresh, --reopen-ui, and --rework-slice are operator decisions and cannot run under --mode auto.",
-  );
+test("--reopen-ui is exclusive, in every mode", () => {
+  for (const mode of ["auto", "step", undefined]) {
+    assert.equal(refusal("discover", { mode, "reopen-ui": "slice-a" }), null, String(mode));
+  }
   assert.equal(
     refusal("discover", { "reopen-ui": "slice-a", refresh: true }),
     "--reopen-discovery, --reopen-ui, --rework-slice, --adopt-visual-contract, and --refresh are different transitions; use exactly one.",
   );
+});
+
+test("every former auto-refusal is gone, and only the auto-refusals", () => {
+  // The exact set `assertOptionCombination` used to throw on. None of them may
+  // refuse for the mode any more; all of them must still refuse for the reasons
+  // that have nothing to do with who is running.
+  for (const option of [
+    { refresh: true },
+    { "reopen-ui": "slice-a" },
+    { "rework-slice": "S1", "confirm-rework": true },
+    { "reopen-complete": "S1", "reopen-reason": "a".repeat(20), "reopen-evidence": "e.md", "confirm-reopen": true },
+    { "adopt-visual-contract": true, "confirm-adopt-visual-contract": true },
+    { "amend-slice": "S1", "add-file": ["a.tsx"] },
+  ]) {
+    const auto = refusal("discover", { ...option, mode: "auto" });
+    const step = refusal("discover", { ...option, mode: "step" });
+    assert.equal(auto, step, JSON.stringify(option));
+    if (auto !== null) assert.doesNotMatch(auto, /--mode auto/, JSON.stringify(option));
+  }
 });
 
 test("--adopt-visual-contract is operator-only, typed, exclusive, and never run or self-confirmed", () => {
@@ -139,10 +162,8 @@ test("--adopt-visual-contract is operator-only, typed, exclusive, and never run 
     refusal("discover", { "confirm-adopt-visual-contract": true }),
     /must be given together/,
   );
-  assert.equal(
-    refusal("discover", { ...adopt, mode: "auto" }),
-    "--adopt-visual-contract is an operator decision and cannot run under --mode auto.",
-  );
+  // No longer mode-refused; see the posture note above.
+  assert.equal(refusal("discover", { ...adopt, mode: "auto" }), null);
   assert.match(refusal("discover", { ...adopt, refresh: true }), /different transitions/);
   assert.match(refusal("discover", { ...adopt, status: true }), /--status is read-only/);
   assert.match(refusal("discover", { ...adopt, scan: true }), /--scan is read-only/);
@@ -150,16 +171,14 @@ test("--adopt-visual-contract is operator-only, typed, exclusive, and never run 
     refusal("run", { "adopt-visual-contract": true }),
     /--adopt-visual-contract is not accepted by run-migration\.mjs/,
   );
-  for (const mode of [undefined, "auto", "step"]) {
-    assert.equal(
-      maySelfConfirm({
-        command: "discover",
-        mode,
-        adoptVisualContract: true,
-        preview: { state: "COMPLETE" },
-      }),
-      false,
-    );
+  // Self-confirmation follows the one policy and nothing else: `auto` confirms
+  // its own preview here as everywhere, `step` does not.
+  for (const [mode, expected] of [
+    [undefined, true],
+    ["auto", true],
+    ["step", false],
+  ]) {
+    assert.equal(maySelfConfirm({ command: "discover", mode }), expected, String(mode));
   }
 });
 
@@ -186,47 +205,56 @@ test("an unknown command is refused rather than silently allowed", () => {
   );
 });
 
-// -- §11.2 self-confirm equivalence. The expressions the wrappers computed
-// before this plan, kept here as the oracle.
+// -- §11.2 self-confirmation is one policy, and the policy is the principal.
+//
+// This used to hold a hand-written oracle reproducing a per-flag denylist --
+// `mode !== "step" && !refresh && state !== "NOT_STARTED"` -- which is exactly
+// the shape that guaranteed each new transition defaulted to operator-required.
+// There is nothing left to reproduce: the answer is `isAutoAuthority(mode)`,
+// for every command and every transition, and the test says so.
 
-const discoverSelfConfirmToday = (mode, refresh, state) =>
-  mode !== "step" && !refresh && state !== "NOT_STARTED";
-const advanceSelfConfirmToday = (mode) => mode !== "step";
-
-test("maySelfConfirm reproduces every verdict the wrappers computed", () => {
-  for (const mode of [undefined, "auto", "step"]) {
-    for (const refresh of [false, true]) {
-      for (const state of ["NOT_STARTED", "ACTIVE", "COMPLETE", "INCOMPATIBLE"]) {
-        const preview = { state };
+test("maySelfConfirm is isAutoAuthority, for every command and every input", () => {
+  for (const command of ["discover", "advance", "registry"]) {
+    for (const mode of [undefined, "auto", "step"]) {
+      const expected = isAutoAuthority(mode);
+      assert.equal(maySelfConfirm({ command, mode }), expected, `${command} ${mode}`);
+      // No transition flag, and no preview state, may move the answer: that
+      // sensitivity is what the denylist was, and it is gone.
+      for (const extra of [
+        { refresh: true },
+        { reopenUi: true },
+        { reopenComplete: true },
+        { reworkSlice: "S1" },
+        { adoptVisualContract: true },
+        { amendSlice: "S1" },
+        { preview: { state: "NOT_STARTED" } },
+        { preview: { state: "COMPLETE" } },
+      ]) {
         assert.equal(
-          maySelfConfirm({ command: "discover", mode, refresh, preview }),
-          discoverSelfConfirmToday(mode, refresh, state),
-          `discover ${mode} refresh=${refresh} ${state}`,
-        );
-        // An advance has no bootstrap or refresh carve-out; that difference is
-        // deliberate and must survive the move.
-        assert.equal(
-          maySelfConfirm({ command: "advance", mode, refresh, preview }),
-          advanceSelfConfirmToday(mode),
-          `advance ${mode} refresh=${refresh} ${state}`,
+          maySelfConfirm({ command, mode, ...extra }),
+          expected,
+          `${command} ${mode} ${JSON.stringify(extra)}`,
         );
       }
     }
   }
 });
 
-// -- §11.3 the rule that used to exist only by omission.
+test("isAutoAuthority defaults on and is false only for step", () => {
+  assert.equal(isAutoAuthority(undefined), true);
+  assert.equal(isAutoAuthority("auto"), true);
+  assert.equal(isAutoAuthority("step"), false);
+});
 
-test("registration is never self-confirmed, in any mode", () => {
-  for (const mode of [undefined, "auto", "step"]) {
-    for (const state of ["NOT_STARTED", "ACTIVE", "COMPLETE"]) {
-      assert.equal(
-        maySelfConfirm({ command: "registry", mode, preview: { state } }),
-        false,
-        `registry ${mode} ${state}`,
-      );
-    }
-  }
+// -- §11.3 registration answers to the same policy as everything else.
+//
+// It used to be the one hard-coded `false`, which made an unattended bootstrap
+// stop at the most mechanical transition the toolkit has.
+
+test("registration self-confirms under auto and stops under step", () => {
+  assert.equal(maySelfConfirm({ command: "registry", mode: "auto" }), true);
+  assert.equal(maySelfConfirm({ command: "registry" }), true);
+  assert.equal(maySelfConfirm({ command: "registry", mode: "step" }), false);
 });
 
 test("an unknown command may not self-confirm by default", () => {

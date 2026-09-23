@@ -14,6 +14,7 @@ import {
 } from "../migration-policy.mjs";
 import {
   assertExecutionConfirmation,
+  autoAdoptToolkitIdentity,
   bootstrapMigration,
   getMigrationStatus,
   previewDiscoveryScan,
@@ -21,6 +22,7 @@ import {
   previewMigrationExecution,
   recoverMigrationRecord,
   renderLoopDirective,
+  renderToolkitAdoption,
 } from "../resumable-migration.mjs";
 
 /**
@@ -254,23 +256,17 @@ export const runDiscoverCli = async (
   const selfConfirm = maySelfConfirm({
     command: "discover",
     mode: options.mode,
-    refresh: options.refresh,
-    reopenUi: options.reopenUi.length > 0,
-    reopenComplete: options.reopenComplete.length > 0,
-    reworkSlice: Boolean(options.reworkSlice),
-    amendSlice: Boolean(options.amendSlice),
-    adoptVisualContract: options.adoptVisualContract,
-    preview,
   });
   const confirmation =
     options.confirmExecution ?? (selfConfirm ? preview.confirmationId : null);
   if (!confirmation) {
+    // `--mode step` only. The process exits at this line, so it states the ID
+    // and stops rather than asking a question it will not be present to hear
+    // the answer to; the front end that chose `step` owns that conversation.
     stdout.write(
       `Confirmation ID: ${preview.confirmationId}\n` +
-        "Proceed with this invocation? Reply Yes or No. No execution has started.\n",
+        "Mode: step — awaiting explicit confirmation. No execution has started.\n",
     );
-    // Reachable under `auto` only at the two operator carve-outs -- a bootstrap
-    // and `--refresh` -- which are genuine stops, not a paused loop.
     stdout.write(
       directive(options, nextOutcome({ preview }).outcome, emitDirective),
     );
@@ -282,6 +278,20 @@ export const runDiscoverCli = async (
   }
   stdout.write(
     "Confirmation accepted. Executing only the action shown in the summary.\n",
+  );
+  // A record stamped by an older build is adopted here, before the gate the
+  // mutation below would otherwise fail closed on. The adoption is its own
+  // journalled transaction with its own history event; this only decides
+  // whether to run it.
+  stdout.write(
+    renderToolkitAdoption(
+      await autoAdoptToolkitIdentity({
+        registryPath: options.registryPath,
+        moduleName: options.moduleName,
+        mode: options.mode,
+        started: preview.state !== "NOT_STARTED",
+      }),
+    ),
   );
   const result = await bootstrapMigration({
     ...options,

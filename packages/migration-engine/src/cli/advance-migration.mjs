@@ -15,11 +15,13 @@ import {
 } from "../migration-policy.mjs";
 import {
   advanceMigration,
+  autoAdoptToolkitIdentity,
   DEFAULT_MODE,
   previewAdvance,
   renderAdvancePreview,
   renderLoopDirective,
   renderProgressChecklist,
+  renderToolkitAdoption,
 } from "../resumable-migration.mjs";
 
 export const parseAdvanceArguments = (arguments_) => {
@@ -106,19 +108,32 @@ export const runAdvanceCli = async (
   }
   const confirmation =
     options.confirmAdvance ??
-    (maySelfConfirm({ command: "advance", mode: options.mode, preview })
+    (maySelfConfirm({ command: "advance", mode: options.mode })
       ? preview.confirmationId
       : null);
   if (!confirmation) {
+    // `--mode step` only; see the same branch in `discover-module.mjs`.
     stdout.write(
       `Confirmation ID: ${preview.confirmationId}\n` +
-        "Proceed with this advance? Reply Yes or No. No execution has started.\n",
+        "Mode: step — awaiting explicit confirmation. No execution has started.\n",
     );
     stdout.write(
       directive(options, nextOutcome({ preview }).outcome, emitDirective),
     );
     return { preview, awaitingConfirmation: true };
   }
+  // Same as the discover CLI: a record stamped by an older build is adopted
+  // before the mutation the identity gate would otherwise refuse, as its own
+  // journalled transaction with its own history event.
+  stdout.write(
+    renderToolkitAdoption(
+      await autoAdoptToolkitIdentity({
+        registryPath: options.registryPath,
+        moduleName: options.moduleName,
+        mode: options.mode,
+      }),
+    ),
+  );
   const result = await advanceMigration({
     ...options,
     confirmAdvance: confirmation,

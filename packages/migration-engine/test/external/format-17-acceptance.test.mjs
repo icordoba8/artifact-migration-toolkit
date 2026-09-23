@@ -59,12 +59,24 @@ const confirmationIdIn = (output) => output.match(/Confirmation ID: ([0-9a-f]+)/
  * Two-phase like every durable transition: the confirmation id comes from the
  * advance's own preview, so an unconfirmed preview writes nothing.
  */
-const advance = async (toolkit, cwd) => {
-  const preview = await run(toolkit, "cli/advance-migration.mjs", ["auth"], cwd);
+const advance = async (toolkit, cwd, extra = []) => {
+  const preview = await run(toolkit, "cli/advance-migration.mjs", ["auth", ...extra], cwd);
   const confirmationId = confirmationIdIn(preview.output);
   if (!confirmationId) return preview;
-  return run(toolkit, "cli/advance-migration.mjs", ["auth", "--confirm-advance", confirmationId], cwd);
+  return run(
+    toolkit,
+    "cli/advance-migration.mjs",
+    ["auth", ...extra, "--confirm-advance", confirmationId],
+    cwd,
+  );
 };
+
+/**
+ * The human-authority path. AUTO adopts an unstamped record on its own
+ * evidence, so the refusal these tests pin is a `--mode step` guarantee; the
+ * AUTO side is proven in `test/unit/auto-authority.test.mjs`.
+ */
+const STEP = ["--mode", "step"];
 
 /**
  * A consumer holding one integrity-valid, unstamped, active Format 17 record,
@@ -101,8 +113,9 @@ test("an installed toolkit resumes an existing unstamped Format 17 record only a
   assert.equal(JSON.parse(identityStatus.output).toolkitIdentityStatus, "UNSTAMPED");
   assert.deepEqual(await consumer.snapshot(), before, "identity status wrote to the record");
 
-  // 4. A mutating resume blocks until adoption, naming one command.
-  const blocked = await advance(toolkit, consumer.root);
+  // 4. Under --mode step a mutating resume blocks until adoption, naming one
+  // command.
+  const blocked = await advance(toolkit, consumer.root, STEP);
   assert.notEqual(blocked.code, 0, blocked.output);
   assert.match(blocked.output, /carries no toolkit identity/);
   assert.match(blocked.output, /toolkit-identity\.mjs/);
@@ -411,7 +424,7 @@ test("an installed toolkit previews and executes a contract-4 upgrade, writing n
   const status = await run(toolkit, "cli/toolkit-identity.mjs", ["status", "--module", "auth"], consumer.root);
   assert.equal(status.code, 0, status.output);
   assert.equal(JSON.parse(status.output).toolkitIdentityStatus, "UNSTAMPED");
-  const blocked = await advance(toolkit, consumer.root);
+  const blocked = await advance(toolkit, consumer.root, STEP);
   assert.notEqual(blocked.code, 0, blocked.output);
   assert.match(blocked.output, /carries no toolkit identity/);
 });
