@@ -916,6 +916,50 @@ difference with no explicit classification never reaches `FINALIZE`.
 a known legacy defect is never reproduced for visual similarity — and both stay
 traceable through the pinned inventory.
 
+### Reopening a `COMPLETE` migration on post-finalization evidence
+
+`--reopen-ui` covers a visible-UI parity audit and `--rework-slice` covers an
+*active* slice with a recorded `FAIL`. Neither covers authoritative evidence that
+arrives **after** `FINALIZE` and proves part of the finalized contract wrong. For
+that, and only that:
+
+```bash
+artifact-migration-discover <module> --reopen-complete <slice[,slice...]> \
+  --reopen-reason "<why the finalized contract stopped being true>" \
+  --reopen-evidence <repository-relative path> --confirm-reopen
+```
+
+It is operator-only and two-phase like `--reopen-ui`: legal only from status
+`COMPLETE`, refused under `--mode auto` and by `run-migration.mjs`, never
+self-confirmed, and combinable with no other transition. All four parts must be
+typed — which slices, why, the evidence, and the confirmation — and any one of
+them alone fails closed. The reason must be at least 12 characters and the
+evidence must be a real persisted file under the legacy or target repository (the
+record's own tree counts); the confirmation ID binds the slices, the reason and
+that file's exact bytes.
+
+In one journalled transaction, ordered so the previous `COMPLETE`'s proof is kept
+before anything is released:
+
+- preserves each named slice's verification byte-for-byte at
+  `reopen/<n>/evidence/<slice-id>/result.json` and writes `reopen/<n>/record.json`
+  (operator, timestamp, reason, evidence reference and hash, slices, prior
+  revision, preserved digests); both stay pinned for life, like a rework attempt;
+- only then releases those slices' `evidence/<slice-id>/result.json` pins and the
+  `FINALIZE` pins, and rewrites each released result to `PENDING`;
+- moves to `VERIFY_SLICES` on the earliest affected slice, with status `ACTIVE`,
+  and appends one `COMPLETE_REOPENED` history event carrying the reason.
+
+Nothing else moves. Unnamed slices, every inventory, matrix, plan and operator
+decision keep their pins and stay valid; `slices/<slice-id>.json` stays pinned,
+because a reopen invalidates a *verification*, not an implementation — a slice
+whose implementation is also wrong records `FAIL` with `defects[]` and returns to
+implementation through `--rework-slice`. No legacy revision is repinned, so
+repository drift still blocks and still needs `--refresh`, and `FINALIZE` re-runs
+the unclaimed-target-drift refusal unchanged. Deleting or altering anything under
+`reopen/` is refused with `REOPEN_EVIDENCE_MISSING` or as altered preserved
+evidence. A `COMPLETE` record that nobody reopens is never touched by any of this.
+
 A `COMPLETE` figma-mcp record below format 17 adopts the visual contract with:
 
 ```bash

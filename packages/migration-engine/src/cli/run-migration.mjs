@@ -79,6 +79,7 @@ export const parseRunArguments = (arguments_) => {
       refresh: { type: "boolean", default: false },
       "reopen-discovery": { type: "boolean", default: false },
       "reopen-ui": { type: "string" },
+      "reopen-complete": { type: "string" },
       "rework-slice": { type: "string" },
       "confirm-rework": { type: "boolean", default: false },
       "amend-slice": { type: "string" },
@@ -123,10 +124,12 @@ const advanceArguments = ({ moduleName, mode, slice }) => [
 const TERMINAL_VALIDATION_REFUSALS = [
   /\bUNCLAIMED_TARGET_DRIFT\b/,
   /\bREWORK_EVIDENCE_MISSING\b/,
+  /\bREOPEN_EVIDENCE_MISSING\b/,
   /^Unresolved verification blocks FINALIZE/,
   /^Stale verification blocks FINALIZE/,
   /^FINALIZE refuses to advance on repaired navigation/,
   /^Preserved rework evidence changed after it was pinned/,
+  /^Preserved reopen evidence changed after it was pinned/,
 ];
 
 /**

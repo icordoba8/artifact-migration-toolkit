@@ -19,7 +19,7 @@ export const MIGRATION_MODES = ["auto", "step"];
 const MODE_MESSAGE = "--mode accepts 'auto' or 'step'.";
 
 const DISCOVER_USAGE =
-  "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--scan] [--status] [--doctor] [--slice <id>]";
+  "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--scan] [--status] [--doctor] [--slice <id>]";
 
 const ARTIFACT_USAGE =
   "Usage: run-artifact.mjs <source> [--type <type>] [--target <path>] [--source-root <path>] [--target-root <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--status] [--mode auto|step] [--slice <id>] [--json]";
@@ -58,6 +58,7 @@ const RUN_REFUSED_OPTIONS = [
   "refresh",
   "reopen-discovery",
   "reopen-ui",
+  "reopen-complete",
   "rework-slice",
   "amend-slice",
   "add-file",
@@ -128,6 +129,10 @@ export const assertOptionCombination = (
         values.refresh ||
         values["reopen-discovery"] ||
         values["reopen-ui"] ||
+        values["reopen-complete"] ||
+        values["reopen-reason"] ||
+        values["reopen-evidence"] ||
+        values["confirm-reopen"] ||
         values["rework-slice"] ||
         values["confirm-rework"] ||
         values["amend-slice"] ||
@@ -156,6 +161,7 @@ export const assertOptionCombination = (
         values.refresh ||
         values["reopen-discovery"] ||
         values["reopen-ui"] ||
+        values["reopen-complete"] ||
         values["rework-slice"] ||
         values["amend-slice"] ||
         hasAddFile(values) ||
@@ -196,6 +202,44 @@ export const assertOptionCombination = (
       throw new Error(
         "--adopt-visual-contract and --confirm-adopt-visual-contract must be given together: adoption moves a completed Figma record onto the format-17 visual contract and names the slices to reverify.",
       );
+    }
+    // Its own message, so the five older transitions keep theirs verbatim.
+    if (
+      values["reopen-complete"] &&
+      (values["reopen-discovery"] ||
+        values["reopen-ui"] ||
+        values["rework-slice"] ||
+        values["confirm-rework"] ||
+        values["amend-slice"] ||
+        values["adopt-visual-contract"] ||
+        values.refresh)
+    ) {
+      throw new Error(
+        "--reopen-complete is its own transition and cannot be combined with --reopen-discovery, --reopen-ui, --rework-slice, --amend-slice, --adopt-visual-contract, or --refresh.",
+      );
+    }
+    // Invalidating a finalized contract is the heaviest operator act the
+    // lifecycle has, so all three parts must be typed: which slices, why, and
+    // the evidence that proves it. Any one of them alone fails closed.
+    if (values["reopen-complete"] && !values["confirm-reopen"]) {
+      throw new Error(
+        "--reopen-complete requires --confirm-reopen: it invalidates the finalized verification of a COMPLETE migration.",
+      );
+    }
+    if (values["reopen-complete"] && !values["reopen-reason"]) {
+      throw new Error(
+        "--reopen-complete requires --reopen-reason <text>: the reopen event is the permanent record of why a finalized contract stopped being true.",
+      );
+    }
+    if (values["reopen-complete"] && !values["reopen-evidence"]) {
+      throw new Error(
+        "--reopen-complete requires --reopen-evidence <path>: a repository-relative path to the authoritative post-finalization evidence.",
+      );
+    }
+    for (const option of ["confirm-reopen", "reopen-reason", "reopen-evidence"]) {
+      if (values[option] && !values["reopen-complete"]) {
+        throw new Error(`--${option} requires --reopen-complete <slice[,slice...]>.`);
+      }
     }
     // Its own message, so the five older transitions keep theirs verbatim.
     if (
@@ -240,6 +284,11 @@ export const assertOptionCombination = (
     ) {
       throw new Error(
         "--refresh, --reopen-ui, and --rework-slice are operator decisions and cannot run under --mode auto.",
+      );
+    }
+    if (values.mode === "auto" && values["reopen-complete"]) {
+      throw new Error(
+        "--reopen-complete is an operator decision and cannot run under --mode auto.",
       );
     }
     if (values.mode === "auto" && values["adopt-visual-contract"]) {
@@ -316,6 +365,7 @@ export const maySelfConfirm = ({
   mode,
   refresh = false,
   reopenUi = false,
+  reopenComplete = false,
   reworkSlice = false,
   adoptVisualContract = false,
   amendSlice = false,
@@ -328,6 +378,10 @@ export const maySelfConfirm = ({
       mode !== "step" &&
       !refresh &&
       !reopenUi &&
+      // Invalidating a finalized contract is never self-confirmed, for the
+      // strongest version of the --refresh reason: it un-completes a COMPLETE
+      // record.
+      !reopenComplete &&
       // A rework releases pinned evidence. It approves more than an id, so it
       // is never self-confirmed, exactly like --refresh and --reopen-ui.
       !reworkSlice &&

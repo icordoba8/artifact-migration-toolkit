@@ -748,6 +748,15 @@ export const FIGMA_CONTEXT_ADOPTION_FILE =
   "inventories/figma-context.adopted.json";
 export const ADOPTION_ROOT = "visual-contract-adoption";
 /**
+ * `--reopen-complete` only. Where a COMPLETE record's superseded verification
+ * evidence is preserved, byte-for-byte, before its pin is released:
+ * `reopen/<n>/evidence/<slice>/result.json` plus `reopen/<n>/record.json`,
+ * which names the operator, the reason and the authoritative post-finalization
+ * evidence that proved the finalized contract wrong. Both stay pinned for life,
+ * exactly like a preserved rework attempt.
+ */
+export const REOPEN_ROOT = "reopen";
+/**
  * Format 15, brownfield only: what the target repository already contained when
  * the record was created, committed *and* uncommitted. A revision alone cannot
  * answer it -- pre-existing work is very often an uncommitted edit, and
@@ -1131,6 +1140,7 @@ const hashPinnedArtifact = async (root, relativePath) => {
  */
 const isBytePinned = (relativePath) =>
   reworkPathParts(relativePath) !== null ||
+  relativePath.startsWith(`${REOPEN_ROOT}/`) ||
   relativePath.startsWith(`${ADOPTION_ROOT}/`) ||
   relativePath.startsWith("stale-ui-evidence/") ||
   relativePath.startsWith("slice-amendments/");
@@ -2672,6 +2682,32 @@ const assertStateGraph = async (root, state, pendingJournal) => {
       }
       continue;
     }
+    // A COMPLETE record reopened by explicit operator act. Structurally the
+    // same release as UI_REMEDIATION_REOPENED -- the named slices' evidence
+    // plus the FINALIZE pins, and nothing else -- but it touches no remediation
+    // file, and the evidence it supersedes is preserved and permanently pinned
+    // like a rework attempt, so the previous COMPLETE's proof survives it.
+    if (event.event === "COMPLETE_REOPENED") {
+      revision += 1;
+      currentStep = "VERIFY_SLICES";
+      activeSlice = event.slices[0];
+      completedSteps.delete("IMPLEMENT_SLICES");
+      completedSteps.delete("VERIFY_SLICES");
+      completedSteps.delete("FINALIZE");
+      completedSlices = completedSlices.filter(
+        (sliceId) => !event.slices.includes(sliceId),
+      );
+      for (const sliceId of event.slices) {
+        requiredHashes.delete(`evidence/${sliceId}/result.json`);
+      }
+      for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
+        requiredHashes.delete(relative);
+      }
+      for (const relative of event.preserved ?? []) {
+        preservedReworkHashes.add(relative);
+      }
+      continue;
+    }
     // W3. A rework returns one slice to implementation. It releases exactly two
     // mutable-current pins and permanently adds the preserved attempt's pins,
     // which are collected separately and unioned back in after the replay so no
@@ -3151,7 +3187,9 @@ const validateCompletedHashes = async (root, state) => {
       throw new Error(
         rework
           ? `REWORK_EVIDENCE_MISSING: the preserved failed verification attempt for slice '${rework.sliceId}' (attempt ${rework.attempt}) is gone. ${relativePath} was pinned when the rework was authorized and is never released by any later transition. It was deleted, not altered; restore it from version control before continuing.`
-          : `Completed artifact is missing: ${relativePath}. Reopen the responsible checkpoint.`,
+          : relativePath.startsWith(`${REOPEN_ROOT}/`)
+            ? `REOPEN_EVIDENCE_MISSING: the verification evidence a COMPLETE reopen superseded is gone. ${relativePath} was pinned when the reopen was authorized and is never released by any later transition. It was deleted, not altered; restore it from version control before continuing.`
+            : `Completed artifact is missing: ${relativePath}. Reopen the responsible checkpoint.`,
       );
     }
     if (!(await pinnedArtifactMatches(root, relativePath, expected))) {
@@ -3162,7 +3200,9 @@ const validateCompletedHashes = async (root, state) => {
             ? `The recorded discovery digest changed after DISCOVERY_COMPLETENESS closed. ${DISCOVERY_SCAN_FILE} is machine-generated and is never edited by hand; rerun the checkpoint with --reopen-discovery.`
             : reworkPathParts(relativePath)
               ? `Preserved rework evidence changed after it was pinned: ${relativePath}. The failed verification attempt that authorized a rework is immutable; it was altered rather than deleted. Restore the original bytes.`
-              : `Completed artifact changed after validation: ${relativePath}. Reopen the responsible checkpoint.`,
+              : relativePath.startsWith(`${REOPEN_ROOT}/`)
+                ? `Preserved reopen evidence changed after it was pinned: ${relativePath}. The superseded verification a COMPLETE reopen preserved is immutable; it was altered rather than deleted. Restore the original bytes.`
+                : `Completed artifact changed after validation: ${relativePath}. Reopen the responsible checkpoint.`,
       );
     }
   }
@@ -8329,6 +8369,9 @@ export const previewMigrationExecution = async ({
   refresh = false,
   reopenDiscovery = false,
   reopenUi = [],
+  reopenComplete = [],
+  reopenReason = null,
+  reopenEvidence = null,
   reworkSlice = null,
   amendSlice = null,
   addFiles = [],
@@ -8344,6 +8387,8 @@ export const previewMigrationExecution = async ({
   const design = resolveDesignSource({ designSource, figma });
   for (const sliceId of reopenUi)
     assertSafeName(sliceId, "UI remediation slice");
+  for (const sliceId of reopenComplete)
+    assertSafeName(sliceId, "Reopened slice");
   if (amendSlice) assertSafeName(amendSlice, "Amended slice");
   const { registryData, resolved } = await readContext({
     registryPath,
@@ -8733,6 +8778,41 @@ export const previewMigrationExecution = async ({
     expectedArtifact = UI_REMEDIATION_FILE;
   }
 
+  let reopenCompleteBinding = null;
+  if (reopenComplete.length > 0) {
+    const plan = await reopenCompletePlan(
+      root,
+      state,
+      { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot },
+      { slices: reopenComplete, reason: reopenReason, evidence: reopenEvidence },
+    );
+    blockers.push(...plan.blockers);
+    const attempt = (await reopenAttemptsOf(root)) + 1;
+    reopenCompleteBinding = {
+      attempt,
+      slices: plan.ordered,
+      reason: typeof reopenReason === "string" ? reopenReason.trim() : null,
+      evidenceReference: plan.claim,
+      evidenceHash: plan.evidenceIdentity,
+    };
+    action = "Invalidate the named slices' finalized verification and reopen the completed migration";
+    reason = `Post-finalization evidence (${plan.claim ?? reopenEvidence ?? "none"}) proves part of the finalized contract wrong: ${typeof reopenReason === "string" ? reopenReason.trim() : "no reason given"}. The superseded verification is preserved under ${REOPEN_ROOT}/${attempt}/ and stays pinned for life; every unnamed slice, every inventory and every operator decision keeps its pin.`;
+    artifacts = [
+      "state.json",
+      "history/history.ndjson",
+      `${REOPEN_ROOT}/${attempt}/record.json`,
+      ...plan.ordered.map(
+        (sliceId) => `${REOPEN_ROOT}/${attempt}/evidence/${sliceId}/result.json`,
+      ),
+      ...plan.ordered.map((sliceId) => `evidence/${sliceId}/result.json`),
+      ...IMMUTABLE_STEP_ARTIFACTS.FINALIZE,
+    ];
+    expectedCheckpoint = "VERIFY_SLICES";
+    expectedArtifact = plan.ordered[0]
+      ? `evidence/${plan.ordered[0]}/result.json`
+      : null;
+  }
+
   if (reworkSlice) {
     if (!usesSliceRework(state)) {
       blockers.push(
@@ -8870,6 +8950,9 @@ export const previewMigrationExecution = async ({
     ...(visualContractAdoption ? { visualContractAdoption } : {}),
     // Same binding: each added file's identity and both slice-record digests.
     ...(sliceAmendment ? { sliceAmendment } : {}),
+    // Same binding again: the exact slices, the exact reason, and the exact
+    // bytes of the evidence that authorizes invalidating a COMPLETE record.
+    ...(reopenCompleteBinding ? { reopenComplete: reopenCompleteBinding } : {}),
   };
   return {
     ...preview,
@@ -9480,6 +9563,9 @@ export const bootstrapMigration = async ({
   refresh = false,
   reopenDiscovery = false,
   reopenUi = [],
+  reopenComplete = [],
+  reopenReason = null,
+  reopenEvidence = null,
   reworkSlice = null,
   amendSlice = null,
   addFiles = [],
@@ -9539,6 +9625,9 @@ export const bootstrapMigration = async ({
       refresh,
       reopenDiscovery,
       reopenUi,
+      reopenComplete,
+      reopenReason,
+      reopenEvidence,
       reworkSlice,
       amendSlice,
       addFiles,
@@ -10526,6 +10615,264 @@ const reopenUiUnderLock = async ({
   };
 };
 
+/* ------------------------------------------------------------------
+ * `--reopen-complete`: the only COMPLETE -> reopened transition that is not
+ * about visible UI.
+ *
+ * `--reopen-ui` reopens a COMPLETE record for a parity audit and `--rework-slice`
+ * returns an *active* slice with a recorded FAIL to implementation. Neither
+ * covers the remaining case: authoritative evidence that appears *after*
+ * FINALIZE and proves part of the finalized contract wrong. A note in the record
+ * changed no machine state, and COMPLETE stayed COMPLETE over evidence everyone
+ * knew was stale.
+ *
+ * Modelled on both: operator-only, refused under `--mode auto`, refused by
+ * `run-migration.mjs`, never self-confirmed, preview-gated, journalled -- and
+ * ordered like a rework, which is the whole safety property. The superseded
+ * verification is preserved byte-for-byte and permanently pinned BEFORE its
+ * mutable pin is released, so there is no reachable state in which the proof
+ * the previous COMPLETE rested on has been freed before it was kept.
+ *
+ * Deliberately narrow. It releases the named slices' evidence and the FINALIZE
+ * pins and nothing else: discovery, baseline, plan, operator decisions and every
+ * unnamed slice stay pinned and stay valid. It moves no legacy revision, so
+ * repository drift still blocks and still needs `--refresh`. And it never edits
+ * the target, so FINALIZE re-runs the unclaimed-drift refusal unchanged.
+ * ------------------------------------------------------------------ */
+
+/**
+ * One definition site for what a reopen is allowed to do, read by the preview
+ * (as blockers) and re-derived under the lock (as refusals) from fresh reads.
+ */
+const reopenCompletePlan = async (
+  root,
+  state,
+  roots,
+  { slices, reason, evidence },
+) => {
+  const blockers = [];
+  if (state.status !== "COMPLETE") {
+    blockers.push(
+      `--reopen-complete is legal only for a COMPLETE migration; the current status is '${state.status}'. A migration that has not finalized is corrected by advancing it, not by reopening it.`,
+    );
+  }
+  // Explicit operator intent, in the record and not only in a terminal: a
+  // reopen that cannot say why it happened is indistinguishable from a
+  // hand-edit of a completed record.
+  if (typeof reason !== "string" || reason.trim().length < 12) {
+    blockers.push(
+      "--reopen-complete requires --reopen-reason <text> of at least 12 characters: the reopen event is the permanent record of why a finalized contract stopped being true.",
+    );
+  }
+  const claim = evidencePathClaim(evidence);
+  let evidenceIdentity = null;
+  if (!claim) {
+    blockers.push(
+      `--reopen-complete requires --reopen-evidence <path>: a repository-relative path to the authoritative post-finalization evidence. Received '${evidence ?? "nothing"}', which is not a persisted artifact path.`,
+    );
+  } else {
+    const absolute = await resolveEvidencePath(claim, roots);
+    if (!absolute) {
+      blockers.push(
+        `--reopen-evidence names '${claim}', which does not exist under the legacy or target repository. Evidence that a finalized contract is wrong must be a real observation, persisted.`,
+      );
+    } else {
+      evidenceIdentity = await fileIdentity(absolute);
+    }
+  }
+  const planned = (await inspectSliceArtifacts(root)).plannedSlices;
+  const requested = new Set(slices);
+  const ordered = planned.filter((sliceId) => requested.has(sliceId));
+  if (requested.size === 0) {
+    blockers.push("--reopen-complete must name one or more planned slices.");
+  }
+  for (const sliceId of requested) {
+    if (!planned.includes(sliceId)) {
+      blockers.push(`--reopen-complete names unknown slice '${sliceId}'.`);
+    }
+  }
+  return { blockers, ordered, claim, evidenceIdentity };
+};
+
+/** How many reopens this record has already recorded, read off the audit log. */
+const reopenAttemptsOf = async (root) =>
+  (await readHistoryEvents(root)).filter(
+    (event) => event.event === "COMPLETE_REOPENED",
+  ).length;
+
+const reopenCompleteUnderLock = async ({
+  registryData,
+  resolved,
+  root,
+  statePath,
+  state,
+  slices,
+  reason,
+  evidence,
+}) => {
+  const roots = {
+    legacyRoot: registryData.legacyRoot,
+    targetRoot: registryData.targetRoot,
+  };
+  const plan = await reopenCompletePlan(root, state, roots, {
+    slices,
+    reason,
+    evidence,
+  });
+  if (plan.blockers.length > 0) {
+    throw new Error(`${plan.blockers.join(" ")} Nothing was written.`);
+  }
+  const { ordered, claim, evidenceIdentity } = plan;
+  const attempt = (await reopenAttemptsOf(root)) + 1;
+  const directory = `${REOPEN_ROOT}/${attempt}`;
+  if (await fileExists(path.join(root, directory))) {
+    throw new Error(
+      `${directory} already exists. Reopens are append-only and an attempt number is never reused; nothing was written.`,
+    );
+  }
+
+  // Every file the transaction writes, built completely before anything lands.
+  // Raw bytes, never parse-and-reserialize: key order, whitespace and line
+  // endings are part of what the previous COMPLETE actually recorded.
+  const writes = [];
+  const rewrites = [];
+  for (const sliceId of ordered) {
+    const relative = `evidence/${sliceId}/result.json`;
+    const absolute = path.join(root, relative);
+    const before = await readFile(absolute);
+    writes.push([`${directory}/${relative}`, before]);
+    rewrites.push({
+      relative,
+      before,
+      // The verification is invalidated, not rewritten into a verdict nobody
+      // recorded: PENDING is the one value `inspectSliceArtifacts` reads as
+      // "not verified", and the superseded PASS survives beside it.
+      content: `${JSON.stringify(
+        { ...JSON.parse(before.toString("utf8")), result: "PENDING" },
+        null,
+        2,
+      )}\n`,
+    });
+  }
+  const preserved = {};
+  for (const [relative, bytes] of writes) preserved[relative] = hashContent(bytes);
+  const recordRelative = `${directory}/record.json`;
+  const record = `${JSON.stringify(
+    {
+      version: 1,
+      attempt,
+      at: now(),
+      operator: `${process.env.USER ?? process.env.USERNAME ?? "unknown"}@${process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? "unknown-host"}`,
+      reason: reason.trim(),
+      evidenceReference: claim,
+      evidenceHash: evidenceIdentity,
+      slices: ordered,
+      priorRevision: state.revision,
+      priorCompletedAt: state.updatedAt,
+      preserved,
+    },
+    null,
+    2,
+  )}\n`;
+  writes.push([recordRelative, Buffer.from(record, "utf8")]);
+  preserved[recordRelative] = hashContent(record);
+
+  const artifactHashes = { ...state.artifactHashes, ...preserved };
+  // Released only now, and only after every preserved path is in the pin set.
+  for (const sliceId of ordered) {
+    delete artifactHashes[`evidence/${sliceId}/result.json`];
+  }
+  for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
+    delete artifactHashes[relative];
+  }
+
+  const steps = stepsFor(state);
+  const reopened = {
+    // Stamped, never a literal, for the same reason `--reopen-ui` stamps:
+    // downgrading the record here would leave format-gated pins present but no
+    // longer expected, bricking every later read.
+    ...state,
+    formatVersion: stampedFormatVersion(state),
+    status: "ACTIVE",
+    currentStep: "VERIFY_SLICES",
+    activeSlice: ordered[0],
+    completedSteps: steps.slice(0, steps.indexOf("IMPLEMENT_SLICES")),
+    pendingSteps: ["IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE"],
+    completedSlices: state.completedSlices.filter(
+      (sliceId) => !ordered.includes(sliceId),
+    ),
+    pendingSlices: ordered,
+    invalidatedArtifacts: [
+      ...ordered.map((sliceId) => `evidence/${sliceId}/result.json`),
+      ...IMMUTABLE_STEP_ARTIFACTS.FINALIZE,
+    ],
+    evidenceFreshness: "STALE",
+    nextAction: `Correct and reverify slice '${ordered[0]}' against the evidence recorded in ${recordRelative}. A slice whose implementation is wrong records FAIL with defects[] and returns to implementation with --rework-slice.`,
+    nextCommand: `/start-migration ${resolved.canonical}`,
+    artifactHashes,
+    revision: state.revision + 1,
+    updatedAt: now(),
+  };
+  const event = {
+    event: "COMPLETE_REOPENED",
+    from: "COMPLETE",
+    step: "VERIFY_SLICES",
+    slices: ordered,
+    attempt,
+    reason: reason.trim(),
+    evidenceReference: claim,
+    preserved: Object.keys(preserved).sort(),
+    revision: reopened.revision,
+  };
+
+  const integrityPath = path.join(root, INTEGRITY_FILE);
+  const integrityBefore = await readFile(integrityPath, "utf8");
+  const nextIntegrity = await renderIntegrityNow(root, reopened);
+  const journalFile = path.join(root, ADVANCE_JOURNAL);
+  await assertHistoryAppendable(registryData.targetRoot, root);
+  await writeJournalAtomic(journalFile, {
+    fromRevision: state.revision,
+    toRevision: reopened.revision,
+    event,
+    startedAt: now(),
+    pid: process.pid,
+    // Recovery removes a half-written preserved tree and restores the evidence
+    // the previous COMPLETE rested on, so a killed reopen leaves the record
+    // exactly as complete as it was.
+    restore: [
+      ...writes.map(([relative]) => ({ path: relative, remove: true })),
+      ...rewrites.map(({ relative, before }) => ({
+        path: relative,
+        content: before.toString("utf8"),
+      })),
+    ],
+    integrity: { content: nextIntegrity, before: integrityBefore },
+  });
+  for (const [relative, bytes] of writes) {
+    await atomicWrite(registryData.targetRoot, path.join(root, relative), bytes);
+  }
+  for (const rewrite of rewrites) {
+    await atomicWrite(
+      registryData.targetRoot,
+      path.join(root, rewrite.relative),
+      rewrite.content,
+    );
+  }
+  await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
+  await atomicWrite(registryData.targetRoot, statePath, renderState(reopened));
+  await appendHistoryOnce(registryData.targetRoot, root, event);
+  await rm(journalFile, { force: true });
+  return {
+    changed: true,
+    reopened: true,
+    statePath,
+    migrationRoot: root,
+    state: reopened,
+    nextArtifact: activeArtifact(reopened),
+    resolved,
+  };
+};
+
 /**
  * Everything that reads a precondition and then writes runs here, inside the
  * per-module lock, and re-reads every input the confirmation was bound to
@@ -10547,6 +10894,9 @@ const bootstrapUnderLock = async ({
   refresh,
   reopenDiscovery,
   reopenUi,
+  reopenComplete = [],
+  reopenReason = null,
+  reopenEvidence = null,
   reworkSlice,
   amendSlice,
   addFiles,
@@ -10626,7 +10976,14 @@ const bootstrapUnderLock = async ({
     // Every branch below this line writes to the record; the plain resume that
     // falls through to `changed: false` does not, and is deliberately left
     // readable on an unstamped or mismatched record.
-    if (reopenDiscovery || reopenUi.length > 0 || reworkSlice || adoption || refresh) {
+    if (
+      reopenDiscovery ||
+      reopenUi.length > 0 ||
+      reopenComplete.length > 0 ||
+      reworkSlice ||
+      adoption ||
+      refresh
+    ) {
       assertRecordToolkitIdentity(
         state,
         resolved.canonical,
@@ -10655,6 +11012,18 @@ const bootstrapUnderLock = async ({
         statePath,
         state,
         slices: reopenUi,
+      });
+    }
+    if (reopenComplete.length > 0) {
+      return reopenCompleteUnderLock({
+        registryData,
+        resolved,
+        root,
+        statePath,
+        state,
+        slices: reopenComplete,
+        reason: reopenReason,
+        evidence: reopenEvidence,
       });
     }
     if (amendSlice) {

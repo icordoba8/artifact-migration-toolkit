@@ -40,6 +40,19 @@ export const normalizePonytailArgument = (arguments_) =>
     return [argument];
   });
 
+/** `a,b, a` -> `["a", "b"]`; absent -> `[]`. */
+const sliceList = (value) =>
+  value
+    ? [
+        ...new Set(
+          value
+            .split(",")
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+        ),
+      ]
+    : [];
+
 export const parseDiscoverArguments = (arguments_) => {
   const normalizedArguments = normalizePonytailArgument(arguments_);
   const { positionals, values } = parseArgs({
@@ -65,6 +78,10 @@ export const parseDiscoverArguments = (arguments_) => {
       registry: { type: "string" },
       "reopen-discovery": { type: "boolean", default: false },
       "reopen-ui": { type: "string" },
+      "reopen-complete": { type: "string" },
+      "reopen-reason": { type: "string" },
+      "reopen-evidence": { type: "string" },
+      "confirm-reopen": { type: "boolean", default: false },
       "rework-slice": { type: "string" },
       "confirm-rework": { type: "boolean", default: false },
       "amend-slice": { type: "string" },
@@ -95,16 +112,11 @@ export const parseDiscoverArguments = (arguments_) => {
     ponytail: values.ponytail,
     refresh: values.refresh,
     reopenDiscovery: values["reopen-discovery"],
-    reopenUi: values["reopen-ui"]
-      ? [
-          ...new Set(
-            values["reopen-ui"]
-              .split(",")
-              .map((value) => value.trim())
-              .filter(Boolean),
-          ),
-        ]
-      : [],
+    reopenUi: sliceList(values["reopen-ui"]),
+    reopenComplete: sliceList(values["reopen-complete"]),
+    reopenReason: values["reopen-reason"] ?? null,
+    reopenEvidence: values["reopen-evidence"] ?? null,
+    confirmReopen: values["confirm-reopen"],
     reworkSlice: values["rework-slice"] ?? null,
     confirmRework: values["confirm-rework"],
     amendSlice: values["amend-slice"] ?? null,
@@ -242,6 +254,7 @@ export const runDiscoverCli = async (
     mode: options.mode,
     refresh: options.refresh,
     reopenUi: options.reopenUi.length > 0,
+    reopenComplete: options.reopenComplete.length > 0,
     reworkSlice: Boolean(options.reworkSlice),
     amendSlice: Boolean(options.amendSlice),
     adoptVisualContract: options.adoptVisualContract,

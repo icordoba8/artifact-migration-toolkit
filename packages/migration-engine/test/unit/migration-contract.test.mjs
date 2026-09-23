@@ -112,7 +112,7 @@ import {
   artifactBindingFor,
 } from "../../src/resumable-migration.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
-import { exitCodeFor } from "../../src/migration-policy.mjs";
+import { exitCodeFor, maySelfConfirm } from "../../src/migration-policy.mjs";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import {
   getArtifactStatus,
@@ -14888,5 +14888,331 @@ test("amend: a transition killed mid-write is recovered to the prior record", as
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+// --- R1: operator-controlled COMPLETE -> reopened ---------------------------
+//
+// The gap these cover: authoritative evidence that arrives *after* FINALIZE and
+// proves part of the finalized contract wrong had no supported expression.
+// `--rework-slice` needs an active slice with a recorded FAIL, and a note in the
+// record changed no machine state, so COMPLETE stayed COMPLETE over evidence
+// everyone knew was stale.
+
+/** Post-finalization evidence, inside the record so it is not target drift. */
+const postFinalizationEvidence = async (fixture, name = "audit.md") => {
+  const absolute = path.join(fixture.migrationRoot, "audits", name);
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(
+    absolute,
+    "Production trace proves slice-a still renders the legacy total.\n",
+  );
+  return path.relative(fixture.targetRoot, absolute).replaceAll(path.sep, "/");
+};
+
+const reopenComplete = async (fixture, slices, overrides = {}) => {
+  const resolution = await resolutionFor(fixture);
+  const options = {
+    ...resolution,
+    moduleName: "auth",
+    reopenComplete: slices,
+    reopenReason: "Post-finalization production trace contradicts CAT-SCN-001.",
+    reopenEvidence: overrides.evidence ?? (await postFinalizationEvidence(fixture)),
+    ...overrides.options,
+  };
+  const preview = await previewMigrationExecution(options);
+  return {
+    preview,
+    run: () =>
+      bootstrapMigration({
+        ...options,
+        boundInputs: preview.boundInputs,
+        registryBinding: preview.registryBinding,
+      }),
+  };
+};
+
+test("R1-1: COMPLETE is immutable by default", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    const before = await snapshot(fixture.migrationRoot);
+    const resolution = await resolutionFor(fixture);
+
+    // A plain resume of a COMPLETE record still writes nothing.
+    const resumed = await bootstrapMigration({
+      ...resolution,
+      moduleName: "auth",
+      boundInputs: (
+        await previewMigrationExecution({ ...resolution, moduleName: "auth" })
+      ).boundInputs,
+    });
+    assert.equal(resumed.changed, false);
+    assert.equal(resumed.state.status, "COMPLETE");
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+
+    // And every partial form of the reopen is refused before argv is accepted.
+    const refusal = (extra) => {
+      try {
+        parseDiscoverArguments(["auth", ...extra]);
+        return null;
+      } catch (error) {
+        return error.message;
+      }
+    };
+    assert.match(
+      refusal(["--reopen-complete", "slice-a"]),
+      /--reopen-complete requires --confirm-reopen/,
+    );
+    assert.match(
+      refusal(["--reopen-complete", "slice-a", "--confirm-reopen"]),
+      /--reopen-complete requires --reopen-reason/,
+    );
+    assert.match(
+      refusal([
+        "--reopen-complete",
+        "slice-a",
+        "--confirm-reopen",
+        "--reopen-reason",
+        "because",
+      ]),
+      /--reopen-complete requires --reopen-evidence/,
+    );
+    assert.match(
+      refusal(["--confirm-reopen"]),
+      /--confirm-reopen requires --reopen-complete/,
+    );
+    assert.match(
+      refusal([
+        "--reopen-complete",
+        "slice-a",
+        "--confirm-reopen",
+        "--reopen-reason",
+        "because the trace says so",
+        "--reopen-evidence",
+        "audits/audit.md",
+        "--mode",
+        "auto",
+      ]),
+      /--reopen-complete is an operator decision and cannot run under --mode auto/,
+    );
+    assert.throws(
+      () => parseRunArguments(["auth", "--reopen-complete", "slice-a"]),
+      /--reopen-complete is not accepted by run-migration\.mjs/,
+    );
+    // It is never self-confirmed, for the strongest version of the --refresh
+    // reason: it un-completes a COMPLETE record.
+    assert.equal(
+      maySelfConfirm({
+        command: "discover",
+        mode: "auto",
+        reopenComplete: true,
+        preview: { state: "COMPLETE" },
+      }),
+      false,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R1-2: an explicit reopen invalidates only the named slice and preserves the superseded proof", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    const before = await state(fixture);
+    const unaffected = before.artifactHashes["evidence/slice-b/result.json"];
+    const supersededBytes = await readFile(
+      path.join(fixture.migrationRoot, "evidence/slice-a/result.json"),
+    );
+
+    const reopen = await reopenComplete(fixture, ["slice-a"]);
+    assert.deepEqual(reopen.preview.blockers, []);
+    assert.equal(reopen.preview.requiresConfirmation, true);
+    assert.equal(reopen.preview.expectedNextCheckpoint, "VERIFY_SLICES");
+    const result = await reopen.run();
+    assert.equal(result.reopened, true);
+
+    const after = await state(fixture);
+    assert.equal(after.status, "ACTIVE");
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.equal(after.activeSlice, "slice-a");
+    assert.deepEqual(after.completedSlices, ["slice-b"]);
+    assert.deepEqual(after.pendingSlices, ["slice-a"]);
+    assert.equal(after.evidenceFreshness, "STALE");
+
+    // Unaffected evidence stays pinned and byte-identical; the affected pin is
+    // released and its verdict is no longer a PASS anybody can advance on.
+    assert.equal(after.artifactHashes["evidence/slice-b/result.json"], unaffected);
+    assert.ok(!after.artifactHashes["evidence/slice-a/result.json"]);
+    assert.ok(!after.artifactHashes["gates.json"]);
+    assert.equal(
+      after.artifactHashes["inventories/legacy.json"],
+      before.artifactHashes["inventories/legacy.json"],
+    );
+    assert.equal(
+      after.artifactHashes["slices/index.json"],
+      before.artifactHashes["slices/index.json"],
+    );
+    // The implementation record is untouched: a reopen invalidates a
+    // verification, it does not un-implement a slice.
+    assert.equal(
+      after.artifactHashes["slices/slice-a.json"],
+      before.artifactHashes["slices/slice-a.json"],
+    );
+    assert.equal(
+      (
+        await readJson(
+          path.join(fixture.migrationRoot, "evidence/slice-a/result.json"),
+        )
+      ).result,
+      "PENDING",
+    );
+
+    // The previous COMPLETE's proof survives byte-for-byte, permanently pinned.
+    const preservedRelative = "reopen/1/evidence/slice-a/result.json";
+    assert.deepEqual(
+      await readFile(path.join(fixture.migrationRoot, preservedRelative)),
+      supersededBytes,
+    );
+    assert.ok(after.artifactHashes[preservedRelative]);
+    const record = await readJson(
+      path.join(fixture.migrationRoot, "reopen/1/record.json"),
+    );
+    assert.equal(record.attempt, 1);
+    assert.deepEqual(record.slices, ["slice-a"]);
+    assert.match(record.reason, /production trace/i);
+    assert.match(record.evidenceReference, /audits\/audit\.md$/);
+    assert.equal(record.priorRevision, before.revision);
+    assert.ok(after.artifactHashes["reopen/1/record.json"]);
+
+    // One explicit, append-only history event carrying the operator's reason.
+    const events = await historyEvents(fixture);
+    const reopened = events.at(-1);
+    assert.equal(reopened.event, "COMPLETE_REOPENED");
+    assert.equal(reopened.from, "COMPLETE");
+    assert.equal(reopened.step, "VERIFY_SLICES");
+    assert.deepEqual(reopened.slices, ["slice-a"]);
+    assert.match(reopened.reason, /production trace/i);
+    assert.ok(reopened.preserved.includes(preservedRelative));
+    // Previous COMPLETE history is preserved, never rewritten.
+    assert.ok(
+      events.some(
+        (event) =>
+          event.event === "STEP_COMPLETED" &&
+          event.step === "VERIFY_SLICES" &&
+          event.slice === "slice-a",
+      ),
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          event.event === "STEP_COMPLETED" && event.nextStep === "COMPLETE",
+      ),
+    );
+
+    // The record still reads: replay, pins and slice-state all agree.
+    assert.equal(
+      (await readState(fixture.targetRoot, "auth")).state.revision,
+      after.revision,
+    );
+    assert.equal(
+      await exists(path.join(fixture.migrationRoot, "advance.journal")),
+      false,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R1-3: a reopened migration is corrected and reaches COMPLETE again", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    await (await reopenComplete(fixture, ["slice-a"])).run();
+
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).currentStep, "FINALIZE");
+    await authorFinalize(fixture);
+    await advance(fixture);
+
+    const after = await state(fixture);
+    assert.equal(after.status, "COMPLETE");
+    assert.equal(after.currentStep, "COMPLETE");
+    assert.deepEqual([...after.completedSlices].sort(), ["slice-a", "slice-b"]);
+    // The preserved proof is still pinned after the record completes again.
+    assert.ok(after.artifactHashes["reopen/1/evidence/slice-a/result.json"]);
+    assert.ok(after.artifactHashes["reopen/1/record.json"]);
+    assert.equal(
+      (await previewMigrationExecution({
+        ...(await resolutionFor(fixture)),
+        moduleName: "auth",
+      })).state,
+      "COMPLETE",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R1-4: invalid reopen requests fail closed", async () => {
+  const active = await createFixture();
+  try {
+    // Not COMPLETE: a migration still in flight is corrected by advancing it.
+    await driveTo(active, "SLICES");
+    // Written before the snapshot: the evidence a reopen cites is not itself
+    // part of what the refusal must leave untouched.
+    await postFinalizationEvidence(active);
+    const before = await snapshot(active.migrationRoot);
+    const early = await reopenComplete(active, ["slice-a"]);
+    assert.match(
+      early.preview.blockers.join("\n"),
+      /--reopen-complete is legal only for a COMPLETE migration/,
+    );
+    await assert.rejects(early.run(), /legal only for a COMPLETE migration/);
+    assert.deepEqual(await snapshot(active.migrationRoot), before);
+  } finally {
+    await active.cleanup();
+  }
+
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    await postFinalizationEvidence(fixture);
+    const before = await snapshot(fixture.migrationRoot);
+
+    const unknown = await reopenComplete(fixture, ["slice-z"]);
+    assert.match(
+      unknown.preview.blockers.join("\n"),
+      /names unknown slice 'slice-z'/,
+    );
+    await assert.rejects(unknown.run(), /names unknown slice 'slice-z'/);
+
+    // Evidence must be a real, persisted observation.
+    const missing = await reopenComplete(fixture, ["slice-a"], {
+      evidence: "audits/never-written.md",
+    });
+    assert.match(
+      missing.preview.blockers.join("\n"),
+      /does not exist under the legacy or target repository/,
+    );
+    await assert.rejects(missing.run(), /does not exist under the legacy/);
+
+    const unreasoned = await reopenComplete(fixture, ["slice-a"], {
+      options: { reopenReason: "stale" },
+    });
+    assert.match(
+      unreasoned.preview.blockers.join("\n"),
+      /requires --reopen-reason <text> of at least 12 characters/,
+    );
+    await assert.rejects(unreasoned.run(), /at least 12 characters/);
+
+    // Nothing above moved a byte, and the record is still COMPLETE.
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
   }
 });
