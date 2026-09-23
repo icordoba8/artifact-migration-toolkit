@@ -29,12 +29,17 @@ import {
   assertSafeName,
   assertSecurePath,
   atomicWrite,
+  commitsIntroducingBlob,
+  commitsTouchingSince,
   committedChangesSince,
   contentIdentity,
   contentIdentityMatches,
   DESIGN_SOURCES,
   dirtyManifest,
+  fileAtRevision,
   gitRevision,
+  headRevision,
+  isAncestorCommit,
   isContentIdentity,
   pendingTransactions,
   persistProjectRegistryBinding,
@@ -6049,6 +6054,207 @@ export const delegatedChangedFilesSatisfiedByChild = (
     );
   });
 
+/**
+ * The reopen attempt that currently governs `sliceId`, or null when the slice
+ * is not reopened. Newest attempt wins: a second reopen supersedes the first.
+ */
+const governingReopen = async (root, sliceId) => {
+  const events = await readHistoryEvents(root);
+  const reopens = events.filter(
+    (event) =>
+      event.event === "COMPLETE_REOPENED" &&
+      Array.isArray(event.slices) &&
+      event.slices.includes(sliceId),
+  );
+  if (reopens.length === 0) return null;
+  return reopens[reopens.length - 1];
+};
+
+/**
+ * Proves the preserved evidence of a reopen attempt is exactly the bytes the
+ * reopen pinned, and returns the record. Tamper is never a soft signal: a
+ * preserved tree that no longer hashes to its pin cannot anchor anything.
+ */
+const verifiedReopenRecord = async (root, attempt, sliceId, state) => {
+  const directory = `${REOPEN_ROOT}/${attempt}`;
+  const recordRelative = `${directory}/record.json`;
+  const absolute = path.join(root, recordRelative);
+  if (!(await fileExists(absolute))) {
+    throw new Error(
+      `${sliceId} was reopened as attempt ${attempt} but ${recordRelative} is missing. The reopen provenance a committed slice is proven against cannot be reconstructed; nothing is accepted on trust.`,
+    );
+  }
+  const bytes = await readFile(absolute);
+  const record = assertPlainObject(
+    JSON.parse(bytes.toString("utf8")),
+    recordRelative,
+  );
+  const preserved = assertPlainObject(record.preserved, `${recordRelative}.preserved`);
+  // The record's own pin is added to the pin set *after* its bytes are
+  // serialized, so it lives in the integrity-sealed state, never inside the
+  // file. That is the stronger place to check it from: the record cannot
+  // restate its own hash, and the state it is checked against is itself sealed.
+  const selfPin = state?.artifactHashes?.[recordRelative];
+  if (typeof selfPin !== "string" || !selfPin) {
+    throw new Error(
+      `${recordRelative} is not pinned by the migration state, so the reopen provenance ${sliceId}'s committed ownership rests on cannot be trusted. Nothing is accepted on trust.`,
+    );
+  }
+  if (!(await fileIdentityMatches(selfPin, absolute))) {
+    throw new Error(
+      `${recordRelative} no longer matches the hash the migration state pinned. Reopen provenance is tamper-evident; a committed ownership claim anchored on an altered record is refused.`,
+    );
+  }
+  for (const [relative, pin] of Object.entries(preserved)) {
+    if (relative === recordRelative) continue;
+    const preservedPath = path.join(root, relative);
+    if (!(await fileExists(preservedPath))) {
+      throw new Error(
+        `${recordRelative} pins preserved evidence '${relative}', which is missing. The reopened slice's superseded PASS is the anchor's proof and must survive for life.`,
+      );
+    }
+    if (!(await fileIdentityMatches(pin, preservedPath))) {
+      throw new Error(
+        `Preserved reopen evidence '${relative}' no longer matches the hash ${recordRelative} pinned. Reopen provenance is tamper-evident; a committed ownership claim anchored on altered evidence is refused.`,
+      );
+    }
+  }
+  return record;
+};
+
+/**
+ * The anchor commit a reopened slice's committed work is proven against.
+ *
+ * New records carry `targetAnchor` outright. Records written before the field
+ * existed -- including migrations reopened in the field -- resolve it from the
+ * pinned preserved evidence: the unique commit that *introduced* those exact
+ * PASS bytes. Merely containing an unchanged blob is not origin, and anything
+ * short of exactly one defensible origin fails closed rather than guessing.
+ */
+const resolveReopenAnchor = async (root, record, sliceId, roots, attempt) => {
+  if (typeof record.targetAnchor === "string" && record.targetAnchor) {
+    return { revision: record.targetAnchor, resolvedFrom: "RECORD" };
+  }
+  const recordRelative = `${REOPEN_ROOT}/${attempt}/record.json`;
+  const evidenceRelative = `${REOPEN_ROOT}/${attempt}/evidence/${sliceId}/result.json`;
+  const pin = record.preserved?.[evidenceRelative];
+  if (typeof pin !== "string" || !pin) {
+    throw new Error(
+      `${recordRelative} carries no targetAnchor and does not pin '${evidenceRelative}', so the committed state ${sliceId} was proven against cannot be established. Reopen provenance is required before a committed ownership claim is accepted.`,
+    );
+  }
+  // The preserved copy is a copy; the pinned bytes originate at the slice's own
+  // evidence path, which is what history records.
+  const originRelative = repoRelative(
+    roots.targetRoot,
+    path.join(root, `evidence/${sliceId}/result.json`),
+  );
+  const origins = await commitsIntroducingBlob(
+    roots.targetRoot,
+    originRelative,
+    pin,
+  );
+  if (origins.length === 0) {
+    throw new Error(
+      `${recordRelative} carries no targetAnchor and the preserved PASS for ${sliceId} matches no commit in the target repository's history, so no anchor can be established. The reopened slice's committed ownership cannot be proven and is refused.`,
+    );
+  }
+  if (origins.length > 1) {
+    throw new Error(
+      `${recordRelative} carries no targetAnchor and the preserved PASS for ${sliceId} originates in ${origins.length} distinct commits (${origins.join(", ")}), so no unique anchor is defensible. Re-reopen the slice to record an explicit anchor rather than accepting an ambiguous one.`,
+    );
+  }
+  return { revision: origins[0], resolvedFrom: "PRESERVED_EVIDENCE" };
+};
+
+/**
+ * A path under the target root in the form Git resolves against it. The `./`
+ * prefix is load-bearing: `git show <rev>:<path>` reads a bare path from the
+ * repository root, which is not always the target root, whereas `:./<path>`
+ * resolves relative to the `-C` directory.
+ */
+const repoRelative = (targetRoot, absolute) =>
+  `./${path.relative(targetRoot, absolute).replaceAll(path.sep, "/")}`;
+
+/**
+ * Committed ownership for a reopened slice: the claims the anchored slice
+ * record already made, plus which of them history has moved on from.
+ *
+ * Returns null when the slice is not reopened, so the live-diff rule stays the
+ * only rule for an ordinary active slice.
+ */
+// Resolved once per slice per anchor state: the resolver shells out to Git
+// several times, and both the implementation gate and the verification gate
+// need the same answer within one command.
+const anchoredOwnershipCache = new Map();
+
+const anchoredReopenOwnership = async (root, sliceId, state, roots) => {
+  if (!roots?.targetRoot) return null;
+  const head = await headRevision(roots.targetRoot);
+  const key = `${root} ${sliceId} ${head}`;
+  if (!anchoredOwnershipCache.has(key)) {
+    anchoredOwnershipCache.set(
+      key,
+      resolveAnchoredOwnership(root, sliceId, roots, head, state),
+    );
+  }
+  const resolved = await anchoredOwnershipCache.get(key);
+  // Drift is re-derived by whichever gate is running, never carried over.
+  if (resolved) resolved.drift = [];
+  return resolved;
+};
+
+const resolveAnchoredOwnership = async (root, sliceId, roots, head, state) => {
+  const reopen = await governingReopen(root, sliceId);
+  if (!reopen) return null;
+  const attempt = reopen.attempt;
+  const record = await verifiedReopenRecord(root, attempt, sliceId, state);
+  const anchor = await resolveReopenAnchor(root, record, sliceId, roots, attempt);
+  if (!(await isAncestorCommit(roots.targetRoot, anchor.revision, head))) {
+    throw new Error(
+      `The reopen anchor '${anchor.revision}' for ${sliceId} is not reachable from the target repository's HEAD. History was rewritten or the anchor belongs to another lineage; a committed ownership claim is refused.`,
+    );
+  }
+  // What the slice record claimed in the reopened COMPLETE state is the only
+  // committed ownership that exists, and reading it from the working tree on
+  // trust would let a claim added after the fact grant itself provenance.
+  //
+  // The migration record is not part of the target's committed history -- this
+  // tool keeps it uncommitted until FINALIZE -- so the anchor commit cannot
+  // supply it. The pin does: `slices/<id>.json` was hashed into
+  // `artifactHashes` at COMPLETE and a reopen deliberately releases only the
+  // slice's evidence and the FINALIZE artifacts, so that pin still describes
+  // the record exactly as the reopened COMPLETE recorded it.
+  const sliceRelative = `slices/${sliceId}.json`;
+  const slicePin = state?.artifactHashes?.[sliceRelative];
+  if (typeof slicePin !== "string" || !slicePin) {
+    throw new Error(
+      `${sliceId} was reopened but ${sliceRelative} is not pinned by the migration state, so what the slice owned in the reopened COMPLETE state cannot be established. The committed ownership claim is refused.`,
+    );
+  }
+  const slicePath = path.join(root, sliceRelative);
+  const anchoredBytes = await readFile(slicePath);
+  if (!(await fileIdentityMatches(slicePin, slicePath))) {
+    throw new Error(
+      `${sliceRelative} no longer matches the hash the migration state pinned for the reopened COMPLETE state. A reopened slice may not rewrite what it owned and then claim the rewrite as committed provenance.`,
+    );
+  }
+  let anchoredRecord;
+  try {
+    anchoredRecord = JSON.parse(anchoredBytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(
+      `${sliceRelative} is not readable JSON (${error.message}), so ${sliceId}'s committed ownership cannot be established.`,
+    );
+  }
+  const claims = new Set();
+  for (const changed of anchoredRecord?.changedFiles ?? []) {
+    if (typeof changed !== "string" || !changed.trim()) continue;
+    claims.add(changed.trim().split(/\s+/)[0].replaceAll("\\", "/"));
+  }
+  return { attempt, anchor, head, claims, record };
+};
+
 const validateImplementedSlice = async (
   root,
   sliceId,
@@ -6117,11 +6323,13 @@ const validateImplementedSlice = async (
   // touched. `dirty` is the target repository's real uncommitted diff
   // (reusing the same `dirtyManifest` this tool already trusts for P1-6);
   // every declared changed file must be part of it.
-  // ponytail: only the *current* uncommitted diff is checked, not history
-  // since some base commit. Consistent with this tool's working assumption
-  // that nothing is committed before FINALIZE. Upgrade path if a slice ever
-  // commits mid-implementation: bind against a recorded base revision the
-  // same way P1-6 binds the legacy/target dirty manifest.
+  // The live uncommitted diff is the ownership proof for an ordinary active
+  // slice. It cannot be the only one after a COMPLETE reopen: the slice being
+  // reopened was finalized, so its legitimate implementation is already
+  // committed and is correctly absent from the current diff. A reopened slice
+  // therefore proves ownership against its reopen anchor as well -- the
+  // committed target state whose preserved PASS is being reopened.
+  const anchored = await anchoredReopenOwnership(root, sliceId, state, roots);
   const dirty = roots?.targetRoot
     ? await dirtyManifest(roots.targetRoot)
     : null;
@@ -6171,16 +6379,51 @@ const validateImplementedSlice = async (
       .relative(roots.targetRoot, resolved)
       .replaceAll(path.sep, "/");
     changedTargetPaths.push(relative);
+    // Ownership: a live claim in the current diff, or an anchored claim the
+    // committed state already carried. Anchored ownership additionally proves
+    // the path existed at the anchor -- a record may not claim provenance for
+    // a file the anchored commit never had.
+    const liveClaim = dirtyPaths ? dirtyPaths.has(relative) : false;
+    const anchoredClaim = Boolean(anchored?.claims.has(relative));
+    if (anchoredClaim && !liveClaim) {
+      const atAnchor = await fileAtRevision(
+        roots.targetRoot,
+        anchored.anchor.revision,
+        `./${relative}`,
+      );
+      if (!atAnchor) {
+        throw new Error(
+          `${sliceId}.changedFiles lists '${changed}', which does not exist at the reopen anchor '${anchored.anchor.revision}'. A reopened slice may only claim files the anchored commit actually carried.`,
+        );
+      }
+      // Historical ownership is not current validity. A path history moved on
+      // from after the anchor keeps its claim, but the reopened slice never
+      // absorbs authorship of those later commits, and the PASS it is working
+      // toward has to rest on evidence bound to the *current* HEAD.
+      const after = await commitsTouchingSince(
+        roots.targetRoot,
+        anchored.anchor.revision,
+        `./${relative}`,
+      );
+      if (after.length > 0) {
+        (anchored.drift ??= []).push({ path: relative, commits: after });
+      }
+    }
     if (
       dirtyPaths &&
       !reusesExistingUiImplementation &&
-      !dirtyPaths.has(relative)
+      !liveClaim &&
+      !anchoredClaim
     ) {
       throw new Error(
-        `${sliceId}.changedFiles lists '${changed}', which is not part of the target repository's current uncommitted diff. Record only files the slice actually modified.`,
+        anchored
+          ? `${sliceId}.changedFiles lists '${changed}', which is neither part of the target repository's current uncommitted diff nor claimed by the slice record at its reopen anchor '${anchored.anchor.revision}'. A reopened slice may only claim work it owns live or owned in the anchored commit.`
+          : `${sliceId}.changedFiles lists '${changed}', which is not part of the target repository's current uncommitted diff. Record only files the slice actually modified.`,
       );
     }
-    if (changedSinceBaseline && !changedSinceBaseline(relative)) {
+    // The baseline rule answers "is this pre-existing work", which an anchored
+    // committed claim has already answered from history.
+    if (changedSinceBaseline && !anchoredClaim && !changedSinceBaseline(relative)) {
       throw new Error(
         `${sliceId}.changedFiles lists '${changed}', which reads exactly as it did when the target baseline was pinned. Pre-existing work is not this migration's work and may not be claimed as slice work.`,
       );
@@ -6699,7 +6942,45 @@ const validateVerifiedSlice = async (root, sliceId, state, roots) => {
     state,
     roots,
   });
+  await assertPostAnchorEvidence(root, sliceId, state, roots, evidence);
   return evidence;
+};
+
+/**
+ * A reopened slice whose anchored files were committed again after the anchor
+ * may not PASS on evidence that predates those commits.
+ *
+ * The anchored claim proves the slice *owned* the path in the committed state;
+ * it says nothing about whether the path still does what the slice proved. When
+ * history has moved on, the verification must be bound to the current HEAD --
+ * missing, stale or non-PASS evidence all fail closed, and the later commits
+ * stay attributed to whoever made them.
+ */
+const assertPostAnchorEvidence = async (root, sliceId, state, roots, evidence) => {
+  const anchored = await anchoredReopenOwnership(root, sliceId, state, roots);
+  if (!anchored) return;
+  const drift = [];
+  for (const claim of anchored.claims) {
+    const commits = await commitsTouchingSince(
+      roots.targetRoot,
+      anchored.anchor.revision,
+      `./${claim}`,
+    );
+    if (commits.length > 0) drift.push({ path: claim, commits });
+  }
+  if (drift.length === 0) return;
+  const paths = drift.map((entry) => entry.path).sort();
+  const verifiedAt = evidence.verifiedAtRevision;
+  if (typeof verifiedAt !== "string" || !verifiedAt) {
+    throw new Error(
+      `${sliceId} was reopened against anchor '${anchored.anchor.revision}', and ${paths.join(", ")} ${paths.length === 1 ? "has" : "have"} been committed to since. Its evidence must record 'verifiedAtRevision' proving it was produced against the current target HEAD '${anchored.head}' before it can PASS.`,
+    );
+  }
+  if (verifiedAt !== anchored.head) {
+    throw new Error(
+      `${sliceId} evidence records verifiedAtRevision '${verifiedAt}', but the target repository's HEAD is '${anchored.head}' and ${paths.join(", ")} changed after the reopen anchor '${anchored.anchor.revision}' (${drift.flatMap((entry) => entry.commits).join(", ")}). Stale evidence never proves a reopened slice; reverify against the current HEAD.`,
+    );
+  }
 };
 
 // Contract 5 decision 1.3: typed Ponytail evidence, never a regex over prose.
@@ -9796,9 +10077,9 @@ export const bootstrapMigration = async ({
   mock = false,
   boundInputs,
   hooks = {},
-  // The principal this invocation runs as. It reaches exactly one decision
-  // here -- whether AUTO may acknowledge a legacy revision it read itself --
-  // and it reaches it through `isAutoAuthority`, like every other gate.
+  // No default: `isAutoAuthority` is the single reader of this, and an absent
+  // mode means auto there. Defaulting it here would silently disable automatic
+  // legacy-drift acknowledgement for every caller that does not name a mode.
   mode,
 }) => {
   if (ponytail !== undefined) assertPonytailTarget(ponytail);
@@ -9856,6 +10137,7 @@ export const bootstrapMigration = async ({
       amendSlice,
       addFiles,
       authorization,
+      mode,
       adoption: adoptionPreview && {
         confirmationId: confirmExecution,
         ...adoptionPreview.visualContractAdoption,
@@ -11078,6 +11360,8 @@ const reopenCompleteUnderLock = async ({
   legacyRevision,
   confirmLegacyRevision,
   autoAcknowledge = false,
+  // Who decides. Defaults to the operator: an absent mode is never autonomy.
+  mode = "step",
 }) => {
   const roots = {
     legacyRoot: registryData.legacyRoot,
@@ -11095,6 +11379,11 @@ const reopenCompleteUnderLock = async ({
     throw new Error(`${plan.blockers.join(" ")} Nothing was written.`);
   }
   const { ordered, claim, evidenceIdentity, legacyDrift } = plan;
+  // HEAD, not `gitRevision`'s path-scoped reading: the anchor must be the
+  // commit the reopened slices are proven against and an ancestor of every
+  // later HEAD, which only the tip guarantees.
+  const authority = mode === "auto" ? "AUTO" : "OPERATOR";
+  const targetAnchor = await headRevision(roots.targetRoot);
   const attempt = (await reopenAttemptsOf(root)) + 1;
   const directory = `${REOPEN_ROOT}/${attempt}`;
   if (await fileExists(path.join(root, directory))) {
@@ -11139,8 +11428,20 @@ const reopenCompleteUnderLock = async ({
       evidenceReference: claim,
       evidenceHash: evidenceIdentity,
       slices: ordered,
+      // Who decided. AUTO assents by deriving the transition from valid
+      // evidence; OPERATOR assents by typing --confirm-reopen. The `operator`
+      // field stays the process identity in both cases -- it records where the
+      // transition ran, never a human approval AUTO did not obtain.
+      authority,
       priorRevision: state.revision,
       priorCompletedAt: state.updatedAt,
+      // The committed target state whose preserved PASS is being reopened.
+      // Without it a reopened slice has no provenance for work that was already
+      // committed at COMPLETE, and `validateImplementedSlice` can only prove
+      // ownership from the current uncommitted diff -- which a committed slice
+      // is legitimately absent from. Records written before this field exists
+      // resolve their anchor from the pinned preserved evidence instead.
+      ...(targetAnchor ? { targetAnchor } : {}),
       ...(legacyDrift ?? {}),
       preserved,
     },
@@ -11195,6 +11496,8 @@ const reopenCompleteUnderLock = async ({
     attempt,
     reason: reason.trim(),
     evidenceReference: claim,
+    authority,
+    ...(targetAnchor ? { targetAnchor } : {}),
     // Also re-anchors gate-evidence freshness (`pinnedInputTimestamps`).
     ...(legacyDrift ?? {}),
     preserved: Object.keys(preserved).sort(),
@@ -11420,6 +11723,7 @@ const bootstrapUnderLock = async ({
         legacyRevision,
         confirmLegacyRevision,
         autoAcknowledge: isAutoAuthority(mode),
+        mode,
       });
     }
     if (amendSlice) {

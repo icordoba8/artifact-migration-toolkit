@@ -15008,6 +15008,45 @@ test("R1-1: COMPLETE is immutable by default", async () => {
       null,
       "the AUTO principal may reach --reopen-complete",
     );
+    // AUTO is a declared principal, not an agent standing in for an operator:
+    // a fully specified reopen is authorized under `--mode auto` on its own
+    // account, with no confirmation flag supplied from outside.
+    assert.deepEqual(
+      parseDiscoverArguments([
+        "auth",
+        "--reopen-complete",
+        "slice-a",
+        "--reopen-reason",
+        "because the trace says so",
+        "--reopen-evidence",
+        "audits/audit.md",
+        "--mode",
+        "auto",
+      ]).reopenComplete,
+      ["slice-a"],
+    );
+    // Reason and evidence stay mandatory under AUTO. It decides whether the
+    // supplied evidence authorizes the reopen; it never invents either.
+    assert.match(
+      refusal(["--reopen-complete", "slice-a", "--mode", "auto"]),
+      /--reopen-complete requires --reopen-reason/,
+    );
+    assert.match(
+      refusal([
+        "--reopen-complete",
+        "slice-a",
+        "--mode",
+        "auto",
+        "--reopen-reason",
+        "because the trace says so",
+      ]),
+      /--reopen-complete requires --reopen-evidence/,
+    );
+    // Step keeps the explicit human confirmation, unchanged.
+    assert.match(
+      refusal(["--reopen-complete", "slice-a", "--mode", "step"]),
+      /--reopen-complete requires --confirm-reopen/,
+    );
     assert.throws(
       () => parseRunArguments(["auth", "--reopen-complete", "slice-a"]),
       /--reopen-complete is not accepted by run-migration\.mjs/,
@@ -15022,6 +15061,16 @@ test("R1-1: COMPLETE is immutable by default", async () => {
         preview: { state: "COMPLETE" },
       }),
       false,
+    );
+    // Under AUTO the reopen is authorized by AUTO itself and recorded as AUTO.
+    assert.equal(
+      maySelfConfirm({
+        command: "discover",
+        mode: "auto",
+        reopenComplete: true,
+        preview: { state: "COMPLETE" },
+      }),
+      true,
     );
     assert.deepEqual(await snapshot(fixture.migrationRoot), before);
   } finally {
@@ -15458,6 +15507,462 @@ test("R1-6: a drift acknowledgement with no drift fails closed; a plain reopen i
     const reopened = (await historyEvents(fixture)).at(-1);
     assert.equal(reopened.event, "COMPLETE_REOPENED");
     assert.equal("toLegacyRevision" in reopened, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- R2 reopened-slice committed provenance ---------------------------------
+//
+// The auth-002 report: after COMPLETE -> reopen, the slice's implementation is
+// already committed, so its claimed files are legitimately absent from the
+// current uncommitted diff. Ownership proved only from that diff can therefore
+// never pass, no matter how correct the slice is. A reopened slice proves
+// ownership against its reopen anchor instead.
+
+/**
+ * Re-pin an artifact a test rewrote, and reseal the integrity anchor over the
+ * new pin set -- the same two writes the engine makes, so the only thing the
+ * test has changed is the artifact itself.
+ */
+const repin = async (fixture, relative) => {
+  const statePath = path.join(fixture.migrationRoot, "state.json");
+  const persisted = await readJson(statePath);
+  persisted.artifactHashes[relative] = createHash("sha256")
+    .update(await readFile(path.join(fixture.migrationRoot, relative)))
+    .digest("hex");
+  await writeJson(statePath, persisted);
+  const integrityPath = path.join(fixture.migrationRoot, "integrity.json");
+  const integrity = await readJson(integrityPath);
+  integrity.artifactHashesSha256 = createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(persisted.artifactHashes).sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        ),
+      ),
+    )
+    .digest("hex");
+  await writeJson(integrityPath, integrity);
+};
+
+/** Commit the target work a slice claims, so it leaves the uncommitted diff. */
+const commitTargetSliceWork = async (
+  fixture,
+  message = "slice work",
+  pathspec = "target",
+) => {
+  await execFileAsync("git", ["add", "-A", pathspec], { cwd: fixture.root });
+  await execFileAsync(
+    "git",
+    [
+      "-c",
+      "user.name=Contract Test",
+      "-c",
+      "user.email=contract@example.test",
+      "commit",
+      "-q",
+      "-m",
+      message,
+    ],
+    { cwd: fixture.root },
+  );
+  return revisionOf(fixture.targetRoot);
+};
+
+/** The claimed path really is absent from the live diff -- the exact condition. */
+const assertClaimNotLive = async (fixture, sliceId) => {
+  const claim = (
+    await readJson(path.join(fixture.migrationRoot, `slices/${sliceId}.json`))
+  ).changedFiles[0];
+  const { stdout } = await execFileAsync(
+    "git",
+    ["-C", fixture.targetRoot, "status", "--porcelain=v1", "-uall", "--", "."],
+    { encoding: "utf8" },
+  );
+  assert.ok(
+    !stdout.includes(claim),
+    `${claim} must be committed, not live, for this fixture to exercise the reopened path`,
+  );
+  return claim;
+};
+
+test("R2-1: a reopened slice proves ownership from its anchor once its work is committed", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    // The whole point: the slice implementation is committed before the reopen,
+    // exactly as a finalized migration leaves it.
+    const anchor = await commitTargetSliceWork(
+      fixture,
+      "slice-a work",
+      "target/src/slice-a.ts",
+    );
+    const claim = await assertClaimNotLive(fixture, "slice-a");
+
+    await (await reopenComplete(fixture, ["slice-a"])).run();
+
+    // The reopen bound itself to the committed state it reopened.
+    const record = await readJson(
+      path.join(fixture.migrationRoot, "reopen/1/record.json"),
+    );
+    assert.equal(record.targetAnchor, anchor);
+    const reopened = (await historyEvents(fixture)).at(-1);
+    assert.equal(reopened.targetAnchor, anchor);
+
+    // Verification advances on anchored ownership alone: `claim` is committed,
+    // so the live-diff rule could never have accepted it.
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).currentStep, "FINALIZE");
+    await authorFinalize(fixture);
+    await advance(fixture);
+    const after = await state(fixture);
+    assert.equal(after.status, "COMPLETE");
+    assert.ok(claim);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2-2: an ordinary active slice still proves ownership from the live diff only", async () => {
+  const fixture = await createFixture();
+  try {
+    // Never reopened: the live-diff rule is the only rule, unchanged.
+    await driveTo(fixture, "SLICES");
+    // A committed file the slice never touched, claimed on first authoring so
+    // the refusal is about ownership rather than a post-validation edit.
+    await writeFile(
+      path.join(fixture.targetRoot, "src/never-touched.ts"),
+      "export {};\n",
+    );
+    await commitTargetSliceWork(
+      fixture,
+      "unrelated committed file",
+      "target/src/never-touched.ts",
+    );
+    // Authored in one write: a second write would trip the artifact pin before
+    // the ownership rule under test is ever reached.
+    const planned = (
+      await readJson(path.join(fixture.migrationRoot, "slices/index.json"))
+    ).slices.find((slice) => slice.id === "slice-a");
+    await writeFile(
+      path.join(fixture.targetRoot, "src/slice-a.ts"),
+      "export {};\n",
+    );
+    await writeJson(
+      path.join(fixture.migrationRoot, "slices/slice-a.json"),
+      {
+        id: "slice-a",
+        implementationStatus: "COMPLETE",
+        requirementIds: planned.requirementIds,
+        scenarioIds: planned.scenarioIds,
+        traceIds: planned.traceIds,
+        capabilityIds: planned.capabilityIds,
+        changedFiles: ["src/slice-a.ts", "src/never-touched.ts"],
+        decisions: ["Implemented in the target architecture."],
+        checks: ["typecheck"],
+      },
+    );
+    // Committed, not reopened, therefore not owned: no anchor exists to grant
+    // it. The artifact pin happens to refuse the rewritten record before the
+    // ownership rule is reached -- either way nothing advances, which is the
+    // guarantee. The live-diff rule itself stays covered by P1-7 above.
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /current uncommitted diff|changed after validation/,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2-3: reopened committed ownership fails closed", async () => {
+  // Tampered preserved evidence can never anchor a claim.
+  const tampered = await createFixture();
+  try {
+    await driveTo(tampered, "FINALIZE");
+    await commitTargetSliceWork(tampered, "slice-a work", "target/src/slice-a.ts");
+    await (await reopenComplete(tampered, ["slice-a"])).run();
+    await writeFile(
+      path.join(tampered.migrationRoot, "reopen/1/evidence/slice-a/result.json"),
+      '{"sliceId":"slice-a","result":"PASS"}\n',
+    );
+    await authorEvidence(tampered, "slice-a");
+    await assert.rejects(
+      advance(tampered, { slice: "slice-a" }),
+      /immutable; it was altered|tamper-evident|no longer matches the hash/,
+    );
+  } finally {
+    await tampered.cleanup();
+  }
+
+  // A reopened slice may not rewrite what it owned and claim the rewrite.
+  const rewritten = await createFixture();
+  try {
+    await driveTo(rewritten, "FINALIZE");
+    await commitTargetSliceWork(rewritten, "slice-a work", "target/src/slice-a.ts");
+    await (await reopenComplete(rewritten, ["slice-a"])).run();
+    const slicePath = path.join(rewritten.migrationRoot, "slices/slice-a.json");
+    const record = await readJson(slicePath);
+    await writeFile(
+      path.join(rewritten.targetRoot, "src/smuggled.ts"),
+      "export {};\n",
+    );
+    await writeJson(slicePath, {
+      ...record,
+      changedFiles: [...record.changedFiles, "src/smuggled.ts"],
+    });
+    await authorEvidence(rewritten, "slice-a");
+    await assert.rejects(
+      advance(rewritten, { slice: "slice-a" }),
+      /may not rewrite what it owned|changed after validation/,
+    );
+  } finally {
+    await rewritten.cleanup();
+  }
+
+  // Missing preserved evidence is missing provenance.
+  const missing = await createFixture();
+  try {
+    await driveTo(missing, "FINALIZE");
+    await commitTargetSliceWork(missing, "slice-a work", "target/src/slice-a.ts");
+    await (await reopenComplete(missing, ["slice-a"])).run();
+    await rm(
+      path.join(missing.migrationRoot, "reopen/1/evidence/slice-a/result.json"),
+    );
+    await authorEvidence(missing, "slice-a");
+    await assert.rejects(
+      advance(missing, { slice: "slice-a" }),
+      /REOPEN_EVIDENCE_MISSING|is missing|must survive for life/,
+    );
+  } finally {
+    await missing.cleanup();
+  }
+});
+
+test("R2-4: a claimed file committed after the anchor needs evidence bound to current HEAD", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    await commitTargetSliceWork(fixture, "slice-a work", "target/src/slice-a.ts");
+    await (await reopenComplete(fixture, ["slice-a"])).run();
+
+    // History moves on: the claimed file is committed again after the anchor.
+    await writeFile(
+      path.join(fixture.targetRoot, "src/slice-a.ts"),
+      "export const changed = true;\n",
+    );
+    const head = await commitTargetSliceWork(
+      fixture,
+      "post-anchor change",
+      "target/src/slice-a.ts",
+    );
+
+    await authorEvidence(fixture, "slice-a");
+    // Historical ownership is not current validity: the claim survives, but a
+    // PASS on evidence that predates those commits does not.
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /verifiedAtRevision/,
+    );
+
+    // Evidence bound to the current HEAD clears it; the later commit is never
+    // attributed to the slice.
+    const evidencePath = path.join(
+      fixture.migrationRoot,
+      "evidence/slice-a/result.json",
+    );
+    await writeJson(evidencePath, {
+      ...(await readJson(evidencePath)),
+      verifiedAtRevision: head,
+    });
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).currentStep, "FINALIZE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R2-5: a legacy reopen with no recorded anchor resolves one from its pinned evidence", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    // The slice evidence must be committed for its origin commit to exist in
+    // history -- that is what a legacy record's anchor is resolved from.
+    const anchor = await commitTargetSliceWork(fixture, "slice work + evidence");
+    await (await reopenComplete(fixture, ["slice-a"])).run();
+
+    // Strip the anchor, reproducing a record reopened before the field existed,
+    // and re-pin so only the anchor is missing rather than the integrity.
+    const recordPath = path.join(fixture.migrationRoot, "reopen/1/record.json");
+    const { targetAnchor, ...legacy } = await readJson(recordPath);
+    assert.ok(targetAnchor);
+    await writeJson(recordPath, legacy);
+    await repin(fixture, "reopen/1/record.json");
+
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).currentStep, "FINALIZE");
+    assert.ok(anchor);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- R3: the same reopen, reached the way a consumer reaches it -------------
+//
+// R1/R2 prove the transition in-process against this checkout. This proves it
+// through the installed runtime the real `start-migration` skill resolves: the
+// staged candidate release is installed by the skill's own `ensureRuntime`, and
+// the reopen then runs as the installed CLI with no confirmation, no terminal
+// and no operator supplied from outside -- AUTO assents on its own account.
+test("R3-1: the installed toolkit reopens a COMPLETE record under --mode auto with no external approval", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    assert.equal((await state(fixture)).status, "COMPLETE");
+    // Committed slice work, exactly as a finalized migration leaves it.
+    const anchor = await commitTargetSliceWork(
+      fixture,
+      "slice-a work",
+      "target/src/slice-a.ts",
+    );
+    const claim = await assertClaimNotLive(fixture, "slice-a");
+    const evidence = await postFinalizationEvidence(fixture);
+
+    const { buildRelease, buildReleaseArchive } = await import(
+      "../../../../scripts/release.mjs"
+    );
+    // The real skill file, not a copy of its logic.
+    const { ensureRuntime, verifyDownloadedAsset } = await import(
+      "../../../../skills/start-migration/scripts/runtime.mjs"
+    );
+    const built = await buildRelease({ force: true });
+    const asset = await buildReleaseArchive(built);
+    const runtime = await ensureRuntime(
+      {
+        provider: "codex",
+        root: fixture.targetRoot,
+        store: path.join(fixture.root, "store"),
+      },
+      {
+        resolve: async () => ({
+          asset: {
+            name: path.basename(asset.archive),
+            digest: asset.digest,
+            url: "private://staged-candidate",
+          },
+          commit: built.identity.commit,
+          version: built.identity.version,
+          viaGh: false,
+        }),
+        download: async (resolved, destination) => {
+          await writeFile(destination, await readFile(asset.archive));
+          await verifyDownloadedAsset(destination, resolved.asset.digest);
+        },
+      },
+    );
+    assert.equal(runtime.outcome, "OK");
+    assert.deepEqual(runtime.toolkit, built.identity);
+
+    const installed = async (bin, argv) => {
+      const command = runtime.commands[bin];
+      assert.ok(command, `${bin} is not an installed command`);
+      const result = await execFileAsync(command[0], [...command.slice(1), ...argv], {
+        cwd: fixture.root,
+        encoding: "utf8",
+      }).catch((error) => error);
+      return {
+        output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+        code: result.code ?? 0,
+      };
+    };
+
+    // The record was written by the suite's own fixture toolkit, so the
+    // installed one moves the pin first. That is an identity act, not an
+    // approval of the reopen: it closes no checkpoint and decides nothing.
+    const adopted = await installed("artifact-migration-toolkit", [
+      "update",
+      "--module",
+      "auth",
+    ]);
+    assert.equal(adopted.code, 0, adopted.output);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+
+    // One invocation. No --confirm-reopen, no --confirm-execution, no TTY.
+    const reopen = await installed("artifact-migration-discover", [
+      "auth",
+      ...(await registryArguments(fixture)),
+      "--reopen-complete",
+      "slice-a",
+      "--reopen-reason",
+      "Post-finalization production trace contradicts CAT-SCN-001.",
+      "--reopen-evidence",
+      evidence,
+      ...AUTO,
+    ]);
+    assert.equal(reopen.code, 0, reopen.output);
+    assert.doesNotMatch(reopen.output, /Confirmation ID/);
+    assert.doesNotMatch(reopen.output, /--confirm-reopen|--confirm-execution/);
+
+    const after = await state(fixture);
+    assert.equal(after.status, "ACTIVE");
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.equal(after.activeSlice, "slice-a");
+
+    const reopened = (await historyEvents(fixture)).at(-1);
+    assert.equal(reopened.event, "COMPLETE_REOPENED");
+    assert.equal(reopened.authority, "AUTO");
+    assert.equal(reopened.targetAnchor, anchor);
+    const record = await readJson(
+      path.join(fixture.migrationRoot, "reopen/1/record.json"),
+    );
+    assert.equal(record.targetAnchor, anchor);
+    assert.ok(claim);
+
+    // The reopen is only half the proof: the reopened slice must also verify.
+    // Still the installed CLI, still no confirmation -- and the claim is still
+    // committed, so only anchored reopen provenance can carry it.
+    await authorEvidence(fixture, "slice-a");
+    assert.equal(await assertClaimNotLive(fixture, "slice-a"), claim);
+    assert.equal(record.targetAnchor, await revisionOf(fixture.targetRoot));
+
+    const verified = await installed("artifact-migration-advance", [
+      "auth",
+      "--slice",
+      "slice-a",
+      ...AUTO,
+    ]);
+    assert.equal(verified.code, 0, verified.output);
+    assert.doesNotMatch(verified.output, /Confirmation ID/);
+    assert.doesNotMatch(verified.output, /Reply Yes or No/);
+    assert.doesNotMatch(verified.output, /--confirm-reopen|--confirm-execution/);
+
+    // Past the reopened VERIFY_SLICES condition, on the anchored claim.
+    const finalized = await state(fixture);
+    assert.equal(finalized.status, "ACTIVE");
+    assert.equal(finalized.currentStep, "FINALIZE");
+    const passed = (await historyEvents(fixture)).at(-1);
+    assert.equal(passed.event, "STEP_COMPLETED");
+    assert.equal(passed.step, "VERIFY_SLICES");
+    assert.equal(passed.nextStep, "FINALIZE");
+    // R2-2 proves a committed claim with no anchor is refused and R2-3 proves
+    // this preserved evidence is what the anchored path reads, so its survival
+    // alongside the PASS is what identifies the accepted claim as anchored.
+    assert.equal(
+      (
+        await readJson(
+          path.join(
+            fixture.migrationRoot,
+            "reopen/1/evidence/slice-a/result.json",
+          ),
+        )
+      ).sliceId,
+      "slice-a",
+    );
   } finally {
     await fixture.cleanup();
   }

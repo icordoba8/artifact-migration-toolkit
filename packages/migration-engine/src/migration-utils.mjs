@@ -889,6 +889,132 @@ export const committedChangesSince = async (root, revision) => {
 };
 
 /**
+ * The tip commit of `root`'s repository. `gitRevision` is path-scoped and may
+ * report an older commit; a reopen anchor must be the tip, because only the tip
+ * is guaranteed to be an ancestor of every later HEAD.
+ */
+export const headRevision = async (root) => {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", root, "rev-parse", "HEAD"],
+      { encoding: "utf8" },
+    );
+    return stdout.trim();
+  } catch (error) {
+    throw new Error(`Cannot read Git HEAD for '${root}': ${error.message}`);
+  }
+};
+
+/**
+ * Bytes of `relativePath` as of `revision`, or null when the path did not exist
+ * there. Distinguishing "absent at that commit" from "git failed" is the whole
+ * point: an ownership claim that cannot be read is never silently accepted.
+ */
+export const fileAtRevision = async (root, revision, relativePath) => {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", root, "show", `${revision}:${relativePath}`],
+      { encoding: "buffer", maxBuffer: 32 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return null;
+  }
+};
+
+/** Whether `ancestor` is reachable from `descendant` in `root`'s history. */
+export const isAncestorCommit = async (root, ancestor, descendant) => {
+  try {
+    await execFileAsync(
+      "git",
+      ["-C", root, "merge-base", "--is-ancestor", ancestor, descendant],
+      { encoding: "utf8" },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Commits after `revision` that touched `relativePath`, newest first. Recorded
+ * as the provenance of post-anchor drift so a reopened slice never absorbs
+ * authorship of work committed after the state it was proven against.
+ */
+export const commitsTouchingSince = async (root, revision, relativePath) => {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      [
+        "-C",
+        root,
+        "log",
+        "--format=%H",
+        `${revision}..HEAD`,
+        "--",
+        relativePath,
+      ],
+      { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
+    );
+    return stdout.split("\n").map((value) => value.trim()).filter(Boolean);
+  } catch (error) {
+    throw new Error(
+      `Cannot list commits touching '${relativePath}' since '${revision}' in '${root}': ${error.message}`,
+    );
+  }
+};
+
+/**
+ * Commits that introduced exactly `blobHash` at `relativePath`, oldest first.
+ *
+ * Legacy reopen compatibility: a record written before reopens carried an
+ * explicit anchor has to resolve one from its pinned preserved evidence. The
+ * defensible anchor is the commit where those exact bytes *originated*, not
+ * merely the newest commit that still carries an unchanged blob -- so this
+ * reports every origin and lets the caller fail closed when there is not
+ * exactly one.
+ */
+export const commitsIntroducingBlob = async (root, relativePath, blobHash) => {
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync(
+      "git",
+      [
+        "-C",
+        root,
+        "log",
+        "--format=%H",
+        "--follow",
+        "--diff-filter=AM",
+        "--",
+        relativePath,
+      ],
+      { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
+    ));
+  } catch (error) {
+    throw new Error(
+      `Cannot trace history of '${relativePath}' in '${root}': ${error.message}`,
+    );
+  }
+  const commits = stdout.split("\n").map((v) => v.trim()).filter(Boolean);
+  const origins = [];
+  for (const commit of commits) {
+    const bytes = await fileAtRevision(root, commit, relativePath);
+    if (!bytes) continue;
+    if (createHash("sha256").update(bytes).digest("hex") !== blobHash) continue;
+    // An origin is a commit carrying the bytes whose parent did not.
+    const parent = await fileAtRevision(root, `${commit}^`, relativePath);
+    const parentHash = parent
+      ? createHash("sha256").update(parent).digest("hex")
+      : null;
+    if (parentHash !== blobHash) origins.push(commit);
+  }
+  return origins;
+};
+
+/**
  * The registry binding may only be persisted into a package.json that belongs
  * to the migration itself. `projectRootFor` walks up from the CWD, so without
  * this an invocation from an unrelated directory writes its binding into a

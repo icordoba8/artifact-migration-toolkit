@@ -231,7 +231,16 @@ export const assertOptionCombination = (
     // Invalidating a finalized contract is the heaviest operator act the
     // lifecycle has, so all three parts must be typed: which slices, why, and
     // the evidence that proves it. Any one of them alone fails closed.
-    if (values["reopen-complete"] && !values["confirm-reopen"]) {
+    // Under `--mode auto` the deciding principal is AUTO, and AUTO assents by
+    // deriving the transition, not by typing a flag: requiring a human
+    // confirmation there would demand an operator the mode declares absent.
+    // Reason and evidence stay mandatory in both modes -- AUTO decides whether
+    // supplied evidence authorizes the reopen, it never supplies it.
+    if (
+      values["reopen-complete"] &&
+      !values["confirm-reopen"] &&
+      values.mode !== "auto"
+    ) {
       throw new Error(
         "--reopen-complete requires --confirm-reopen: it invalidates the finalized verification of a COMPLETE migration.",
       );
