@@ -926,7 +926,8 @@ that, and only that:
 ```bash
 artifact-migration-discover <module> --reopen-complete <slice[,slice...]> \
   --reopen-reason "<why the finalized contract stopped being true>" \
-  --reopen-evidence <repository-relative path> --confirm-reopen
+  --reopen-evidence <repository-relative path> --confirm-reopen \
+  [--confirm-legacy-revision <current legacy revision>]
 ```
 
 It is operator-only and two-phase like `--reopen-ui`: legal only from status
@@ -954,9 +955,19 @@ Nothing else moves. Unnamed slices, every inventory, matrix, plan and operator
 decision keep their pins and stay valid; `slices/<slice-id>.json` stays pinned,
 because a reopen invalidates a *verification*, not an implementation — a slice
 whose implementation is also wrong records `FAIL` with `defects[]` and returns to
-implementation through `--rework-slice`. No legacy revision is repinned, so
-repository drift still blocks and still needs `--refresh`, and `FINALIZE` re-runs
-the unclaimed-target-drift refusal unchanged. Deleting or altering anything under
+implementation through `--rework-slice`. `FINALIZE` re-runs the
+unclaimed-target-drift refusal unchanged.
+
+If the legacy revision moved since `COMPLETE`, the reopen is blocked until the
+operator also types `--confirm-legacy-revision <sha>` with the exact current
+revision; a missing or different SHA, or the flag with no drift, fails closed.
+The acknowledged move is bound into the confirmation ID, recorded as
+`fromLegacyRevision`/`toLegacyRevision` in `reopen/<n>/record.json` and the
+`COMPLETE_REOPENED` event, and becomes the record's `legacyRevision`. Nothing
+else is released for it — slice evidence is not revision-bound, and the released
+`FINALIZE` gates must be re-proven against the new revision, produced after the
+reopen. Without the flag no revision is repinned; a drift the named slices do
+not cover still needs `--refresh`. Deleting or altering anything under
 `reopen/` is refused with `REOPEN_EVIDENCE_MISSING` or as altered preserved
 evidence. A `COMPLETE` record that nobody reopens is never touched by any of this.
 

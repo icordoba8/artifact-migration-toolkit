@@ -6735,7 +6735,8 @@ const pinnedInputTimestamps = async (root, state) => {
   let legacyRevisionPinnedAt = state.createdAt;
   for (const event of events) {
     if (
-      ["REFRESHED", "UI_REMEDIATION_REOPENED"].includes(event.event) &&
+      (["REFRESHED", "UI_REMEDIATION_REOPENED"].includes(event.event) ||
+        (event.event === "COMPLETE_REOPENED" && event.toLegacyRevision)) &&
       typeof event.at === "string"
     ) {
       if (
@@ -8372,6 +8373,7 @@ export const previewMigrationExecution = async ({
   reopenComplete = [],
   reopenReason = null,
   reopenEvidence = null,
+  confirmLegacyRevision = null,
   reworkSlice = null,
   amendSlice = null,
   addFiles = [],
@@ -8663,7 +8665,14 @@ export const previewMigrationExecution = async ({
       blockers.push(error.message);
     }
   }
-  if (legacyRevisionChanged && !refresh && reopenUi.length === 0) {
+  // `--reopen-complete` owns its drift check (`reopenCompletePlan`), where
+  // the operator may acknowledge the exact new revision.
+  if (
+    legacyRevisionChanged &&
+    !refresh &&
+    reopenUi.length === 0 &&
+    reopenComplete.length === 0
+  ) {
     blockers.push(
       `Legacy revision changed from '${state.legacyRevision.revision}' to '${currentLegacyRevision.revision}'. Review the mismatch before using --refresh --confirm-mismatch.`,
     );
@@ -8784,7 +8793,13 @@ export const previewMigrationExecution = async ({
       root,
       state,
       { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot },
-      { slices: reopenComplete, reason: reopenReason, evidence: reopenEvidence },
+      {
+        slices: reopenComplete,
+        reason: reopenReason,
+        evidence: reopenEvidence,
+        legacyRevision: currentLegacyRevision,
+        confirmLegacyRevision,
+      },
     );
     blockers.push(...plan.blockers);
     const attempt = (await reopenAttemptsOf(root)) + 1;
@@ -8794,9 +8809,11 @@ export const previewMigrationExecution = async ({
       reason: typeof reopenReason === "string" ? reopenReason.trim() : null,
       evidenceReference: plan.claim,
       evidenceHash: plan.evidenceIdentity,
+      // Absent without drift, so a no-drift confirmation ID is unchanged.
+      ...(plan.legacyDrift ? { legacyRevision: plan.legacyDrift } : {}),
     };
     action = "Invalidate the named slices' finalized verification and reopen the completed migration";
-    reason = `Post-finalization evidence (${plan.claim ?? reopenEvidence ?? "none"}) proves part of the finalized contract wrong: ${typeof reopenReason === "string" ? reopenReason.trim() : "no reason given"}. The superseded verification is preserved under ${REOPEN_ROOT}/${attempt}/ and stays pinned for life; every unnamed slice, every inventory and every operator decision keeps its pin.`;
+    reason = `Post-finalization evidence (${plan.claim ?? reopenEvidence ?? "none"}) proves part of the finalized contract wrong: ${typeof reopenReason === "string" ? reopenReason.trim() : "no reason given"}. The superseded verification is preserved under ${REOPEN_ROOT}/${attempt}/ and stays pinned for life; every unnamed slice, every inventory and every operator decision keeps its pin.${plan.legacyDrift && confirmLegacyRevision === currentLegacyRevision.revision ? ` The operator acknowledges the legacy revision change '${plan.legacyDrift.fromLegacyRevision.revision}' -> '${plan.legacyDrift.toLegacyRevision.revision}'; the reopened slices and FINALIZE are reverified against the new revision.` : ""}`;
     artifacts = [
       "state.json",
       "history/history.ndjson",
@@ -9566,6 +9583,7 @@ export const bootstrapMigration = async ({
   reopenComplete = [],
   reopenReason = null,
   reopenEvidence = null,
+  confirmLegacyRevision = null,
   reworkSlice = null,
   amendSlice = null,
   addFiles = [],
@@ -9628,6 +9646,7 @@ export const bootstrapMigration = async ({
       reopenComplete,
       reopenReason,
       reopenEvidence,
+      confirmLegacyRevision,
       reworkSlice,
       amendSlice,
       addFiles,
@@ -10635,9 +10654,13 @@ const reopenUiUnderLock = async ({
  *
  * Deliberately narrow. It releases the named slices' evidence and the FINALIZE
  * pins and nothing else: discovery, baseline, plan, operator decisions and every
- * unnamed slice stay pinned and stay valid. It moves no legacy revision, so
- * repository drift still blocks and still needs `--refresh`. And it never edits
- * the target, so FINALIZE re-runs the unclaimed-drift refusal unchanged.
+ * unnamed slice stay pinned and stay valid. Path-scoped legacy drift blocks it
+ * unless the operator types the exact current revision with
+ * `--confirm-legacy-revision`; the record then moves to that revision, and the
+ * move is kept in the reopen record and event. Nothing else is released for it:
+ * slice evidence is not revision-bound, and the FINALIZE gates it releases
+ * anyway are re-proven against the new revision. And it never edits the
+ * target, so FINALIZE re-runs the unclaimed-drift refusal unchanged.
  * ------------------------------------------------------------------ */
 
 /**
@@ -10648,9 +10671,22 @@ const reopenCompletePlan = async (
   root,
   state,
   roots,
-  { slices, reason, evidence },
+  { slices, reason, evidence, legacyRevision, confirmLegacyRevision = null },
 ) => {
   const blockers = [];
+  const drifted = state.legacyRevision.revision !== legacyRevision.revision;
+  if (drifted && confirmLegacyRevision !== legacyRevision.revision) {
+    blockers.push(
+      confirmLegacyRevision
+        ? `--confirm-legacy-revision '${confirmLegacyRevision}' does not match the current legacy revision '${legacyRevision.revision}'. Nothing was acknowledged.`
+        : `Legacy revision changed from '${state.legacyRevision.revision}' to '${legacyRevision.revision}'. A COMPLETE reopen may acknowledge it with --confirm-legacy-revision ${legacyRevision.revision}; otherwise review the mismatch before using --refresh --confirm-mismatch.`,
+    );
+  }
+  if (!drifted && confirmLegacyRevision) {
+    blockers.push(
+      `--confirm-legacy-revision was given, but the legacy revision has not changed from '${state.legacyRevision.revision}'. There is no drift to acknowledge.`,
+    );
+  }
   if (state.status !== "COMPLETE") {
     blockers.push(
       `--reopen-complete is legal only for a COMPLETE migration; the current status is '${state.status}'. A migration that has not finalized is corrected by advancing it, not by reopening it.`,
@@ -10691,7 +10727,13 @@ const reopenCompletePlan = async (
       blockers.push(`--reopen-complete names unknown slice '${sliceId}'.`);
     }
   }
-  return { blockers, ordered, claim, evidenceIdentity };
+  const legacyDrift = drifted
+    ? {
+        fromLegacyRevision: state.legacyRevision,
+        toLegacyRevision: legacyRevision,
+      }
+    : null;
+  return { blockers, ordered, claim, evidenceIdentity, legacyDrift };
 };
 
 /** How many reopens this record has already recorded, read off the audit log. */
@@ -10709,6 +10751,8 @@ const reopenCompleteUnderLock = async ({
   slices,
   reason,
   evidence,
+  legacyRevision,
+  confirmLegacyRevision,
 }) => {
   const roots = {
     legacyRoot: registryData.legacyRoot,
@@ -10718,11 +10762,13 @@ const reopenCompleteUnderLock = async ({
     slices,
     reason,
     evidence,
+    legacyRevision,
+    confirmLegacyRevision,
   });
   if (plan.blockers.length > 0) {
     throw new Error(`${plan.blockers.join(" ")} Nothing was written.`);
   }
-  const { ordered, claim, evidenceIdentity } = plan;
+  const { ordered, claim, evidenceIdentity, legacyDrift } = plan;
   const attempt = (await reopenAttemptsOf(root)) + 1;
   const directory = `${REOPEN_ROOT}/${attempt}`;
   if (await fileExists(path.join(root, directory))) {
@@ -10769,6 +10815,7 @@ const reopenCompleteUnderLock = async ({
       slices: ordered,
       priorRevision: state.revision,
       priorCompletedAt: state.updatedAt,
+      ...(legacyDrift ?? {}),
       preserved,
     },
     null,
@@ -10809,6 +10856,7 @@ const reopenCompleteUnderLock = async ({
     evidenceFreshness: "STALE",
     nextAction: `Correct and reverify slice '${ordered[0]}' against the evidence recorded in ${recordRelative}. A slice whose implementation is wrong records FAIL with defects[] and returns to implementation with --rework-slice.`,
     nextCommand: `/start-migration ${resolved.canonical}`,
+    ...(legacyDrift ? { legacyRevision: legacyDrift.toLegacyRevision } : {}),
     artifactHashes,
     revision: state.revision + 1,
     updatedAt: now(),
@@ -10821,6 +10869,8 @@ const reopenCompleteUnderLock = async ({
     attempt,
     reason: reason.trim(),
     evidenceReference: claim,
+    // Also re-anchors gate-evidence freshness (`pinnedInputTimestamps`).
+    ...(legacyDrift ?? {}),
     preserved: Object.keys(preserved).sort(),
     revision: reopened.revision,
   };
@@ -10897,6 +10947,7 @@ const bootstrapUnderLock = async ({
   reopenComplete = [],
   reopenReason = null,
   reopenEvidence = null,
+  confirmLegacyRevision = null,
   reworkSlice,
   amendSlice,
   addFiles,
@@ -10957,7 +11008,8 @@ const bootstrapUnderLock = async ({
     if (
       state.legacyRevision.revision !== legacyRevision.revision &&
       !refresh &&
-      reopenUi.length === 0
+      reopenUi.length === 0 &&
+      reopenComplete.length === 0
     ) {
       throw new Error(
         `Legacy revision changed from '${state.legacyRevision.revision}' to '${legacyRevision.revision}'. This is repository evidence drift, not a session or model interruption. Review the new legacy evidence and rerun with --refresh --confirm-mismatch.`,
@@ -11024,6 +11076,8 @@ const bootstrapUnderLock = async ({
         slices: reopenComplete,
         reason: reopenReason,
         evidence: reopenEvidence,
+        legacyRevision,
+        confirmLegacyRevision,
       });
     }
     if (amendSlice) {

@@ -269,7 +269,7 @@ against the repository being migrated:
 artifact-migration-discover <module> --status | --scan | --reopen-discovery
 artifact-migration-discover <module> [--target <t>] [--openspec-proposal-stdin] [--confirm-execution <id>]   # bootstrap
 artifact-migration-discover <module> --refresh --confirm-mismatch
-artifact-migration-discover <module> --reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen
+artifact-migration-discover <module> --reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]
 artifact-migration-decision <module> --pending | --approve <stable-id> | --list
 artifact-migration-registry <module> --target <target> [--alias <alias>]
 artifact-migration-upgrade <module> [--confirm-upgrade <id> | --rollback | --recover]

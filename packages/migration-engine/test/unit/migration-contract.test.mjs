@@ -15222,3 +15222,230 @@ test("R1-4: invalid reopen requests fail closed", async () => {
     await fixture.cleanup();
   }
 });
+
+// --- R1 drift: a COMPLETE reopen over path-scoped legacy drift ---------------
+//
+// The auth report: a COMPLETE record whose legacy revision moved could not be
+// reopened at all -- the drift blocker fired before the reopen was planned, and
+// the only way out was a full --refresh back to DISCOVER_LEGACY.
+
+/** One committed change under the module's legacy path: path-scoped drift. */
+const commitLegacyDrift = async (fixture) => {
+  await writeFile(
+    path.join(fixture.legacyRoot, "auth/marker.txt"),
+    "auth\nnew revision\n",
+  );
+  await execFileAsync("git", ["add", "legacy/auth/marker.txt"], {
+    cwd: fixture.root,
+  });
+  await execFileAsync(
+    "git",
+    [
+      "-c",
+      "user.name=Contract Test",
+      "-c",
+      "user.email=contract@example.test",
+      "commit",
+      "-q",
+      "-m",
+      "legacy drift",
+    ],
+    { cwd: fixture.root },
+  );
+  return revisionOf(fixture.legacyRoot);
+};
+
+const FINALIZE_PINS = ["steps/08-finalize.md", "gates.json"];
+
+test("R1-5: a COMPLETE reopen acknowledges legacy drift, keeps every unaffected pin, and completes again", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    const before = await state(fixture);
+    const oldRevision = before.legacyRevision.revision;
+    const newRevision = await commitLegacyDrift(fixture);
+    assert.notEqual(newRevision, oldRevision);
+    const evidence = await postFinalizationEvidence(fixture);
+    const supersededBytes = await readFile(
+      path.join(fixture.migrationRoot, "evidence/slice-a/result.json"),
+    );
+    const untouched = await snapshot(fixture.migrationRoot);
+    const reopenArguments = [
+      "--reopen-complete",
+      "slice-a",
+      "--confirm-reopen",
+      "--reopen-reason",
+      "Post-finalization production trace contradicts CAT-SCN-001.",
+      "--reopen-evidence",
+      evidence,
+    ];
+
+    // Missing, wrong, or preview-bypassing acknowledgements fail closed.
+    const missing = await discoverCli(fixture, reopenArguments);
+    assert.equal(missing.blocked, true);
+    assert.match(
+      missing.preview.blockers.join("\n"),
+      new RegExp(`--confirm-legacy-revision ${newRevision}`),
+    );
+    const wrong = await discoverCli(fixture, [
+      ...reopenArguments,
+      "--confirm-legacy-revision",
+      oldRevision,
+    ]);
+    assert.equal(wrong.blocked, true);
+    assert.match(
+      wrong.preview.blockers.join("\n"),
+      /does not match the current legacy revision/,
+    );
+    const bypass = await reopenComplete(fixture, ["slice-a"], { evidence });
+    await assert.rejects(
+      bypass.run(),
+      /Legacy revision changed .*--confirm-legacy-revision.*Nothing was written/s,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), untouched);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+
+    // The acknowledged revision is part of what the operator confirms.
+    const acknowledged = [
+      ...reopenArguments,
+      "--confirm-legacy-revision",
+      newRevision,
+    ];
+    const offered = await discoverCli(fixture, acknowledged);
+    assert.equal(offered.awaitingConfirmation, true);
+    assert.equal(offered.preview.expectedNextCheckpoint, "VERIFY_SLICES");
+    assert.deepEqual(
+      offered.preview.reopenComplete.legacyRevision.fromLegacyRevision,
+      before.legacyRevision,
+    );
+    assert.equal(
+      offered.preview.reopenComplete.legacyRevision.toLegacyRevision.revision,
+      newRevision,
+    );
+    const done = await discoverCli(fixture, [
+      ...acknowledged,
+      "--confirm-execution",
+      offered.preview.confirmationId,
+    ]);
+    assert.equal(done.result.reopened, true);
+
+    const after = await state(fixture);
+    assert.equal(after.status, "ACTIVE");
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.equal(after.activeSlice, "slice-a");
+    assert.deepEqual(after.completedSlices, ["slice-b"]);
+    assert.equal(after.legacyRevision.revision, newRevision);
+    // Only the named slice's verification and FINALIZE are released; every
+    // other pin -- inventories, plan, slice-b, implementation records -- holds.
+    for (const [relative, hash] of Object.entries(before.artifactHashes)) {
+      if (
+        relative === "evidence/slice-a/result.json" ||
+        FINALIZE_PINS.includes(relative)
+      ) {
+        assert.equal(after.artifactHashes[relative], undefined, relative);
+      } else {
+        assert.equal(after.artifactHashes[relative], hash, relative);
+      }
+    }
+    // The previous COMPLETE's proof and the drift acknowledgement are kept.
+    assert.deepEqual(
+      await readFile(
+        path.join(fixture.migrationRoot, "reopen/1/evidence/slice-a/result.json"),
+      ),
+      supersededBytes,
+    );
+    assert.ok(after.artifactHashes["reopen/1/evidence/slice-a/result.json"]);
+    assert.ok(after.artifactHashes["reopen/1/record.json"]);
+    const record = await readJson(
+      path.join(fixture.migrationRoot, "reopen/1/record.json"),
+    );
+    assert.equal(record.fromLegacyRevision.revision, oldRevision);
+    assert.equal(record.toLegacyRevision.revision, newRevision);
+    assert.match(record.reason, /production trace/i);
+    assert.match(record.evidenceReference, /audits\/audit\.md$/);
+    assert.ok(record.evidenceHash);
+    const reopened = (await historyEvents(fixture)).at(-1);
+    assert.equal(reopened.event, "COMPLETE_REOPENED");
+    assert.equal(reopened.fromLegacyRevision.revision, oldRevision);
+    assert.equal(reopened.toLegacyRevision.revision, newRevision);
+
+    // Resume reads the moved revision as current: no drift blocker remains.
+    const resolution = await resolutionFor(fixture);
+    const resumed = await previewMigrationExecution({
+      ...resolution,
+      moduleName: "auth",
+    });
+    assert.deepEqual(resumed.blockers, []);
+    assert.equal(resumed.currentCheckpoint, "VERIFY_SLICES");
+
+    // Corrected, reverified, and COMPLETE again on the new revision.
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).currentStep, "FINALIZE");
+    await authorFinalize(fixture);
+    await advance(fixture);
+    const completed = await state(fixture);
+    assert.equal(completed.status, "COMPLETE");
+    assert.equal(completed.legacyRevision.revision, newRevision);
+    assert.deepEqual([...completed.completedSlices].sort(), [
+      "slice-a",
+      "slice-b",
+    ]);
+    assert.ok(completed.artifactHashes["reopen/1/evidence/slice-a/result.json"]);
+    assert.ok(completed.artifactHashes["reopen/1/record.json"]);
+    assert.equal(
+      completed.artifactHashes["evidence/slice-b/result.json"],
+      before.artifactHashes["evidence/slice-b/result.json"],
+    );
+    const final = await previewMigrationExecution({
+      ...resolution,
+      moduleName: "auth",
+    });
+    assert.equal(final.state, "COMPLETE");
+    assert.deepEqual(final.blockers, []);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("R1-6: a drift acknowledgement with no drift fails closed; a plain reopen is unchanged", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    const before = await state(fixture);
+    await postFinalizationEvidence(fixture);
+    const untouched = await snapshot(fixture.migrationRoot);
+
+    assert.throws(
+      () =>
+        parseDiscoverArguments([
+          "auth",
+          "--confirm-legacy-revision",
+          before.legacyRevision.revision,
+        ]),
+      /--confirm-legacy-revision requires --reopen-complete/,
+    );
+    const stray = await reopenComplete(fixture, ["slice-a"], {
+      options: { confirmLegacyRevision: before.legacyRevision.revision },
+    });
+    assert.match(stray.preview.blockers.join("\n"), /no drift to acknowledge/);
+    await assert.rejects(stray.run(), /no drift to acknowledge/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), untouched);
+
+    const plain = await reopenComplete(fixture, ["slice-a"]);
+    assert.deepEqual(plain.preview.blockers, []);
+    assert.equal("legacyRevision" in plain.preview.reopenComplete, false);
+    await plain.run();
+    const after = await state(fixture);
+    assert.deepEqual(after.legacyRevision, before.legacyRevision);
+    const record = await readJson(
+      path.join(fixture.migrationRoot, "reopen/1/record.json"),
+    );
+    assert.equal("fromLegacyRevision" in record, false);
+    const reopened = (await historyEvents(fixture)).at(-1);
+    assert.equal(reopened.event, "COMPLETE_REOPENED");
+    assert.equal("toLegacyRevision" in reopened, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
