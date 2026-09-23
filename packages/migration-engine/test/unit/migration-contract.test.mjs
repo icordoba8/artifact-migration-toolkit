@@ -8099,6 +8099,12 @@ test("no provider tree carries its own copy of the migration state machine", asy
   }
   // Parity is worthless if the one authored copy never states the rules, so
   // the content every provider inherits is pinned here rather than assumed.
+  //
+  // Matched against whitespace-collapsed prose: the rules below are sentences,
+  // but the document hard-wraps at the column, so a literal `includes` pins the
+  // line breaks as well as the words and silently stops matching the moment a
+  // paragraph is re-flowed. What is pinned here is the wording, not the wrap.
+  const prose = skill.replace(/\s+/g, " ");
   for (const rule of [
     "## Progress presentation",
     "Never derive displayed progress from source files",
@@ -8107,14 +8113,14 @@ test("no provider tree carries its own copy of the migration state machine", asy
     "never sort, filter, merge, rename or add",
     "both on every outcome",
     "On every iteration, render canonical progress",
-    "never reformat, re-order, translate, summarize, add emoji to, or add percentages",
+    "Never reformat, re-order, translate, summarize, add emoji to, or add percentages",
     "`progressChecklist` verbatim inside a fenced code block",
     "never required to execute a migration",
     "### Never author a migration plan",
     "A progress row is a display, never a control",
     "never through a model-callable affordance",
   ]) {
-    assert.ok(skill.includes(rule), `the protocol no longer states: ${rule}`);
+    assert.ok(prose.includes(rule), `the protocol no longer states: ${rule}`);
   }
 });
 
