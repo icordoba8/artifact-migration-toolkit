@@ -58,6 +58,235 @@ const typescriptCheck = (status = "PASS", project = "tsconfig.json") => ({
   validator: { kind: "TYPESCRIPT", project },
   status,
 });
+
+test("two exact in-place sources keep frozen provenance through ordered slices and FINALIZE", async () => {
+  const fixture = await createFixture();
+  const primary = "legacy/widget/source.ts";
+  const columns = "legacy/widget/consumer-a.ts";
+  const sibling = "legacy/widget/consumer-b.ts";
+  fixture.sourceRoot = fixture.root;
+  fixture.targetRoot = fixture.root;
+  fixture.options = {
+    source: primary,
+    sources: [columns, `./${columns}`, primary],
+    target: primary,
+    type: "component",
+    sourceRoot: fixture.root,
+    targetRoot: fixture.root,
+  };
+  fixture.id = artifactIdFor({ source: primary, type: "component" });
+  fixture.artifactRoot = artifactRoot(fixture.root, fixture.id);
+  try {
+    await writeFile(path.join(fixture.root, sibling), "export const b = true;\n");
+    await writeFile(path.join(fixture.root, columns), 'import "./consumer-b";\nexport const a = true;\n');
+    await writeJson(fixture.root, "tsconfig.json", {
+      compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext", noEmit: true, skipLibCheck: true, target: "ES2022" },
+      include: ["legacy/widget/*.ts"],
+    });
+    const before = Object.fromEntries(await Promise.all([primary, columns].map(async (file) => [file, await digest(path.join(fixture.root, file))])));
+    const parsed = parseArtifactArguments([primary, "--source", columns, "--source", `./${columns}`, "--source", primary]);
+    assert.deepEqual(parsed.sources, [columns, `./${columns}`, primary]);
+    await bootstrap(fixture);
+    let state = await stateOf(fixture);
+    const paths = [columns, primary].sort();
+    assert.deepEqual(state.bindings.source.paths, paths);
+    assert.deepEqual(state.bindings.target.paths, paths);
+    assert.ok(!state.bindings.source.paths.includes(sibling));
+    const frozen = structuredClone(state.bindings.source);
+    for (const entry of frozen.entries) assert.equal(entry.sha256, before[entry.path]);
+    assert.deepEqual(parseArtifactArguments(artifactArgumentsFor(state)).sources, [columns]);
+
+    const event = JSON.parse((await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8")).trim());
+    await writeJson(fixture.artifactRoot, "transaction.json", { version: 1, state, event });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    assert.deepEqual((await stateOf(fixture)).bindings.source, frozen);
+
+    const sourceDocument = {
+      version: 1, artifactId: fixture.id, hasVisibleUi: false,
+      sourceFiles: [primary],
+      behaviors: [
+        { id: "B-dialog", description: "Dialog behavior", visible: false, evidence: [{ path: primary, sha256: before[primary], status: "VERIFIED" }] },
+        { id: "B-columns", description: "Columns behavior", visible: false, evidence: [{ path: columns, sha256: before[columns], status: "VERIFIED" }] },
+      ],
+      globalContracts: [], featureLocalVisuals: [], operatorDecisions: [],
+    };
+    await writeJson(fixture.artifactRoot, "inventories/source.json", sourceDocument);
+    assert.match((await runArtifact(fixture.options)).reason, /source inventory.sourceFiles/);
+    sourceDocument.sourceFiles = paths;
+    await writeJson(fixture.artifactRoot, "inventories/source.json", sourceDocument);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    const scan = await runDiscoveryScan({
+      legacyRoot: fixture.root, moduleRoots: paths,
+      typescript: requireFrom(import.meta.url)("ts-discovery-compiler"),
+    });
+    assert.deepEqual(scan.census, paths);
+    const units = [
+      { path: `${primary}#source`, disposition: "MIGRATED_BEHAVIOR", ref: "B-dialog" },
+      { path: `${columns}#a`, disposition: "MIGRATED_BEHAVIOR", ref: "B-columns" },
+    ];
+    await writeJson(fixture.artifactRoot, "inventories/completeness.json", {
+      version: 1, sourceFiles: paths, units,
+      requirements: [{ element: sibling, disposition: "MIGRATED_BEHAVIOR", ref: "B-columns" }],
+    });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeJson(fixture.artifactRoot, "inventories/target.json", {
+      version: 1, artifactId: fixture.id, resolution: "MIGRATE_NEW",
+      targetFiles: paths, targetNative: [], evidence: [],
+    });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    assert.deepEqual((await stateOf(fixture)).bindings.target.paths, paths);
+    const parity = { version: 1, rows: ["B-dialog", "B-columns"].map((behaviorId, index) => ({
+      id: `P-${index + 1}`, behaviorId, resolution: "MIGRATE_NEW", status: "PLANNED", targetEvidence: [],
+    })) };
+    await Promise.all([
+      writeJson(fixture.artifactRoot, "matrices/parity.json", parity),
+      writeJson(fixture.artifactRoot, "matrices/target-native.json", { version: 1, rows: [] }),
+      writeJson(fixture.artifactRoot, "matrices/design-system.json", { version: 1, rows: [] }),
+      writeJson(fixture.artifactRoot, "matrices/global-contract.json", { version: 1, rows: [] }),
+    ]);
+    const built = await runArtifact(fixture.options);
+    assert.equal((await stateOf(fixture)).currentStep, "PLAN", built.reason);
+    await writeJson(fixture.artifactRoot, "slices/index.json", { version: 1, slices: [
+      { id: "slice-dialog", behaviorIds: ["B-dialog"], dependsOn: [], kind: "NEW" },
+      { id: "slice-columns", behaviorIds: ["B-columns"], dependsOn: ["slice-dialog"], kind: "NEW" },
+    ] });
+    const premature = await runArtifact({ ...fixture.options, slice: "slice-columns" });
+    assert.equal(premature.outcome, "BLOCKED");
+    assert.match(premature.reason, /requires completed slices: slice-dialog/);
+    assert.equal((await stateOf(fixture)).currentStep, "PLAN");
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+
+    for (const [slice, file, behaviorId, bytes] of [
+      ["slice-dialog", primary, "B-dialog", "export const source = 2;\n"],
+      ["slice-columns", columns, "B-columns", 'import { source } from "./source";\nimport "./consumer-b";\nexport const a = source + 1;\n'],
+    ]) {
+      assert.equal((await stateOf(fixture)).activeSlice, slice);
+      await writeFile(path.join(fixture.root, file), bytes);
+      const changed = { path: file, sha256: await digest(path.join(fixture.root, file)) };
+      await writeJson(fixture.artifactRoot, `slices/${slice}.json`, {
+        version: 1, sliceId: slice, status: "COMPLETE", changedFiles: [changed],
+        checks: [typescriptCheck()], preservedTargetNativeIds: [],
+      });
+      const ready = await getArtifactStatus(fixture.options);
+      assert.equal(ready.status, "ACTIVE", ready.reason);
+      assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+      state = await stateOf(fixture);
+      assert.deepEqual(state.bindings.source, frozen);
+      assert.equal(state.bindings.target.entries.find((entry) => entry.path === file).sha256, changed.sha256);
+      await writeJson(fixture.artifactRoot, `evidence/${slice}/result.json`, {
+        version: 1, sliceId: slice, status: "PASS", runtimeEvidence: [],
+        checks: [{ behaviorId, status: "PASS", evidence: [{ ...changed, status: "VERIFIED" }] }],
+      });
+      assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+      assert.deepEqual((await stateOf(fixture)).bindings.source, frozen);
+    }
+    for (const row of parity.rows) {
+      row.status = "VERIFIED";
+      const file = row.behaviorId === "B-dialog" ? primary : columns;
+      row.targetEvidence = [{ path: file, sha256: await digest(path.join(fixture.root, file)), status: "VERIFIED" }];
+    }
+    await writeJson(fixture.artifactRoot, "matrices/parity.json", parity);
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture, { requirementElements: [sibling] }));
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    assert.match(await readFile(path.join(fixture.root, columns), "utf8"), /import "\.\/consumer-b"/);
+    assert.ok(JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/completeness.json"), "utf8"))
+      .requirements.some((row) => row.element === sibling));
+    assert.deepEqual((await stateOf(fixture)).bindings.source, frozen);
+    await writeFile(path.join(fixture.root, primary), "export const source = 'tampered';\n");
+    const tampered = await getArtifactStatus(fixture.options);
+    assert.equal(tampered.status, "STALE");
+    assert.deepEqual(tampered.stale.sourceDrift, []);
+    assert.ok(tampered.stale.targetDrift.includes(primary));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FINALIZE reports a same-root bound legacy import outside migrated overlap paths", async () => {
+  const fixture = await createFixture();
+  const migrated = "legacy/widget/source.ts";
+  const legacy = "legacy/widget/consumer-a.ts";
+  fixture.sourceRoot = fixture.root;
+  fixture.targetRoot = fixture.root;
+  fixture.options = {
+    source: migrated, sources: [legacy], target: migrated, type: "component",
+    sourceRoot: fixture.root, targetRoot: fixture.root,
+  };
+  fixture.id = artifactIdFor({ source: migrated, type: "component" });
+  fixture.artifactRoot = artifactRoot(fixture.root, fixture.id);
+  try {
+    await writeJson(fixture.root, "tsconfig.json", {
+      compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext", noEmit: true, skipLibCheck: true, target: "ES2022" },
+      include: ["legacy/widget/*.ts"],
+    });
+    await bootstrap(fixture);
+    let state = await stateOf(fixture);
+    const paths = [legacy, migrated].sort();
+    assert.deepEqual(state.bindings.source.paths, paths);
+    assert.deepEqual(state.bindings.target.paths, paths);
+    await writeJson(fixture.artifactRoot, "inventories/source.json", {
+      version: 1, artifactId: fixture.id, hasVisibleUi: false, sourceFiles: paths,
+      behaviors: [{
+        id: "B-1", description: "The source behavior is migrated.", visible: false,
+        evidence: await Promise.all(paths.map(async (file) => ({
+          path: file, sha256: await digest(path.join(fixture.root, file)), status: "VERIFIED",
+        }))),
+      }],
+      globalContracts: [], featureLocalVisuals: [], operatorDecisions: [],
+    });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeJson(fixture.artifactRoot, "inventories/completeness.json", {
+      version: 1, sourceFiles: paths,
+      units: ["legacy/widget/source.ts#source", "legacy/widget/consumer-a.ts#a"].map((file) => ({
+        path: file, disposition: "MIGRATED_BEHAVIOR", ref: "B-1",
+      })),
+      requirements: [],
+    });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeJson(fixture.artifactRoot, "inventories/target.json", {
+      version: 1, artifactId: fixture.id, resolution: "MIGRATE_NEW",
+      targetFiles: [migrated], targetNative: [], evidence: [],
+    });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    const parity = { version: 1, rows: [{
+      id: "P-1", behaviorId: "B-1", resolution: "MIGRATE_NEW", status: "PLANNED", targetEvidence: [],
+    }] };
+    await Promise.all([
+      writeJson(fixture.artifactRoot, "matrices/parity.json", parity),
+      writeJson(fixture.artifactRoot, "matrices/target-native.json", { version: 1, rows: [] }),
+      writeJson(fixture.artifactRoot, "matrices/design-system.json", { version: 1, rows: [] }),
+      writeJson(fixture.artifactRoot, "matrices/global-contract.json", { version: 1, rows: [] }),
+    ]);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await advancePlan(fixture, "MIGRATE_NEW");
+    await writeFile(path.join(fixture.root, migrated),
+      'import { a } from "./consumer-a";\nexport const source = a;\n');
+    await writeJson(fixture.artifactRoot, "slices/slice-1.json", {
+      version: 1, sliceId: "slice-1", status: "COMPLETE",
+      changedFiles: [{ path: migrated, sha256: await digest(path.join(fixture.root, migrated)) }],
+      checks: [typescriptCheck()], preservedTargetNativeIds: [],
+    });
+    const implemented = await runArtifact(fixture.options);
+    assert.equal(implemented.outcome, "CONTINUE", implemented.reason);
+    await advanceVerification(fixture, { ui: false });
+    parity.rows[0].status = "VERIFIED";
+    parity.rows[0].targetEvidence = [await targetEvidence(fixture)];
+    await writeJson(fixture.artifactRoot, "matrices/parity.json", parity);
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+    state = await stateOf(fixture);
+    assert.deepEqual(state.bindings.source.paths, paths);
+    assert.deepEqual(state.bindings.target.paths, paths);
+    const refused = await runArtifact(fixture.options);
+    assert.equal(refused.outcome, "CONTINUE");
+    assert.match(refused.reason,
+      /Target code still resolves to legacy modules: legacy\/widget\/source\.ts -> legacy\/widget\/consumer-a\.ts/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 const nodeCheck = (file, status = "PASS") => ({
   validator: { kind: "NODE_CHECK", file },
   status,
@@ -2069,6 +2298,10 @@ test("finalization reports shared imports that resolve transitively into the leg
       "import { LegacyButton } from '../../../../legacy/shared/legacy-button';\nexport { LegacyButton };\n",
     );
     await writeFile(
+      path.join(fixture.targetRoot, "src/shared/components/bound.tsx"),
+      "export { source } from '@legacy/widget/source';\n",
+    );
+    await writeFile(
       path.join(fixture.targetRoot, "tsconfig.json"),
       `${JSON.stringify({ compilerOptions: { jsx: "react-jsx", module: "ESNext", moduleResolution: "Bundler", noEmit: true, paths: { "@legacy/*": ["../legacy/*"] } }, include: ["src/**/*.ts", "src/**/*.tsx"] }, null, 2)}\n`,
     );
@@ -2076,12 +2309,14 @@ test("finalization reports shared imports that resolve transitively into the leg
     const { findings } = await legacyDependencies(fixture.targetRoot, fixture.sourceRoot);
     assert.ok(findings.some((finding) => finding.file === "src/shared/components/direct.tsx"));
     assert.ok(findings.some((finding) => finding.file === "src/shared/components/form.tsx"));
+    assert.ok(findings.some((finding) => finding.file === "src/shared/components/bound.tsx" && finding.legacyPath === "widget/source.ts"));
     assert.ok(findings.some((finding) => finding.chain.length === 2));
 
     await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
     const refused = await runArtifact(fixture.options);
     assert.equal(refused.outcome, "CONTINUE");
     assert.match(refused.reason, /src\/shared\/components\/form\.tsx -> shared\/legacy-button\.tsx/);
+    assert.match(refused.reason, /src\/shared\/components\/bound\.tsx -> widget\/source\.ts/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
   } finally {
     await fixture.cleanup();

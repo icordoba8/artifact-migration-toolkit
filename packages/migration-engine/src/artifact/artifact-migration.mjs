@@ -369,9 +369,8 @@ const targetCodeFiles = async (targetRoot) => {
  * Legacy scope depends on the invocation, and both forms are real. With
  * distinct roots the whole source root is legacy. With one root -- the SKILL's
  * documented default, where the previous implementation returned nothing at all
- * -- "legacy" is exactly this artifact's bound source paths plus the
- * requirements discovered for it, because the rest of the repository is the
- * target.
+ * -- "legacy" is exactly this artifact's bound source paths. Requirements
+ * outside that frozen set are shared dependencies, not migrated legacy files.
  */
 export const legacyDependencies = async (
   targetRoot,
@@ -385,7 +384,6 @@ export const legacyDependencies = async (
   const legacyRoots = [...new Set(legacyPaths)].map((value) =>
     path.resolve(resolvedSourceRoot, normalizeRelative(value, "legacy path")),
   );
-  if (inPlace && legacyRoots.length === 0) return { findings: [], undecidable: [] };
   const isLegacy = (absolute) =>
     inPlace
       ? legacyRoots.some((root) => isWithin(root, absolute))
@@ -942,8 +940,11 @@ const samePath = (left, right) => {
       : path.resolve(value);
   return normalize(left) === normalize(right);
 };
-export const artifactArgumentsFor = ({ artifactType, source, target, designSource, figmaSources }) => [
+export const artifactArgumentsFor = ({ artifactType, source, target, sourcePaths, sourceBinding, bindings, designSource, figmaSources }) => [
   source.path,
+  ...(sourcePaths ?? sourceBinding?.paths ?? bindings?.source?.paths ?? [source.path])
+    .filter((file) => file !== source.path)
+    .flatMap((file) => ["--source", file]),
   "--type",
   artifactType,
   "--target",
@@ -1170,7 +1171,7 @@ const captureBinding = async (root, paths, side) => {
   const excludeProviders = side === "target";
   const [revision, dirty, manifest] = await Promise.all([
     gitRevision(root),
-    dirtyManifest(root, { exclude: excludeProviders ? PROVIDER_PATHS : [] }),
+    dirtyManifest(root, { exclude: excludeProviders ? PROVIDER_PATHS : [".agents/knowledge/migrations/"] }),
     scopedManifest(root, paths, { excludeProviders }),
   ]);
   return {
@@ -1183,8 +1184,19 @@ const captureBinding = async (root, paths, side) => {
   };
 };
 
+const sourcePathAtRoot = (root, value) => {
+  const file = nonEmpty(value, "source");
+  const relative = normalizeRelative(path.isAbsolute(file) ? path.relative(root, file) : file, "source");
+  if (!isWithin(root, path.resolve(root, relative))) throw new Error("source escapes sourceRoot.");
+  return relative;
+};
+
+const targetPathsFor = (sourcePath, targetPath, sourcePaths) =>
+  sourcePath === targetPath ? sourcePaths : [targetPath];
+
 export const resolveArtifact = async ({
   source,
+  sources = [],
   type = "artifact",
   target,
   sourceRoot = process.cwd(),
@@ -1199,17 +1211,21 @@ export const resolveArtifact = async ({
     assertDirectory(resolvedSourceRoot, "sourceRoot"),
     assertDirectory(resolvedTargetRoot, "targetRoot"),
   ]);
-  const sourcePath = path.isAbsolute(nonEmpty(source, "source"))
-    ? normalizeRelative(path.relative(resolvedSourceRoot, source), "source")
-    : normalizeRelative(source, "source");
-  const sourceAbsolute = path.resolve(resolvedSourceRoot, sourcePath);
-  if (!isWithin(resolvedSourceRoot, sourceAbsolute)) throw new Error("source escapes sourceRoot.");
-  await access(sourceAbsolute).catch((error) => {
-    if (error.code === "ENOENT") throw new Error(`Source artifact does not exist: ${sourceAbsolute}`);
-    throw error;
-  });
+  const sourcePath = sourcePathAtRoot(resolvedSourceRoot, source);
+  const sourcePaths = [...new Set([sourcePath, ...sources.map((file) => sourcePathAtRoot(resolvedSourceRoot, file))])].sort();
+  for (const file of sourcePaths) {
+    const absolute = path.resolve(resolvedSourceRoot, file);
+    await access(absolute).catch((error) => {
+      if (error.code === "ENOENT") throw new Error(`Source artifact does not exist: ${absolute}`);
+      throw error;
+    });
+  }
   const artifactType = assertSafeName(type, "artifact type");
   const targetPath = normalizeRelative(target ?? sourcePath, "target");
+  if (sourcePaths.length > 1 && targetPath !== sourcePath) {
+    throw new Error("Multi-file artifacts require matching source and target paths; explicit remapping is unsupported.");
+  }
+  const targetPaths = targetPathsFor(sourcePath, targetPath, sourcePaths);
   const id = artifactIdFor({ source: sourcePath, type: artifactType });
   if (formatVersion !== ARTIFACT_FORMAT_VERSION) {
     throw new Error(`Unsupported artifact migration format ${formatVersion}.`);
@@ -1220,7 +1236,9 @@ export const resolveArtifact = async ({
     artifactType,
     formatVersion,
     source: { root: resolvedSourceRoot, path: sourcePath },
+    sourcePaths,
     target: { root: resolvedTargetRoot, path: targetPath },
+    targetPaths,
     root: artifactRoot(resolvedTargetRoot, id),
     ...design,
   };
@@ -1297,6 +1315,9 @@ const validateState = (state, expectedId) => {
   exactObject(state.bindings, "bindings", ["source", "target"]);
   validateBinding(state.bindings.source, "bindings.source");
   validateBinding(state.bindings.target, "bindings.target");
+  if (!state.bindings.source.paths.includes(state.source.path) || !state.bindings.target.paths.includes(state.target.path)) {
+    throw new Error("Artifact binding paths must include their primary source and target.");
+  }
   plainObject(state.artifactHashes, "artifactHashes");
   for (const [key, digest] of Object.entries(state.artifactHashes)) {
     nonEmpty(key, "artifactHashes key");
@@ -1584,13 +1605,21 @@ const validateTransactionInput = (input, label) => {
       input,
       label,
       ["kind", "artifactType", "source", "target"],
-      ["designSource", "figmaSources"],
+      ["designSource", "figmaSources", "sourcePaths"],
     );
     assertSafeName(input.artifactType, `${label}.artifactType`);
     for (const key of ["source", "target"]) {
       exactObject(input[key], `${label}.${key}`, ["root", "path"]);
       nonEmpty(input[key].root, `${label}.${key}.root`);
       normalizeRelative(input[key].path, `${label}.${key}.path`);
+    }
+    if (input.sourcePaths !== undefined) {
+      const paths = arrayOf(input.sourcePaths, `${label}.sourcePaths`);
+      unique(paths, `${label}.sourcePaths`);
+      if (!paths.includes(input.source.path) || canonical(paths) !== canonical([...paths].sort())) {
+        throw new Error(`${label}.sourcePaths must be sorted and include the primary source.`);
+      }
+      for (const file of paths) normalizeRelative(file, `${label}.sourcePaths`);
     }
     if (input.designSource !== undefined) {
       const design = resolveDesignSource({
@@ -1730,7 +1759,9 @@ const proveBootstrapTransaction = async (root, transaction) => {
     artifactType: input.artifactType,
     formatVersion: state.formatVersion,
     source: input.source,
+    sourcePaths: input.sourcePaths ?? [input.source.path],
     target: input.target,
+    targetPaths: targetPathsFor(input.source.path, input.target.path, input.sourcePaths ?? [input.source.path]),
     // The journal's design fields are optional (see validateTransactionInput);
     // absent means normal execution resolved the default, so recovery resolves
     // it through the same shared resolver rather than reproducing a record with
@@ -1741,8 +1772,8 @@ const proveBootstrapTransaction = async (root, transaction) => {
     }),
   };
   const [sourceBinding, targetBinding] = await Promise.all([
-    captureBinding(resolved.source.root, [resolved.source.path], "source"),
-    captureBinding(resolved.target.root, [resolved.target.path], "target"),
+    captureBinding(resolved.source.root, resolved.sourcePaths, "source"),
+    captureBinding(resolved.target.root, resolved.targetPaths, "target"),
   ]);
   const expectedState = initialArtifactState(resolved, sourceBinding, targetBinding, state.updatedAt);
   if (canonical(expectedState) !== canonical(state)) {
@@ -1823,6 +1854,9 @@ const reconstructLegacyTransaction = async (root, transaction) => {
         kind: "BOOTSTRAP",
         artifactType: transaction.state.artifactType,
         source: transaction.state.source,
+        ...(transaction.state.bindings.source.paths.length > 1
+          ? { sourcePaths: transaction.state.bindings.source.paths }
+          : {}),
         target: transaction.state.target,
         ...(transaction.state.designSource
           ? {
@@ -2028,8 +2062,8 @@ export const previewArtifact = async (options = {}) => {
   }
   const resolved = await resolveArtifact(options);
   const [sourceBinding, targetBinding] = await Promise.all([
-    captureBinding(resolved.source.root, [resolved.source.path], "source"),
-    captureBinding(resolved.target.root, [resolved.target.path], "target"),
+    captureBinding(resolved.source.root, resolved.sourcePaths, "source"),
+    captureBinding(resolved.target.root, resolved.targetPaths, "target"),
   ]);
   const snapshot = {
     action: "BOOTSTRAP",
@@ -2069,6 +2103,7 @@ const createArtifactRecord = async (resolved, options, confirmExecution) => {
       kind: "BOOTSTRAP",
       artifactType: resolved.artifactType,
       source: resolved.source,
+      ...(resolved.sourcePaths.length > 1 ? { sourcePaths: resolved.sourcePaths } : {}),
       target: resolved.target,
       designSource: resolved.designSource,
       figmaSources: resolved.figmaSources,
@@ -2108,6 +2143,20 @@ const validateEvidenceFile = async (root, evidence, label, extra = []) => {
     throw error;
   });
   if (actual !== evidence.sha256) throw new Error(`${label}.sha256 does not match ${relative}.`);
+  return relative;
+};
+
+const validateSourceEvidenceFile = async (state, evidence, label) => {
+  const relative = normalizeRelative(evidence.path, `${label}.path`);
+  const frozen = samePath(state.source.root, state.target.root) &&
+    state.bindings.target.paths.includes(relative)
+      ? state.bindings.source.entries.find((entry) => entry.path === relative && entry.kind === "FILE")
+      : null;
+  if (!frozen) return validateEvidenceFile(state.source.root, evidence, label);
+  exactObject(evidence, label, ["path", "sha256", "status"]);
+  if (evidence.status !== "VERIFIED" || evidence.sha256 !== frozen.sha256) {
+    throw new Error(`${label} does not match the frozen source binding for ${relative}.`);
+  }
   return relative;
 };
 
@@ -2156,7 +2205,7 @@ const validateSourceInventory = async (root, state) => {
     const evidence = arrayOf(row.evidence, `source inventory.behaviors[${index}].evidence`);
     if (evidence.length === 0) throw new Error(`source inventory behavior '${row.id}' requires evidence.`);
     for (const [evidenceIndex, item] of evidence.entries()) {
-      await validateEvidenceFile(state.source.root, item, `source behavior '${row.id}' evidence[${evidenceIndex}]`);
+      await validateSourceEvidenceFile(state, item, `source behavior '${row.id}' evidence[${evidenceIndex}]`);
     }
   }
   if (behaviorIds.length === 0) throw new Error("source inventory requires at least one behavior.");
@@ -2182,7 +2231,7 @@ const validateSourceInventory = async (root, state) => {
     const evidence = arrayOf(row.evidence, `feature-local visual '${row.id}' evidence`);
     if (evidence.length === 0) throw new Error(`feature-local visual '${row.id}' requires evidence.`);
     for (const [evidenceIndex, item] of evidence.entries()) {
-      await validateEvidenceFile(state.source.root, item, `feature-local visual '${row.id}' evidence[${evidenceIndex}]`);
+      await validateSourceEvidenceFile(state, item, `feature-local visual '${row.id}' evidence[${evidenceIndex}]`);
     }
   }
   unique(visualIds, "feature-local visual ids");
@@ -2314,7 +2363,7 @@ const sourceRequirements = (state) =>
     metrics.discoveryScans += 1;
     const scan = await runDiscoveryScan({
       legacyRoot: state.source.root,
-      moduleRoots: [state.source.path],
+      moduleRoots: state.bindings.source.paths,
       typescript: await structuralParser(),
     });
     for (const key of SCANNER_REQUIREMENT_KEYS) {
@@ -2451,7 +2500,9 @@ const validateTargetInventory = async (root, state) => {
   if (!ARTIFACT_RESOLUTIONS.includes(document.resolution)) throw new Error(`Unknown target resolution '${document.resolution}'.`);
   if (!assessmentCompleted) {
     const targetExists = await exists(path.join(state.target.root, state.target.path));
-    if (document.resolution === "MIGRATE_NEW" && targetExists) {
+    const inPlace = samePath(state.source.root, state.target.root) &&
+      state.bindings.source.paths.includes(state.target.path);
+    if (document.resolution === "MIGRATE_NEW" && targetExists && !inPlace) {
       throw new Error("MIGRATE_NEW requires the bound target artifact to be absent.");
     }
     if (document.resolution !== "MIGRATE_NEW" && !targetExists) {
@@ -2773,6 +2824,12 @@ const validatePlan = async (root, state) => {
 
 const validateImplementation = async (root, state, capability) => {
   const plan = await validatePlan(root, state);
+  const missingDependencies = plan.document.slices
+    .find((slice) => slice.id === state.activeSlice)?.dependsOn
+    .filter((dependency) => !state.completedSlices.includes(dependency)) ?? [];
+  if (missingDependencies.length > 0) {
+    throw new Error(`Slice '${state.activeSlice}' requires completed slices: ${missingDependencies.join(", ")}.`);
+  }
   const relative = `slices/${state.activeSlice}.json`;
   const document = await readJsonAt(root, relative, "slice implementation");
   exactObject(document, "slice implementation", [
@@ -2859,14 +2916,16 @@ const validateImplementation = async (root, state, capability) => {
   return { relative, document, changedFiles, validationEvidence: validation.evidence, deferredExecution, plan };
 };
 
-const validateBoundTo = (boundTo, state, label, sliceDigest) => {
+const validateBoundTo = (boundTo, state, label, sliceDigest, origin) => {
   exactObject(
     boundTo,
     label,
     ["sourceDigest", "targetDigest", "sliceDigest"],
     state.designSource === "figma-mcp" ? ["figmaContextDigest"] : [],
   );
-  if (boundTo.sourceDigest !== state.bindings.source.digest || boundTo.targetDigest !== state.bindings.target.digest) {
+  if (boundTo.sourceDigest !== state.bindings.source.digest ||
+    (origin === "TARGET" && boundTo.targetDigest !== state.bindings.target.digest) ||
+    (origin === "LEGACY" && !/^[a-f0-9]{64}$/.test(boundTo.targetDigest))) {
     throw new Error(`${label} is stale for the current source/target binding.`);
   }
   if (boundTo.sliceDigest !== sliceDigest) throw new Error(`${label}.sliceDigest is stale.`);
@@ -2996,7 +3055,7 @@ const validateVerification = async (root, state, capability) => {
       if ((await secureHash(root, artifactPath, "runtime artifact path")) !== artifact.sha256) throw new Error(`runtime artifact hash does not match ${artifactPath}.`);
     }
     sameMembers(kinds, ["ACCESSIBILITY_SNAPSHOT", "SCREENSHOT"], `runtime evidence '${row.behaviorId}' artifact kinds`);
-    validateBoundTo(row.boundTo, state, `runtime evidence '${row.behaviorId}' boundTo`, sliceDigest);
+    validateBoundTo(row.boundTo, state, `runtime evidence '${row.behaviorId}' boundTo`, sliceDigest, row.origin);
     const visualRow =
       row.origin === "TARGET"
         ? implementation.plan.baseline.visualRows?.find(
@@ -3156,15 +3215,18 @@ const validateFinal = async (root, state) => {
   // approval into a COMPLETE record.
   await validateExternalRequirements(state, requirements, "final requirement");
 
-  // Legacy scope is this artifact's bound source paths plus every requirement
-  // discovered for it, so the check is real when both roots are the same
-  // directory -- the SKILL's documented default.
+  // In one root, only a source path actually changed by a migration slice is
+  // migrated. Bootstrap prebinds every source path as a target, even untouched
+  // legacy files. Separate-root migration keeps its existing full scope.
+  const inPlace = samePath(state.source.root, state.target.root);
   const legacyPaths = [
     ...state.bindings.source.paths,
-    ...requirements
+    ...(inPlace ? [] : requirements)
       .map((row) => row?.element)
       .filter((element) => typeof element === "string" && !element.includes(" ")),
-  ];
+  ].filter((file) =>
+    !inPlace || !changedFiles.has(file),
+  );
   const legacy = await legacyDependencies(state.target.root, state.source.root, legacyPaths, {
     changedFiles: [...changedFiles],
   });
@@ -3368,7 +3430,9 @@ const freshness = async (root, state, validation = null) => {
     captureBinding(state.source.root, state.bindings.source.paths, "source"),
     captureBinding(state.target.root, state.bindings.target.paths, "target"),
   ]);
-  const sourceDrift = diffEntries(state.bindings.source.entries, source.entries);
+  const targetScope = new Set(state.bindings.target.paths);
+  const sourceDrift = diffEntries(state.bindings.source.entries, source.entries)
+    .filter((file) => !samePath(state.source.root, state.target.root) || !targetScope.has(file));
   const targetDrift = diffEntries(state.bindings.target.entries, target.entries);
   const acceptedTargetDrift =
     state.currentStep === "IMPLEMENT_SLICES" &&
@@ -3444,6 +3508,13 @@ const assertInvocationMatches = (state, options) => {
     // to the same physical artifact is a match, not a conflict.
     const fold = (value) => (process.platform === "win32" ? value.toLowerCase() : value);
     if (fold(requestedSource) !== fold(state.source.path)) throw new Error("Invocation source path conflicts with persisted state.");
+  }
+  if (options.sources !== undefined) {
+    const requested = [...new Set([
+      state.source.path,
+      ...arrayOf(options.sources, "sources").map((file) => sourcePathAtRoot(state.source.root, file)),
+    ])].sort();
+    sameMembers(requested, state.bindings.source.paths, "Invocation source paths");
   }
   if (options.sourceRoot && !samePath(options.sourceRoot, state.source.root)) throw new Error("Invocation sourceRoot conflicts with persisted state.");
   if (options.target && normalizeRelative(options.target, "target") !== state.target.path) throw new Error("Invocation target conflicts with persisted state.");
@@ -3613,7 +3684,7 @@ const nextState = async (root, state, validation, fresh, selectedSlice) => {
   next.revision += 1;
   next.artifactHashes = { ...state.artifactHashes, ...(await pinsFor(root, state, validation)) };
   next.bindings = {
-    source: fresh.source,
+    source: state.bindings.source,
     target: await captureBinding(state.target.root, pathsAfterCheckpoint(state, validation), "target"),
   };
   const current = state.currentStep;
@@ -3623,6 +3694,10 @@ const nextState = async (root, state, validation, fresh, selectedSlice) => {
     const ids = validation.result.ids;
     const first = selectedSlice ?? ids[0];
     if (!ids.includes(first)) throw new Error(`Selected slice '${first}' is not in the plan.`);
+    const missing = validation.result.document.slices
+      .find((slice) => slice.id === first).dependsOn
+      .filter((dependency) => !state.completedSlices.includes(dependency));
+    if (missing.length > 0) throw new Error(`Slice '${first}' requires completed slices: ${missing.join(", ")}.`);
     next.completedSteps = [...state.completedSteps, current];
     next.currentStep = "IMPLEMENT_SLICES";
     next.activeSlice = first;
@@ -3672,6 +3747,12 @@ const previewAdvance = async (root, state, options) => {
     throw new Error("An artifact transition cannot be derived from a read-only checkpoint validation.");
   }
   if (validation && !validation.ready) return { state, validation, outcome: validation.outcome, reason: validation.reason };
+  if (state.currentStep === "PLAN" && options.slice) {
+    const selected = validation.result.document.slices.find((slice) => slice.id === options.slice);
+    if (selected?.dependsOn.some((dependency) => !state.completedSlices.includes(dependency))) {
+      return { state, validation, outcome: "BLOCKED", reason: `Slice '${options.slice}' requires completed slices: ${selected.dependsOn.join(", ")}.` };
+    }
+  }
   const fresh = await freshness(root, state, validation);
   if (fresh.stale) {
     return {

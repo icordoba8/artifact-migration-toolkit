@@ -32,6 +32,7 @@ export const parseArtifactArguments = (arguments_) => {
     options: {
       type: { type: "string", default: "artifact" },
       target: { type: "string" },
+      source: { type: "string", multiple: true },
       "source-root": { type: "string" },
       "target-root": { type: "string" },
       status: { type: "boolean", default: false },
@@ -45,6 +46,7 @@ export const parseArtifactArguments = (arguments_) => {
   assertOptionCombination("artifact", { positionals, values });
   return {
     source: positionals[0],
+    sources: values.source,
     type: values.type,
     target: values.target,
     sourceRoot: values["source-root"],
@@ -112,6 +114,7 @@ export const runArtifactCli = async (
   const parsed = parseArtifactArguments(arguments_);
   const options = {
     source: parsed.source,
+    sources: parsed.sources,
     type: parsed.type,
     target: parsed.target,
     sourceRoot: parsed.sourceRoot,

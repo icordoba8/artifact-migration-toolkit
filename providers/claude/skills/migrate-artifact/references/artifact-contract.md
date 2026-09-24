@@ -89,7 +89,8 @@ dispositions; `MIGRATED_BEHAVIOR`, `FEATURE_LOCAL` and
 `target.json` owns `artifactId`, `resolution`, `targetFiles`, `targetNative`,
 and per-behavior target `evidence`. `TARGET_REUSE` requires verified evidence
 for every behavior. `TARGET_EXTEND` requires verified target-native rows.
-`MIGRATE_NEW` requires the bound target artifact to be absent and has no
+`MIGRATE_NEW` requires the bound target artifact to be absent unless it is a
+bound in-place source path, and has no
 target-native rows. For `TARGET_REUSE`/`TARGET_EXTEND`, `targetFiles` must
 include the bound target path, and every `targetNative[].path` and every
 `evidence[].path` must be one of the declared `targetFiles`: reuse is proven

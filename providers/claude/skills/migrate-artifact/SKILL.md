@@ -30,7 +30,8 @@ An exact admin/CI override is available as `--version X.Y.Z` or
 changes a migration record's `toolkitIdentity`.
 
 ```bash
-artifact-migrate <source> \
+artifact-migrate <primary-source> \
+  [--source <additional-source>]... \
   [--type <type>] [--target <path>] \
   [--source-root <path>] [--target-root <path>] \
   [--status] [--mode auto|step] [--slice <id>] [--json]
@@ -38,6 +39,10 @@ artifact-migrate <source> \
 
 `/migrate-artifact <source>` is the provider-facing equivalent. Defaults are
 `--type artifact`, both roots at the current directory, and `--mode auto`.
+The primary source identifies the artifact. Repeat `--source` for additional
+exact files; the source binding contains only those paths. With matching roots
+and no remapping, the target binding starts with the same path set. The source
+binding remains frozen as legacy provenance while target files change in place.
 
 ## Protocol
 
