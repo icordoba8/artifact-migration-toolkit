@@ -33,12 +33,14 @@
     "install.mjs",
     "skills/migrate-artifact/SKILL.md",
     "skills/migrate-artifact/references/artifact-contract.md",
+    "skills/migrate-artifact/release-identity.json",
     "skills/migrate-artifact/scripts/runtime.mjs",
     "skills/start-migration/SKILL.md",
     "skills/start-migration/references/discovery-checklist.md",
     "skills/start-migration/references/migration-contract.md",
     "skills/start-migration/references/provider-compatibility.md",
     "skills/start-migration/references/v5-contract.md",
+    "skills/start-migration/release-identity.json",
     "skills/start-migration/scripts/runtime.mjs"
   ]
 }

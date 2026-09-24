@@ -27,6 +27,42 @@ const repositoryRoot = path.resolve(
 
 export const lockPath = (root) => path.join(root, "skills-lock.json");
 
+export const IDENTITY_BASENAME = "release-identity.json";
+
+export const identityPath = (root, skillName) =>
+  path.join(root, "skills", skillName, IDENTITY_BASENAME);
+
+/**
+ * The committed half of an installed skill's identity.
+ *
+ * `skills add` copies the *committed* tree, so every field here has to be a real
+ * value. A placeholder would install as the literal `{{TOOLKIT_VERSION}}` and the
+ * installed skill would name no release at all -- which is why the version is
+ * read from the root manifest rather than restated here, a second copy of it
+ * being exactly the drift this file exists to remove.
+ *
+ * Commit and content hash are *absent*, not placeheld, and have to be: the commit
+ * containing this file, and the hash this file feeds, are both unknowable while
+ * writing it. `scripts/release.mjs` adds them to the staged copy only, which is
+ * what keeps the release content hash acyclic. `source` is what lets an operator
+ * tell the two apart in an installed tree without running the engine.
+ */
+export const identityDocument = async (root, skillName) => {
+  const manifest = JSON.parse(
+    await readFile(path.join(root, "package.json"), "utf8"),
+  );
+  return `${JSON.stringify(
+    {
+      name: manifest.name,
+      version: manifest.version,
+      skill: skillName,
+      source: "repository",
+    },
+    null,
+    2,
+  )}\n`;
+};
+
 /** Install output, never canonical source; under pnpm it is symlinks too. */
 const walk = async (absolute, relative = "") => {
   const entries = await readdir(absolute, { withFileTypes: true });
@@ -80,6 +116,11 @@ export const skillLockEntries = async (root = repositoryRoot) =>
   );
 
 export const writeSkillsLock = async (root = repositoryRoot) => {
+  // Stamped before the hashes are taken, so the lock covers the identity it just
+  // wrote rather than the previous version's.
+  for (const name of await canonicalSkillNames(root)) {
+    await writeFile(identityPath(root, name), await identityDocument(root, name));
+  }
   const lock = { version: 1, skills: await skillLockEntries(root) };
   await writeFile(lockPath(root), `${JSON.stringify(lock, null, 2)}\n`);
   return lock;
@@ -91,6 +132,6 @@ if (
 ) {
   const lock = await writeSkillsLock();
   console.log(
-    `Updated skills-lock.json for ${Object.keys(lock.skills).join(", ")}.`,
+    `Updated release-identity.json and skills-lock.json for ${Object.keys(lock.skills).join(", ")}.`,
   );
 }

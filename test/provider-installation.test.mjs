@@ -32,6 +32,12 @@ async function bundles() {
     manifest.files[relative] = digest(bytes);
   };
   await replace('packages/migration-engine/build-identity.json', manifest.toolkit);
+  // The per-skill stamps move with the synthetic identity too, or the second
+  // release would ship skills still claiming the first release's version.
+  for (const file of Object.keys(manifest.files).filter(relative => relative.endsWith('/release-identity.json'))) {
+    const source = JSON.parse(await readFile(path.join(second, file)));
+    await replace(file, { ...source, version: manifest.toolkit.version, commit: manifest.toolkit.commit, contentHash: manifest.toolkit.contentHash });
+  }
   for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
     const file = `providers/${provider}/adapter.json`;
     const source = JSON.parse(await readFile(path.join(second, file)));
@@ -127,6 +133,14 @@ for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
         assert.ok(!text.includes('{{ENGINE_MCP_ENTRY}}'), relative);
         const skill = relative.match(/(?:^|\/)(start-migration|migrate-artifact)\/(.+)$/);
         if (skill) {
+          // An installed skill states the release it came from as data, so an
+          // operator can inspect what is installed without running the runtime --
+          // and it says `release`, not `repository`, because this tree was packaged.
+          if (relative.endsWith('/release-identity.json')) {
+            assert.deepEqual(JSON.parse(text), { name: receipt.toolkit.name, version: receipt.toolkit.version, skill: skill[1], source: 'release', commit: receipt.toolkit.commit, contentHash: receipt.toolkit.contentHash }, relative);
+            surfaces.add(`identity:${skill[1]}`);
+            continue;
+          }
           if (!relative.endsWith('SKILL.md')) continue;
           assert.match(text, /status/i);
           if (provider === 'claude') assert.match(text, /^user-invocable: true$/m);
@@ -143,6 +157,7 @@ for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
       }
       for (const name of ['start-migration', 'migrate-artifact']) {
         assert.ok(surfaces.has(`skill:${name}`), `${name} skill not installed`);
+        assert.ok(surfaces.has(`identity:${name}`), `${name} release identity not installed`);
         // Claude invokes the native skill directly: no duplicate prompt wrapper.
         assert.equal(surfaces.has(`wrapper:${name}`), provider !== 'claude', `${name} wrapper`);
       }

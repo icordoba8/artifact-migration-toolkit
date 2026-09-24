@@ -43,6 +43,12 @@ import {
   TOOLKIT_COMMIT_PLACEHOLDER,
   TOOLKIT_VERSION_PLACEHOLDER,
 } from "./providers-sync.mjs";
+import {
+  IDENTITY_BASENAME,
+  canonicalSkillNames,
+  identityDocument,
+  identityPath,
+} from "./skills-lock.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -165,6 +171,19 @@ export const releaseCheck = async (root = repositoryRoot) => {
   if (untracked.length > 0) {
     blockers.push(`Payload paths are not committed: ${untracked.join(", ")}`);
   }
+  // A committed skill identity that disagrees with the root manifest would ship a
+  // `skills add` install naming the wrong release, and the packaged copy is
+  // derived from it, so the two could never be reconciled after the fact.
+  // Byte equality against a freshly generated stamp is the whole check: it
+  // catches a stale version, a hand-edit and a leftover placeholder alike.
+  for (const name of await canonicalSkillNames(root)) {
+    const committed = await readFile(identityPath(root, name), "utf8").catch(() => null);
+    if (committed !== (await identityDocument(root, name))) {
+      blockers.push(
+        `skills/${name}/${IDENTITY_BASENAME} does not match version ${versions.root}. Run 'pnpm skills:lock' and 'pnpm providers:sync'.`,
+      );
+    }
+  }
   const { contentHash } = await contentHashOf(root);
   return { version: versions.root, commit, contentHash, blockers };
 };
@@ -203,6 +222,19 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
         identity,
       );
       await writeFile(destination, rendered, "utf8");
+    } else if (path.posix.basename(relative) === IDENTITY_BASENAME) {
+      // Derived from the committed stamp rather than rebuilt, so a packaged skill
+      // cannot claim a different name, version or skill than the tree it came
+      // from. Commit and content hash are added only here: the committed file
+      // feeds `contentHash`, so carrying it would be a cycle.
+      const committed = JSON.parse(await readFile(path.join(root, relative), "utf8"));
+      const staged = {
+        ...committed,
+        source: "release",
+        commit: identity.commit,
+        contentHash: identity.contentHash,
+      };
+      await writeFile(destination, `${JSON.stringify(staged, null, 2)}\n`, "utf8");
     } else {
       await cp(path.join(root, relative), destination);
     }

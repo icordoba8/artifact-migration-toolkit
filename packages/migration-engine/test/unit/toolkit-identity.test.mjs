@@ -242,6 +242,48 @@ test("release identity is derived from the payload and is checksum-verifiable", 
   const stagedManifest = await readFile(path.join(bundle, "providers/claude/adapter.json"), "utf8");
   assert.ok(stagedManifest.includes(check.contentHash), "the staged manifest carries the identity");
   assert.ok(stagedManifest.includes(check.commit));
+
+  // The per-skill stamp is acyclic the same way, but by *omission* rather than by
+  // placeholder: `skills add` copies the committed file verbatim, so it may not
+  // carry a token no installer resolves. Name, version and skill are real in the
+  // committed copy; commit and content hash are added only when staged, and the
+  // staged copy is derived from the committed one -- so the two cannot name
+  // different releases. Every provider projection is the same bytes: which
+  // provider installed a skill cannot change what it says it is.
+  for (const skill of ["start-migration", "migrate-artifact"]) {
+    const committedText = await readFile(
+      path.join(repositoryRoot, `skills/${skill}/release-identity.json`),
+      "utf8",
+    );
+    assert.ok(!committedText.includes("{{"), `${skill} committed identity has a placeholder`);
+    assert.ok(
+      !committedText.includes(check.contentHash) && !committedText.includes(check.commit),
+      `${skill} must not carry the hash or commit it contributes to`,
+    );
+    const committed = JSON.parse(committedText);
+    assert.deepEqual(committed, {
+      name: "artifact-migration-tools",
+      version: check.version,
+      skill,
+      source: "repository",
+    });
+
+    const canonical = await readFile(path.join(bundle, `skills/${skill}/release-identity.json`));
+    assert.deepEqual(JSON.parse(canonical.toString("utf8")), {
+      name: committed.name,
+      version: committed.version,
+      skill: committed.skill,
+      source: "release",
+      commit: check.commit,
+      contentHash: check.contentHash,
+    });
+    for (const provider of ["claude", "codex", "opencode", "copilot"]) {
+      const projected = await readFile(
+        path.join(bundle, `providers/${provider}/skills/${skill}/release-identity.json`),
+      );
+      assert.ok(projected.equals(canonical), `${provider}/${skill} identity is not byte-identical`);
+    }
+  }
   await assert.rejects(
     readFile(path.join(bundle, "packages/migration-engine/test/unit/toolkit-identity.test.mjs")),
     { code: "ENOENT" },

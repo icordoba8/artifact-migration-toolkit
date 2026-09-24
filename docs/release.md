@@ -139,14 +139,34 @@ is the canonical operator-facing copy. They are asserted byte-identical by
 
 ## Versioning
 
-`pnpm skills:lock` → `scripts/skills-lock.mjs` recomputes `skills-lock.json`
+`pnpm skills:lock` → `scripts/skills-lock.mjs` writes each canonical skill's
+`release-identity.json` from the root manifest, then recomputes `skills-lock.json`
 over each canonical skill directory (path **and** bytes, so a rename moves the
 hash), so a downstream target can detect that a skill moved without diffing tens
 of thousands of lines. `pnpm providers:test` fails if the committed lock and the
-canonical bytes disagree.
+canonical bytes disagree, and `pnpm release:check` blocks if a committed identity
+names a version other than the root manifest's. Bumping the toolkit version
+therefore means re-running `pnpm skills:lock` and `pnpm providers:sync`, exactly
+as a skill edit does.
 
 The engine package release content hash is separate from the skill hashes; a
 skill hash does not identify the engine package.
+
+### Per-skill release identity
+
+`skills/<name>/release-identity.json` is how an *installed* skill states what it
+is, without the engine running. It exists because `skills add <repo>` copies the
+committed tree: a stamp rendered only at packaging time would install as a
+literal `{{TOOLKIT_VERSION}}`, so the committed copy carries real values —
+`name`, `version`, `skill`, and `source: "repository"`.
+
+`commit` and `contentHash` are **absent** from the committed copy, not held as
+placeholders. Neither is knowable while writing the file: the commit contains it,
+and it is an input to the content hash. `scripts/release.mjs` adds both to the
+staged copy and flips `source` to `"release"`, deriving that copy from the
+committed one so a packaged skill cannot name a different release than the tree
+it came from. That derivation is what keeps the identity acyclic, and `source` is
+what tells an operator which of the two they are looking at.
 
 ## Toolkit identity
 

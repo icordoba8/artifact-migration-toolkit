@@ -13,6 +13,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -36,9 +37,13 @@ import {
   providerNames,
   runProvidersSync,
 } from "../scripts/providers-sync.mjs";
+import { payloadPaths, releaseCheck } from "../scripts/release.mjs";
 import {
+  IDENTITY_BASENAME,
   canonicalSkillNames,
   computeSkillHash,
+  identityDocument,
+  identityPath,
   skillLockEntries,
 } from "../scripts/skills-lock.mjs";
 
@@ -977,4 +982,79 @@ test("skills-lock.json matches the canonical skill bytes, and the hash tracks bo
     path.join(root, "skills/start-migration/references/renamed.md"),
   );
   assert.notEqual(await computeSkillHash(root, "start-migration"), afterEdit);
+});
+
+test("a standard tree install carries the real toolkit version, with no placeholder to resolve", async () => {
+  const manifest = JSON.parse(await readText(repositoryRoot, "package.json"));
+
+  for (const skill of SKILLS) {
+    // `skills add <repo>` copies the committed skill directory as-is: no packaging
+    // step, no runtime, no placeholder renderer. This is what a normal install
+    // lands on, so it is what has to already be true.
+    const installed = await mkdtemp(path.join(os.tmpdir(), `skills-add-${skill}-`));
+    fixtureRoots.add(installed);
+    await cp(path.join(repositoryRoot, "skills", skill), installed, {
+      recursive: true,
+      filter: (source) => !source.split(path.sep).includes("node_modules"),
+    });
+
+    const canonical = await readFile(path.join(installed, IDENTITY_BASENAME));
+    const identity = JSON.parse(canonical.toString("utf8"));
+    assert.deepEqual(identity, {
+      name: manifest.name,
+      version: manifest.version,
+      skill,
+      source: "repository",
+    });
+    assert.match(identity.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+    assert.ok(
+      !canonical.toString("utf8").includes("{{"),
+      `${skill} would install an unresolved placeholder`,
+    );
+    // Commit and content hash are absent rather than placeheld: both are
+    // unknowable while writing the file that feeds them. `source` is what says so.
+    assert.ok(!("commit" in identity) && !("contentHash" in identity));
+
+    // Every provider projection is the same bytes, so which provider installed a
+    // skill cannot change what that skill says it is.
+    for (const provider of PROVIDERS) {
+      const projected = await readFile(
+        path.join(repositoryRoot, `providers/${provider}/skills/${skill}/${IDENTITY_BASENAME}`),
+      );
+      assert.ok(projected.equals(canonical), `${provider}/${skill} identity drifted from canonical`);
+    }
+  }
+});
+
+test("a committed skill identity that disagrees with the root manifest blocks the release", async () => {
+  const blockerFor = (check, skill) =>
+    check.blockers.filter((blocker) => blocker.startsWith(`skills/${skill}/${IDENTITY_BASENAME}`));
+
+  // The real tree must be in agreement: this is the CI-side half of the guarantee.
+  const live = await releaseCheck(repositoryRoot);
+  for (const skill of SKILLS) {
+    assert.deepEqual(blockerFor(live, skill), [], `skills/${skill} identity is stale`);
+    assert.equal(
+      await readText(repositoryRoot, `skills/${skill}/${IDENTITY_BASENAME}`),
+      await identityDocument(repositoryRoot, skill),
+    );
+  }
+
+  // A payload copy with one stale version is the failure this exists to catch: a
+  // `skills add` install naming a release the tree is not.
+  const root = await mkdtemp(path.join(os.tmpdir(), "release-identity-"));
+  fixtureRoots.add(root);
+  for (const relative of await payloadPaths(repositoryRoot)) {
+    const destination = path.join(root, relative);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await cp(path.join(repositoryRoot, relative), destination);
+  }
+  const stale = JSON.parse(await readText(root, `skills/start-migration/${IDENTITY_BASENAME}`));
+  await writeFile(
+    identityPath(root, "start-migration"),
+    `${JSON.stringify({ ...stale, version: "0.0.1" }, null, 2)}\n`,
+  );
+  const drifted = await releaseCheck(root);
+  assert.equal(blockerFor(drifted, "start-migration").length, 1, drifted.blockers.join("; "));
+  assert.deepEqual(blockerFor(drifted, "migrate-artifact"), []);
 });
