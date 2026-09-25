@@ -44,7 +44,7 @@ import {
   targetTypeScript,
   validateArtifactComplete,
 } from "../../src/artifact/artifact-migration.mjs";
-import { artifactDirective, parseArtifactArguments } from "../../src/artifact/run-artifact.mjs";
+import { artifactDirective, parseArtifactArguments, runArtifactCli } from "../../src/artifact/run-artifact.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsRoot = path.resolve(
@@ -403,6 +403,35 @@ const bootstrap = async (fixture, extra = {}) => {
   assert.equal(result.outcome, "CONTINUE");
   assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
 };
+
+test("A-02 artifact invocation mismatch emits canonical BLOCKED progress and recovery", async () => {
+  const fixture = await createFixture();
+  try {
+    await bootstrap(fixture);
+    const args = ["widget", "--type", "component", "--target", "src/wrong.ts", "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot];
+    let output = "";
+    const previousExitCode = process.exitCode;
+    let result;
+    try {
+      result = await runArtifactCli(args, { stdout: { write: (chunk) => { output += chunk; } } });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+    assert.equal(result.outcome, "BLOCKED");
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.artifactId, fixture.id);
+    assert.equal(result.progress.activeCheckpoint, "DISCOVER_LEGACY");
+    assert.match(result.progressChecklist, /stop reason: BLOCKED/);
+    assert.match(output, /Next action: \/migrate-artifact/);
+    assert.match(output, /loop: STOP reason=BLOCKED/);
+    assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+    const status = await getArtifactStatus({ ...fixture.options, target: "src/wrong.ts" });
+    assert.equal(status.outcome, "BLOCKED");
+    assert.match(status.progressChecklist, /stop reason: BLOCKED/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 const sourceInventory = async (fixture, { ui = false, pendingDecision = false, runtimeStates = ["DEFAULT"] } = {}) => {
   const state = await stateOf(fixture);

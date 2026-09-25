@@ -1028,6 +1028,16 @@ legacy-authored set with `UI_OBSERVATIONS_ADOPTED` first; pre-17 ACTIVE
 figma-mcp records combine visual and observations adoption in that transition.
 TARGET proof cannot author the required set.
 
+Author `ui-observations-adoption/candidate/legacy.json` from legacy authority,
+then preview with `artifact-migration-discover <module> --adopt-ui-observations`.
+The preview prints the candidate digest, affected slices, blockers, and an exact
+confirmation command. Run `artifact-migration-discover <module>
+--adopt-ui-observations --confirm-adopt-ui-observations <digest>` using that
+printed digest. A pre-17 figma-mcp record also needs the existing adopted Figma
+context and visual acceptance matrix; its preview prints a combined digest.
+The journaled transition requeues affected slices. Collect fresh UI proof and
+resume `/start-migration <module>` to VERIFY.
+
 Verification evidence lives in the affected slice's `result.json`; captures live
 beside it under `evidence/<slice-id>/ui/`. `uiEvidence` rows are produced by the
 repository's registered Playwright MCP server and bind the runtime observation

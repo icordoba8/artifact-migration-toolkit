@@ -16702,6 +16702,49 @@ test("UIP-N7: history replay after an ACTIVE --reopen-ui derives the live pins, 
 
 const UI_CANDIDATE = "ui-observations-adoption/candidate/legacy.json";
 
+test("F-01 CLI previews, confirms, journals, and resumes UI observations adoption", async () => {
+  const fixture = await createFixture();
+  const args = ["auth", "--adopt-ui-observations"];
+  const cli = async (arguments_) => {
+    let output = "";
+    const cwd = process.cwd();
+    process.chdir(fixture.root);
+    try {
+      const result = await runDiscoverCli(arguments_, { stdout: { write: (chunk) => { output += chunk; } } });
+      return { result, output };
+    } finally {
+      process.chdir(cwd);
+    }
+  };
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a", {
+      uiBehavior: (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json"))).uiBehaviors[0],
+    });
+    await assert.rejects(advance(fixture, { slice: "slice-a" }), /artifact-migration-discover auth --adopt-ui-observations/);
+    const before = await snapshot(fixture.migrationRoot);
+    assert.throws(() => parseDiscoverArguments([]), /--adopt-ui-observations/);
+    const preview = await cli(args);
+    assert.match(preview.output, /UI_OBSERVATIONS_ADOPTED preview/);
+    const digest = preview.output.match(/Confirm with: .*--confirm-adopt-ui-observations (sha256:[a-f0-9]+)/)?.[1];
+    assert.ok(digest);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    await assert.rejects(cli([...args, "--confirm-adopt-ui-observations", "sha256:wrong"]), /changed after it was previewed/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    const confirmed = await cli([...args, "--confirm-adopt-ui-observations", digest]);
+    assert.match(confirmed.output, /UI_OBSERVATIONS_ADOPTED: VERIFY_SLICES/);
+    assert.equal((await historyEvents(fixture)).at(-1).event, "UI_OBSERVATIONS_ADOPTED");
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.deepEqual((await state(fixture)).completedSlices, ["slice-a"]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 /**
  * A genuine pre-18 UI record: the pinned legacy inventory has no
  * requiredObservations and the stamp is 17. The format-18 bytes it was driven
@@ -17167,10 +17210,19 @@ test("combined adoption: pre-17 ACTIVE figma-mcp validates both inputs and commi
     assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
     await writeFile(candidatePath, candidate);
 
-    const adopted = await adoptUiObservations({
-      ...target,
-      confirmationDigest: preview.confirmationDigest,
-    });
+    let cliOutput = "";
+    const cwd = process.cwd();
+    process.chdir(fixture.root);
+    let adopted;
+    try {
+      ({ result: adopted } = await runDiscoverCli(
+        ["auth", "--adopt-ui-observations", "--confirm-adopt-ui-observations", preview.confirmationDigest],
+        { stdout: { write: (chunk) => { cliOutput += chunk; } } },
+      ));
+    } finally {
+      process.chdir(cwd);
+    }
+    assert.match(cliOutput, /Combined visual \+ observations digest/);
     assert.equal(adopted.state.formatVersion, 18);
     assert.equal(adopted.state.currentStep, "VERIFY_SLICES");
     assert.equal(adopted.state.activeSlice, "slice-a");

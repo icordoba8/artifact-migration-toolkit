@@ -144,6 +144,10 @@ test("the blocker and status matrix: status reports, mutation refuses", () => {
   // Stamped record, different build: refused.
   assert.equal(toolkitIdentityStatus(IDENTITY, other), "MISMATCH");
   assert.match(toolkitIdentityBlocker(IDENTITY, other, options), /refused and nothing was written/);
+  assert.match(
+    toolkitIdentityBlocker(IDENTITY, other, { ...options, updateCommand: "artifact-migration-toolkit update --artifact src/widget.ts" }),
+    /artifact-migration-toolkit update --artifact src\/widget\.ts/,
+  );
 
   // Stamped record, source checkout: it cannot prove it is the pinned release.
   assert.equal(toolkitIdentityStatus(IDENTITY, null), "UNIDENTIFIED_TOOLKIT");
@@ -359,6 +363,8 @@ const runEngine = async (engineRoot, script, args, cwd) => {
     { cwd, encoding: "utf8" },
   ).catch((error) => error);
   return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
     output: `${result.stdout ?? ""}${result.stderr ?? ""}${result.message ?? ""}`,
     code: result.code ?? 0,
     signal: result.signal,
@@ -405,7 +411,7 @@ const unstampedConsumer = async () => {
 /** This checkout, run as a command: an unidentified toolkit installation. */
 const sourceEngine = path.join(repositoryRoot, "packages/migration-engine");
 
-test("the artifact adoption command resolves its source path and permits resuming", async (t) => {
+test("A-02 artifact mismatch remains BLOCKED with progress and exact identity recovery command", async (t) => {
   const bundle = await sharedBundle(t);
   const engine = engineIn(bundle, ".");
   const root = await mkdtemp(path.join(os.tmpdir(), "amt-artifact-adopt-"));
@@ -424,15 +430,35 @@ test("the artifact adoption command resolves its source path and permits resumin
 
   const blocked = await runEngine(engine, "artifact/run-artifact.mjs", args, root);
   assert.notEqual(blocked.code, 0, blocked.output);
-  const command = blocked.output.match(/Adopt it with: (.+)/)?.[1];
+  const command = JSON.parse(blocked.stdout).nextCommand;
   assert.ok(command, JSON.stringify(blocked));
-  assert.ok(command.endsWith(`adopt --artifact ${source}`), command);
+  assert.ok(command.includes(`adopt --artifact ${source} --type artifact`), command);
   const adopted = await promisify(exec)(command, { cwd: root });
   assert.match(adopted.stdout, /adopted toolkit identity/);
   const status = await runEngine(engine, "cli/toolkit-identity.mjs", ["status", "--artifact", source], root);
   assert.equal(status.code, 0, status.output);
   assert.equal(JSON.parse(status.output).artifactId, before.artifactId);
   assert.equal(JSON.parse(status.output).toolkitIdentityStatus, "MATCH");
+  const mismatchTarget = await runEngine(engine, "artifact/run-artifact.mjs", [source, "--target", "src/other.ts", "--source-root", root, "--target-root", root, "--json"], root);
+  const invocation = JSON.parse(mismatchTarget.stdout);
+  assert.equal(invocation.outcome, "BLOCKED");
+  assert.equal(invocation.status, "BLOCKED");
+  assert.equal(invocation.artifactId, before.artifactId);
+  assert.equal(invocation.progress.activeCheckpoint, "DISCOVER_LEGACY");
+  assert.match(invocation.progressChecklist, /stop reason: BLOCKED/);
+  assert.match(invocation.reason, /Next action: \/migrate-artifact/);
+  const pinned = JSON.parse(await readFile(engineIn(bundle, "build-identity.json"), "utf8"));
+  const other = await siblingBundle(bundle, { ...pinned, commit: "f".repeat(40), contentHash: `sha256:${"e".repeat(64)}` });
+  t.after(() => other.cleanup());
+  const mismatch = await runEngine(other.engine, "artifact/run-artifact.mjs", args, root);
+  const blockedResult = JSON.parse(mismatch.stdout);
+  assert.equal(blockedResult.outcome, "BLOCKED");
+  assert.equal(blockedResult.status, "BLOCKED");
+  assert.equal(blockedResult.artifactId, before.artifactId);
+  assert.equal(blockedResult.progress.activeCheckpoint, "DISCOVER_LEGACY");
+  assert.match(blockedResult.progressChecklist, /stop reason: BLOCKED/);
+  assert.match(blockedResult.reason, /toolkit-identity\.mjs update --artifact src\/widget\.ts/);
+  assert.match(blockedResult.nextCommand, /toolkit-identity\.mjs update --artifact src\/widget\.ts/);
   const resumed = await runEngine(engine, "artifact/run-artifact.mjs", args, root);
   assert.equal(resumed.code, 0, resumed.output);
   assert.equal(JSON.parse(resumed.output).artifactId, before.artifactId);

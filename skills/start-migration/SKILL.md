@@ -392,6 +392,8 @@ constants by a contract test — the table cannot drift from the code.
   Format 18 (authored `requiredObservations` in the legacy inventory) is the
   same kind: a pre-18 UI record stays readable, earns no new VERIFY_SLICES or
   FINALIZE PASS, and reaches 18 only through `UI_OBSERVATIONS_ADOPTED`.
+  Preview with `artifact-migration-discover <module> --adopt-ui-observations`,
+  then run the printed `--confirm-adopt-ui-observations <digest>` command.
 - A record is never promoted into a feature it never ran, and a persisted
   version field is never hand-edited to route around a refusal.
 

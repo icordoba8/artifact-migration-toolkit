@@ -160,7 +160,7 @@ export const TOOLKIT_IDENTITY_EVENTS = [
  * operator is always given this engine's own installed executable rather than
  * a guess about where the toolkit lives.
  */
-export const toolkitIdentityBlocker = (recorded, active, { action, adoptCommand }) => {
+export const toolkitIdentityBlocker = (recorded, active, { action, adoptCommand, updateCommand }) => {
   if (!recorded) {
     // An unstamped record refuses every mutation until a toolkit is explicitly
     // adopted, and *which* toolkit is running does not soften that. An earlier
@@ -182,7 +182,7 @@ export const toolkitIdentityBlocker = (recorded, active, { action, adoptCommand 
     return `This record pins toolkit ${renderToolkitIdentity(recorded)}, but the running engine is a source checkout with no ${BUILD_IDENTITY_FILE} and cannot prove it is that release. ${action} is refused and nothing was written.`;
   }
   if (!sameToolkitIdentity(recorded, active)) {
-    return `This record pins toolkit ${renderToolkitIdentity(recorded)}, but the running toolkit is ${renderToolkitIdentity(active)}. ${action} is refused and nothing was written. Install the pinned release, or perform an explicit toolkit identity update.`;
+    return `This record pins toolkit ${renderToolkitIdentity(recorded)}, but the running toolkit is ${renderToolkitIdentity(active)}. ${action} is refused and nothing was written. Install the pinned release, or update explicitly with: ${updateCommand ?? adoptCommand.replace(/\badopt\b/, "update")}`;
   }
   return null;
 };

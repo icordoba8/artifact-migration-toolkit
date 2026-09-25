@@ -29,7 +29,7 @@ export const MIGRATION_MODES = ["auto", "step"];
 const MODE_MESSAGE = "--mode accepts 'auto' or 'step'.";
 
 const DISCOVER_USAGE =
-  "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--scan] [--status] [--doctor] [--slice <id>]";
+  "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--adopt-ui-observations [--confirm-adopt-ui-observations <digest>]] [--scan] [--status] [--doctor] [--slice <id>]";
 
 const ARTIFACT_USAGE =
   "Usage: run-artifact.mjs <source> [--source <additional-source>]... [--type <type>] [--target <path>] [--source-root <path>] [--target-root <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--status] [--mode auto|step] [--slice <id>] [--json]";
@@ -73,6 +73,8 @@ const RUN_REFUSED_OPTIONS = [
   "amend-slice",
   "add-file",
   "adopt-visual-contract",
+  "adopt-ui-observations",
+  "confirm-adopt-ui-observations",
   "doctor",
   "scan",
   "status",
@@ -149,6 +151,8 @@ export const assertOptionCombination = (
         hasAddFile(values) ||
         values["adopt-visual-contract"] ||
         values["confirm-adopt-visual-contract"] ||
+        values["adopt-ui-observations"] ||
+        values["confirm-adopt-ui-observations"] ||
         values.scan ||
         values["confirm-execution"] ||
         values["confirm-mismatch"] ||
@@ -176,6 +180,8 @@ export const assertOptionCombination = (
         values["amend-slice"] ||
         hasAddFile(values) ||
         values["adopt-visual-contract"] ||
+        values["adopt-ui-observations"] ||
+        values["confirm-adopt-ui-observations"] ||
         values["confirm-execution"] ||
         values["confirm-mismatch"] ||
         values.brief ||
@@ -189,6 +195,20 @@ export const assertOptionCombination = (
       throw new Error(
         "--scan is read-only and cannot be combined with a mutating option.",
       );
+    }
+    if (
+      values["confirm-adopt-ui-observations"] !== undefined && !values["adopt-ui-observations"]
+    ) {
+      throw new Error("--confirm-adopt-ui-observations requires --adopt-ui-observations.");
+    }
+    if (
+      values["adopt-ui-observations"] &&
+      Object.entries(values).some(([option, value]) =>
+        !["adopt-ui-observations", "confirm-adopt-ui-observations", "registry"].includes(option) &&
+        Boolean(value) && (!Array.isArray(value) || value.length > 0),
+      )
+    ) {
+      throw new Error("--adopt-ui-observations is its own transition; use it with only --registry and optional --confirm-adopt-ui-observations <digest>.");
     }
     if (
       [

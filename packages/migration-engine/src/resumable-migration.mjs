@@ -6671,7 +6671,7 @@ const validateUiRuntimeEvidence = async ({
   if (!usesUiVerification(state) || !baseline.legacy.hasVisibleUi) return;
   if (!usesRequiredObservations(state)) {
     throw new Error(
-      `Visible UI needs format-${REQUIRED_OBSERVATIONS_FORMAT} requiredObservations before VERIFY_SLICES or FINALIZE can PASS. Use UI_OBSERVATIONS_ADOPTED${state.designSource === "figma-mcp" && !usesVisualAcceptance(state) ? " with combined visual adoption" : ""}; TARGET proof cannot supply the contract.`,
+      `Visible UI needs format-${REQUIRED_OBSERVATIONS_FORMAT} requiredObservations before VERIFY_SLICES or FINALIZE can PASS. Preview UI_OBSERVATIONS_ADOPTED${state.designSource === "figma-mcp" && !usesVisualAcceptance(state) ? " with combined visual adoption" : ""} with: artifact-migration-discover ${state.migrationId} --adopt-ui-observations. Confirm using the digest printed by that command; TARGET proof cannot supply the contract.`,
     );
   }
   const parityIds = new Set(implementation.traceIds);

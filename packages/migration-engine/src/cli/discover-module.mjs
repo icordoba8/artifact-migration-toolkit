@@ -13,11 +13,13 @@ import {
   nextOutcome,
 } from "../migration-policy.mjs";
 import {
+  adoptUiObservations,
   assertExecutionConfirmation,
   autoAdoptToolkitIdentity,
   bootstrapMigration,
   getMigrationStatus,
   previewDiscoveryScan,
+  previewUiObservationsAdoption,
   BLOCKED_EXIT_CODE,
   previewMigrationExecution,
   recoverMigrationRecord,
@@ -91,6 +93,8 @@ export const parseDiscoverArguments = (arguments_) => {
       "add-file": { type: "string", multiple: true },
       "adopt-visual-contract": { type: "boolean", default: false },
       "confirm-adopt-visual-contract": { type: "boolean", default: false },
+      "adopt-ui-observations": { type: "boolean", default: false },
+      "confirm-adopt-ui-observations": { type: "string" },
       scan: { type: "boolean", default: false },
       slice: { type: "string" },
       status: { type: "boolean", default: false },
@@ -126,6 +130,8 @@ export const parseDiscoverArguments = (arguments_) => {
     amendSlice: values["amend-slice"] ?? null,
     addFiles: values["add-file"] ?? [],
     adoptVisualContract: values["adopt-visual-contract"],
+    adoptUiObservations: values["adopt-ui-observations"],
+    confirmAdoptUiObservations: values["confirm-adopt-ui-observations"],
     scan: values.scan,
     slice: values.slice,
     status: values.status,
@@ -222,6 +228,25 @@ export const runDiscoverCli = async (
     const scan = await previewDiscoveryScan(options);
     stdout.write(`${JSON.stringify(scan, null, 2)}\n`);
     return { scan };
+  }
+  if (options.adoptUiObservations) {
+    const plan = await previewUiObservationsAdoption(options);
+    const digest = plan.confirmationDigest ?? plan.candidateDigest;
+    const command = `artifact-migration-discover ${options.moduleName} --adopt-ui-observations --confirm-adopt-ui-observations ${digest}`;
+    stdout.write(`UI_OBSERVATIONS_ADOPTED preview\nCandidate digest: ${plan.candidateDigest ?? "none"}\n${plan.confirmationDigest ? `Combined visual + observations digest: ${plan.confirmationDigest}\n` : ""}Affected slices: ${(plan.affectedSlices ?? []).join(", ") || "none"}\nBlockers: ${plan.blockers.join("; ") || "none"}\n${plan.blockers.length ? "" : `Confirm with: ${command}\n`}`);
+    if (plan.blockers.length) {
+      process.exitCode = BLOCKED_EXIT_CODE;
+      return { preview: plan, blocked: true };
+    }
+    if (!options.confirmAdoptUiObservations) return { preview: plan, awaitingConfirmation: true };
+    const result = await adoptUiObservations({
+      registryPath: options.registryPath,
+      moduleName: options.moduleName,
+      candidateDigest: options.confirmAdoptUiObservations,
+      confirmationDigest: options.confirmAdoptUiObservations,
+    });
+    stdout.write(`UI_OBSERVATIONS_ADOPTED: ${result.state.currentStep}; resume with /start-migration ${options.moduleName}\n`);
+    return { preview: plan, result };
   }
   // `discover-module.mjs <module>` *is* the resume command, and resuming a
   // record whose last transition was interrupted is the whole point of the

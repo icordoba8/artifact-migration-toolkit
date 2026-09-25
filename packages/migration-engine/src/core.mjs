@@ -103,6 +103,7 @@ export {
 // the name that describes what it does (D2-2). Both stay exported, permanently.
 export {
   advanceMigration,
+  adoptUiObservations,
   artifactBindingFor,
   artifactPrerequisiteWork,
   assertArtifactPrerequisites,
@@ -114,6 +115,7 @@ export {
   previewAdvance,
   previewDiscoveryScan,
   previewMigrationExecution,
+  previewUiObservationsAdoption,
   renderAdvancePreview,
   renderProgress,
   renderProgressChecklist,

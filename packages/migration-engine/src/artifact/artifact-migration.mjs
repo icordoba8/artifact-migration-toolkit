@@ -58,7 +58,7 @@ import { parserResolutionError } from "../discovery-scan.mjs";
 // already routes every artifact approval through its recorder, so binding the
 // rendered command to that same installation adds no coupling that was not
 // already load-bearing.
-import { engineCommand } from "../engine-paths.mjs";
+import { engineCommand, quoteCommandToken } from "../engine-paths.mjs";
 import {
   activeToolkitIdentity,
   sameToolkitIdentity,
@@ -3494,6 +3494,14 @@ const outcomeResult = (state, outcome, reason, mode, extra = {}, status = state.
   };
 };
 
+const blockedArtifactResult = (state, reason, mode, nextCommand) =>
+  outcomeResult(
+    { ...state, nextAction: reason, nextCommand: nextCommand === undefined ? state.nextCommand : nextCommand },
+    "BLOCKED", reason, mode,
+    { nextAction: reason, nextCommand: nextCommand === undefined ? state.nextCommand : nextCommand },
+    "BLOCKED",
+  );
+
 const locate = ({ targetRoot = process.cwd(), id, source, type = "artifact", sourceRoot } = {}) => {
   const resolvedTargetRoot = path.resolve(targetRoot);
   const artifactId = id ?? artifactIdFor({ source, type, sourceRoot });
@@ -3548,9 +3556,12 @@ const readArtifactStatus = async (options = {}) => {
   if (await exists(transactionFile)) {
     // A recoverable two-phase transaction reports honestly as ACTIVE and is
     // replayed by the next run; only a torn or invalid one blocks. No write.
+    let transaction;
+    let replayable = false;
     try {
-      const transaction = JSON.parse(await readFile(transactionFile, "utf8"));
+      transaction = JSON.parse(await readFile(transactionFile, "utf8"));
       await assertTransactionReplayable(location.root, transaction);
+      replayable = true;
       if (transaction.state.artifactId !== location.id) {
         throw new Error("Artifact state identity does not match its directory.");
       }
@@ -3565,6 +3576,12 @@ const readArtifactStatus = async (options = {}) => {
         root: location.root,
       };
     } catch (error) {
+      const state = replayable && transaction?.state?.artifactId === location.id
+        ? transaction.state
+        : await readArtifactState(location.targetRoot, location.id).catch(() => null);
+      if (state) {
+        return { ...blockedArtifactResult(state, error.message, null, artifactCommandFor(state)), exists: true, root: location.root };
+      }
       return {
         artifactId: location.id,
         exists: true,
@@ -3584,6 +3601,9 @@ const readArtifactStatus = async (options = {}) => {
     state = await readArtifactState(location.targetRoot, location.id);
     assertInvocationMatches(state, options);
   } catch (error) {
+    if (state) {
+      return { ...blockedArtifactResult(state, error.message, null, artifactCommandFor(state)), exists: true, root: location.root };
+    }
     return {
       artifactId: location.id,
       exists: true,
@@ -3823,6 +3843,8 @@ const runArtifactIteration = async (options = {}) => {
     } catch (error) {
       // An unreplayable transaction is a blocked record, and `--status` says so
       // too. Throwing here made the two paths disagree about the same journal.
+      const state = await readArtifactState(location.targetRoot, location.id).catch(() => null);
+      if (state) return blockedArtifactResult(state, error.message, mode);
       return {
         artifactId: location.id,
         outcome: "BLOCKED",
@@ -3842,8 +3864,18 @@ const runArtifactIteration = async (options = {}) => {
       return outcomeResult(state, "CONTINUE", null, mode);
     }
     const state = await readArtifactState(location.targetRoot, location.id);
-    assertInvocationMatches(state, options);
-    assertArtifactToolkitIdentity(state, location.id, "Advancing this artifact migration");
+    try {
+      assertInvocationMatches(state, options);
+      assertArtifactToolkitIdentity(state, location.id, "Advancing this artifact migration");
+    } catch (error) {
+      if (!error.toolkitIdentity && !error.message.startsWith("Invocation ")) throw error;
+      const nextCommand = error.toolkitIdentity
+        ? activeToolkitIdentity()
+          ? artifactIdentityCommand(state, state.toolkitIdentity ? "update" : "adopt")
+          : null
+        : artifactCommandFor(state);
+      return blockedArtifactResult(state, `${error.message}${nextCommand ? ` Next action: ${nextCommand}` : ""}`, mode, nextCommand);
+    }
     const preview = await previewAdvance(location.root, state, options);
     if (preview.outcome === "COMPLETE") return outcomeResult(state, "COMPLETE", preview.reason, mode);
     if (preview.outcome === "OPERATOR_DECISION") {
@@ -3926,10 +3958,19 @@ export const runArtifact = async (
 // --artifact uses this to present and approve child decisions; the engine never
 // records one itself (approval lives only in record-decision.mjs).
 /** The artifact-side twin of the module gate. Mutation only; never a read. */
+const artifactIdentityCommand = (state, mode) => engineCommand(
+  "cli/toolkit-identity.mjs", mode,
+  "--artifact", quoteCommandToken(state.source.path),
+  "--type", state.artifactType,
+  "--source-root", quoteCommandToken(state.source.root),
+  "--target-root", quoteCommandToken(state.target.root),
+);
+
 export const assertArtifactToolkitIdentity = (state, id, action) => {
   const blocker = toolkitIdentityBlocker(state.toolkitIdentity ?? null, activeToolkitIdentity(), {
     action,
-    adoptCommand: engineCommand("cli/toolkit-identity.mjs", "adopt", "--artifact", state.source.path),
+    adoptCommand: artifactIdentityCommand(state, "adopt"),
+    updateCommand: artifactIdentityCommand(state, "update"),
   });
   if (blocker) throw Object.assign(new Error(blocker), { toolkitIdentity: true });
 };
