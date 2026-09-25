@@ -181,6 +181,11 @@ its SHA, so the same capture file may not be reused across two logical slots.
 `provider` and `sessionId` are excluded from the semantic evidence hash and do
 not decide freshness. File hashes and `boundTo` do.
 
+This artifact record keeps the `ACCESSIBILITY_SNAPSHOT` shape above. The
+`playwright-ui-proof/v1` structured proof (state observations, `postAction`
+evidence per interaction) and `ACTIVE` `--reopen-ui` recovery apply to module
+migrations; see `start-migration/references/migration-contract.md`.
+
 ## Finalize
 
 `gates.json` is `{version, gates, uiEvidence, requirementEvidence}` and contains

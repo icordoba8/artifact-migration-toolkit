@@ -110,6 +110,10 @@ import {
   TARGET_DIRTY_SCOPE,
   validateResumableMigration,
   artifactBindingFor,
+  adoptUiObservations,
+  assertRequiredObservations,
+  previewUiObservationsAdoption,
+  REQUIRED_OBSERVATIONS_FORMAT,
 } from "../../src/resumable-migration.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
 import { exitCodeFor, maySelfConfirm } from "../../src/migration-policy.mjs";
@@ -401,6 +405,33 @@ const LEGACY_INVENTORY = {
         },
       ],
       runtimeStates: ["DEFAULT"],
+      requiredObservations: [
+        {
+          id: "UIO-1",
+          state: "DEFAULT",
+          role: "button",
+          name: "Sign in",
+          predicate: "visibility",
+          expected: true,
+        },
+        {
+          id: "UIO-3",
+          state: "DEFAULT",
+          role: "button",
+          name: "Sign in",
+          predicate: "text",
+          expected: "Sign in",
+        },
+        {
+          id: "UIO-2",
+          state: "DEFAULT",
+          afterInteractionId: "UIX-1",
+          role: "status",
+          name: "Signed in",
+          predicate: "presence",
+          expected: true,
+        },
+      ],
       evidence: evidenceChecklist(
         "legacy/auth/marker.txt",
         ["AUTH-REQ-001"],
@@ -722,12 +753,92 @@ const authorEvidence = async (
     // Lets a single test bend one field of the runtime record (or add a
     // screenshot) without restating the whole evidence document.
     mutate = (records) => records,
+    // Bends the structured playwright-ui-proof/v1 document the record references.
+    mutateProof = (proof) => proof,
     limitations = [],
   } = {},
 ) => {
   const planned = (
     await readJson(path.join(fixture.migrationRoot, "slices/index.json"))
   ).slices.find((slice) => slice.id === sliceId);
+  const observation = (controlState) => ({
+    url: "http://localhost/auth/sign-in",
+    controls: [
+      {
+        role: "button",
+        name: "Sign in",
+        state: controlState,
+        present: true,
+        visible: true,
+        text: "Sign in",
+        assertions: [
+          { predicate: "presence", expected: true },
+          { predicate: "visibility", expected: true },
+          { predicate: "text", expected: "Sign in" },
+          { predicate: "url", expected: "http://localhost/auth/sign-in" },
+        ],
+      },
+    ],
+  });
+  // One structured proof per record that still references the default
+  // proof, observed in that record's own state and interactions, so a test
+  // cloning records[0] across states gets a proof bound to each clone.
+  const writeProof = async (record, index) => {
+    const content = `${JSON.stringify(
+      mutateProof({
+        proofFormat: "playwright-ui-proof/v1",
+        sliceId,
+        uiBehaviorId: record.uiBehaviorId,
+        state: record.state,
+        traceId: "BR-1",
+        scenarioIds: uiBehavior.scenarioIds,
+        observation: observation(record.state),
+        interactions: (record.interactions ?? []).map((interaction) => ({
+          id: interaction.id,
+          action: { type: "click", target: "button[name=Sign in]" },
+          postAction: {
+            url: "http://localhost/auth/sign-in",
+            controls: [{
+              role: "status",
+              name: "Signed in",
+              state: "SUBMITTED",
+              present: true,
+              assertions: [{ predicate: "presence", expected: true }],
+            }],
+          },
+        })),
+      }),
+      null,
+      2,
+    )}\n`;
+    const absolute = path.join(
+      fixture.migrationRoot,
+      `evidence/${sliceId}/ui/proof-${index}.json`,
+    );
+    await mkdir(path.dirname(absolute), { recursive: true });
+    await writeFile(absolute, content);
+    return {
+      reference: path
+        .relative(fixture.targetRoot, absolute)
+        .replaceAll(path.sep, "/"),
+      hash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    };
+  };
+  const proofPath = "evidence/ui/proof.json";
+  const proofDigest = `sha256:${"d".repeat(64)}`;
+  // A test that bent `hash` keeps its bent digest against the real proof.
+  const withProofs = async (records) =>
+    Promise.all(
+      records.map(async (record, index) => {
+        if (record.reference !== proofPath) return record;
+        const written = await writeProof(record, index);
+        return {
+          ...record,
+          reference: written.reference,
+          hash: record.hash === proofDigest ? written.hash : record.hash,
+        };
+      }),
+    );
   // P1-7: each command result is a structured record whose captured output
   // is a real, hash-verified file, not a bare string.
   const outputContent = "pnpm --dir target test\nall tests passed\n";
@@ -786,7 +897,7 @@ const authorEvidence = async (
         },
       ],
       scenarios: planned.acceptanceScenarios,
-      uiEvidence: mutate(
+      uiEvidence: await withProofs(mutate(
         sliceId === "slice-a" && includeUi
           ? [
               {
@@ -808,8 +919,8 @@ const authorEvidence = async (
                     outcome: "PASS",
                   }),
                 ),
-                reference: outputPath,
-                hash: outputDigest,
+                reference: proofPath,
+                hash: proofDigest,
                 boundTo: {
                   target: "auth",
                   requirementsDigest: persisted.requirementsAuthority.digest,
@@ -822,7 +933,7 @@ const authorEvidence = async (
             ]
           : [],
         { sliceId, uiBehavior, outputPath, outputDigest },
-      ),
+      )),
       uiEvidenceLimitations: limitations,
       residualRisks: [],
     },
@@ -3799,6 +3910,9 @@ test("an isolated clean roles fixture completes DISCOVERY_COMPLETENESS without a
             description: "The roles page presents the roles feature.",
             configuration: { density: "compact" },
             runtimeStates: ["DEFAULT"],
+            requiredObservations: [
+              { id: "UIO-roles", state: "DEFAULT", role: "main", name: "Roles", predicate: "visibility", expected: true },
+            ],
             evidence: evidenceChecklist(
               "legacy/src/features/roles/index.ts",
               ["ROLES-REQ-001"],
@@ -4026,6 +4140,9 @@ test("a runtime redirect over a destructured parameter base creates no EDGE_RESO
             description: "The roles page presents the roles feature.",
             configuration: { density: "compact" },
             runtimeStates: ["DEFAULT"],
+            requiredObservations: [
+              { id: "UIO-roles", state: "DEFAULT", role: "main", name: "Roles", predicate: "visibility", expected: true },
+            ],
             evidence: evidenceChecklist(
               "legacy/src/features/roles/index.ts",
               ["ROLES-REQ-001"],
@@ -5625,6 +5742,10 @@ test("UI-10: non-UI migrations complete without UI runtime evidence", async () =
 const TWO_STATE_UI_BEHAVIOR = {
   ...LEGACY_INVENTORY.uiBehaviors[0],
   runtimeStates: ["DEFAULT", "EMPTY"],
+  requiredObservations: [
+    ...LEGACY_INVENTORY.uiBehaviors[0].requiredObservations,
+    { id: "UIO-empty", state: "EMPTY", role: "button", name: "Sign in", predicate: "presence", expected: false },
+  ],
 };
 
 const uiLegacy = (uiBehavior) => ({
@@ -5858,6 +5979,20 @@ test("UI-18: the same picture is never persisted twice across states", async () 
         { ...records[0], screenshot: shot },
         { ...records[0], state: "EMPTY", screenshot: shot },
       ],
+      mutateProof: (proof) => proof.state === "EMPTY" ? {
+        ...proof,
+        observation: {
+          ...proof.observation,
+          controls: proof.observation.controls.map((control) => ({
+            ...control,
+            present: false,
+            assertions: control.assertions.map((assertion) =>
+              assertion.predicate === "presence"
+                ? { ...assertion, expected: false }
+                : assertion),
+          })),
+        },
+      } : proof,
     });
     await assert.rejects(
       advance(fixture, { slice: "slice-a" }),
@@ -6052,19 +6187,10 @@ test("UI-26: FINALIZE refuses a verified slice whose UI artifact is gone", async
   const fixture = await createFixture();
   try {
     await driveTo(fixture, "PLAN");
-    const capture = await writeCapture(
-      fixture,
-      "slice-a",
-      "runtime.txt",
-      "route /auth/sign-in rendered\n",
-    );
     for (const slice of SLICES) {
       await authorSlice(fixture, slice.id);
       await advance(fixture, { slice: slice.id });
-      await authorEvidence(fixture, slice.id, {
-        mutate: (records) =>
-          records.map((record) => ({ ...record, ...capture })),
-      });
+      await authorEvidence(fixture, slice.id);
       await advance(fixture, { slice: slice.id });
     }
     assert.equal((await state(fixture)).currentStep, "FINALIZE");
@@ -6072,7 +6198,7 @@ test("UI-26: FINALIZE refuses a verified slice whose UI artifact is gone", async
     // The capture is deleted after the slice verified. result.json is
     // untouched, so only FINALIZE's own re-validation can catch this.
     await rm(
-      path.join(fixture.migrationRoot, "evidence/slice-a/ui/runtime.txt"),
+      path.join(fixture.migrationRoot, "evidence/slice-a/ui/proof-0.json"),
     );
 
     await completeStepDoc(fixture, "FINALIZE");
@@ -6096,6 +6222,231 @@ test("UI-26: FINALIZE refuses a verified slice whose UI artifact is gone", async
     await fixture.cleanup();
   }
 });
+
+test("UIP-P1: structured playwright-ui-proof/v1 with interaction post-state passes VERIFY_SLICES and FINALIZE", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    for (const slice of SLICES) {
+      await authorSlice(fixture, slice.id);
+      await advance(fixture, { slice: slice.id });
+      await authorEvidence(fixture, slice.id);
+      await advance(fixture, { slice: slice.id });
+    }
+    const proof = await readJson(
+      path.join(fixture.migrationRoot, "evidence/slice-a/ui/proof-0.json"),
+    );
+    assert.equal(proof.proofFormat, "playwright-ui-proof/v1");
+    assert.ok(proof.interactions[0].postAction.controls.length > 0);
+    await authorFinalize(fixture);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// The interaction is claimed and proved in DEFAULT, but its frozen postAction
+// requirement belongs to EMPTY. The EMPTY proof exists without that action.
+for (const gate of ["VERIFY_SLICES", "FINALIZE"]) {
+  test(`UIP-state-binding at ${gate}: an interaction in another state cannot satisfy required postAction`, async () => {
+    const fixture = await createFixture();
+    const uiBehavior = {
+      ...LEGACY_INVENTORY.uiBehaviors[0],
+      runtimeStates: ["DEFAULT", "EMPTY"],
+      requiredObservations: [
+        ...LEGACY_INVENTORY.uiBehaviors[0].requiredObservations.map(
+          (observation) => observation.afterInteractionId
+            ? { ...observation, state: "EMPTY" }
+            : observation,
+        ),
+        { id: "UIO-empty", state: "EMPTY", role: "button", name: "Sign in", predicate: "presence", expected: true },
+      ],
+    };
+    const recordsFor = (records, interactionState) => [
+      { ...records[0], interactions: interactionState === "DEFAULT" ? records[0].interactions : [] },
+      { ...records[0], state: "EMPTY", interactions: interactionState === "EMPTY" ? records[0].interactions : [] },
+    ];
+    try {
+      await driveTo(fixture, "PLAN", advance, { legacy: uiLegacy(uiBehavior) });
+      for (const slice of gate === "FINALIZE" ? SLICES : [SLICES[0]]) {
+        await authorSlice(fixture, slice.id);
+        await advance(fixture, { slice: slice.id });
+        await authorEvidence(fixture, slice.id, {
+          uiBehavior,
+          mutate: (records) => records.length ? recordsFor(records, "EMPTY") : records,
+        });
+        if (gate === "FINALIZE") await advance(fixture, { slice: slice.id });
+      }
+      await authorEvidence(fixture, "slice-a", {
+        uiBehavior,
+        mutate: (records) => recordsFor(records, "DEFAULT"),
+      });
+      if (gate === "FINALIZE") {
+        await repin(fixture, "evidence/slice-a/result.json");
+        await authorFinalize(fixture);
+      }
+      await assert.rejects(
+        advance(fixture, gate === "VERIFY_SLICES" ? { slice: "slice-a" } : {}),
+        /state 'EMPTY' misses required postAction observation 'UIO-2'/,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+// N1-N3, each proven at both gates through the one shared validator.
+const UI_PROOF_NEGATIVES = [
+  {
+    id: "N1",
+    name: "a correctly hashed command log used as UI proof",
+    evidence: {
+      mutate: (records, { outputPath, outputDigest }) =>
+        records.map((record) => ({
+          ...record,
+          reference: outputPath,
+          hash: outputDigest,
+        })),
+    },
+    // A command log is not JSON, so the proof read itself fails closed.
+    pattern: /UI evidence\[0\]\.reference is invalid JSON/,
+  },
+  {
+    id: "N1b",
+    name: "a hash-valid JSON artifact that is not playwright-ui-proof/v1",
+    evidence: {
+      mutateProof: ({ proofFormat, ...rest }) => ({ ...rest, snapshot: "ok" }),
+    },
+    pattern: /is not 'playwright-ui-proof\/v1' structured proof/,
+  },
+  {
+    id: "N2",
+    name: "structured proof missing the required state",
+    evidence: {
+      mutateProof: (proof) => ({
+        ...proof,
+        observation: {
+          ...proof.observation,
+          controls: proof.observation.controls.map((control) => ({
+            ...control,
+            state: "LOADING",
+          })),
+        },
+      }),
+    },
+    pattern: /has no control observed in required state 'DEFAULT'/,
+  },
+  {
+    id: "N2b",
+    name: "structured proof whose required control is not visible, despite an authored PASS",
+    evidence: {
+      mutateProof: (proof) => ({
+        ...proof,
+        outcome: "PASS",
+        observation: {
+          ...proof.observation,
+          controls: proof.observation.controls.map((control) => ({
+            ...control,
+            visible: false,
+          })),
+        },
+      }),
+    },
+    pattern: /visibility failed: expected 'true', observed 'false'/,
+  },
+  {
+    id: "N4",
+    name: "A+B+C required but proof measures only A",
+    evidence: {
+      mutateProof: (proof) => ({
+        ...proof,
+        observation: {
+          ...proof.observation,
+          controls: proof.observation.controls.map(({ text, ...control }) => ({
+            ...control,
+            assertions: [{ predicate: "visibility", expected: true }],
+          })),
+        },
+        interactions: proof.interactions.map((interaction) => ({
+          ...interaction,
+          postAction: {
+            ...interaction.postAction,
+            controls: [{
+              role: "button",
+              name: "Other",
+              state: "SUBMITTED",
+              present: true,
+              assertions: [{ predicate: "presence", expected: true }],
+            }],
+          },
+        })),
+      }),
+    },
+    pattern: /misses required observation 'UIO-3'/,
+  },
+  {
+    id: "N3",
+    name: "an interaction without its post-action observation",
+    evidence: {
+      mutateProof: (proof) => ({
+        ...proof,
+        interactions: proof.interactions.map(({ postAction, ...rest }) => ({
+          ...rest,
+          outcome: "PASS",
+        })),
+      }),
+    },
+    pattern: /proof interaction 'UIX-1'\.postAction/,
+  },
+];
+
+for (const negative of UI_PROOF_NEGATIVES) {
+  test(`UIP-${negative.id} at VERIFY_SLICES: ${negative.name} is rejected`, async () => {
+    const fixture = await createFixture();
+    try {
+      await driveTo(fixture, "PLAN");
+      await authorSlice(fixture, "slice-a");
+      await advance(fixture, { slice: "slice-a" });
+      await authorEvidence(fixture, "slice-a", negative.evidence);
+      await assert.rejects(
+        advance(fixture, { slice: "slice-a" }),
+        negative.pattern,
+      );
+      assert.equal((await state(fixture)).activeSlice, "slice-a");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test(`UIP-${negative.id} at FINALIZE: ${negative.name} is rejected and names --reopen-ui (N4)`, async () => {
+    const fixture = await createFixture();
+    try {
+      await driveTo(fixture, "PLAN");
+      for (const slice of SLICES) {
+        await authorSlice(fixture, slice.id);
+        await advance(fixture, { slice: slice.id });
+        await authorEvidence(fixture, slice.id);
+        await advance(fixture, { slice: slice.id });
+      }
+      // State C/D: a completed slice whose pinned evidence predates v1.
+      await authorEvidence(fixture, "slice-a", negative.evidence);
+      await repin(fixture, "evidence/slice-a/result.json");
+      await authorFinalize(fixture);
+      const refusal = await advance(fixture).then(
+        () => assert.fail("FINALIZE accepted invalid UI proof"),
+        (error) => error,
+      );
+      assert.match(refusal.message, negative.pattern);
+      if (negative.id.startsWith("N1")) {
+        assert.match(refusal.message, /--reopen-ui slice-a\./);
+      }
+      assert.notEqual((await state(fixture)).status, "COMPLETE");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
 
 /**
  * The inverse of UI-21. Identical bytes across origins are not a duplicate
@@ -6176,6 +6527,11 @@ test("UI-24: a real Playwright observation carries a visible-UI migration to COM
         },
       ],
       runtimeStates: ["DEFAULT", "SEARCH"],
+      requiredObservations: [
+        { id: "UIO-list", state: "DEFAULT", role: "table", name: "Products", predicate: "visibility", expected: true },
+        { id: "UIO-search", state: "SEARCH", role: "searchbox", name: "Search products", predicate: "value", expected: "widget" },
+        { id: "UIO-count", state: "SEARCH", afterInteractionId: "UIX-1", role: "status", name: "Results", predicate: "text", expected: "1 result" },
+      ],
     };
     const mismatch = {
       ...TARGET_INVENTORY.uiMismatches[0],
@@ -6219,6 +6575,25 @@ test("UI-24: a real Playwright observation carries a visible-UI migration to COM
       evidence: {
         uiBehavior,
         mismatch,
+        mutateProof: (proof) => {
+          const stateObservation = proof.state === "DEFAULT"
+            ? { role: "table", name: "Products", state: "DEFAULT", visible: true,
+                assertions: [{ predicate: "visibility", expected: true }] }
+            : { role: "searchbox", name: "Search products", state: "SEARCH", value: "widget",
+                assertions: [{ predicate: "value", expected: "widget" }] };
+          return {
+            ...proof,
+            observation: { url: "http://localhost/catalog", controls: [stateObservation] },
+            interactions: proof.interactions.map((interaction) => ({
+              ...interaction,
+              postAction: {
+                url: "http://localhost/catalog",
+                controls: [{ role: "status", name: "Results", state: "SEARCH",
+                  text: "1 result", assertions: [{ predicate: "text", expected: "1 result" }] }],
+              },
+            })),
+          };
+        },
         mutate: (records) =>
           records.flatMap((record) =>
             ["LEGACY", "TARGET"].flatMap((origin) =>
@@ -10554,7 +10929,14 @@ test("figma-17: a frame named 'mobile' binds nothing; only an explicit row binds
       ...LEGACY_INVENTORY,
       uiBehaviors: LEGACY_INVENTORY.uiBehaviors.map((uiBehavior) =>
         uiBehavior.id === "UIB-1"
-          ? { ...uiBehavior, runtimeStates: ["DEFAULT", "MOBILE"] }
+          ? {
+              ...uiBehavior,
+              runtimeStates: ["DEFAULT", "MOBILE"],
+              requiredObservations: [
+                ...uiBehavior.requiredObservations,
+                { id: "UIO-mobile", state: "MOBILE", role: "button", name: "Sign in", predicate: "visibility", expected: true },
+              ],
+            }
           : uiBehavior,
       ),
     };
@@ -10670,7 +11052,14 @@ test("unbacked-17: explicit rows bind DEFAULT and MOBILE to Figma variants; a 'n
       ...LEGACY_INVENTORY,
       uiBehaviors: LEGACY_INVENTORY.uiBehaviors.map((uiBehavior) =>
         uiBehavior.id === "UIB-1"
-          ? { ...uiBehavior, runtimeStates: ["DEFAULT", "MOBILE"] }
+          ? {
+              ...uiBehavior,
+              runtimeStates: ["DEFAULT", "MOBILE"],
+              requiredObservations: [
+                ...uiBehavior.requiredObservations,
+                { id: "UIO-mobile", state: "MOBILE", role: "button", name: "Sign in", predicate: "visibility", expected: true },
+              ],
+            }
           : uiBehavior,
       ),
     };
@@ -10814,7 +11203,7 @@ test("unbacked-17: without authoritative design only a live operator decision co
     await advance(fixture);
     const persisted = await state(fixture);
     assert.ok(persisted.completedSteps.includes("BUILD_BASELINE"));
-    assert.equal(persisted.formatVersion, 17);
+    assert.equal(persisted.formatVersion, MIGRATION_FORMAT_VERSION);
   } finally {
     await fixture.cleanup();
   }
@@ -11255,27 +11644,21 @@ test("visual-17: persisted Figma evidence that changed after it was hashed is st
 test("visual-17: a format-16 figma-mcp record keeps provenance-only semantics", async () => {
   const fixture = await createFixture();
   try {
-    await figmaAtAssessTarget(fixture, {}, 16);
-    await writeJson(
-      path.join(fixture.migrationRoot, "inventories/figma-context.json"),
-      { version: 1, frames: [{ fileKey: "ABC123def", nodeId: FIGMA_NODE }] },
-    );
-    await advance(fixture);
-    await completeStepDoc(fixture, "BUILD_BASELINE");
-    await writeMatrices(fixture);
-    await registerAuth(fixture);
-    // No visual-acceptance matrix is demanded or pinned.
-    await advance(fixture);
-    await completeStepDoc(fixture, "PLAN");
-    await writeJson(path.join(fixture.migrationRoot, "slices/index.json"), {
-      version: 1,
-      slices: SLICES,
-    });
-    await advance(fixture);
-    await completeStepDoc(fixture, "IMPLEMENT_SLICES");
-    await completeStepDoc(fixture, "VERIFY_SLICES");
+    await driveFigmaToVerify(fixture);
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
+    await downgradeToFormat16(fixture);
+    const historical = await state(fixture);
+    assert.equal(historical.formatVersion, 16);
+    assert.equal(
+      historical.artifactHashes["matrices/visual-acceptance.json"],
+      undefined,
+    );
+    assert.equal(
+      (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json")))
+        .uiBehaviors[0].requiredObservations,
+      undefined,
+    );
     const pin = await figmaPin(fixture);
     await authorEvidence(fixture, "slice-a", {
       mutate: (records) =>
@@ -11284,14 +11667,30 @@ test("visual-17: a format-16 figma-mcp record keeps provenance-only semantics", 
           boundTo: { ...record.boundTo, figmaContextDigest: pin },
         })),
     });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /Visible UI needs format-18 requiredObservations/,
+    );
+
+    await writeAdoptionEvidence(fixture);
+    const target = { registryPath: fixture.registryPath, moduleName: "auth" };
+    const preview = await previewUiObservationsAdoption(target);
+    assert.deepEqual(preview.blockers, []);
+    await adoptUiObservations({
+      ...target,
+      confirmationDigest: preview.confirmationDigest,
+    });
+    const adopted = await state(fixture);
+    assert.equal(adopted.formatVersion, 18);
+    assert.ok(adopted.artifactHashes["matrices/visual-acceptance.json"]);
+    assert.ok(adopted.artifactHashes["inventories/figma-context.json"]);
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await figmaEvidence(fixture),
+    });
     await advance(fixture, { slice: "slice-a" });
     const persisted = await state(fixture);
-    assert.equal(persisted.formatVersion, 16);
-    assert.equal(
-      persisted.artifactHashes["matrices/visual-acceptance.json"],
-      undefined,
-    );
     assert.equal(persisted.activeSlice, "slice-b");
+    assert.equal(persisted.formatVersion, 18);
   } finally {
     await fixture.cleanup();
   }
@@ -11372,43 +11771,20 @@ const finalizeFixture = async (fixture) => {
   await advance(fixture);
 };
 
-/** A format-16 figma-mcp migration COMPLETE under provenance-only semantics:
- * a model-prose context, no visual contract, a digest-bound TARGET UI row on
- * slice-a, and slice-b with functional evidence only. */
+/** Construct a persisted pre-17 COMPLETE record from a valid current record. */
 const driveFigma16ToComplete = async (fixture) => {
-  await figmaAtAssessTarget(fixture, {}, 16);
-  await writeJson(
-    path.join(fixture.migrationRoot, "inventories/figma-context.json"),
-    STUB_CONTEXT,
-  );
-  await advance(fixture);
-  await completeStepDoc(fixture, "BUILD_BASELINE");
-  await writeMatrices(fixture);
-  await registerAuth(fixture);
-  await advance(fixture);
-  await completeStepDoc(fixture, "PLAN");
-  await writeJson(path.join(fixture.migrationRoot, "slices/index.json"), {
-    version: 1,
-    slices: SLICES,
-  });
-  await advance(fixture);
-  await completeStepDoc(fixture, "IMPLEMENT_SLICES");
-  await completeStepDoc(fixture, "VERIFY_SLICES");
-  const pin = await figmaPin(fixture);
+  await driveFigmaToVerify(fixture);
   for (const slice of SLICES) {
     await authorSlice(fixture, slice.id);
     await advance(fixture, { slice: slice.id });
     await authorEvidence(fixture, slice.id, {
-      mutate: (records) =>
-        records.map((record) => ({
-          ...record,
-          boundTo: { ...record.boundTo, figmaContextDigest: pin },
-        })),
+      mutate: await figmaEvidence(fixture),
     });
     await advance(fixture, { slice: slice.id });
   }
   await finalizeFixture(fixture);
   assert.equal((await state(fixture)).status, "COMPLETE");
+  await downgradeToFormat16(fixture);
 };
 
 /** Fresh format-17 evidence authored beside the pinned context. */
@@ -11820,6 +12196,20 @@ test("adopt-17: --reopen-ui after adoption verifies under format 17 and reaches 
     });
     await assert.rejects(
       advance(fixture, { slice: "slice-a" }),
+      /Visible UI needs format-18 requiredObservations/,
+    );
+    await adoptObservations(fixture);
+    assert.equal((await state(fixture)).formatVersion, 18);
+    assert.equal((await historyEvents(fixture)).at(-1).event, "UI_OBSERVATIONS_ADOPTED");
+    await authorEvidence(fixture, "slice-a", {
+      mutate: (records) =>
+        records.map((record) => ({
+          ...record,
+          boundTo: { ...record.boundTo, figmaContextDigest: pin },
+        })),
+    });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
       /VISUAL_ACCEPTANCE_FAIL/,
     );
     await authorEvidence(fixture, "slice-a", {
@@ -11839,7 +12229,7 @@ test("adopt-17: --reopen-ui after adoption verifies under format 17 and reaches 
     await finalizeFixture(fixture);
     const complete = await state(fixture);
     assert.equal(complete.status, "COMPLETE");
-    assert.equal(complete.formatVersion, 17);
+    assert.equal(complete.formatVersion, 18);
   } finally {
     await fixture.cleanup();
   }
@@ -13989,19 +14379,19 @@ test("R-W10-a: the SKILL.md compatibility table cannot drift from the exported c
   );
 });
 
-test("R-W10-c: formats 10, 11 and 17 stay non-promoting, and every other supported format is executable", () => {
+test("R-W10-c: formats 10, 11, 17 and 18 stay non-promoting, and every other supported format is executable", () => {
   // Two different questions with two different answers. Conflating them is what
   // made a first attempt at deriving this set turn every format-10 record
   // unexecutable: 10 and 11 are never promoted *into*, but a record already at
   // 10 must still run its own lifecycle to completion.
-  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17]);
+  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18]);
   for (const version of SUPPORTED_FORMAT_VERSIONS) {
     assert.equal(
       formatIsSupported(version),
       true,
       `format ${version} must remain executable`,
     );
-    assert.equal(formatIsPromoting(version), ![10, 11, 17].includes(version));
+    assert.equal(formatIsPromoting(version), ![10, 11, 17, 18].includes(version));
   }
   // Bumping the constant cannot orphan the format that was current a moment
   // ago: the previous format is derived into the supported set, not typed into
@@ -14027,10 +14417,12 @@ test("R-W10-e: a format newer than supported is refused with the update message"
 test("R-W10-b / R-W10-d: a format-15 record runs the full lifecycle unchanged and gains no rework vocabulary", async () => {
   const fixture = await createFixture();
   try {
-    // Born at 15, before same-slice rework existed. It must finalize exactly as
-    // it did before the bump: no attempt counter, no `rework/**` pin, and no
-    // FINALIZE assertion that demands records it never authored.
-    await driveTo(fixture, "FINALIZE", advance, {
+    // Persist a historical COMPLETE shape after the current lifecycle closes.
+    await driveTo(fixture, "FINALIZE");
+    await downgradeToFormat17(fixture);
+    const statePath = path.join(fixture.migrationRoot, "state.json");
+    await writeJson(statePath, {
+      ...(await readJson(statePath)),
       formatVersion: MULTI_SOURCE_FORMAT_VERSION,
     });
     const persisted = await state(fixture);
@@ -14041,6 +14433,11 @@ test("R-W10-b / R-W10-d: a format-15 record runs the full lifecycle unchanged an
       "stamped 15 until it authors a rework",
     );
     assert.equal(persisted.sliceReworks, undefined);
+    assert.equal(
+      (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json")))
+        .uiBehaviors[0].requiredObservations,
+      undefined,
+    );
     assert.deepEqual(
       Object.keys(persisted.artifactHashes).filter((relative) =>
         relative.startsWith("rework/"),
@@ -14454,9 +14851,9 @@ test("R-W8-e: no provider tree has an engine entry point to run", async () => {
  * operation actually spent.
  * ------------------------------------------------------------------------ */
 
-/** A format-16 figma record, COMPLETE, with both slices reopened by --reopen-ui. */
-const reopenedFigma16 = async (fixture, slices = ["slice-a", "slice-b"]) => {
-  await driveFigma16ToComplete(fixture);
+/** A completed current-format record, with slices reopened for amendment tests. */
+const reopenedForAmendment = async (fixture, slices = ["slice-a", "slice-b"]) => {
+  await driveTo(fixture, "FINALIZE");
   const reopen = await reopenUi(fixture, slices);
   assert.deepEqual(reopen.preview.blockers, []);
   await reopen.run();
@@ -14518,7 +14915,7 @@ const approveSequence = (sequence) =>
 test("amend: one amendment preserves the prior record, re-pins both, and writes one event", async () => {
   const fixture = await createFixture();
   try {
-    await reopenedFigma16(fixture, ["slice-a"]);
+    await reopenedForAmendment(fixture, ["slice-a"]);
     const added = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const before = await state(fixture);
     const priorBytes = await readFile(
@@ -14593,7 +14990,7 @@ test("amend: one amendment preserves the prior record, re-pins both, and writes 
 test("amend: refuses a slice that is not reopened, and a file it does not add", async () => {
   const fixture = await createFixture();
   try {
-    await driveFigma16ToComplete(fixture);
+    await driveTo(fixture, "FINALIZE");
     const added = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     // COMPLETE, nothing reopened.
     const complete = await amendPreview(fixture, "slice-a", [added]);
@@ -14641,7 +15038,7 @@ test("amend: refuses a slice that is not reopened, and a file it does not add", 
 test("amend: an unbranded authorization is refused before anything is written", async () => {
   const fixture = await createFixture();
   try {
-    await reopenedFigma16(fixture, ["slice-a"]);
+    await reopenedForAmendment(fixture, ["slice-a"]);
     const added = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const before = await state(fixture);
     await assert.rejects(
@@ -14663,7 +15060,7 @@ test("amend: an unbranded authorization is refused before anything is written", 
 test("sequence: one approval executes an ordered set, each event citing its own index", async () => {
   const fixture = await createFixture();
   try {
-    const before = await reopenedFigma16(fixture);
+    const before = await reopenedForAmendment(fixture);
     const a = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const b = await extraTargetFile(fixture, "src/slice-b-helper.ts");
     const sequence = await sequenceFor(fixture, [
@@ -14720,7 +15117,7 @@ test("sequence: one approval executes an ordered set, each event citing its own 
 test("sequence: naming one slice twice is refused before a human sees anything", async () => {
   const fixture = await createFixture();
   try {
-    await reopenedFigma16(fixture, ["slice-a"]);
+    await reopenedForAmendment(fixture, ["slice-a"]);
     const a = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const other = await extraTargetFile(fixture, "src/slice-a-extra.ts");
     await assert.rejects(
@@ -14749,7 +15146,7 @@ test("sequence: naming one slice twice is refused before a human sees anything",
 test("sequence: a record that moved expires the whole remaining authorization", async () => {
   const fixture = await createFixture();
   try {
-    const before = await reopenedFigma16(fixture);
+    const before = await reopenedForAmendment(fixture);
     const a = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const b = await extraTargetFile(fixture, "src/slice-b-helper.ts");
     const sequence = await sequenceFor(fixture, [
@@ -14786,7 +15183,7 @@ test("sequence: a record that moved expires the whole remaining authorization", 
 test("sequence: a file edited after approval expires the sequence, unwritten", async () => {
   const fixture = await createFixture();
   try {
-    const before = await reopenedFigma16(fixture);
+    const before = await reopenedForAmendment(fixture);
     const a = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const b = await extraTargetFile(fixture, "src/slice-b-helper.ts");
     const sequence = await sequenceFor(fixture, [
@@ -14820,7 +15217,7 @@ test("sequence: a file edited after approval expires the sequence, unwritten", a
 test("amend: a transition killed mid-write is recovered to the prior record", async () => {
   const fixture = await createFixture();
   try {
-    await reopenedFigma16(fixture, ["slice-a"]);
+    await reopenedForAmendment(fixture, ["slice-a"]);
     const added = await extraTargetFile(fixture, "src/slice-a-helper.ts");
     const before = await state(fixture);
     const priorBytes = await readFile(
@@ -15963,6 +16360,826 @@ test("R3-1: the installed toolkit reopens a COMPLETE record under --mode auto wi
       ).sliceId,
       "slice-a",
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- ACTIVE --reopen-ui: recovery for completed slices lacking v1 UI proof ---
+//
+// A slice verified before playwright-ui-proof/v1 existed holds pinned evidence
+// FINALIZE now refuses. These cases prove every such state has a supported path
+// to new structured proof, and that the recovery never re-admits old bytes.
+
+const COMMAND_LOG_AS_PROOF = {
+  mutate: (records, { outputPath, outputDigest }) =>
+    records.map((record) => ({
+      ...record,
+      reference: outputPath,
+      hash: outputDigest,
+    })),
+};
+
+/** Replace a completed slice's pinned evidence with pre-v1 (command log) proof. */
+const weakenCompletedSlice = async (fixture, sliceId = "slice-a") => {
+  await authorEvidence(fixture, sliceId, COMMAND_LOG_AS_PROOF);
+  await repin(fixture, `evidence/${sliceId}/result.json`);
+  return readFile(
+    path.join(fixture.migrationRoot, `evidence/${sliceId}/result.json`),
+    "utf8",
+  );
+};
+
+/** State C: slice-a completed on pre-v1 evidence, slice-b active at VERIFY. */
+const atStateC = async (fixture) => {
+  await driveTo(fixture, "PLAN");
+  await authorSlice(fixture, "slice-a");
+  await advance(fixture, { slice: "slice-a" });
+  await authorEvidence(fixture, "slice-a");
+  await advance(fixture, { slice: "slice-a" });
+  await authorSlice(fixture, "slice-b");
+  await advance(fixture, { slice: "slice-b" });
+  assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+  assert.equal((await state(fixture)).activeSlice, "slice-b");
+  return weakenCompletedSlice(fixture);
+};
+
+/** State D: both slices completed, ACTIVE at FINALIZE, slice-a pre-v1. */
+const atStateD = async (fixture) => {
+  await driveTo(fixture, "PLAN");
+  for (const slice of SLICES) {
+    await authorSlice(fixture, slice.id);
+    await advance(fixture, { slice: slice.id });
+    await authorEvidence(fixture, slice.id);
+    await advance(fixture, { slice: slice.id });
+  }
+  assert.equal((await state(fixture)).currentStep, "FINALIZE");
+  return weakenCompletedSlice(fixture);
+};
+
+/** Advance every pending slice with fresh v1 proof until FINALIZE. */
+const finishSlices = async (fixture) => {
+  for (let guard = 0; guard < 8; guard += 1) {
+    const current = await state(fixture);
+    if (current.currentStep === "FINALIZE") return;
+    if (current.currentStep === "VERIFY_SLICES") {
+      await authorEvidence(fixture, current.activeSlice);
+    }
+    await advance(fixture, { slice: current.activeSlice });
+  }
+  assert.fail("slices never reached FINALIZE");
+};
+
+const lastHistoryEvent = async (fixture) =>
+  (
+    await readFile(
+      path.join(fixture.migrationRoot, "history/history.ndjson"),
+      "utf8",
+    )
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .at(-1);
+
+const assertActiveReopenThenComplete = async (fixture) => {
+  const before = await state(fixture);
+  const reopen = await reopenUi(fixture, ["slice-a"]);
+  assert.deepEqual(reopen.preview.blockers, []);
+  const result = await reopen.run();
+  assert.equal(result.reopened, true);
+  const after = await state(fixture);
+  assert.equal(after.status, "ACTIVE");
+  assert.equal(after.currentStep, "VERIFY_SLICES");
+  assert.equal(after.activeSlice, "slice-a");
+  assert.equal(after.evidenceFreshness, "STALE");
+  assert.deepEqual(after.pendingSlices, [
+    "slice-a",
+    ...before.pendingSlices.filter((id) => id !== "slice-a"),
+  ]);
+  assert.deepEqual(after.sliceReworks ?? {}, before.sliceReworks ?? {});
+  assert.equal(after.formatVersion, before.formatVersion);
+  assert.equal(MIGRATION_FORMAT_VERSION, 18);
+  // Only the named evidence and FINALIZE's own pins are released; discovery,
+  // baseline, plan, implementation and remediation pins are untouched.
+  for (const [relative, pin] of Object.entries(before.artifactHashes)) {
+    if (relative === "evidence/slice-a/result.json") continue;
+    if (after.artifactHashes[relative] === undefined) {
+      assert.ok(
+        after.invalidatedArtifacts.includes(relative),
+        `${relative} was released without being a FINALIZE pin`,
+      );
+      continue;
+    }
+    assert.equal(after.artifactHashes[relative], pin, `${relative} stays pinned`);
+  }
+  assert.ok(!after.invalidatedArtifacts.includes("ui-remediation.json"));
+  assert.ok(!after.artifactHashes["evidence/slice-a/result.json"]);
+  const reset = await readJson(
+    path.join(fixture.migrationRoot, "evidence/slice-a/result.json"),
+  );
+  assert.equal(reset.result, "PENDING");
+  assert.deepEqual(reset.uiEvidence, []);
+  const event = await lastHistoryEvent(fixture);
+  assert.equal(event.event, "UI_REMEDIATION_REOPENED");
+  assert.equal(event.from, "ACTIVE");
+  assert.equal(
+    await exists(path.join(fixture.migrationRoot, "ui-remediation.json")),
+    Boolean(before.artifactHashes["ui-remediation.json"]),
+  );
+
+  // FINALIZE reaching COMPLETE also proves the discovery/baseline gate evidence
+  // still passes the freshness check (the reopen did not re-pin legacy).
+  await finishSlices(fixture);
+  await authorFinalize(fixture);
+  await advance(fixture);
+  const done = await state(fixture);
+  assert.equal(done.status, "COMPLETE");
+  assert.deepEqual(done.sliceReworks ?? {}, before.sliceReworks ?? {});
+};
+
+test("UIP-P2: state C (ACTIVE, completed slice on pre-v1 evidence) recovers through ACTIVE --reopen-ui to COMPLETE", async () => {
+  const fixture = await createFixture();
+  try {
+    await atStateC(fixture);
+    await assertActiveReopenThenComplete(fixture);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UIP-P3: state D (ACTIVE at FINALIZE) recovers through ACTIVE --reopen-ui to COMPLETE", async () => {
+  const fixture = await createFixture();
+  try {
+    await atStateD(fixture);
+    await assertActiveReopenThenComplete(fixture);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UIP-P4: state E (COMPLETE) recovers through the existing --reopen-ui with v1 proof", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    assert.equal((await state(fixture)).status, "COMPLETE");
+    await weakenCompletedSlice(fixture);
+    const reopen = await reopenUi(fixture, ["slice-a"]);
+    assert.deepEqual(reopen.preview.blockers, []);
+    await reopen.run();
+    assert.equal((await lastHistoryEvent(fixture)).from, "COMPLETE");
+    await writeJson(path.join(fixture.migrationRoot, "ui-remediation.json"), {
+      version: 1,
+      hasVisibleUi: true,
+      uiBehaviors: LEGACY_INVENTORY.uiBehaviors,
+      uiMismatches: TARGET_INVENTORY.uiMismatches,
+    });
+    await finishSlices(fixture);
+    await authorFinalize(fixture);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/** After a rework, re-implement until the slice is back at VERIFY_SLICES. */
+const finishUntilVerify = async (fixture) => {
+  for (let guard = 0; guard < 4; guard += 1) {
+    const current = await state(fixture);
+    if (current.currentStep === "VERIFY_SLICES") return;
+    await authorSlice(fixture, current.activeSlice);
+    await advance(fixture, { slice: current.activeSlice });
+  }
+};
+
+test("UIP-P5: role-shaped state A (VERIFY_SLICES, rework 1/3, PENDING) takes v1 proof and advances without a reopen", async () => {
+  const fixture = await createFixture();
+  try {
+    await atFailedVerification(fixture, "slice-a");
+    await rework(fixture, "slice-a", { confirmRework: true });
+    await finishUntilVerify(fixture);
+    const before = await state(fixture);
+    assert.equal(before.currentStep, "VERIFY_SLICES");
+    assert.equal(before.activeSlice, "slice-a");
+    assert.equal(before.sliceReworks["slice-a"], 1);
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    const after = await state(fixture);
+    assert.deepEqual(after.completedSlices, ["slice-a"]);
+    assert.equal(after.sliceReworks["slice-a"], 1);
+    const history = await readFile(
+      path.join(fixture.migrationRoot, "history/history.ndjson"),
+      "utf8",
+    );
+    assert.doesNotMatch(history, /UI_REMEDIATION_REOPENED/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UIP-N5: ACTIVE --reopen-ui refusals write nothing", async () => {
+  const cases = [
+    {
+      name: "names the active slice",
+      setup: atStateC,
+      slices: ["slice-a", "slice-b"],
+      pattern: /names only completed slices; slice-b is active or pending/,
+    },
+    {
+      name: "omits a completed slice lacking v1 proof",
+      setup: atStateD,
+      slices: ["slice-b"],
+      pattern:
+        /must include every completed slice lacking playwright-ui-proof\/v1 UI proof: slice-a\./,
+    },
+    {
+      name: "runs at a step before VERIFY_SLICES",
+      setup: async (fixture) => {
+        await driveTo(fixture, "PLAN");
+      },
+      slices: ["slice-a"],
+      pattern:
+        /legal only for a COMPLETE migration, or an ACTIVE one at VERIFY_SLICES or FINALIZE/,
+    },
+    {
+      name: "runs while the active slice holds an un-reworked FAIL",
+      setup: async (fixture) => {
+        await atStateC(fixture);
+        const planned = SLICES.find((slice) => slice.id === "slice-b");
+        await writeFile(
+          path.join(fixture.migrationRoot, "evidence/slice-b/result.json"),
+          `${JSON.stringify({
+            sliceId: "slice-b",
+            result: "FAIL",
+            producedAt: new Date().toISOString(),
+            requirementIds: planned.requirementIds,
+            scenarioIds: planned.scenarioIds,
+            traceIds: planned.traceIds,
+            defects: [],
+          })}\n`,
+        );
+      },
+      slices: ["slice-a"],
+      pattern:
+        /holds an un-reworked FAIL; resolve it with --rework-slice first/,
+    },
+  ];
+  for (const refusal of cases) {
+    const fixture = await createFixture();
+    try {
+      await refusal.setup(fixture);
+      const before = await snapshot(fixture.migrationRoot);
+      const reopen = await reopenUi(fixture, refusal.slices);
+      await assert.rejects(reopen.run(), refusal.pattern, refusal.name);
+      assert.deepEqual(
+        await snapshot(fixture.migrationRoot),
+        before,
+        `${refusal.name} wrote nothing`,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("UIP-N6: after an ACTIVE --reopen-ui the old pre-v1 evidence bytes are rejected", async () => {
+  const fixture = await createFixture();
+  try {
+    const weakBytes = await atStateC(fixture);
+    await (await reopenUi(fixture, ["slice-a"])).run();
+    await writeFile(
+      path.join(fixture.migrationRoot, "evidence/slice-a/result.json"),
+      weakBytes,
+    );
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /UI evidence\[0\]\.reference is invalid JSON/,
+    );
+    assert.deepEqual((await state(fixture)).completedSlices, []);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UIP-N7: history replay after an ACTIVE --reopen-ui derives the live pins, remediation pin retained", async () => {
+  const fixture = await createFixture();
+  try {
+    // A remediation pin exists only after a COMPLETE --reopen-ui, so start there.
+    await driveTo(fixture, "FINALIZE");
+    await (await reopenUi(fixture, ["slice-a"])).run();
+    await writeJson(path.join(fixture.migrationRoot, "ui-remediation.json"), {
+      version: 1,
+      hasVisibleUi: true,
+      uiBehaviors: LEGACY_INVENTORY.uiBehaviors,
+      uiMismatches: TARGET_INVENTORY.uiMismatches,
+    });
+    await finishSlices(fixture);
+    const pinned = (await state(fixture)).artifactHashes["ui-remediation.json"];
+    assert.ok(pinned, "the remediation file is pinned before the ACTIVE reopen");
+    await weakenCompletedSlice(fixture);
+    await (await reopenUi(fixture, ["slice-a"])).run();
+    assert.equal((await lastHistoryEvent(fixture)).from, "ACTIVE");
+    const live = await state(fixture);
+    assert.equal(live.artifactHashes["ui-remediation.json"], pinned);
+    // Every resume replays history against the live pins and refuses any
+    // divergence; a clean preview is the replay agreeing with the record.
+    const resumed = await previewMigrationExecution({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+    });
+    assert.deepEqual(resumed.blockers, []);
+    await finishSlices(fixture);
+    await authorFinalize(fixture);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- Format 18: required UI observations and UI_OBSERVATIONS_ADOPTED --------
+
+const UI_CANDIDATE = "ui-observations-adoption/candidate/legacy.json";
+
+/**
+ * A genuine pre-18 UI record: the pinned legacy inventory has no
+ * requiredObservations and the stamp is 17. The format-18 bytes it was driven
+ * with are what legacy authority recovers, so they become the candidate.
+ */
+const downgradeToFormat17 = async (fixture) => {
+  const relative = "inventories/legacy.json";
+  const absolute = path.join(fixture.migrationRoot, relative);
+  const recovered = await readFile(absolute);
+  const inventory = JSON.parse(recovered.toString("utf8"));
+  inventory.uiBehaviors = inventory.uiBehaviors.map(
+    ({ requiredObservations: _dropped, ...rest }) => rest,
+  );
+  await writeJson(absolute, inventory);
+  const statePath = path.join(fixture.migrationRoot, "state.json");
+  await writeJson(statePath, { ...(await readJson(statePath)), formatVersion: 17 });
+  await repin(fixture, relative);
+  const candidate = path.join(fixture.migrationRoot, UI_CANDIDATE);
+  await mkdir(path.dirname(candidate), { recursive: true });
+  await writeFile(candidate, recovered);
+  return recovered;
+};
+
+/** Test-only persisted format-16 shape, never a production transition. */
+const downgradeToFormat16 = async (fixture) => {
+  await downgradeToFormat17(fixture);
+  const statePath = path.join(fixture.migrationRoot, "state.json");
+  const persisted = await readJson(statePath);
+  persisted.formatVersion = 16;
+  delete persisted.artifactHashes["matrices/visual-acceptance.json"];
+  await writeJson(statePath, persisted);
+  await rm(path.join(fixture.migrationRoot, "matrices/visual-acceptance.json"));
+  await writeJson(
+    path.join(fixture.migrationRoot, "inventories/figma-context.json"),
+    STUB_CONTEXT,
+  );
+  await repin(fixture, "inventories/figma-context.json");
+};
+
+const adoptObservations = async (fixture) => {
+  const target = { registryPath: fixture.registryPath, moduleName: "auth" };
+  const preview = await previewUiObservationsAdoption(target);
+  assert.deepEqual(preview.blockers, []);
+  return adoptUiObservations({
+    ...target,
+    candidateDigest: preview.candidateDigest,
+  });
+};
+
+/** Old bytes preserved and pinned for life, new contract pinned, event recorded. */
+const assertAdoptionPreserved = async (fixture, before, slices) => {
+  const after = await state(fixture);
+  assert.equal(after.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+  assert.equal(after.revision, before.revision + 1);
+  const event = (await historyEvents(fixture)).at(-1);
+  assert.equal(event.event, "UI_OBSERVATIONS_ADOPTED");
+  assert.deepEqual(event.slices, slices);
+  assert.equal(
+    event.previousLegacyDigest,
+    before.artifactHashes["inventories/legacy.json"],
+  );
+  assert.equal(event.legacyDigest, after.artifactHashes["inventories/legacy.json"]);
+  assert.notEqual(event.legacyDigest, event.previousLegacyDigest);
+  assert.ok(
+    event.preserved.includes("ui-observations-adoption/inventories/legacy.json"),
+  );
+  for (const relative of event.preserved) {
+    assert.ok(after.artifactHashes[relative], `${relative} is pinned`);
+  }
+  for (const sliceId of slices) {
+    const kept = `ui-observations-adoption/evidence/${sliceId}/result.json`;
+    assert.ok(event.preserved.includes(kept));
+    if (before.completedSlices.includes(sliceId)) {
+      assert.equal((await readJson(path.join(fixture.migrationRoot, kept))).result, "PASS");
+    }
+    assert.equal(
+      (
+        await readJson(
+          path.join(fixture.migrationRoot, `evidence/${sliceId}/result.json`),
+        )
+      ).result,
+      "PENDING",
+    );
+  }
+  // The whole record, history replay included, still validates.
+  await readState(fixture.targetRoot, "auth");
+  return { after, event };
+};
+
+test("format 18: requiredObservations schema rejects every malformed shape", () => {
+  const base = LEGACY_INVENTORY.uiBehaviors[0];
+  assert.doesNotThrow(() => assertRequiredObservations(base));
+  const withObservations = (requiredObservations) => ({
+    ...base,
+    requiredObservations,
+  });
+  const [stateObs, , postObs] = base.requiredObservations;
+  const url = { id: "UIO-u", state: "DEFAULT", predicate: "url", expected: "/x" };
+  const cases = [
+    [{ ...base, requiredObservations: undefined }, /unadopted contract, never an empty set/],
+    [withObservations([]), /no state observation for runtime state 'DEFAULT'/],
+    [withObservations([stateObs]), /no post-action observation for interaction 'UIX-1'/],
+    [withObservations([{ ...stateObs, source: "proof" }, postObs]), /unsupported fields: source/],
+    [withObservations([{ ...stateObs, state: "EMPTY" }, postObs]), /not one of UIB-1.runtimeStates/],
+    [withObservations([stateObs, { ...postObs, afterInteractionId: "UIX-9" }]), /not an interaction of UIB-1/],
+    [withObservations([{ ...stateObs, predicate: "regex" }, postObs]), /predicate 'regex'/],
+    [withObservations([{ ...stateObs, name: undefined }, postObs]), /name must be a non-empty string/],
+    [withObservations([{ ...stateObs, expected: "yes" }, postObs]), /does not fit predicate 'visibility'/],
+    [withObservations([{ ...stateObs, predicate: "count", expected: -1 }, postObs]), /does not fit predicate 'count'/],
+    [withObservations([{ ...url, role: "link" }, stateObs, postObs]), /takes no role or name/],
+    [withObservations([stateObs, { ...postObs, id: "UIO-1" }]), /not unique/],
+  ];
+  for (const [item, pattern] of cases) {
+    assert.throws(() => assertRequiredObservations(item), pattern);
+  }
+  // Empty text is a valid exact expectation; url is page-scoped.
+  assert.doesNotThrow(() =>
+    assertRequiredObservations(
+      withObservations([{ ...stateObs, predicate: "text", expected: "" }, url, postObs]),
+    ),
+  );
+});
+
+test("format 18 is non-promoting; an old UI record adopts before a new PASS", async () => {
+  assert.equal(MIGRATION_FORMAT_VERSION, 18);
+  assert.ok(NON_PROMOTING_FORMAT_VERSIONS.includes(18));
+  assert.equal(formatIsPromoting(18), false);
+  assert.equal(formatIsSupported(17), true);
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    const stillOld = await state(fixture);
+    assert.equal(stillOld.currentStep, "VERIFY_SLICES");
+    assert.equal(stillOld.formatVersion, 17, "an advance never stamps 18");
+    await authorEvidence(fixture, "slice-a", {
+      uiBehavior: (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json"))).uiBehaviors[0],
+    });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /UI_OBSERVATIONS_ADOPTED/,
+    );
+    assert.equal((await state(fixture)).formatVersion, 17);
+    await adoptObservations(fixture);
+    assert.equal((await state(fixture)).formatVersion, 18);
+    await authorEvidence(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).revision, stillOld.revision + 2);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI_OBSERVATIONS_ADOPTED blocks without writing when legacy authority is missing, tampered, or unconfirmed", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    const target = { registryPath: fixture.registryPath, moduleName: "auth" };
+    const candidatePath = path.join(fixture.migrationRoot, UI_CANDIDATE);
+    const good = await readFile(candidatePath);
+    await rm(candidatePath);
+    let before = await snapshot(fixture.migrationRoot);
+    assert.match(
+      (await previewUiObservationsAdoption(target)).blockers.join(" "),
+      /No legacy authority to adopt/,
+    );
+    await assert.rejects(
+      adoptUiObservations({ ...target, candidateDigest: "sha256:0" }),
+      /Nothing was written/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    const tampered = JSON.parse(good.toString("utf8"));
+    tampered.uiBehaviors[0].description = "rewritten";
+    await writeJson(candidatePath, tampered);
+    assert.match(
+      (await previewUiObservationsAdoption(target)).blockers.join(" "),
+      /may only add requiredObservations/,
+    );
+    await writeFile(candidatePath, good);
+    const preview = await previewUiObservationsAdoption(target);
+    assert.equal(preview.candidate, good.toString("utf8"), "exact candidate bytes");
+    await writeFile(candidatePath, `${good.toString("utf8")}\n`);
+    before = await snapshot(fixture.migrationRoot);
+    await assert.rejects(
+      adoptUiObservations({ ...target, candidateDigest: preview.candidateDigest }),
+      /changed after it was previewed/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI_OBSERVATIONS_ADOPTED case A: ACTIVE with a pending UI slice keeps plan and step", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    const before = await state(fixture);
+    await adoptObservations(fixture);
+    const { after } = await assertAdoptionPreserved(fixture, before, []);
+    assert.equal(after.currentStep, before.currentStep);
+    assert.equal(after.activeSlice, before.activeSlice);
+    assert.deepEqual(after.pendingSlices, before.pendingSlices);
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a", {});
+    await advance(fixture, { slice: "slice-a" });
+    assert.deepEqual((await state(fixture)).completedSlices, ["slice-a"]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI_OBSERVATIONS_ADOPTED role-shaped case B: ACTIVE / VERIFY_SLICES / pending UI slice adopts without restart", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await downgradeToFormat17(fixture);
+    await authorEvidence(fixture, "slice-a", {});
+    const before = await state(fixture);
+    assert.equal(before.currentStep, "VERIFY_SLICES");
+    assert.equal(before.activeSlice, "slice-a");
+    await adoptObservations(fixture);
+    const { after } = await assertAdoptionPreserved(fixture, before, ["slice-a"]);
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.equal(after.activeSlice, "slice-a");
+    assert.deepEqual(after.completedSteps, before.completedSteps, "no restart");
+    assert.equal(
+      after.artifactHashes["slices/index.json"],
+      before.artifactHashes["slices/index.json"],
+    );
+    await authorEvidence(fixture, "slice-a", {});
+    await advance(fixture, { slice: "slice-a" });
+    assert.deepEqual((await state(fixture)).completedSlices, ["slice-a"]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI_OBSERVATIONS_ADOPTED case C: completed UI slices are preserved, requeued, and complete again", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a", {});
+    await advance(fixture, { slice: "slice-a" });
+    await authorSlice(fixture, "slice-b");
+    await advance(fixture, { slice: "slice-b" });
+    await downgradeToFormat17(fixture);
+    const before = await state(fixture);
+    assert.deepEqual(before.completedSlices, ["slice-a"]);
+    const priorPass = await readFile(
+      path.join(fixture.migrationRoot, "evidence/slice-a/result.json"),
+    );
+    await adoptObservations(fixture);
+    const { after } = await assertAdoptionPreserved(fixture, before, ["slice-a"]);
+    assert.deepEqual(
+      await readFile(
+        path.join(
+          fixture.migrationRoot,
+          "ui-observations-adoption/evidence/slice-a/result.json",
+        ),
+      ),
+      priorPass,
+    );
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.equal(after.activeSlice, "slice-a");
+    assert.deepEqual(after.completedSlices, []);
+    assert.deepEqual(after.pendingSlices, ["slice-a", "slice-b"]);
+    assert.ok(!after.artifactHashes["evidence/slice-a/result.json"]);
+    await authorEvidence(fixture, "slice-a", {});
+    await advance(fixture, { slice: "slice-a" });
+    // slice-b was mid-VERIFY; its existing slice record re-closes IMPLEMENT unchanged.
+    assert.equal((await state(fixture)).currentStep, "IMPLEMENT_SLICES");
+    await advance(fixture, { slice: "slice-b" });
+    await authorEvidence(fixture, "slice-b", {});
+    await advance(fixture, { slice: "slice-b" });
+    await authorFinalize(fixture);
+    await advance(fixture);
+    const complete = await state(fixture);
+    assert.equal(complete.status, "COMPLETE");
+    assert.equal(complete.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.ok(
+      complete.artifactHashes["ui-observations-adoption/evidence/slice-a/result.json"],
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI_OBSERVATIONS_ADOPTED case D: ACTIVE / FINALIZE is refused, adopts, reverifies, and finalizes", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "SLICES");
+    await downgradeToFormat17(fixture);
+    await authorFinalize(fixture);
+    await assert.rejects(advance(fixture), /UI_OBSERVATIONS_ADOPTED/);
+    const before = await state(fixture);
+    assert.equal(before.currentStep, "FINALIZE");
+    await adoptObservations(fixture);
+    const { after, event } = await assertAdoptionPreserved(fixture, before, ["slice-a"]);
+    assert.equal(event.from, "FINALIZE");
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.deepEqual(after.completedSlices, ["slice-b"]);
+    await authorEvidence(fixture, "slice-a", {
+      mutate: (records) => records.map((record) => ({
+        ...record,
+        boundTo: {
+          ...record.boundTo,
+          uiContractDigest: before.artifactHashes["inventories/legacy.json"],
+        },
+      })),
+    });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /boundTo.uiContractDigest is stale/,
+    );
+    await authorEvidence(fixture, "slice-a", {});
+    await advance(fixture, { slice: "slice-a" });
+    await authorFinalize(fixture);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI_OBSERVATIONS_ADOPTED case E: COMPLETE keeps prior completion evidence and requires new PASS and FINALIZE", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "FINALIZE");
+    await downgradeToFormat17(fixture);
+    const before = await state(fixture);
+    assert.equal(before.status, "COMPLETE");
+    const gates = await readFile(path.join(fixture.migrationRoot, "gates.json"));
+    const historyPath = path.join(fixture.migrationRoot, "history/history.ndjson");
+    const priorHistory = await readFile(historyPath, "utf8");
+    await adoptObservations(fixture);
+    const { after, event } = await assertAdoptionPreserved(fixture, before, ["slice-a"]);
+    assert.equal(event.from, "COMPLETE");
+    assert.equal(after.status, "ACTIVE");
+    assert.equal(after.currentStep, "VERIFY_SLICES");
+    assert.deepEqual(
+      await readFile(
+        path.join(fixture.migrationRoot, "ui-observations-adoption/gates.json"),
+      ),
+      gates,
+    );
+    assert.ok(after.artifactHashes["ui-observations-adoption/gates.json"]);
+    assert.ok(!after.artifactHashes["gates.json"]);
+    assert.ok((await readFile(historyPath, "utf8")).startsWith(priorHistory));
+    assert.match(
+      (
+        await previewUiObservationsAdoption({
+          registryPath: fixture.registryPath,
+          moduleName: "auth",
+        })
+      ).blockers.join(" "),
+      /already format 18/,
+    );
+    await authorEvidence(fixture, "slice-a", {});
+    await advance(fixture, { slice: "slice-a" });
+    await authorFinalize(fixture);
+    await advance(fixture);
+    const complete = await state(fixture);
+    assert.equal(complete.status, "COMPLETE");
+    assert.equal(complete.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("combined adoption: pre-17 ACTIVE figma-mcp validates both inputs and commits one format-18 event", async () => {
+  const fixture = await createFixture();
+  try {
+    await figmaAtAssessTarget(fixture, {}, 16);
+    await writeJson(path.join(fixture.migrationRoot, "inventories/figma-context.json"), STUB_CONTEXT);
+    await advance(fixture);
+    await completeStepDoc(fixture, "BUILD_BASELINE");
+    await writeMatrices(fixture);
+    await registerAuth(fixture);
+    await advance(fixture);
+    await completeStepDoc(fixture, "PLAN");
+    await writeJson(path.join(fixture.migrationRoot, "slices/index.json"), {
+      version: 1,
+      slices: SLICES,
+    });
+    await advance(fixture);
+
+    const legacyPath = path.join(fixture.migrationRoot, "inventories/legacy.json");
+    const candidate = await readFile(legacyPath);
+    const inventory = JSON.parse(candidate.toString("utf8"));
+    inventory.uiBehaviors = inventory.uiBehaviors.map(
+      ({ requiredObservations: _removed, ...rest }) => rest,
+    );
+    await writeJson(legacyPath, inventory);
+    await repin(fixture, "inventories/legacy.json");
+    const candidatePath = path.join(fixture.migrationRoot, UI_CANDIDATE);
+    await mkdir(path.dirname(candidatePath), { recursive: true });
+    await writeFile(candidatePath, candidate);
+    await writeAdoptionEvidence(fixture);
+    await completeStepDoc(fixture, "IMPLEMENT_SLICES");
+    await completeStepDoc(fixture, "VERIFY_SLICES");
+
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    const pin = await figmaPin(fixture);
+    await authorEvidence(fixture, "slice-a", {
+      mutate: (records) => records.map((record) => ({
+        ...record,
+        boundTo: { ...record.boundTo, figmaContextDigest: pin },
+      })),
+    });
+    const target = { registryPath: fixture.registryPath, moduleName: "auth" };
+    const before = await state(fixture);
+    const preview = await previewUiObservationsAdoption(target);
+    assert.deepEqual(preview.blockers, []);
+    assert.ok(preview.confirmationDigest);
+    assert.ok(preview.visualEvidenceDigest);
+    assert.deepEqual(preview.affectedSlices, ["slice-a"]);
+
+    let bytes = await snapshot(fixture.migrationRoot);
+    await assert.rejects(
+      adoptUiObservations({ ...target, candidateDigest: preview.candidateDigest }),
+      /complete transition was not confirmed/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+    await writeFile(candidatePath, `${candidate.toString("utf8")}\n`);
+    bytes = await snapshot(fixture.migrationRoot);
+    await assert.rejects(
+      adoptUiObservations({ ...target, confirmationDigest: preview.confirmationDigest }),
+      /complete transition was not confirmed/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+    await writeFile(candidatePath, candidate);
+
+    const visualPath = path.join(fixture.migrationRoot, ADOPTED_CONTEXT);
+    const visualBytes = await readFile(visualPath);
+    await writeJson(visualPath, STUB_CONTEXT);
+    bytes = await snapshot(fixture.migrationRoot);
+    assert.match((await previewUiObservationsAdoption(target)).blockers.join(" "), /Visual contract adoption fails closed/);
+    await assert.rejects(
+      adoptUiObservations({ ...target, confirmationDigest: preview.confirmationDigest }),
+      /Nothing was written/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+    await writeFile(visualPath, visualBytes);
+
+    await writeFile(candidatePath, JSON.stringify(inventory));
+    bytes = await snapshot(fixture.migrationRoot);
+    assert.match((await previewUiObservationsAdoption(target)).blockers.join(" "), /requiredObservations is missing/);
+    await assert.rejects(
+      adoptUiObservations({ ...target, confirmationDigest: preview.confirmationDigest }),
+      /Nothing was written/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+    await writeFile(candidatePath, candidate);
+
+    const adopted = await adoptUiObservations({
+      ...target,
+      confirmationDigest: preview.confirmationDigest,
+    });
+    assert.equal(adopted.state.formatVersion, 18);
+    assert.equal(adopted.state.currentStep, "VERIFY_SLICES");
+    assert.equal(adopted.state.activeSlice, "slice-a");
+    assert.equal(adopted.state.revision, before.revision + 1);
+    assert.equal((await historyEvents(fixture)).at(-1).event, "UI_OBSERVATIONS_ADOPTED");
+    assert.equal((await readJson(path.join(fixture.migrationRoot, "evidence/slice-a/result.json"))).result, "PENDING");
+    assert.ok(adopted.state.artifactHashes["ui-observations-adoption/inventories/figma-context.json"]);
+    assert.ok(adopted.state.artifactHashes["matrices/visual-acceptance.json"]);
+    await readState(fixture.targetRoot, "auth");
   } finally {
     await fixture.cleanup();
   }

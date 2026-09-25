@@ -909,8 +909,14 @@ A completed migration may reopen only affected slices with:
 artifact-migration-discover <module> --reopen-ui <slice[,slice...]>
 ```
 
-`--reopen-ui` is legal only from `COMPLETE` and does not reopen unrelated
-slices. Under `--mode step` it is operator-only and two-phase; under `--mode
+`--reopen-ui` is legal from `COMPLETE`, and from an `ACTIVE` record at
+`VERIFY_SLICES` or `FINALIZE` to recover completed slices whose UI evidence is
+not `playwright-ui-proof/v1`. It does not reopen unrelated slices. On `ACTIVE`
+it names only `completedSlices`, must include every completed slice lacking v1
+proof, is refused while an advance journal is pending or the active slice holds
+an un-reworked `FAIL`, writes no `ui-remediation.json`, keeps every
+pre-implementation pin and rework counter, and records
+`UI_REMEDIATION_REOPENED` with `from: "ACTIVE"`. Under `--mode step` it is operator-only and two-phase; under `--mode
 auto` the AUTO principal decides it on its own evidence and records it in the
 auto ledger.
 It creates editable `ui-remediation.json`. Each mismatch must use one of
@@ -1016,6 +1022,12 @@ every other slice unchanged.
 
 ### Runtime evidence rows
 
+For visible UI, a pre-18 record remains readable but cannot earn a new
+VERIFY_SLICES or FINALIZE PASS without `requiredObservations`. Adopt the
+legacy-authored set with `UI_OBSERVATIONS_ADOPTED` first; pre-17 ACTIVE
+figma-mcp records combine visual and observations adoption in that transition.
+TARGET proof cannot author the required set.
+
 Verification evidence lives in the affected slice's `result.json`; captures live
 beside it under `evidence/<slice-id>/ui/`. `uiEvidence` rows are produced by the
 repository's registered Playwright MCP server and bind the runtime observation
@@ -1042,7 +1054,7 @@ data-source mode, behavior, and state:
       "outcome": "PASS"
     }
   ],
-  "reference": "…/evidence/catalog-001/ui/search.txt",
+  "reference": "…/evidence/catalog-001/ui/search.proof.json",
   "hash": "sha256:…",
   "screenshot": {
     "reference": "…/evidence/catalog-001/ui/search.png",
@@ -1072,6 +1084,60 @@ data-source mode, behavior, and state:
 - An interaction's `expected` must equal the discovered contract, so the target
   is verified against what discovery found, not against what it happens to do.
 - Screenshots are supporting evidence and are never compared pixel for pixel.
+- A `TARGET` row's `reference` must be structured `playwright-ui-proof/v1`
+  JSON; a hash match alone (a command log, a text note) is refused at both
+  `VERIFY_SLICES` and `FINALIZE`, for every record format. The proof repeats the
+  row's `sliceId`, `uiBehaviorId` and `state`, the behavior's parity-row
+  `traceId`, and its `scenarioIds`. `observation.controls[]` records each
+  control's `role`, `name`, `state` and observed `present`/`visible`/`text`/
+  `value`/`count`; at least one control is observed in the row's required
+  `state`. Every assertion `{ predicate, expected }` uses `presence`,
+  `visibility`, `text`, `value`, `count` or `url` and is evaluated by the engine
+  against the observed values; an authored `PASS` never overrides a failed
+  predicate. Every interaction the row claims needs an `action`
+  (`type`, `target`) and a `postAction` observation of the resulting state with
+  its own passing assertions. A completed slice refused only for lacking v1
+  proof names its recovery: `--reopen-ui <slices>`.
+
+```json
+{
+  "proofFormat": "playwright-ui-proof/v1",
+  "sliceId": "catalog-001",
+  "uiBehaviorId": "UIB-1",
+  "state": "SEARCH",
+  "traceId": "BR-1",
+  "scenarioIds": ["CAT-SCN-001"],
+  "observation": {
+    "url": "http://localhost:3000/catalog",
+    "controls": [
+      {
+        "role": "searchbox", "name": "Search", "state": "SEARCH",
+        "present": true, "visible": true, "value": "widget",
+        "assertions": [
+          { "predicate": "visibility", "expected": true },
+          { "predicate": "value", "expected": "widget" }
+        ]
+      }
+    ]
+  },
+  "interactions": [
+    {
+      "id": "UIX-1",
+      "action": { "type": "fill", "target": "searchbox[name=Search]" },
+      "postAction": {
+        "url": "http://localhost:3000/catalog?q=widget",
+        "controls": [
+          {
+            "role": "row", "name": "Widget", "state": "SEARCH",
+            "present": true, "visible": true, "count": 2,
+            "assertions": [{ "predicate": "count", "expected": 2 }]
+          }
+        ]
+      }
+    }
+  ]
+}
+```
   Byte-identical legacy and target captures verify, because perfect visual
   parity is the best outcome a migration can have, not a duplicate. Without a
   Figma visual contract (target-system, or a figma-mcp record below format 17),

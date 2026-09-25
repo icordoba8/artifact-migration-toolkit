@@ -361,7 +361,8 @@ constants by a contract test — the table cannot drift from the code.
 
 | Persisted source       | Result                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| contract 5, format 17  | executes the full lifecycle; a figma-mcp record is held to the Figma visual acceptance contract                       |
+| contract 5, format 18  | executes the full lifecycle; every legacy UI behavior carries frozen `requiredObservations`                           |
+| contract 5, format 17  | executes the full lifecycle; a figma-mcp record is held to the Figma visual acceptance contract; never promoted to 18 |
 | contract 5, format 16  | executes the full lifecycle with controlled same-slice rework and unclaimed-drift refusal at FINALIZE; never promoted to 17 |
 | contract 5, format 15  | executes the full lifecycle with multi-source/brownfield targets; self-heals to 16 on the next advance                |
 | contract 5, format 14  | executes with a recorded design source; self-heals forward                                                            |
@@ -388,6 +389,9 @@ constants by a contract test — the table cannot drift from the code.
   computed after the fact) are the worked examples. Format 17 (authored Figma
   evidence and `matrices/visual-acceptance.json`) is the same kind: a format-16
   figma-mcp record keeps provenance-only visual semantics for its whole life.
+  Format 18 (authored `requiredObservations` in the legacy inventory) is the
+  same kind: a pre-18 UI record stays readable, earns no new VERIFY_SLICES or
+  FINALIZE PASS, and reaches 18 only through `UI_OBSERVATIONS_ADOPTED`.
 - A record is never promoted into a feature it never ran, and a persisted
   version field is never hand-edited to route around a refusal.
 
@@ -743,6 +747,14 @@ Only for `hasVisibleUi: true`. When it is `false`, UI runtime evidence is
 Use the repository's already-registered `playwright` MCP server (`.mcp.json`,
 `@playwright/mcp`) through its `browser_*` tools. Do not add a second browser
 automation stack, and do not write a bespoke runner.
+
+Each `TARGET` PASS row references a `playwright-ui-proof/v1` JSON observation
+(structured role/name/state per control, engine-evaluated `presence`,
+`visibility`, `text`, `value`, `count` and `url` assertions, and an `action` plus
+`postAction` observation per interaction); a hash-valid log is never proof. A
+completed slice verified on older evidence is recovered with `--reopen-ui
+<slices>`, legal on `COMPLETE` and on `ACTIVE` at `VERIFY_SLICES`/`FINALIZE`
+(completed slices only). See `references/migration-contract.md`.
 
 Playwright is an evidence provider, never a second migration engine. It decides
 nothing: the engine owns which behaviors are required, whether evidence is

@@ -71,7 +71,7 @@ const artifactEngine = () =>
   import("./artifact/artifact-migration.mjs");
 
 export const RESUMABLE_CONTRACT_VERSION = 5;
-export const MIGRATION_FORMAT_VERSION = 17;
+export const MIGRATION_FORMAT_VERSION = 18;
 export const WORKFLOW_VERSION = "5.0";
 
 /**
@@ -184,6 +184,18 @@ export const usesSliceRework = (state) =>
 export const VISUAL_ACCEPTANCE_FORMAT = 17;
 export const usesVisualAcceptance = (state) =>
   (state?.formatVersion ?? 1) >= VISUAL_ACCEPTANCE_FORMAT;
+
+/**
+ * Format 18: every legacy `uiBehaviors[]` item carries `requiredObservations[]`,
+ * the frozen acceptance set a TARGET proof is measured against. Non-promoting:
+ * a missing array is an unadopted contract, never an empty one, so an older UI
+ * record reaches 18 only through the explicit UI_OBSERVATIONS_ADOPTED transition.
+ */
+export const REQUIRED_OBSERVATIONS_FORMAT = 18;
+export const usesRequiredObservations = (state) =>
+  (state?.formatVersion ?? 1) >= REQUIRED_OBSERVATIONS_FORMAT;
+export const UI_OBSERVATIONS_ADOPTION_ROOT = "ui-observations-adoption";
+export const UI_OBSERVATIONS_CANDIDATE_FILE = `${UI_OBSERVATIONS_ADOPTION_ROOT}/candidate/legacy.json`;
 const usesFigmaVisualContract = (state) =>
   usesVisualAcceptance(state) &&
   usesDesignSource(state) &&
@@ -360,6 +372,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
   DISCOVERY_COMPLETENESS_FORMAT,
   CAPABILITY_OWNERSHIP_FORMAT,
   VISUAL_ACCEPTANCE_FORMAT,
+  REQUIRED_OBSERVATIONS_FORMAT,
 ]);
 
 /**
@@ -370,6 +383,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
  * no third place, which is what the negation chain kept growing.
  */
 const FORMAT_FEATURES = [
+  [REQUIRED_OBSERVATIONS_FORMAT, usesRequiredObservations],
   [VISUAL_ACCEPTANCE_FORMAT, usesVisualAcceptance],
   [SLICE_REWORK_FORMAT, usesSliceRework],
   [MULTI_SOURCE_FORMAT, usesMultiSource],
@@ -706,6 +720,8 @@ const uiBehaviorIsRequired = (uiBehavior, mismatch) => {
   if (UI_UNREQUIRED_DISPOSITIONS.has(disposition)) return false;
   return uiBehavior.conditional !== true || disposition === "REQUIRED_BEHAVIOR";
 };
+export const UI_PROOF_FORMAT = "playwright-ui-proof/v1";
+
 export const UI_RUNTIME_STATES = new Set([
   "DEFAULT",
   "POPULATED",
@@ -1187,6 +1203,7 @@ const isBytePinned = (relativePath) =>
   reworkPathParts(relativePath) !== null ||
   relativePath.startsWith(`${REOPEN_ROOT}/`) ||
   relativePath.startsWith(`${ADOPTION_ROOT}/`) ||
+  relativePath.startsWith(`${UI_OBSERVATIONS_ADOPTION_ROOT}/`) ||
   relativePath.startsWith("stale-ui-evidence/") ||
   relativePath.startsWith("slice-amendments/");
 
@@ -2739,9 +2756,9 @@ const assertStateGraph = async (root, state, pendingJournal) => {
       for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
         requiredHashes.delete(relative);
       }
-      // `from: "FINALIZE"` is stale-evidence recovery: the UI contract did not
-      // change, so any remediation pin stays exactly as it was.
-      if (event.from !== "FINALIZE") {
+      // `from: "FINALIZE"`/`"ACTIVE"` is stale-evidence recovery: the UI
+      // contract did not change, so any remediation pin stays exactly as it was.
+      if (!["FINALIZE", "ACTIVE"].includes(event.from)) {
         requiredHashes.delete(UI_REMEDIATION_FILE);
         uiRemediationReopened = true;
       }
@@ -2819,6 +2836,33 @@ const assertStateGraph = async (root, state, pendingJournal) => {
     // is already required by BUILD_BASELINE once the record reads as format 17.
     if (event.event === "VISUAL_CONTRACT_ADOPTED") {
       revision += 1;
+      for (const relative of event.preserved ?? []) {
+        preservedReworkHashes.add(relative);
+      }
+      continue;
+    }
+    // The format-18 acceptance contract adopted in place. The legacy pin stays
+    // required (its value moves, which the anchor covers); the prior inventory,
+    // results and gates are pinned for life. A reopening adoption releases the
+    // named slices' results and the FINALIZE pins exactly like COMPLETE_REOPENED.
+    if (event.event === "UI_OBSERVATIONS_ADOPTED") {
+      revision += 1;
+      if (event.step === "VERIFY_SLICES") {
+        currentStep = "VERIFY_SLICES";
+        activeSlice = event.activeSlice;
+        completedSteps.delete("IMPLEMENT_SLICES");
+        completedSteps.delete("VERIFY_SLICES");
+        completedSteps.delete("FINALIZE");
+        completedSlices = completedSlices.filter(
+          (sliceId) => !event.slices.includes(sliceId),
+        );
+        for (const sliceId of event.slices) {
+          requiredHashes.delete(`evidence/${sliceId}/result.json`);
+        }
+        for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
+          requiredHashes.delete(relative);
+        }
+      }
       for (const relative of event.preserved ?? []) {
         preservedReworkHashes.add(relative);
       }
@@ -3613,6 +3657,7 @@ const validateLegacyInventory = async (root, roots, state) => {
       );
     }
     const behaviorIds = new Set(behaviors.map((behavior) => behavior.id));
+    const observationIds = new Set();
     for (const item of uiBehaviors) {
       if (!behaviorIds.has(item.behaviorId)) {
         throw new Error(
@@ -3696,9 +3741,121 @@ const validateLegacyInventory = async (root, roots, state) => {
           `${item.id} requires OpenSpec requirement and scenario traceability.`,
         );
       }
+      if (usesRequiredObservations(state)) {
+        assertRequiredObservations(item, observationIds);
+      }
     }
   }
   return inventory;
+};
+
+/**
+ * The format-18 acceptance set of one legacy UI behavior. Control identity is
+ * (role, exact accessible name); `url` is page-scoped and has neither. Entries
+ * are conjunctive, and every runtime state and declared interaction needs at
+ * least one. Shape only: nothing here reads, or may be supplied by, TARGET proof.
+ */
+const OBSERVATION_EXPECTED = {
+  presence: (value) => typeof value === "boolean",
+  visibility: (value) => typeof value === "boolean",
+  text: (value) => typeof value === "string",
+  value: (value) => typeof value === "string",
+  count: (value) => Number.isInteger(value) && value >= 0,
+  url: (value) => typeof value === "string" && value.length > 0,
+};
+const OBSERVATION_FIELDS = new Set([
+  "id",
+  "state",
+  "afterInteractionId",
+  "role",
+  "name",
+  "predicate",
+  "expected",
+]);
+
+export const assertRequiredObservations = (item, seenIds = new Set()) => {
+  const label = `${item.id}.requiredObservations`;
+  if (item.requiredObservations === undefined) {
+    throw new Error(
+      `${label} is missing. A format-${REQUIRED_OBSERVATIONS_FORMAT} UI behavior without it is an unadopted contract, never an empty set; author it from legacy evidence and the pinned OpenSpec authority.`,
+    );
+  }
+  const observations = assertArray(item.requiredObservations, label);
+  const runtimeStates = item.runtimeStates ?? [];
+  const interactionIds = (item.interactions ?? []).map(
+    (interaction) => interaction.id,
+  );
+  for (const [index, observation] of observations.entries()) {
+    const at = `${label}[${index}]`;
+    assertPlainObject(observation, at);
+    const unknown = Object.keys(observation).filter(
+      (key) => !OBSERVATION_FIELDS.has(key),
+    );
+    if (unknown.length > 0) {
+      throw new Error(`${at} has unsupported fields: ${unknown.join(", ")}.`);
+    }
+    assertNonEmpty(observation.id, `${at}.id`);
+    if (seenIds.has(observation.id)) {
+      throw new Error(`${at}.id '${observation.id}' is not unique across the inventory.`);
+    }
+    seenIds.add(observation.id);
+    if (!runtimeStates.includes(observation.state)) {
+      throw new Error(
+        `${at}.state '${observation.state}' is not one of ${item.id}.runtimeStates.`,
+      );
+    }
+    if (
+      "afterInteractionId" in observation &&
+      !interactionIds.includes(observation.afterInteractionId)
+    ) {
+      throw new Error(
+        `${at}.afterInteractionId '${observation.afterInteractionId}' is not an interaction of ${item.id}.`,
+      );
+    }
+    const fits = OBSERVATION_EXPECTED[observation.predicate];
+    if (!fits) {
+      throw new Error(
+        `${at}.predicate '${observation.predicate}' is not one of ${Object.keys(OBSERVATION_EXPECTED).join(", ")}.`,
+      );
+    }
+    if (observation.predicate === "url") {
+      if ("role" in observation || "name" in observation) {
+        throw new Error(`${at} is a page-scoped url observation and takes no role or name.`);
+      }
+    } else {
+      assertNonEmpty(observation.role, `${at}.role`);
+      assertNonEmpty(observation.name, `${at}.name`);
+    }
+    if (!fits(observation.expected)) {
+      throw new Error(
+        `${at}.expected does not fit predicate '${observation.predicate}'.`,
+      );
+    }
+  }
+  for (const runtimeState of runtimeStates) {
+    if (
+      !observations.some(
+        (observation) =>
+          observation.state === runtimeState &&
+          !("afterInteractionId" in observation),
+      )
+    ) {
+      throw new Error(
+        `${label} has no state observation for runtime state '${runtimeState}'.`,
+      );
+    }
+  }
+  for (const interactionId of interactionIds) {
+    if (
+      !observations.some(
+        (observation) => observation.afterInteractionId === interactionId,
+      )
+    ) {
+      throw new Error(
+        `${label} has no post-action observation for interaction '${interactionId}'.`,
+      );
+    }
+  }
 };
 
 /* ------------------------------------------------------------------ *
@@ -6512,6 +6669,11 @@ const validateUiRuntimeEvidence = async ({
   roots,
 }) => {
   if (!usesUiVerification(state) || !baseline.legacy.hasVisibleUi) return;
+  if (!usesRequiredObservations(state)) {
+    throw new Error(
+      `Visible UI needs format-${REQUIRED_OBSERVATIONS_FORMAT} requiredObservations before VERIFY_SLICES or FINALIZE can PASS. Use UI_OBSERVATIONS_ADOPTED${state.designSource === "figma-mcp" && !usesVisualAcceptance(state) ? " with combined visual adoption" : ""}; TARGET proof cannot supply the contract.`,
+    );
+  }
   const parityIds = new Set(implementation.traceIds);
   const mismatchByBehavior = new Map(
     baseline.target.uiMismatches.map((row) => [row.uiBehaviorId, row]),
@@ -6554,6 +6716,7 @@ const validateUiRuntimeEvidence = async ({
   const screenshotHashes = new Set();
   let baselineViewport = null;
   const exercised = new Set();
+  const satisfiedPostActions = new Set();
   for (const [index, record] of records.entries()) {
     const label = `${sliceId} UI evidence[${index}]`;
     assertPlainObject(record, label);
@@ -6690,12 +6853,160 @@ const validateUiRuntimeEvidence = async ({
     if (!isContentIdentity(record.hash)) {
       throw new Error(`${label}.hash must be a SHA-256 digest.`);
     }
-    await assertEvidenceReference(
+    const proofPath = await assertEvidenceReference(
       { reference: record.reference, hash: record.hash },
       label,
       roots,
       { require: true },
     );
+    // A hash match only proves the bytes are unchanged, not that they observe
+    // a UI. TARGET PASS rows must reference structured Playwright proof whose
+    // predicates the engine evaluates itself; authored outcomes are ignored.
+    if (origin === "TARGET") {
+      const proof = assertPlainObject(
+        await readJson(proofPath, `${label}.reference`),
+        `${label}.reference`,
+      );
+      if (proof.proofFormat !== UI_PROOF_FORMAT) {
+        throw new Error(
+          `${label}.reference is not '${UI_PROOF_FORMAT}' structured proof (proofFormat '${proof.proofFormat}'). A hash-valid file is not a UI observation.`,
+        );
+      }
+      const parityRow = baseline.behaviorRows.find(
+        (row) => row.behaviorId === uiBehavior.behaviorId,
+      );
+      for (const [field, expected] of Object.entries({
+        sliceId,
+        uiBehaviorId: record.uiBehaviorId,
+        state: record.state,
+        traceId: parityRow.id,
+      })) {
+        if (proof[field] !== expected) {
+          throw new Error(
+            `${label} proof.${field} is '${proof[field]}', expected '${expected}'.`,
+          );
+        }
+      }
+      const proofScenarios = assertArray(
+        proof.scenarioIds,
+        `${label} proof.scenarioIds`,
+      );
+      const missingScenario = uiBehavior.scenarioIds.find(
+        (id) => !proofScenarios.includes(id),
+      );
+      if (missingScenario) {
+        throw new Error(
+          `${label} proof.scenarioIds omits '${missingScenario}' of UI behavior '${uiBehavior.id}'.`,
+        );
+      }
+      const assertObservation = (value, at) => {
+        const observation = assertPlainObject(value, at);
+        assertNonEmpty(observation.url, `${at}.url`);
+        const controls = assertArray(observation.controls, `${at}.controls`);
+        if (controls.length === 0) {
+          throw new Error(`${at}.controls must observe at least one control.`);
+        }
+        for (const [position, control] of controls.entries()) {
+          const where = `${at}.controls[${position}]`;
+          assertPlainObject(control, where);
+          assertNonEmpty(control.role, `${where}.role`);
+          assertNonEmpty(control.name, `${where}.name`);
+          assertNonEmpty(control.state, `${where}.state`);
+          const assertions = assertArray(
+            control.assertions,
+            `${where}.assertions`,
+          );
+          if (assertions.length === 0) {
+            throw new Error(`${where}.assertions must not be empty.`);
+          }
+          for (const [n, assertion] of assertions.entries()) {
+            assertPlainObject(assertion, `${where}.assertions[${n}]`);
+            const observed = {
+              presence: control.present,
+              visibility: control.visible,
+              text: control.text,
+              value: control.value,
+              count: control.count,
+              url: observation.url,
+            };
+            if (!Object.hasOwn(observed, assertion.predicate)) {
+              throw new Error(
+                `${where}.assertions[${n}].predicate '${assertion.predicate}' is not one of ${Object.keys(observed).join(", ")}.`,
+              );
+            }
+            if (
+              assertion.expected === undefined ||
+              observed[assertion.predicate] !== assertion.expected
+            ) {
+              throw new Error(
+                `${where}.assertions[${n}] ${assertion.predicate} failed: expected '${assertion.expected}', observed '${observed[assertion.predicate]}'.`,
+              );
+            }
+          }
+        }
+        return controls;
+      };
+      const controls = assertObservation(
+        proof.observation,
+        `${label} proof.observation`,
+      );
+      if (!controls.some((control) => control.state === record.state)) {
+        throw new Error(
+          `${label} proof.observation has no control observed in required state '${record.state}'.`,
+        );
+      }
+      const checkRequired = (requiredObservation, snapshot, at, stateSnapshot) => {
+        const { predicate, expected } = requiredObservation;
+        const field = { presence: "present", visibility: "visible" }[predicate] ?? predicate;
+        const controls = predicate === "url"
+          ? [snapshot]
+          : snapshot.controls.filter(
+              (control) =>
+                control.role === requiredObservation.role &&
+                control.name === requiredObservation.name &&
+                (!stateSnapshot || control.state === record.state),
+            );
+        if (!controls.some((control) =>
+          Object.hasOwn(control, field) &&
+          OBSERVATION_EXPECTED[predicate](control[field]) &&
+          control[field] === expected
+        )) {
+          throw new Error(`${at} misses required observation '${requiredObservation.id}' (${predicate}: ${JSON.stringify(expected)}).`);
+        }
+      };
+      for (const observation of usesRequiredObservations(state)
+        ? uiBehavior.requiredObservations
+        : []) {
+        if (observation.state === record.state && !observation.afterInteractionId) {
+          checkRequired(observation, proof.observation, `${label} proof.observation`, true);
+        }
+      }
+      const proofInteractions = assertArray(
+        proof.interactions ?? [],
+        `${label} proof.interactions`,
+      );
+      for (const claimed of record.interactions ?? []) {
+        const at = `${label} proof interaction '${claimed.id}'`;
+        const observed = proofInteractions.find(
+          (item) => item?.id === claimed.id,
+        );
+        if (!observed) {
+          throw new Error(`${at} is missing.`);
+        }
+        const action = assertPlainObject(observed.action, `${at}.action`);
+        assertNonEmpty(action.type, `${at}.action.type`);
+        assertNonEmpty(action.target, `${at}.action.target`);
+        assertObservation(observed.postAction, `${at}.postAction`);
+        for (const observation of usesRequiredObservations(state)
+          ? uiBehavior.requiredObservations
+          : []) {
+          if (observation.state === record.state && observation.afterInteractionId === claimed.id) {
+            checkRequired(observation, observed.postAction, `${at}.postAction`, false);
+            satisfiedPostActions.add(`${uiBehavior.id}::${observation.id}`);
+          }
+        }
+      }
+    }
     if (record.screenshot) {
       assertPlainObject(record.screenshot, `${label}.screenshot`);
       assertNonEmpty(
@@ -6764,6 +7075,13 @@ const validateUiRuntimeEvidence = async ({
         throw new Error(
           `Required UI behavior '${uiBehavior.id}' interaction '${interaction.id}' was never exercised against the target runtime.${limitationFor(uiBehavior.runtimeStates[0])}`,
         );
+      }
+    }
+    if (usesRequiredObservations(state)) {
+      for (const observation of uiBehavior.requiredObservations) {
+        if (observation.afterInteractionId && !satisfiedPostActions.has(`${uiBehavior.id}::${observation.id}`)) {
+          throw new Error(`Required UI behavior '${uiBehavior.id}' state '${observation.state}' misses required postAction observation '${observation.id}' after interaction '${observation.afterInteractionId}'.`);
+        }
       }
     }
   }
@@ -6947,6 +7265,62 @@ const validateVerifiedSlice = async (root, sliceId, state, roots) => {
 };
 
 /**
+ * Classification only, never a validator: does this slice's recorded TARGET UI
+ * evidence reference anything other than `playwright-ui-proof/v1`? Drives the
+ * `--reopen-ui` recovery hint and the ACTIVE reopen superset rule.
+ */
+export const sliceLacksUiProofV1 = async (root, sliceId, roots) => {
+  let evidence;
+  try {
+    evidence = JSON.parse(
+      await readFile(path.join(root, `evidence/${sliceId}/result.json`), "utf8"),
+    );
+  } catch {
+    return false;
+  }
+  if (evidence?.result !== "PASS" || !Array.isArray(evidence.uiEvidence)) {
+    return false;
+  }
+  for (const record of evidence.uiEvidence) {
+    if ((record?.origin ?? "TARGET") !== "TARGET") continue;
+    const claim = evidencePathClaim(record.reference);
+    const resolved = claim && (await resolveEvidencePath(claim, roots));
+    try {
+      const proof = JSON.parse(await readFile(resolved, "utf8"));
+      if (proof?.proofFormat !== UI_PROOF_FORMAT) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+};
+
+const completedSlicesLackingUiProofV1 = async (root, state, roots) => {
+  const lacking = [];
+  for (const sliceId of state.completedSlices ?? []) {
+    if (await sliceLacksUiProofV1(root, sliceId, roots)) lacking.push(sliceId);
+  }
+  return lacking;
+};
+
+/** Same pattern as the visual-contract hint: name the one recovery command. */
+const withUiProofReopenHint = async (root, sliceId, state, roots) => {
+  try {
+    return await validateVerifiedSlice(root, sliceId, state, roots);
+  } catch (error) {
+    if (
+      !(state.completedSlices ?? []).includes(sliceId) ||
+      !(await sliceLacksUiProofV1(root, sliceId, roots))
+    ) {
+      throw error;
+    }
+    const lacking = await completedSlicesLackingUiProofV1(root, state, roots);
+    error.message += ` Completed slices ${lacking.join(", ")} lack ${UI_PROOF_FORMAT} UI proof; recover them with: --reopen-ui ${lacking.join(",")}.`;
+    throw error;
+  }
+};
+
+/**
  * A reopened slice whose anchored files were committed again after the anchor
  * may not PASS on evidence that predates those commits.
  *
@@ -7037,6 +7411,7 @@ const assertEvidenceReference = async (entry, label, roots, options = {}) => {
       `${label}.hash does not match the current bytes of '${claim}'. Recorded ${entry.hash}, actual ${await fileIdentity(resolved)}. Regenerate the evidence against the current tree.`,
     );
   }
+  return resolved;
 };
 
 const assertEvidenceEntry = (entry, label, context) => {
@@ -7127,7 +7502,11 @@ const pinnedInputTimestamps = async (root, state) => {
   let legacyRevisionPinnedAt = state.createdAt;
   for (const event of events) {
     if (
-      (["REFRESHED", "UI_REMEDIATION_REOPENED"].includes(event.event) ||
+      // A stale-evidence reopen (`from` FINALIZE/ACTIVE) never re-pins the
+      // legacy revision, so it must not age the gate evidence bound to it.
+      (event.event === "REFRESHED" ||
+        (event.event === "UI_REMEDIATION_REOPENED" &&
+          !["FINALIZE", "ACTIVE"].includes(event.from)) ||
         (event.event === "COMPLETE_REOPENED" && event.toLegacyRevision)) &&
       typeof event.at === "string"
     ) {
@@ -7921,7 +8300,7 @@ const validateStep = async (root, state, step, sliceId, roots) => {
     );
   }
   if (step === "VERIFY_SLICES") {
-    await validateVerifiedSlice(
+    await withUiProofReopenHint(
       root,
       sliceId ?? state.activeSlice,
       state,
@@ -7945,7 +8324,7 @@ const validateStep = async (root, state, step, sliceId, roots) => {
     await assertNoNavigationRepairNeeded(root, state);
     await assertNoUnresolvedVerification(root, state, slices);
     for (const slice of slices) {
-      await validateVerifiedSlice(root, slice.id, state, roots);
+      await withUiProofReopenHint(root, slice.id, state, roots);
     }
     await assertNoUnclaimedTargetDrift(root, state, roots, slices);
     await validateGates(root, state, roots);
@@ -9240,10 +9619,8 @@ export const previewMigrationExecution = async ({
   }
 
   if (reopenUi.length > 0) {
-    if (state.status !== "COMPLETE") {
-      blockers.push(
-        `--reopen-ui is legal only for a COMPLETE migration; the current status is '${state.status}'.`,
-      );
+    if (!reopenUiEligible(state)) {
+      blockers.push(reopenUiIneligible(state));
     }
     const planned = (await inspectSliceArtifacts(root)).plannedSlices;
     for (const sliceId of reopenUi) {
@@ -10552,7 +10929,7 @@ const amendSliceUnderLock = async ({
  * the new pin. A COMPLETE record has no non-terminal design row (FINALIZE
  * refused one), so no other slice can fail format-17 verification.
  */
-const visualContractAdoptionPlan = async (root, state, roots) => {
+const visualContractAdoptionPlan = async (root, state, roots, allowActive = false) => {
   const refuse = (message) => ({
     blockers: [message],
     affectedSlices: [],
@@ -10568,7 +10945,7 @@ const visualContractAdoptionPlan = async (root, state, roots) => {
       `--adopt-visual-contract moves a pre-format-${VISUAL_ACCEPTANCE_FORMAT} record onto the visual contract once; this record is already format ${state.formatVersion}. It is not a refresh, replan, or reset.`,
     );
   }
-  if (state.status !== "COMPLETE") {
+  if (state.status !== "COMPLETE" && !(allowActive && state.status === "ACTIVE")) {
     return refuse(
       `--adopt-visual-contract is legal only for a COMPLETE migration; the current status is '${state.status}' at '${state.currentStep}'.`,
     );
@@ -10595,11 +10972,16 @@ const visualContractAdoptionPlan = async (root, state, roots) => {
     );
   }
   const affectedSlices = [];
-  for (const sliceId of state.completedSlices) {
-    const evidence = await readJson(
+  for (const sliceId of [
+    ...state.completedSlices,
+    ...(allowActive && state.currentStep === "VERIFY_SLICES" && state.activeSlice
+      ? [state.activeSlice]
+      : []),
+  ]) {
+    const evidence = await readFile(
       path.join(root, `evidence/${sliceId}/result.json`),
-      `Evidence for ${sliceId}`,
-    );
+      "utf8",
+    ).then(JSON.parse, () => null);
     if (
       (evidence.uiEvidence ?? []).some(
         (record) => (record.origin ?? "TARGET") === "TARGET",
@@ -11007,6 +11389,430 @@ const adoptVisualContractUnderLock = async ({
   };
 };
 
+/**
+ * UI_OBSERVATIONS_ADOPTED: the one way a pre-18 UI record gains the frozen
+ * `requiredObservations` acceptance set. Read-only; shared by the preview and
+ * the transaction so both refuse for the same reasons.
+ *
+ * The candidate is a complete `inventories/legacy.json` authored from legacy
+ * runtime/source evidence and the pinned OpenSpec authority, and may differ
+ * from the pinned inventory only by the added arrays. No TARGET proof is an
+ * input. Affected slices are the completed slices, and a VERIFY_SLICES active
+ * slice, whose result holds TARGET UI evidence: that evidence binds the old
+ * UI-contract digest. They are preserved, then invalidated and requeued at
+ * VERIFY_SLICES (the COMPLETE_REOPENED release shape), never reimplemented.
+ */
+const uiObservationsAdoptionPlan = async (root, state, combined = false) => {
+  const refuse = (message) => ({ blockers: [message] });
+  const legacyRelative = initialArtifacts.legacyInventory;
+  if (usesRequiredObservations(state)) {
+    return refuse(
+      `This record is already format ${state.formatVersion}; UI_OBSERVATIONS_ADOPTED moves a pre-${REQUIRED_OBSERVATIONS_FORMAT} record once and is not a correction path.`,
+    );
+  }
+  if (!usesUiVerification(state) || !state.artifactHashes?.[legacyRelative]) {
+    return refuse(
+      `UI_OBSERVATIONS_ADOPTED needs a pinned format-${UI_VERIFICATION_FORMAT}+ legacy inventory; this record has none to adopt into.`,
+    );
+  }
+  if (!["ACTIVE", "COMPLETE"].includes(state.status)) {
+    return refuse(
+      `UI_OBSERVATIONS_ADOPTED is legal only for an ACTIVE or COMPLETE migration; the current status is '${state.status}'.`,
+    );
+  }
+  // A pre-17 Figma record may reach 18 only through the combined adoption.
+  if (state.designSource === "figma-mcp" && !usesVisualAcceptance(state) && !combined) {
+    return refuse(
+      `A pre-format-${VISUAL_ACCEPTANCE_FORMAT} figma-mcp record would be promoted into the visual contract by format ${REQUIRED_OBSERVATIONS_FORMAT}; adopt the visual contract first (--adopt-visual-contract).`,
+    );
+  }
+  if (await readAdvanceJournal(root)) {
+    return refuse("An advance journal is pending; resume the migration first.");
+  }
+  if (await fileExists(path.join(root, UI_OBSERVATIONS_ADOPTION_ROOT, "record.json"))) {
+    return refuse(`${UI_OBSERVATIONS_ADOPTION_ROOT}/record.json already exists. A record adopts once.`);
+  }
+  const candidatePath = path.join(root, UI_OBSERVATIONS_CANDIDATE_FILE);
+  if (!(await fileExists(candidatePath))) {
+    return refuse(
+      `No legacy authority to adopt: author ${UI_OBSERVATIONS_CANDIDATE_FILE} from legacy runtime/source evidence and the pinned OpenSpec requirements. TARGET proof cannot supply it.`,
+    );
+  }
+  const candidateBytes = await readFile(candidatePath);
+  const current = JSON.parse(await readFile(path.join(root, legacyRelative), "utf8"));
+  let candidate;
+  try {
+    candidate = JSON.parse(candidateBytes.toString("utf8"));
+    const frozen = (inventory) =>
+      JSON.stringify({
+        ...inventory,
+        uiBehaviors: (inventory.uiBehaviors ?? []).map(
+          ({ requiredObservations: _added, ...rest }) => rest,
+        ),
+      });
+    if (frozen(candidate) !== frozen(current)) {
+      throw new Error(
+        "The candidate may only add requiredObservations; every other field of the pinned legacy inventory is frozen.",
+      );
+    }
+    if (!candidate.hasVisibleUi) {
+      throw new Error("A record with no visible UI has no UI adoption obligation.");
+    }
+    const seen = new Set();
+    for (const item of candidate.uiBehaviors) {
+      assertRequiredObservations(item, seen);
+    }
+  } catch (error) {
+    return refuse(`UI observation adoption fails closed: ${error.message}`);
+  }
+  const affected = [];
+  for (const sliceId of [...state.completedSlices, state.activeSlice]) {
+    if (!sliceId || affected.includes(sliceId)) continue;
+    if (sliceId === state.activeSlice && state.currentStep !== "VERIFY_SLICES") continue;
+    const evidence = await readFile(
+      path.join(root, `evidence/${sliceId}/result.json`),
+      "utf8",
+    ).then(JSON.parse, () => null);
+    if (
+      (evidence?.uiEvidence ?? []).some(
+        (record) => (record.origin ?? "TARGET") === "TARGET",
+      )
+    ) {
+      affected.push(sliceId);
+    }
+  }
+  const planned = (await inspectSliceArtifacts(root)).plannedSlices;
+  const affectedSlices = planned.filter((sliceId) => affected.includes(sliceId));
+  const requeued = affectedSlices.filter((sliceId) =>
+    state.completedSlices.includes(sliceId),
+  );
+  if (
+    requeued.length > 0 &&
+    state.status === "ACTIVE" &&
+    !["VERIFY_SLICES", "FINALIZE"].includes(state.currentStep)
+  ) {
+    return refuse(
+      `Completed UI slices ${requeued.join(", ")} must be requeued at VERIFY_SLICES; advance the active slice to VERIFY_SLICES, then adopt.`,
+    );
+  }
+  const reopen =
+    affectedSlices.length > 0 &&
+    (state.status === "COMPLETE" ||
+      state.currentStep === "FINALIZE" ||
+      requeued.length > 0);
+  return {
+    blockers: [],
+    candidate: candidateBytes.toString("utf8"),
+    candidateBytes,
+    candidateDigest: `sha256:${hashContent(candidateBytes)}`,
+    previousLegacyDigest: state.artifactHashes[legacyRelative],
+    affectedSlices,
+    reopen,
+    pendingSlices: reopen
+      ? planned.filter(
+          (sliceId) =>
+            affectedSlices.includes(sliceId) ||
+            state.pendingSlices.includes(sliceId) ||
+            sliceId === state.activeSlice,
+        )
+      : state.pendingSlices,
+  };
+};
+
+const combinedUiAdoptionPlan = async (root, state, roots) => {
+  const combined = state.designSource === "figma-mcp" && !usesVisualAcceptance(state);
+  const observations = await uiObservationsAdoptionPlan(root, state, combined);
+  if (!combined || observations.blockers.length > 0) return observations;
+  const visual = await visualContractAdoptionPlan(root, state, roots, true);
+  if (visual.blockers.length > 0) return { blockers: visual.blockers };
+  return {
+    ...observations,
+    visualEvidenceDigest: visual.evidenceDigest,
+    confirmationDigest: `sha256:${hashContent(JSON.stringify([
+      observations.candidateDigest,
+      visual.evidenceDigest,
+    ]))}`,
+    affectedSlices: [...new Set([...observations.affectedSlices, ...visual.affectedSlices])],
+  };
+};
+
+/** The exact candidate bytes and their digest; confirmation must echo the digest. */
+export const previewUiObservationsAdoption = async ({ registryPath, moduleName }) => {
+  const { registryData, resolved } = await readContext({ registryPath, moduleName });
+  const { state } = await readState(registryData.targetRoot, resolved.canonical);
+  const { candidateBytes: _bytes, ...plan } = await combinedUiAdoptionPlan(
+    migrationRoot(registryData.targetRoot, resolved.canonical),
+    state,
+    { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot },
+  );
+  return plan;
+};
+
+/**
+ * One journalled transaction: preserve the prior inventory, affected results
+ * and FINALIZE gates byte-for-byte and pin them for life, swap the candidate
+ * in, move the legacy pin, stamp format 18, release only the affected result
+ * and gate pins, and append one UI_OBSERVATIONS_ADOPTED event. Nothing is
+ * released before its preserved copy is in the pin set.
+ */
+export const adoptUiObservations = async ({
+  registryPath,
+  moduleName,
+  candidateDigest,
+  confirmationDigest,
+}) => {
+  const { registryData, resolved } = await readContext({ registryPath, moduleName });
+  return withModuleLock(registryData.targetRoot, resolved.canonical, async () => {
+    const root = migrationRoot(registryData.targetRoot, resolved.canonical);
+    const statePath = statePathFor(registryData.targetRoot, resolved.canonical);
+    await recoverPendingAdvance(registryData.targetRoot, root, statePath);
+    const { state } = await readState(registryData.targetRoot, resolved.canonical);
+    assertRecordToolkitIdentity(state, resolved.canonical, "adopt required UI observations");
+    const plan = await combinedUiAdoptionPlan(root, state, {
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
+    });
+    if (plan.blockers.length > 0) {
+      throw new Error(`${plan.blockers.join(" ")} Nothing was written.`);
+    }
+    if (plan.confirmationDigest) {
+      if (plan.confirmationDigest !== confirmationDigest) {
+        throw new Error(
+          "The adoption inputs changed after preview, or the complete transition was not confirmed. Nothing was written; preview again and confirm its digest.",
+        );
+      }
+    } else if (plan.candidateDigest !== candidateDigest) {
+      throw new Error(
+        "The candidate changed after it was previewed, or was never previewed. Nothing was written; preview again and confirm its digest.",
+      );
+    }
+    const at = now();
+    const legacyRelative = initialArtifacts.legacyInventory;
+    const keep = (relative) => `${UI_OBSERVATIONS_ADOPTION_ROOT}/${relative}`;
+    const previousLegacy = await readFile(path.join(root, legacyRelative));
+    const writes = [[keep(legacyRelative), previousLegacy]];
+    const rewrites = [
+      { relative: legacyRelative, before: previousLegacy, content: plan.candidateBytes },
+    ];
+    let figmaContextDigest;
+    let visualAcceptanceDigest;
+    if (plan.confirmationDigest) {
+      const previousContext = await readFile(path.join(root, FIGMA_CONTEXT_FILE));
+      const adoptedContext = await readFile(path.join(root, FIGMA_CONTEXT_ADOPTION_FILE));
+      writes.push([keep(FIGMA_CONTEXT_FILE), previousContext]);
+      rewrites.push({
+        relative: FIGMA_CONTEXT_FILE,
+        before: previousContext,
+        content: adoptedContext,
+      });
+      figmaContextDigest = contentIdentity(FIGMA_CONTEXT_FILE, adoptedContext);
+      visualAcceptanceDigest = await fileIdentity(path.join(root, VISUAL_ACCEPTANCE_FILE));
+    }
+    for (const sliceId of plan.affectedSlices) {
+      const relative = `evidence/${sliceId}/result.json`;
+      const before = await readFile(path.join(root, relative));
+      writes.push([keep(relative), before]);
+      rewrites.push({
+        relative,
+        before,
+        content: `${JSON.stringify(
+          {
+            ...JSON.parse(before.toString("utf8")),
+            result: "PENDING",
+            uiEvidence: [],
+            uiEvidenceLimitations: [],
+          },
+          null,
+          2,
+        )}\n`,
+      });
+    }
+    if (plan.reopen) {
+      for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
+        if (state.artifactHashes[relative]) {
+          writes.push([keep(relative), await readFile(path.join(root, relative))]);
+        }
+      }
+    }
+    const preserved = {};
+    for (const [relative, bytes] of writes) preserved[relative] = hashContent(bytes);
+    const legacyDigest = contentIdentity(legacyRelative, plan.candidateBytes);
+    const recordRelative = keep("record.json");
+    const record = `${JSON.stringify(
+      {
+        version: 1,
+        transition: "UI_OBSERVATIONS_ADOPTED",
+        note: "Adoption of the format-18 required UI observations contract from legacy authority. Not a refresh, replan, or restart; no TARGET proof was an input.",
+        migrationId: state.migrationId,
+        fromFormat: state.formatVersion,
+        toFormat: REQUIRED_OBSERVATIONS_FORMAT,
+        at,
+        operator: `${process.env.USER ?? process.env.USERNAME ?? "unknown"}@${process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? "unknown-host"}`,
+        priorRevision: state.revision,
+        priorStatus: state.status,
+        priorStep: state.currentStep,
+        candidateDigest: plan.candidateDigest,
+        ...(plan.confirmationDigest ? {
+          confirmationDigest: plan.confirmationDigest,
+          visualEvidenceDigest: plan.visualEvidenceDigest,
+          previousFigmaContextDigest: state.artifactHashes[FIGMA_CONTEXT_FILE],
+          figmaContextDigest,
+          visualAcceptanceDigest,
+        } : {}),
+        previousLegacyDigest: plan.previousLegacyDigest,
+        legacyDigest,
+        affectedSlices: plan.affectedSlices,
+        preserved: { ...preserved },
+      },
+      null,
+      2,
+    )}\n`;
+    writes.push([recordRelative, Buffer.from(record, "utf8")]);
+    preserved[recordRelative] = hashContent(record);
+
+    const artifactHashes = {
+      ...state.artifactHashes,
+      ...preserved,
+      [legacyRelative]: legacyDigest,
+      ...(plan.confirmationDigest ? {
+        [FIGMA_CONTEXT_FILE]: figmaContextDigest,
+        [VISUAL_ACCEPTANCE_FILE]: visualAcceptanceDigest,
+      } : {}),
+    };
+    if (plan.reopen) {
+      for (const sliceId of plan.affectedSlices) {
+        delete artifactHashes[`evidence/${sliceId}/result.json`];
+      }
+      for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
+        delete artifactHashes[relative];
+      }
+    }
+    const steps = stepsFor(state);
+    const activeSlice = plan.reopen ? plan.pendingSlices[0] : state.activeSlice;
+    const adopted = {
+      ...state,
+      formatVersion: REQUIRED_OBSERVATIONS_FORMAT,
+      ...(plan.confirmationDigest ? {
+        visualContractAdoption: {
+          fromFormat: state.formatVersion,
+          toFormat: REQUIRED_OBSERVATIONS_FORMAT,
+          adoptedAt: at,
+          record: recordRelative,
+          pendingReverification: [],
+        },
+      } : {}),
+      ...(plan.reopen
+        ? {
+            status: "ACTIVE",
+            currentStep: "VERIFY_SLICES",
+            activeSlice,
+            completedSteps: steps.slice(0, steps.indexOf("IMPLEMENT_SLICES")),
+            pendingSteps: ["IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE"],
+            completedSlices: state.completedSlices.filter(
+              (sliceId) => !plan.affectedSlices.includes(sliceId),
+            ),
+            pendingSlices: plan.pendingSlices,
+          }
+        : {}),
+      ...(plan.affectedSlices.length > 0
+        ? {
+            invalidatedArtifacts: [
+              ...plan.affectedSlices.map((sliceId) => `evidence/${sliceId}/result.json`),
+              ...(plan.reopen ? IMMUTABLE_STEP_ARTIFACTS.FINALIZE : []),
+            ],
+            evidenceFreshness: "STALE",
+          }
+        : {}),
+      nextAction: `Required UI observations adopted. Collect fresh ${UI_PROOF_FORMAT} proof and verify ${activeSlice ?? "the pending UI slices"} under the adopted contract.`,
+      nextCommand: `/start-migration ${resolved.canonical}`,
+      artifactHashes,
+      revision: state.revision + 1,
+      updatedAt: at,
+    };
+    const event = {
+      event: "UI_OBSERVATIONS_ADOPTED",
+      from: state.status === "COMPLETE" ? "COMPLETE" : state.currentStep,
+      fromFormat: state.formatVersion,
+      toFormat: REQUIRED_OBSERVATIONS_FORMAT,
+      ...(plan.reopen ? { step: "VERIFY_SLICES", activeSlice } : {}),
+      slices: plan.affectedSlices,
+      candidateDigest: plan.candidateDigest,
+      ...(plan.confirmationDigest ? {
+        confirmationDigest: plan.confirmationDigest,
+        visualEvidenceDigest: plan.visualEvidenceDigest,
+        figmaContextDigest,
+        visualAcceptanceDigest,
+      } : {}),
+      previousLegacyDigest: plan.previousLegacyDigest,
+      legacyDigest,
+      preserved: Object.keys(preserved).sort(),
+      at,
+      revision: adopted.revision,
+    };
+    const integrityPath = path.join(root, INTEGRITY_FILE);
+    const integrityBefore = await readFile(integrityPath, "utf8");
+    const nextIntegrity = await renderIntegrityNow(root, adopted);
+    const journalFile = path.join(root, ADVANCE_JOURNAL);
+    await assertHistoryAppendable(registryData.targetRoot, root);
+    await writeJournalAtomic(journalFile, {
+      fromRevision: state.revision,
+      toRevision: adopted.revision,
+      event,
+      startedAt: at,
+      pid: process.pid,
+      restore: [
+        ...writes.map(([relative]) => ({ path: relative, remove: true })),
+        ...rewrites.map(({ relative, before }) => ({
+          path: relative,
+          content: before.toString("utf8"),
+        })),
+        { path: UI_OBSERVATIONS_CANDIDATE_FILE, content: plan.candidate },
+        ...(plan.confirmationDigest ? [{
+          path: FIGMA_CONTEXT_ADOPTION_FILE,
+          content: (await readFile(path.join(root, FIGMA_CONTEXT_ADOPTION_FILE))).toString("utf8"),
+        }] : []),
+      ],
+      integrity: { content: nextIntegrity, before: integrityBefore },
+    });
+    for (const [relative, bytes] of writes) {
+      await atomicWrite(registryData.targetRoot, path.join(root, relative), bytes);
+    }
+    for (const rewrite of rewrites) {
+      await atomicWrite(
+        registryData.targetRoot,
+        path.join(root, rewrite.relative),
+        rewrite.content,
+      );
+    }
+    await rm(path.join(root, UI_OBSERVATIONS_CANDIDATE_FILE));
+    if (plan.confirmationDigest) await rm(path.join(root, FIGMA_CONTEXT_ADOPTION_FILE));
+    await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
+    await atomicWrite(registryData.targetRoot, statePath, renderState(adopted));
+    await appendHistoryOnce(registryData.targetRoot, root, event);
+    await rm(journalFile, { force: true });
+    return {
+      changed: true,
+      adopted: true,
+      statePath,
+      migrationRoot: root,
+      state: adopted,
+      affectedSlices: plan.affectedSlices,
+      nextArtifact: activeArtifact(adopted),
+      resolved,
+    };
+  });
+};
+
+// COMPLETE: a visible-UI parity audit. ACTIVE at VERIFY_SLICES/FINALIZE:
+// stale-evidence recovery for completed slices lacking playwright-ui-proof/v1.
+const reopenUiEligible = (state) =>
+  state.status === "COMPLETE" ||
+  (state.status === "ACTIVE" &&
+    ["VERIFY_SLICES", "FINALIZE"].includes(state.currentStep));
+
+const reopenUiIneligible = (state) =>
+  `--reopen-ui is legal only for a COMPLETE migration, or an ACTIVE one at VERIFY_SLICES or FINALIZE; the current status is '${state.status}' at '${state.currentStep}'.`;
+
 const reopenUiUnderLock = async ({
   registryData,
   resolved,
@@ -11015,11 +11821,10 @@ const reopenUiUnderLock = async ({
   state,
   slices,
 }) => {
-  if (state.status !== "COMPLETE") {
-    throw new Error(
-      `--reopen-ui is legal only for a COMPLETE migration; the current status is '${state.status}'.`,
-    );
+  if (!reopenUiEligible(state)) {
+    throw new Error(reopenUiIneligible(state));
   }
+  const fromActive = state.status === "ACTIVE";
   const plan = await readJson(
     path.join(root, initialArtifacts.slices),
     "Slice index",
@@ -11038,6 +11843,42 @@ const reopenUiUnderLock = async ({
       `--reopen-ui must include every slice whose Figma visual evidence predates the adopted visual contract: ${pendingReverification.join(", ")}.`,
     );
   }
+  if (fromActive) {
+    const notCompleted = ordered.filter(
+      (sliceId) => !state.completedSlices.includes(sliceId),
+    );
+    if (notCompleted.length > 0) {
+      throw new Error(
+        `--reopen-ui on an ACTIVE migration names only completed slices; ${notCompleted.join(", ")} is active or pending and is re-authored in place.`,
+      );
+    }
+    const lacking = await completedSlicesLackingUiProofV1(root, state, {
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
+    });
+    const omitted = lacking.filter((sliceId) => !requested.has(sliceId));
+    if (omitted.length > 0) {
+      throw new Error(
+        `--reopen-ui must include every completed slice lacking ${UI_PROOF_FORMAT} UI proof: ${lacking.join(", ")}.`,
+      );
+    }
+    if (await readAdvanceJournal(root)) {
+      throw new Error(
+        "--reopen-ui is refused while an advance journal is pending; resume the migration first.",
+      );
+    }
+    if (state.activeSlice) {
+      const active = await readFile(
+        path.join(root, `evidence/${state.activeSlice}/result.json`),
+        "utf8",
+      ).then(JSON.parse, () => null);
+      if (active?.result === "FAIL") {
+        throw new Error(
+          `--reopen-ui is refused while active slice '${state.activeSlice}' holds an un-reworked FAIL; resolve it with --rework-slice first.`,
+        );
+      }
+    }
+  }
   const artifactHashes = { ...state.artifactHashes };
   for (const sliceId of ordered) {
     delete artifactHashes[`evidence/${sliceId}/result.json`];
@@ -11045,7 +11886,9 @@ const reopenUiUnderLock = async ({
   for (const relative of IMMUTABLE_STEP_ARTIFACTS.FINALIZE) {
     delete artifactHashes[relative];
   }
-  delete artifactHashes[UI_REMEDIATION_FILE];
+  // ACTIVE recovery changes only the proof format, never the UI contract, so
+  // the remediation file and its pin stay exactly as they are.
+  if (!fromActive) delete artifactHashes[UI_REMEDIATION_FILE];
 
   const remediationPath = path.join(root, UI_REMEDIATION_FILE);
   const remediationBefore = (await fileExists(remediationPath))
@@ -11102,14 +11945,23 @@ const reopenUiUnderLock = async ({
     completedSlices: state.completedSlices.filter(
       (sliceId) => !requested.has(sliceId),
     ),
-    pendingSlices: ordered,
+    pendingSlices: fromActive
+      ? plan.slices
+          .map((slice) => slice.id)
+          .filter(
+            (sliceId) =>
+              requested.has(sliceId) || state.pendingSlices.includes(sliceId),
+          )
+      : ordered,
     invalidatedArtifacts: [
-      UI_REMEDIATION_FILE,
+      ...(fromActive ? [] : [UI_REMEDIATION_FILE]),
       ...ordered.map((sliceId) => `evidence/${sliceId}/result.json`),
       ...IMMUTABLE_STEP_ARTIFACTS.FINALIZE,
     ],
     evidenceFreshness: "STALE",
-    nextAction: `Author ${UI_REMEDIATION_FILE}, then collect Playwright evidence for ${ordered[0]}.`,
+    nextAction: fromActive
+      ? `Collect ${UI_PROOF_FORMAT} Playwright evidence for ${ordered[0]}.`
+      : `Author ${UI_REMEDIATION_FILE}, then collect Playwright evidence for ${ordered[0]}.`,
     nextCommand: `/start-migration ${resolved.canonical}`,
     ...(state.visualContractAdoption
       ? {
@@ -11119,14 +11971,16 @@ const reopenUiUnderLock = async ({
           },
         }
       : {}),
-    artifacts: { ...state.artifacts, uiRemediation: UI_REMEDIATION_FILE },
+    artifacts: fromActive
+      ? state.artifacts
+      : { ...state.artifacts, uiRemediation: UI_REMEDIATION_FILE },
     artifactHashes,
     revision: state.revision + 1,
     updatedAt: now(),
   };
   const event = {
     event: "UI_REMEDIATION_REOPENED",
-    from: "COMPLETE",
+    from: fromActive ? "ACTIVE" : "COMPLETE",
     step: "VERIFY_SLICES",
     slices: ordered,
     at: reopened.updatedAt,
@@ -11144,9 +11998,13 @@ const reopenUiUnderLock = async ({
     startedAt: now(),
     pid: process.pid,
     restore: [
-      remediationBefore === null
-        ? { path: UI_REMEDIATION_FILE, remove: true }
-        : { path: UI_REMEDIATION_FILE, content: remediationBefore },
+      ...(fromActive
+        ? []
+        : [
+            remediationBefore === null
+              ? { path: UI_REMEDIATION_FILE, remove: true }
+              : { path: UI_REMEDIATION_FILE, content: remediationBefore },
+          ]),
       ...resultRewrites.map(({ relative, before }) => ({
         path: relative,
         content: before,
@@ -11154,7 +12012,9 @@ const reopenUiUnderLock = async ({
     ],
     integrity: { content: nextIntegrity, before: integrityBefore },
   });
-  await atomicWrite(registryData.targetRoot, remediationPath, remediation);
+  if (!fromActive) {
+    await atomicWrite(registryData.targetRoot, remediationPath, remediation);
+  }
   for (const rewrite of resultRewrites) {
     await atomicWrite(
       registryData.targetRoot,
@@ -11172,7 +12032,9 @@ const reopenUiUnderLock = async ({
     statePath,
     migrationRoot: root,
     state: reopened,
-    nextArtifact: UI_REMEDIATION_FILE,
+    nextArtifact: fromActive
+      ? `evidence/${ordered[0]}/result.json`
+      : UI_REMEDIATION_FILE,
     resolved,
   };
 };

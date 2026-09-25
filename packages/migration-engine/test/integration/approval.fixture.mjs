@@ -223,6 +223,10 @@ const LEGACY_INVENTORY = {
         },
       ],
       runtimeStates: ["DEFAULT"],
+      requiredObservations: [
+        { id: "UIO-1", state: "DEFAULT", role: "button", name: "Sign in", predicate: "visibility", expected: true },
+        { id: "UIO-2", state: "DEFAULT", afterInteractionId: "UIX-1", role: "status", name: "Signed in", predicate: "presence", expected: true },
+      ],
       evidence: evidenceChecklist(
         "legacy/auth/marker.txt",
         ["AUTH-REQ-001"],
