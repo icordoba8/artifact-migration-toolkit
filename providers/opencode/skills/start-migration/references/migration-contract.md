@@ -115,6 +115,147 @@ every pinned path in every record written before format 10.
 `decisions/operator-decisions.ndjson` exists only once an operator has recorded
 a decision.
 
+## Format upgrades
+
+`state.formatVersion` is a cursor: the last *completed* format increment. From
+the upgrade floor forward, a registered upgrader is the sole promoter of that
+cursor, one adjacent increment at a time, each in its own journalled
+transaction.
+
+```text
+FORMAT_UPGRADE_FLOOR          = 17   (module engine)
+ARTIFACT_FORMAT_UPGRADE_FLOOR = 13   (artifact engine)
+```
+
+- **At or above the floor**: `state.formatVersion < runtime format` means an
+  increment is owed. Each adjacent `N → N+1` increment has one registered
+  upgrader. While its declared old-format prerequisite is absent it is
+  `INACTIVE`: the format stays at N and the historical lifecycle may produce
+  that prerequisite. Once present it is `ACTIVE` and exclusive: the lifecycle
+  freezes until the increment commits. Nothing is skipped or self-healed.
+- **Below the module floor**: unchanged historical compatibility. Formats 4–16
+  keep `compatibilityBlocker` admission, the self-healing promotions for the
+  additive bumps (12–16), and the existing operator-driven one-shot adoptions —
+  `VISUAL_CONTRACT_ADOPTED` into 17, and the pre-17 visual/combined
+  `requiredObservations` adoption into 18. Formats 4–16 were **not** retrofitted
+  into adjacent registry rows, and formats 10 and 11 still run to completion at
+  their own stamp.
+- The floors are declared constants, never derived from the promotion or
+  self-healing tables. Above a floor nothing may promote the cursor except the
+  registry, and the release gate refuses a bumped runtime format that has no
+  registered adjacent upgrader.
+
+Nothing new is persisted for any of this: pending-ness is a pure function of
+`(state.formatVersion, runtime format, registry, record tree)`, so status,
+preflight and the transaction always agree and a crash can leave no
+"upgrade started" flag behind.
+
+### Dispatch order
+
+`recover any pending transaction → toolkit identity → active format upgrade → normal
+lifecycle`, for every **mutating** invocation. An inactive owed increment falls
+through to the lifecycle that produces its prerequisite. At most one increment
+commits per invocation, and the invocation stops there. **Read-only** status and previews
+report the identity refusal or project the pending upgrade and write nothing —
+no identity adoption, no recovery, no state write.
+
+### The typed result
+
+Status projects `formatUpgrade` read-only; an active-upgrade preflight also
+carries it. It is `null` at the runtime format and below the floor:
+
+```json
+{
+  "recordFormat": 17,
+  "runtimeFormat": 18,
+  "from": 17,
+  "to": 18,
+  "upgrader": { "id": "UI_OBSERVATIONS_ADOPTED", "version": 1 },
+  "active": true,
+  "state": "NEEDS_INPUT",
+  "prerequisite": null,
+  "domain": "TRANSFORM",
+  "requiredInput": {
+    "kind": "candidateFile",
+    "path": "ui-observations-adoption/candidate/legacy.json",
+    "authority": "legacy",
+    "description": "…"
+  },
+  "blockers": [],
+  "nextAction": "…",
+  "confirmationDigest": null
+}
+```
+
+`activation` is explicitly `null` for immediate activation, or a predicate over
+persisted state with a declarative `prerequisite {kind, path, description}`.
+The prerequisite is validated, pinned **old-format authority**, separate from
+`requiredInput`, which is new material requested only after activation. For
+17→18, DISCOVER_LEGACY validates and pins `inventories/legacy.json`. Its
+bootstrap scaffold is not authority. Before that pin exists, status reports
+`active: false`, `state: "INACTIVE"`, the prerequisite and `nextAction`; no
+domain or required input is classified, and normal execution continues at 17.
+The successful DISCOVER_LEGACY transaction writes the pin, leaves the format
+at 17 and writes no `FORMAT_UPGRADED` event. From the next invocation the
+increment is ACTIVE and lifecycle mutations refuse until it commits. The pin
+remains the activation signal if the file later goes missing or corrupt;
+classification is then BLOCKED, never INACTIVE.
+
+For an ACTIVE increment, `state` is one of `NEEDS_INPUT` (the declared input is absent), `BLOCKED` (the
+input exists, or the record's own authority cannot be read, and the upgrader
+refused — `blockers` carries the refusal verbatim) or `READY` (validated, digest
+computed, committable). `domain` is `TRANSFORM` when this record needs the row's
+domain work and `NO_OP` when it does not; a `NO_OP` declares no
+`requiredInput` and still commits one real increment. INACTIVE is an owed
+increment awaiting its old-format authority, not a skipped increment.
+
+Author the required input from the authority the row declares, and nothing else.
+For 17→18 that authority is the record's validated legacy inventory plus the
+pinned requirements/OpenSpec authority; TARGET-produced proof is never authority
+for a legacy-derived requirement, and the engine refuses a candidate that
+changes any frozen field.
+
+### Outcomes, freeze and history
+
+- `FORMAT_UPGRADE` (blocked exit code) — an ACTIVE increment did not
+  commit. Nothing was written. Every lifecycle mutation refuses while it is
+  active: checkpoint advance, reopen (discovery/UI/complete), slice rework, slice
+  amendment, slice-state repair, refresh and decision recording. The checkpoint
+  tuple, pins, revision and history are byte-identical afterwards.
+- `FORMAT_UPGRADED` (exit 0) — exactly one increment committed. `formatVersion`
+  is `N+1`, `revision` moved by one, `integrity.json` was re-rendered, and one
+  canonical history event was appended. No checkpoint advanced in that
+  invocation, and `status`, `currentStep`, `activeSlice`, `completedSteps`,
+  `pendingSteps`, `completedSlices`, `pendingSlices` and `artifactHashes` are
+  unchanged except where the upgrader's own declared, journalled invalidation
+  says otherwise (17→18 requeues the slices whose UI evidence the adopted
+  observations invalidate).
+
+One event per committed increment, canonical envelope, with the domain-specific
+transition subordinate to it:
+
+```json
+{ "event": "FORMAT_UPGRADED",
+  "transition": "UI_OBSERVATIONS_ADOPTED",
+  "fromFormat": 17, "toFormat": 18,
+  "domain": "TRANSFORM",
+  "upgrader": { "id": "UI_OBSERVATIONS_ADOPTED", "version": 1 },
+  "inputs": [{ "kind": "candidateFile", "path": "…", "digest": "sha256:…" }],
+  "priorRevision": 41, "revision": 42,
+  "priorStateDigest": "sha256:…", "stateDigest": "sha256:…",
+  "priorStep": "VERIFY_SLICES", "activeSlice": "…", "at": "…" }
+```
+
+A `NO_OP` line carries the same envelope with `"domain": "NO_OP"`, no
+`transition` and `"inputs": []`, so a replay can tell "nothing needed doing for
+this record" from "nothing was recorded". History lines written before this
+envelope existed keep their original top-level `UI_OBSERVATIONS_ADOPTED` event
+and still read: an append-only log is never rewritten.
+
+Failure leaves format `N`, the lifecycle frozen and the record byte-identical;
+the existing journal recovery resolves a crash mid-transaction, and a rerun of
+the same normal command re-selects the same target deterministically.
+
 ## Canonical module-boundary model (format 10)
 
 One versioned resolver computes the boundary during `DISCOVER_LEGACY` and again
@@ -615,9 +756,13 @@ exactly like the MCP path.
 
 Checkpoint and slice `state` is one of `COMPLETED`, `ACTIVE`, `PENDING`,
 `BLOCKED`, and nothing else. The active checkpoint is `BLOCKED` rather than
-`ACTIVE` whenever the iteration stopped — outcome `BLOCKED`, `OPERATOR_DECISION`
-or `FAILED`, or a record whose `status` is not `ACTIVE`. A `COMPLETE` record
-reports every checkpoint `COMPLETED`, `activeCheckpoint` and `nextWork` `null`.
+`ACTIVE` whenever the iteration stopped — outcome `BLOCKED`, `OPERATOR_DECISION`,
+`FAILED` or `FORMAT_UPGRADE`, or a record whose `status` is not `ACTIVE`. A
+`COMPLETE` record reports every checkpoint `COMPLETED`, `activeCheckpoint` and
+`nextWork` `null`. While a format increment is owed the projection also carries
+`formatUpgrade`. INACTIVE renders `FORMAT UPGRADE PENDING` and leaves the
+checklist live, with no stopping `FORMAT_UPGRADE` outcome. ACTIVE renders
+`FORMAT UPGRADE REQUIRED` above the checklist it freezes.
 
 The checkpoint list is `stepsFor(state)`, not a constant: a format-9 record was
 born under the eight-checkpoint lifecycle and must not be shown a phantom
@@ -673,7 +818,10 @@ principal supplies that same ID for every transition it can derive from the
 preview it just computed — including `--refresh`, `--reopen-ui`,
 `--reopen-complete`, `--rework-slice`, `--amend-slice` and
 `--adopt-visual-contract` — and records the decision in
-`decisions/auto-decisions.ndjson`. The carve-out is a bootstrap
+`decisions/auto-decisions.ndjson`. A `READY` format upgrade is confirmed through
+that same single mechanism: the preflight computes it, the digest of its required
+input is bound into the ID and re-checked under the record lock, and no
+format-specific flag or separate confirmation exists. The carve-out is a bootstrap
 (`NOT_STARTED`): initialization pins the OpenSpec authority for the migration's
 whole life and there is no prior record to decide from, so it stays two-phase
 under either mode.
@@ -1023,20 +1171,33 @@ every other slice unchanged.
 ### Runtime evidence rows
 
 For visible UI, a pre-18 record remains readable but cannot earn a new
-VERIFY_SLICES or FINALIZE PASS without `requiredObservations`. Adopt the
-legacy-authored set with `UI_OBSERVATIONS_ADOPTED` first; pre-17 ACTIVE
-figma-mcp records combine visual and observations adoption in that transition.
-TARGET proof cannot author the required set.
+VERIFY_SLICES or FINALIZE PASS without `requiredObservations`. TARGET proof
+cannot author the required set, in either of the two paths below.
 
-Author `ui-observations-adoption/candidate/legacy.json` from legacy authority,
-then preview with `artifact-migration-discover <module> --adopt-ui-observations`.
-The preview prints the candidate digest, affected slices, blockers, and an exact
-confirmation command. Run `artifact-migration-discover <module>
---adopt-ui-observations --confirm-adopt-ui-observations <digest>` using that
-printed digest. A pre-17 figma-mcp record also needs the existing adopted Figma
-context and visual acceptance matrix; its preview prints a combined digest.
-The journaled transition requeues affected slices. Collect fresh UI proof and
-resume `/start-migration <module>` to VERIFY.
+**A record at format 17 (at or above the upgrade floor).** The registered 17→18
+format upgrader owns the transition, and the normal command dispatches it — see
+"Format upgrades" above. An early record first completes DISCOVER_LEGACY at 17
+to pin its authoritative inventory; the scaffold alone does not activate the
+upgrader. Run `/start-migration <module>`, then author only the
+`requiredObservations` candidate the reported `formatUpgrade.requiredInput`
+names, and rerun the same command. Never type a format-specific adoption flag
+for such a record.
+
+**A record below format 17 (pre-floor historical compatibility).** The one-shot
+legacy adoption is still the only way across, and it is still operator-driven:
+author `ui-observations-adoption/candidate/legacy.json` from legacy authority,
+then preview with `artifact-migration-discover <module>
+--adopt-ui-observations`. The preview prints the candidate digest, affected
+slices, blockers, and an exact confirmation command. Run
+`artifact-migration-discover <module> --adopt-ui-observations
+--confirm-adopt-ui-observations <digest>` using that printed digest. A pre-17
+figma-mcp record also needs the existing adopted Figma context and visual
+acceptance matrix; its preview prints a combined digest, and that combined plan
+is reachable only through this pre-floor flag.
+
+Either way the journaled transition requeues affected slices, and exactly one
+`UI_OBSERVATIONS_ADOPTED` transition is ever applied to a record. Collect fresh
+UI proof and resume `/start-migration <module>` to VERIFY.
 
 Verification evidence lives in the affected slice's `result.json`; captures live
 beside it under `evidence/<slice-id>/ui/`. `uiEvidence` rows are produced by the

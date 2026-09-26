@@ -94,6 +94,7 @@ import {
   NON_PROMOTING_FORMAT_VERSIONS,
   pendingTargetDriftCandidates,
   SLICE_REWORK_FORMAT,
+  VISUAL_ACCEPTANCE_FORMAT,
   SUPPORTED_FORMAT_VERSIONS,
   previewMigrationExecution,
   readCanonicalModuleBoundary,
@@ -112,6 +113,11 @@ import {
   artifactBindingFor,
   adoptUiObservations,
   assertRequiredObservations,
+  commitNoOpFormatUpgrade,
+  FORMAT_UPGRADE_FLOOR,
+  isUiObservationsAdoption,
+  pendingFormatUpgrade,
+  repairSliceState,
   previewUiObservationsAdoption,
   REQUIRED_OBSERVATIONS_FORMAT,
 } from "../../src/resumable-migration.mjs";
@@ -8351,6 +8357,9 @@ test("the projection exposes the engine's checkpoints, in engine order", async (
       "activeSlice",
       "blocker",
       "checkpoints",
+      // The pending format increment, or null. Derived from the record and the
+      // registry, so it stays host-independent like everything else here.
+      "formatUpgrade",
       "mode",
       "module",
       "nextWork",
@@ -12036,6 +12045,20 @@ test("adopt-17: adoption preserves identity, history, slices, and functional evi
     );
     assert.equal(record.adopted.frames[0].sources.screenshot.length, 1);
 
+    // Adoption lands the record on 17 and the runtime is 18, so the mandatory
+    // increment outranks the lifecycle: nothing resumes until it commits, and
+    // the normal command is what commits it.
+    const frozen = await previewMigrationExecution({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+    });
+    assert.equal(frozen.state, "FORMAT_UPGRADE");
+    await assert.rejects(
+      (await reopenUi(fixture, ["slice-a"])).run(),
+      FROZEN_BY_UPGRADE,
+    );
+    await upgradeToFormat18(fixture);
+
     // The old TARGET visual evidence cannot stand: resuming is refused until
     // every affected slice is reopened, and adoption is not repeatable.
     const resumed = await previewMigrationExecution({
@@ -12055,7 +12078,7 @@ test("adopt-17: adoption preserves identity, history, slices, and functional evi
     await writeAdoptionEvidence(fixture);
     assert.match(
       (await adoptionPreview(fixture)).blockers.join("\n"),
-      /already format 17\. It is not a refresh, replan, or reset/,
+      /already format 18\. It is not a refresh, replan, or reset/,
     );
   } finally {
     await fixture.cleanup();
@@ -12166,19 +12189,35 @@ test("adopt-17: an operator-approved unbacked state goes stale when the adopted 
   }
 });
 
-test("adopt-17: --reopen-ui after adoption verifies under format 17 and reaches COMPLETE again", async () => {
+test("adopt-17: the mandatory increment requeues the adopted slice, which reverifies to COMPLETE again", async () => {
   const fixture = await createFixture();
   try {
     await driveFigma16ToComplete(fixture);
     await writeAdoptionEvidence(fixture);
     await adopt(fixture, await adoptionPreview(fixture));
-    const reopen = await reopenUi(fixture, ["slice-a"]);
-    assert.deepEqual(reopen.preview.blockers, []);
-    await reopen.run();
+    // The record lands on 17 and the runtime is 18, so the reopen this test is
+    // about cannot run until the increment commits. The normal command commits
+    // it -- and only it: the reopen is still the reopen's own transaction.
+    await assert.rejects(
+      (await reopenUi(fixture, ["slice-a"])).run(),
+      FROZEN_BY_UPGRADE,
+    );
+    await upgradeToFormat18(fixture);
+    // The increment's own declared invalidation requeues the affected slice, so
+    // the `--reopen-ui slice-a` this test used to type is both unnecessary and
+    // refused: slice-a is active, not completed. The visual adoption's
+    // pendingReverification still names it, and the slice's own reverification
+    // below is what satisfies it -- the record is not stuck.
     const reopened = await state(fixture);
-    assert.equal(reopened.formatVersion, 17);
-    assert.deepEqual(reopened.visualContractAdoption.pendingReverification, []);
+    assert.equal(reopened.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.deepEqual(reopened.visualContractAdoption.pendingReverification, [
+      "slice-a",
+    ]);
     assert.deepEqual(reopened.completedSlices, ["slice-b"]);
+    await assert.rejects(
+      (await reopenUi(fixture, ["slice-a"])).run(),
+      /names only completed slices/,
+    );
     await writeJson(path.join(fixture.migrationRoot, "ui-remediation.json"), {
       version: 1,
       hasVisibleUi: true,
@@ -12187,20 +12226,6 @@ test("adopt-17: --reopen-ui after adoption verifies under format 17 and reaches 
     });
     const pin = await figmaPin(fixture);
     // Provenance alone -- what verified this slice at format 16 -- now fails.
-    await authorEvidence(fixture, "slice-a", {
-      mutate: (records) =>
-        records.map((record) => ({
-          ...record,
-          boundTo: { ...record.boundTo, figmaContextDigest: pin },
-        })),
-    });
-    await assert.rejects(
-      advance(fixture, { slice: "slice-a" }),
-      /Visible UI needs format-18 requiredObservations/,
-    );
-    await adoptObservations(fixture);
-    assert.equal((await state(fixture)).formatVersion, 18);
-    assert.equal((await historyEvents(fixture)).at(-1).event, "UI_OBSERVATIONS_ADOPTED");
     await authorEvidence(fixture, "slice-a", {
       mutate: (records) =>
         records.map((record) => ({
@@ -12225,11 +12250,11 @@ test("adopt-17: --reopen-ui after adoption verifies under format 17 and reaches 
       mutate: await figmaEvidence(fixture),
     });
     await advance(fixture, { slice: "slice-a" });
-    // FINALIZE re-validates slice-b's untouched functional evidence under 17.
+    // FINALIZE re-validates slice-b's untouched functional evidence under 18.
     await finalizeFixture(fixture);
     const complete = await state(fixture);
     assert.equal(complete.status, "COMPLETE");
-    assert.equal(complete.formatVersion, 18);
+    assert.equal(complete.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
   } finally {
     await fixture.cleanup();
   }
@@ -16717,14 +16742,20 @@ test("F-01 CLI previews, confirms, journals, and resumes UI observations adoptio
     }
   };
   try {
+    // The slice is put in flight first and the record downgraded after: at 17
+    // the owed increment freezes every lifecycle mutation, so a format-17
+    // record with a slice mid-flight cannot be built by advancing at 17.
     await driveTo(fixture, "PLAN");
-    await downgradeToFormat17(fixture);
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
+    await downgradeToFormat17(fixture);
     await authorEvidence(fixture, "slice-a", {
       uiBehavior: (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json"))).uiBehaviors[0],
     });
-    await assert.rejects(advance(fixture, { slice: "slice-a" }), /artifact-migration-discover auth --adopt-ui-observations/);
+    // The refusal no longer names a flag: at 17 the increment is mandatory and
+    // the preflight refuses before any verification runs. The flag below is the
+    // retained pre-floor entry point, and this test is its coverage.
+    await assert.rejects(advance(fixture, { slice: "slice-a" }), FROZEN_BY_UPGRADE);
     const before = await snapshot(fixture.migrationRoot);
     assert.throws(() => parseDiscoverArguments([]), /--adopt-ui-observations/);
     const preview = await cli(args);
@@ -16794,13 +16825,37 @@ const adoptObservations = async (fixture) => {
   });
 };
 
+/**
+ * The one supported way a true format-17 record reaches 18: the normal command,
+ * no format-specific flag, exactly one increment, and the invocation ends there.
+ *
+ * Every test whose subject is what happens *after* the barrier crosses it
+ * through here. Hand-writing `formatVersion: 18` or reaching for the pre-floor
+ * admin flag would test a state the engine can no longer produce.
+ */
+const upgradeToFormat18 = async (fixture) => {
+  const run = await discoverCli(fixture);
+  assert.equal(run.formatUpgraded, true, run.stdout);
+  assert.equal(run.exitCode, 0);
+  // The driver starts the next invocation itself; no agent decision in between.
+  assert.match(run.stdout, /loop: CONTINUE next=\/start-migration \S+\n/);
+  const after = await state(fixture);
+  assert.equal(after.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+  return run;
+};
+
+/** The frozen-lifecycle refusal every mutating path speaks while owed. */
+const FROZEN_BY_UPGRADE = /format upgrade is owed/;
+
 /** Old bytes preserved and pinned for life, new contract pinned, event recorded. */
 const assertAdoptionPreserved = async (fixture, before, slices) => {
   const after = await state(fixture);
   assert.equal(after.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
   assert.equal(after.revision, before.revision + 1);
   const event = (await historyEvents(fixture)).at(-1);
-  assert.equal(event.event, "UI_OBSERVATIONS_ADOPTED");
+  // Either spelling: the pre-floor flag writes the historical event, the
+  // registered row writes the canonical envelope around the same domain fields.
+  assert.ok(isUiObservationsAdoption(event), event.event);
   assert.deepEqual(event.slices, slices);
   assert.equal(
     event.previousLegacyDigest,
@@ -16876,22 +16931,23 @@ test("format 18 is non-promoting; an old UI record adopts before a new PASS", as
   const fixture = await createFixture();
   try {
     await driveTo(fixture, "PLAN");
-    await downgradeToFormat17(fixture);
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
+    await downgradeToFormat17(fixture);
     const stillOld = await state(fixture);
     assert.equal(stillOld.currentStep, "VERIFY_SLICES");
-    assert.equal(stillOld.formatVersion, 17, "an advance never stamps 18");
     await authorEvidence(fixture, "slice-a", {
       uiBehavior: (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json"))).uiBehaviors[0],
     });
+    // No advance ever stamps a non-promoting format, and at 17 none even runs:
+    // the owed increment outranks the lifecycle and is the only thing that can
+    // move the cursor to 18.
     await assert.rejects(
       advance(fixture, { slice: "slice-a" }),
-      /UI_OBSERVATIONS_ADOPTED/,
+      FROZEN_BY_UPGRADE,
     );
     assert.equal((await state(fixture)).formatVersion, 17);
-    await adoptObservations(fixture);
-    assert.equal((await state(fixture)).formatVersion, 18);
+    await upgradeToFormat18(fixture);
     await authorEvidence(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
     assert.equal((await state(fixture)).revision, stillOld.revision + 2);
@@ -17048,10 +17104,11 @@ test("UI_OBSERVATIONS_ADOPTED case D: ACTIVE / FINALIZE is refused, adopts, reve
     await driveTo(fixture, "SLICES");
     await downgradeToFormat17(fixture);
     await authorFinalize(fixture);
-    await assert.rejects(advance(fixture), /UI_OBSERVATIONS_ADOPTED/);
+    // FINALIZE is a lifecycle mutation, so the owed increment refuses it first.
+    await assert.rejects(advance(fixture), FROZEN_BY_UPGRADE);
     const before = await state(fixture);
     assert.equal(before.currentStep, "FINALIZE");
-    await adoptObservations(fixture);
+    await upgradeToFormat18(fixture);
     const { after, event } = await assertAdoptionPreserved(fixture, before, ["slice-a"]);
     assert.equal(event.from, "FINALIZE");
     assert.equal(after.currentStep, "VERIFY_SLICES");
@@ -17235,4 +17292,979 @@ test("combined adoption: pre-17 ACTIVE figma-mcp validates both inputs and commi
   } finally {
     await fixture.cleanup();
   }
+});
+
+// --- The format-upgrade cursor and the NO_OP increment ----------------------
+//
+// `state.formatVersion` at or above the floor is a cursor: a record behind the
+// runtime format owes exactly the next adjacent increment, and the increment
+// commits even when this record needs none of its domain work. The pure
+// registry/coverage proofs live in test/unit/format-upgrades.test.mjs; these
+// are the record-level ones, beside the fixture that can produce a real
+// format-17 record.
+
+const upgradeTarget = (fixture) => ({
+  registryPath: fixture.registryPath,
+  moduleName: "auth",
+});
+
+const pendingUpgrade = async (fixture, persisted) =>
+  pendingFormatUpgrade(
+    fixture.migrationRoot,
+    persisted ?? (await state(fixture)),
+    "auth",
+    { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot },
+  );
+
+/**
+ * A true format-17 record with no visible UI, so 17 -> 18 is a no-op.
+ *
+ * ponytail: the pinned legacy inventory is rewritten and re-pinned rather than
+ * the whole record being driven through a non-UI discovery. The row's domain
+ * classifier reads exactly this file, so this is the input under test; the
+ * record's other documents still describe UI, so the lifecycle is not driven
+ * further here. Upgrade path if a future row classifies on more than the legacy
+ * inventory: drive the non-UI variant end to end, as UI-10 does.
+ */
+const downgradeToFormat17WithoutUi = async (fixture) => {
+  await downgradeToFormat17(fixture);
+  const relative = "inventories/legacy.json";
+  const absolute = path.join(fixture.migrationRoot, relative);
+  await writeJson(absolute, {
+    ...(await readJson(absolute)),
+    hasVisibleUi: false,
+    uiBehaviors: [],
+  });
+  await repin(fixture, relative);
+  // A no-op increment declares no required input, so the candidate the UI
+  // downgrade authored must not be what carries it.
+  await rm(path.join(fixture.migrationRoot, UI_CANDIDATE));
+};
+
+const interruptNoOpUpgradeAt = async (fixture, stage) => {
+  const crash = new Error(`simulated crash after the ${stage} write`);
+  await assert.rejects(
+    commitNoOpFormatUpgrade({
+      ...upgradeTarget(fixture),
+      hooks: {
+        afterWrite: (written) => {
+          if (written === stage) throw crash;
+        },
+      },
+    }),
+    (error) => error === crash,
+  );
+};
+
+test("FU-1: a format-17 record resolves exactly 17 -> 18, and 18 resolves none", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    const pending = await pendingUpgrade(fixture);
+    assert.equal(pending.from, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(pending.to, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(pending.to, pending.from + 1, "the cursor never skips an increment");
+    assert.deepEqual(pending.upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
+    assert.equal(pending.domain, "TRANSFORM", "a visible-UI record owes the domain work");
+    assert.equal(pending.state, "READY");
+    assert.ok(pending.confirmationDigest);
+
+    // The declared input is what separates READY from NEEDS_INPUT, and its
+    // absence writes nothing.
+    const candidatePath = path.join(fixture.migrationRoot, UI_CANDIDATE);
+    const candidate = await readFile(candidatePath);
+    await rm(candidatePath);
+    const needsInput = await pendingUpgrade(fixture);
+    assert.equal(needsInput.state, "NEEDS_INPUT");
+    assert.equal(needsInput.requiredInput.path, UI_CANDIDATE);
+    assert.equal(needsInput.requiredInput.authority, "legacy");
+    assert.equal(needsInput.confirmationDigest, null);
+    assert.match(needsInput.nextAction, /Author ui-observations-adoption/);
+    await writeFile(candidatePath, candidate);
+
+    // Committed: the cursor has moved, so nothing is owed at the runtime format.
+    await adoptObservations(fixture);
+    assert.equal((await state(fixture)).formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(await pendingUpgrade(fixture), null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-2: a no-visible-UI format-17 record commits an atomic NO_OP 17 -> 18", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17WithoutUi(fixture);
+    const before = await state(fixture);
+    const filesBefore = await snapshot(fixture.migrationRoot);
+    const linesBefore = (await historyEvents(fixture)).length;
+
+    const pending = await pendingUpgrade(fixture);
+    assert.equal(pending.domain, "NO_OP");
+    assert.equal(pending.state, "READY", "a no-op still owes a committed increment");
+    assert.equal(pending.requiredInput, null, "a no-op declares no input");
+    assert.equal(pending.confirmationDigest, null);
+
+    const committed = await commitNoOpFormatUpgrade(upgradeTarget(fixture));
+    const after = await state(fixture);
+    assert.equal(committed.state.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(after.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(after.revision, before.revision + 1);
+    assert.notEqual(after.updatedAt, undefined);
+
+    // Exactly one event, carrying what a replay needs to audit the claim that
+    // nothing needed doing.
+    const events = await historyEvents(fixture);
+    assert.equal(events.length, linesBefore + 1);
+    const upgrades = events.filter((event) => event.event === "FORMAT_UPGRADED");
+    assert.equal(upgrades.length, 1);
+    const [event] = upgrades;
+    assert.equal(event.fromFormat, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(event.toFormat, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(event.domain, "NO_OP");
+    assert.deepEqual(event.upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
+    assert.deepEqual(event.inputs, []);
+    assert.equal(event.priorRevision, before.revision);
+    assert.equal(event.revision, after.revision);
+    assert.equal(event.priorStep, before.currentStep);
+    assert.match(event.priorStateDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.match(event.stateDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.notEqual(event.priorStateDigest, event.stateDigest);
+
+    // The checkpoint tuple, the collections and every pin are byte-identical:
+    // the only fields that moved are the three the increment owns.
+    for (const field of [
+      "status",
+      "currentStep",
+      "activeSlice",
+      "completedSteps",
+      "pendingSteps",
+      "completedSlices",
+      "pendingSlices",
+      "artifactHashes",
+      "plan",
+      "requirementsAuthority",
+    ]) {
+      assert.deepEqual(after[field], before[field], `${field} is unchanged`);
+    }
+    assert.deepEqual(
+      Object.entries(after).filter(
+        ([key, value]) =>
+          JSON.stringify(value) !== JSON.stringify(before[key]),
+      ).map(([key]) => key).sort(),
+      ["formatVersion", "revision", "updatedAt"],
+    );
+
+    // And on disk: three files moved, none of them an artifact, an inventory,
+    // a slice, a piece of evidence or a candidate.
+    const filesAfter = await snapshot(fixture.migrationRoot);
+    assert.deepEqual(
+      Object.keys({ ...filesBefore, ...filesAfter })
+        .filter((relative) => filesBefore[relative] !== filesAfter[relative])
+        .sort(),
+      ["history/history.ndjson", "integrity.json", "state.json"],
+    );
+
+    // History replays to exactly this record, and a rerun does not re-upgrade.
+    await readState(fixture.targetRoot, "auth");
+    assert.equal(await pendingUpgrade(fixture), null);
+    const bytes = await snapshot(fixture.migrationRoot);
+    await assert.rejects(
+      commitNoOpFormatUpgrade(upgradeTarget(fixture)),
+      /owes no format upgrade at format 18. Nothing was written/,
+    );
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+    // That the lifecycle then resumes at 18 on the unchanged checkpoint is what
+    // the unchanged tuple above says; driving it is FU-5's job, on a record
+    // whose target inventory agrees about the absent UI.
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-3: a crash before the state write leaves format 17 and a byte-identical record", async () => {
+  for (const stage of ["journal", "integrity"]) {
+    const fixture = await createFixture();
+    try {
+      await driveTo(fixture, "PLAN");
+      await downgradeToFormat17WithoutUi(fixture);
+      const before = await snapshot(fixture.migrationRoot);
+      const revisionBefore = (await state(fixture)).revision;
+
+      await interruptNoOpUpgradeAt(fixture, stage);
+      assert.equal(
+        await exists(path.join(fixture.migrationRoot, "advance.journal")),
+        true,
+        "the journal survives the crash",
+      );
+      await recoverMigrationRecord(upgradeTarget(fixture));
+
+      const after = await state(fixture);
+      assert.equal(after.formatVersion, VISUAL_ACCEPTANCE_FORMAT, stage);
+      assert.equal(after.revision, revisionBefore);
+      assert.deepEqual(
+        await snapshot(fixture.migrationRoot),
+        before,
+        `the record is byte-identical after recovering from the ${stage} crash`,
+      );
+
+      // The rerun selects the same target and commits it.
+      const pending = await pendingUpgrade(fixture);
+      assert.equal(pending.from, VISUAL_ACCEPTANCE_FORMAT);
+      assert.equal(pending.to, REQUIRED_OBSERVATIONS_FORMAT);
+      assert.equal(pending.domain, "NO_OP");
+      await commitNoOpFormatUpgrade(upgradeTarget(fixture));
+      assert.equal((await state(fixture)).formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+      await readState(fixture.targetRoot, "auth");
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("FU-4: a crash after the state write recovers forward to exactly one event", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17WithoutUi(fixture);
+    const linesBefore = (await historyEvents(fixture)).length;
+    const revisionBefore = (await state(fixture)).revision;
+
+    await interruptNoOpUpgradeAt(fixture, "state");
+    assert.equal((await state(fixture)).formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal((await historyEvents(fixture)).length, linesBefore);
+
+    await recoverMigrationRecord(upgradeTarget(fixture));
+    assert.equal(
+      await exists(path.join(fixture.migrationRoot, "advance.journal")),
+      false,
+    );
+    const events = await historyEvents(fixture);
+    assert.equal(events.length, linesBefore + 1);
+    assert.equal(events.at(-1).event, "FORMAT_UPGRADED");
+    assert.equal(events.at(-1).revision, revisionBefore + 1);
+
+    // Idempotent: recovering again appends nothing and re-upgrades nothing.
+    await recoverMigrationRecord(upgradeTarget(fixture));
+    assert.equal((await historyEvents(fixture)).length, linesBefore + 1);
+    assert.equal(await pendingUpgrade(fixture), null);
+    await readState(fixture.targetRoot, "auth");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-5: pre-floor records owe no format upgrade and keep their semantics", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    const current = await state(fixture);
+    assert.equal(FORMAT_UPGRADE_FLOOR, VISUAL_ACCEPTANCE_FORMAT);
+    // Nothing below the floor is dispatched: formats 10 and 11 are permanently
+    // non-promoting by design, so no adjacent upgrader for them can exist.
+    for (const formatVersion of [4, 10, 11, 12, 16]) {
+      assert.equal(
+        await pendingUpgrade(fixture, { ...current, formatVersion }),
+        null,
+        `format ${formatVersion} owes no format upgrade`,
+      );
+    }
+
+    // And a genuinely persisted pre-floor record still runs its lifecycle: no
+    // freeze, no dispatch, no promotion past its own stamp.
+    const statePath = path.join(fixture.migrationRoot, "state.json");
+    await writeJson(statePath, { ...current, formatVersion: SLICE_REWORK_FORMAT });
+    await readState(fixture.targetRoot, "auth");
+    assert.equal(await pendingUpgrade(fixture), null);
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    assert.equal((await state(fixture)).formatVersion, SLICE_REWORK_FORMAT);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-6: only a validated legacy inventory that declares no visible UI is a NO_OP", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    const relative = "inventories/legacy.json";
+    const absolute = path.join(fixture.migrationRoot, relative);
+    const authority = await readJson(absolute);
+
+    // 1. Valid authority that says there is visible UI.
+    assert.equal((await pendingUpgrade(fixture)).domain, "TRANSFORM");
+
+    // 2. Valid authority that explicitly says there is not.
+    await writeJson(absolute, { ...authority, hasVisibleUi: false, uiBehaviors: [] });
+    await repin(fixture, relative);
+    assert.equal((await pendingUpgrade(fixture)).domain, "NO_OP");
+
+    // 3-5. No authority, unreadable authority, and authority that is silent or
+    // lying about visible UI: all BLOCKED, none of them a no-op.
+    const before = await state(fixture);
+    const linesBefore = (await historyEvents(fixture)).length;
+    const cases = [
+      ["missing", null],
+      ["unreadable", "{ not json"],
+      ["malformed", JSON.stringify({ version: 1 })],
+      ["silent", JSON.stringify({ ...authority, hasVisibleUi: undefined, uiBehaviors: [] })],
+      ["non-boolean", JSON.stringify({ ...authority, hasVisibleUi: "false", uiBehaviors: [] })],
+      // Declares no UI while discovery holds UI behaviors: the engine's own
+      // consistency rule, not a second parser.
+      ["inconsistent", JSON.stringify({ ...authority, hasVisibleUi: false })],
+    ];
+    for (const [name, content] of cases) {
+      if (content === null) await rm(absolute);
+      else await writeFile(absolute, `${content}\n`);
+      await repin(fixture, relative).catch(() => {});
+
+      const pending = await pendingUpgrade(fixture);
+      assert.equal(pending.state, "BLOCKED", name);
+      assert.equal(pending.domain, null, name);
+      assert.equal(pending.confirmationDigest, null, name);
+      assert.match(
+        pending.blockers.join(" "),
+        /authoritative legacy inventory could not establish whether this record has visible UI/,
+        name,
+      );
+
+      // Nothing may move on a blocker: not the stamp, not the revision, not
+      // the audit record, and no journal is left behind.
+      await assert.rejects(
+        commitNoOpFormatUpgrade(upgradeTarget(fixture)),
+        /not READY\/NO_OP|Migration state|Legacy|Nothing was written/,
+        name,
+      );
+      const after = await state(fixture);
+      assert.equal(after.formatVersion, VISUAL_ACCEPTANCE_FORMAT, name);
+      assert.equal(after.revision, before.revision, name);
+      const events = await historyEvents(fixture);
+      assert.equal(events.length, linesBefore, name);
+      assert.equal(
+        events.some((event) => event.event === "FORMAT_UPGRADED"),
+        false,
+        name,
+      );
+      assert.equal(
+        await exists(path.join(fixture.migrationRoot, "advance.journal")),
+        false,
+        `${name} leaves no journal residue`,
+      );
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- The upgrade the normal command owns: status, dispatch, freeze, history ---
+//
+// Steps 4-7 of the format-upgrade plan. The cursor and the NO_OP transaction are
+// FU-1..FU-6 above; these prove the outcomes, the read-only projection, the
+// mutating dispatch order, the lifecycle freeze and the canonical history
+// envelope -- and they drive the real CLI, because "the agent never types a
+// format-specific command" is a statement about that surface and nothing else.
+
+const statusOf = (fixture) =>
+  getMigrationStatus({ registryPath: fixture.registryPath, moduleName: "auth" });
+
+test("FU-7: read-only status projects the pending increment and writes nothing", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    const before = await state(fixture);
+    const bytes = await snapshot(fixture.migrationRoot);
+
+    const ready = await statusOf(fixture);
+    assert.equal(ready.formatUpgrade.state, "READY");
+    assert.equal(ready.formatUpgrade.domain, "TRANSFORM");
+    assert.equal(ready.formatUpgrade.recordFormat, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(ready.formatUpgrade.runtimeFormat, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(ready.formatUpgrade.from, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(ready.formatUpgrade.to, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.deepEqual(ready.formatUpgrade.upgrader, {
+      id: "UI_OBSERVATIONS_ADOPTED",
+      version: 1,
+    });
+    assert.ok(ready.formatUpgrade.confirmationDigest);
+    // The block is above the frozen checklist, and the active checkpoint reads
+    // BLOCKED through the machinery that renders every other stop.
+    assert.match(ready.progressChecklist, /^FORMAT UPGRADE REQUIRED\n/);
+    assert.match(ready.progressChecklist, /record format: 17\nruntime format: 18\n/);
+    assert.match(
+      ready.progressChecklist,
+      /current upgrade: 17->18 \(UI_OBSERVATIONS_ADOPTED v1\)/,
+    );
+    assert.match(ready.progressChecklist, /upgrade state: READY \(domain: TRANSFORM\)/);
+    assert.match(
+      ready.progressChecklist,
+      /--- normal progress \(frozen behind the upgrade\) ---\nprogress: /,
+    );
+    assert.match(ready.progressChecklist, /\[!\] \d+\/\d+ IMPLEMENT_SLICES/);
+
+    // NEEDS_INPUT names the canonical candidate path and the legacy authority.
+    const candidatePath = path.join(fixture.migrationRoot, UI_CANDIDATE);
+    const candidate = await readFile(candidatePath);
+    await rm(candidatePath);
+    const needsInput = await statusOf(fixture);
+    assert.equal(needsInput.formatUpgrade.state, "NEEDS_INPUT");
+    assert.equal(needsInput.formatUpgrade.requiredInput.kind, "candidateFile");
+    assert.equal(needsInput.formatUpgrade.requiredInput.path, UI_CANDIDATE);
+    assert.equal(needsInput.formatUpgrade.requiredInput.authority, "legacy");
+    assert.equal(needsInput.formatUpgrade.confirmationDigest, null);
+    assert.match(
+      needsInput.progressChecklist,
+      /required input: candidateFile ui-observations-adoption\/candidate\/legacy\.json \(authority: legacy\)/,
+    );
+    await writeFile(candidatePath, candidate);
+
+    // BLOCKED: the authority is readable and pinned but does not answer the
+    // question the domain classifier asks it.
+    const relative = "inventories/legacy.json";
+    const absolute = path.join(fixture.migrationRoot, relative);
+    const authority = await readJson(absolute);
+    await writeJson(absolute, { ...authority, hasVisibleUi: undefined, uiBehaviors: [] });
+    await repin(fixture, relative);
+    const blocked = await statusOf(fixture);
+    assert.equal(blocked.formatUpgrade.state, "BLOCKED");
+    assert.equal(blocked.formatUpgrade.domain, null);
+    assert.match(
+      blocked.formatUpgrade.blockers.join(" "),
+      /could not establish whether this record has visible UI/,
+    );
+    assert.match(blocked.progressChecklist, /upgrade blocker: /);
+    await writeJson(absolute, authority);
+    await repin(fixture, relative);
+
+    // Identity outranks the upgrade: with a refusal in hand the increment is
+    // reported BLOCKED and the record is not read past the cursor. This is the
+    // exact value `getMigrationStatus` passes when the record pins a toolkit the
+    // running engine cannot prove it is.
+    const outranked = await pendingFormatUpgrade(
+      fixture.migrationRoot,
+      await state(fixture),
+      "auth",
+      { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot },
+      { identityBlocker: "This record pins toolkit 9.9.9." },
+    );
+    assert.equal(outranked.state, "BLOCKED");
+    assert.equal(outranked.domain, null);
+    assert.equal(outranked.requiredInput, null);
+    assert.equal(outranked.confirmationDigest, null);
+    assert.deepEqual(outranked.blockers, ["This record pins toolkit 9.9.9."]);
+
+    // Every read above, and the ones the whole status surface makes: no byte, no
+    // revision, no identity and no history line moved.
+    const after = await state(fixture);
+    assert.equal(after.revision, before.revision);
+    assert.deepEqual(after.toolkitIdentity, before.toolkitIdentity);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-8: the normal CLI owns 17 -> 18; no format-specific flag is ever typed", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    const candidatePath = path.join(fixture.migrationRoot, UI_CANDIDATE);
+    const candidate = await readFile(candidatePath);
+    await rm(candidatePath);
+    const before = await state(fixture);
+    const bytes = await snapshot(fixture.migrationRoot);
+
+    // 1. Owed but not committable: the normal command reports it and writes
+    // nothing at all.
+    const owed = await discoverCli(fixture);
+    assert.equal(owed.preview.state, "FORMAT_UPGRADE");
+    assert.equal(owed.preview.requiresConfirmation, false);
+    assert.equal(owed.preview.confirmationId, null);
+    assert.equal(owed.blocked, true);
+    assert.equal(owed.exitCode, BLOCKED_EXIT_CODE);
+    assert.match(owed.stdout, /FORMAT UPGRADE REQUIRED/);
+    assert.match(owed.stdout, /Execution: FORMAT_UPGRADE/);
+    assert.match(owed.stdout, /loop: STOP reason=FORMAT_UPGRADE/);
+    assert.doesNotMatch(owed.stdout, /--adopt-ui-observations/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+
+    // 2. Input authored at the named path; the same command commits exactly one
+    // increment, ends the invocation, and hands the driver a continuation it can
+    // act on with no agent decision in between.
+    await writeFile(candidatePath, candidate);
+    const upgraded = await discoverCli(fixture);
+    assert.equal(upgraded.formatUpgraded, true);
+    assert.equal(upgraded.exitCode, 0);
+    assert.match(upgraded.stdout, /FORMAT_UPGRADED: 17 -> 18 \(domain TRANSFORM\)/);
+    assert.match(upgraded.stdout, /loop: CONTINUE next=\/start-migration \S+\n/);
+    assert.doesNotMatch(upgraded.stdout, /loop: STOP/);
+    const after = await state(fixture);
+    assert.equal(after.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+
+    // The checkpoint tuple did not advance across the upgrade.
+    assert.equal(after.currentStep, before.currentStep);
+    assert.deepEqual(after.completedSteps, before.completedSteps);
+    assert.deepEqual(after.pendingSteps, before.pendingSteps);
+    assert.deepEqual(after.completedSlices, before.completedSlices);
+    assert.equal(after.activeSlice, before.activeSlice);
+
+    // 3. One canonical event, the domain transition subordinate to it.
+    const events = await historyEvents(fixture);
+    const upgrades = events.filter((event) => event.event === "FORMAT_UPGRADED");
+    assert.equal(upgrades.length, 1, "exactly one increment, exactly one line");
+    const [event] = upgrades;
+    assert.equal(event.transition, "UI_OBSERVATIONS_ADOPTED");
+    assert.equal(event.domain, "TRANSFORM");
+    assert.equal(event.fromFormat, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(event.toFormat, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.deepEqual(event.upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
+    assert.equal(event.inputs.length, 1);
+    assert.equal(event.inputs[0].path, UI_CANDIDATE);
+    assert.equal(event.inputs[0].kind, "candidateFile");
+    assert.ok(event.inputs[0].digest);
+    assert.equal(event.priorRevision, before.revision);
+    assert.equal(event.revision, after.revision);
+    assert.equal(event.priorStep, before.currentStep);
+    assert.match(event.priorStateDigest, /^sha256:[a-f0-9]{64}$/);
+    assert.notEqual(event.priorStateDigest, event.stateDigest);
+    assert.equal(
+      events.filter((line) => line.event === "UI_OBSERVATIONS_ADOPTED").length,
+      0,
+      "the canonical envelope is one row, not two",
+    );
+    assert.ok(isUiObservationsAdoption(event), "and it still reads as the adoption");
+    // Replays, and to exactly this record.
+    const replayed = await readState(fixture.targetRoot, "auth");
+    assert.equal(replayed.state.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+
+    // 4. At most one increment per invocation: the rerun owes nothing and the
+    // lifecycle is live again.
+    assert.equal((await statusOf(fixture)).formatUpgrade, null);
+    const resumed = await discoverCli(fixture);
+    assert.notEqual(resumed.preview.state, "FORMAT_UPGRADE");
+    assert.equal(resumed.formatUpgraded, undefined);
+    assert.equal(
+      (await historyEvents(fixture)).filter(
+        (line) => line.event === "FORMAT_UPGRADED",
+      ).length,
+      1,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-9: the normal CLI commits a NO_OP 17 -> 18 with no input at all", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17WithoutUi(fixture);
+    const before = await state(fixture);
+
+    const status = await statusOf(fixture);
+    assert.equal(status.formatUpgrade.state, "READY");
+    assert.equal(status.formatUpgrade.domain, "NO_OP");
+    assert.equal(status.formatUpgrade.requiredInput, null);
+
+    const upgraded = await discoverCli(fixture);
+    assert.equal(upgraded.formatUpgraded, true);
+    assert.equal(upgraded.exitCode, 0);
+    assert.match(upgraded.stdout, /FORMAT_UPGRADED: 17 -> 18 \(domain NO_OP\)/);
+    const after = await state(fixture);
+    assert.equal(after.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.equal(after.currentStep, before.currentStep);
+    const upgrades = (await historyEvents(fixture)).filter(
+      (event) => event.event === "FORMAT_UPGRADED",
+    );
+    assert.equal(upgrades.length, 1);
+    assert.equal(upgrades[0].domain, "NO_OP");
+    assert.equal(upgrades[0].transition, undefined);
+    await readState(fixture.targetRoot, "auth");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-10: every lifecycle mutation refuses while the increment is owed", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToFormat17(fixture);
+    // NEEDS_INPUT on purpose: the guard is independent of the classifier, so an
+    // upgrade that cannot even be committed yet still freezes everything.
+    await rm(path.join(fixture.migrationRoot, UI_CANDIDATE));
+    // Authored, so the advance that is refused below is one that would otherwise
+    // have succeeded -- and snapshotted after, so the only writes under test are
+    // the refused ones.
+    await authorSlice(fixture, "slice-a");
+    const before = await state(fixture);
+    const bytes = await snapshot(fixture.migrationRoot);
+    const frozen = /format upgrade is owed/;
+
+    // Every checkpoint transition, through the confirmed two-phase API.
+    await assert.rejects(advance(fixture, { slice: "slice-a" }), frozen);
+    // The reopen/rework/amend/refresh/visual-adoption dispatcher, and the plain
+    // resume's binding write with it.
+    const preview = await previewMigrationExecution({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+    });
+    assert.equal(preview.state, "FORMAT_UPGRADE");
+    for (const options of [
+      { reopenDiscovery: true },
+      { reopenUi: ["slice-a"] },
+      { reopenComplete: ["slice-a"] },
+      { reworkSlice: "slice-a" },
+      { amendSlice: "slice-a", addFiles: ["src/slice-a.ts"] },
+      { refresh: true, confirmMismatch: true },
+      {},
+    ]) {
+      await assert.rejects(
+        bootstrapMigration({
+          ...(await resolutionFor(fixture)),
+          moduleName: "auth",
+          registryBinding: preview.registryBinding,
+          boundInputs: preview.boundInputs,
+          ...options,
+        }),
+        frozen,
+        JSON.stringify(options),
+      );
+    }
+    // Slice-state repair, the mutating wrapper around `reconcileSliceState`.
+    await assert.rejects(repairSliceState(fixture.targetRoot, "auth"), frozen);
+
+    // The other half of the matrix: the same lifecycle family, on a record whose
+    // increment is owed but not yet exclusive, is *allowed*. Both halves are
+    // needed -- one alone proves either a freeze that deadlocks a newborn record
+    // or a guard that never fires.
+    const early = await createFixture();
+    try {
+      await newbornFormat17(early);
+      assert.equal((await pendingUpgrade(early)).active, false);
+      const preEarly = await previewMigrationExecution({
+        ...(await resolutionFor(early)),
+        moduleName: "auth",
+      });
+      assert.notEqual(preEarly.state, "FORMAT_UPGRADE");
+      await bootstrapMigration({
+        ...(await resolutionFor(early)),
+        moduleName: "auth",
+        registryBinding: preEarly.registryBinding,
+        boundInputs: preEarly.boundInputs,
+      });
+      await authorDiscoverLegacyAt17(early);
+      await advance(early);
+      assert.equal((await state(early)).currentStep, "DISCOVERY_COMPLETENESS");
+      // And the moment the prerequisite is pinned, the same family refuses.
+      assert.equal((await pendingUpgrade(early)).active, true);
+      await completeStepDoc(early, "DISCOVERY_COMPLETENESS");
+      await assert.rejects(advance(early), frozen);
+      await assert.rejects(repairSliceState(early.targetRoot, "auth"), frozen);
+    } finally {
+      await early.cleanup();
+    }
+
+    // Nothing moved: not the tuple, not the revision, not the audit record.
+    const after = await state(fixture);
+    assert.equal(after.formatVersion, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.currentStep, before.currentStep);
+    assert.deepEqual(after.completedSlices, before.completedSlices);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+
+    // No history line of any kind was appended by a refused mutation; the only
+    // one an owed increment may ever produce is its own, and that is FU-8's.
+    assert.equal(
+      (await historyEvents(fixture)).filter(
+        (event) => event.event === "FORMAT_UPGRADED",
+      ).length,
+      0,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- The activation boundary -------------------------------------------------
+//
+// Owed is not the same thing as exclusive. The 17 -> 18 upgrader consumes the
+// *authoritative* legacy inventory, and bootstrap writes that path as an
+// unvalidated scaffold long before DISCOVER_LEGACY validates and pins it. An
+// increment that froze the lifecycle from birth would therefore freeze the one
+// step that produces its own input. These prove the window: open while the
+// prerequisite is absent, closed on itself the moment the pin exists.
+
+/**
+ * A legitimately early format-17 record: born, stamped 17, standing at
+ * DISCOVER_LEGACY with the scaffold on disk and nothing pinned. The stamp is
+ * written the same way `driveTo`'s `formatVersion` override writes it -- the
+ * integrity anchor covers the pin set, which this does not touch.
+ */
+const newbornFormat17 = async (fixture) => {
+  await initialize(fixture);
+  const statePath = path.join(fixture.migrationRoot, "state.json");
+  const persisted = await readJson(statePath);
+  assert.equal(persisted.currentStep, "DISCOVER_LEGACY");
+  assert.deepEqual(persisted.completedSteps, ["RESOLVE"]);
+  assert.equal(
+    persisted.artifactHashes["inventories/legacy.json"],
+    undefined,
+    "the scaffold is not authority and bootstrap must not pin it",
+  );
+  assert.equal(
+    (await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json")))
+      .hasVisibleUi,
+    false,
+    "and the scaffold says exactly the thing activation must not read",
+  );
+  await writeJson(statePath, {
+    ...persisted,
+    formatVersion: VISUAL_ACCEPTANCE_FORMAT,
+  });
+  await readState(fixture.targetRoot, "auth");
+};
+
+/** The DISCOVER_LEGACY authoring block, at format 17: no requiredObservations. */
+const authorDiscoverLegacyAt17 = async (fixture) => {
+  await completeStepDoc(fixture, "DISCOVER_LEGACY");
+  await writeJson(path.join(fixture.migrationRoot, "inventories/legacy.json"), {
+    ...LEGACY_INVENTORY,
+    uiBehaviors: LEGACY_INVENTORY.uiBehaviors.map(
+      ({ requiredObservations: _dropped, ...rest }) => rest,
+    ),
+  });
+  await writeJson(
+    path.join(fixture.migrationRoot, "inventories/module-classification.json"),
+    MODULE_CLASSIFICATION,
+  );
+};
+
+test("FU-12: an early format-17 record reports the increment INACTIVE and keeps running", async () => {
+  const fixture = await createFixture();
+  try {
+    await newbornFormat17(fixture);
+    const before = await state(fixture);
+    const bytes = await snapshot(fixture.migrationRoot);
+
+    // Owed, named, and nothing more. No domain, no required input, no blocker:
+    // the classifier is never reached, so the scaffold is never validated.
+    const pending = await pendingUpgrade(fixture);
+    assert.equal(pending.state, "INACTIVE");
+    assert.equal(pending.active, false);
+    assert.equal(pending.from, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(pending.to, REQUIRED_OBSERVATIONS_FORMAT);
+    assert.deepEqual(pending.upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
+    assert.equal(pending.domain, null);
+    assert.equal(pending.requiredInput, null);
+    assert.deepEqual(pending.blockers, []);
+    assert.equal(pending.confirmationDigest, null);
+    assert.deepEqual(pending.prerequisite, {
+      kind: "pinnedArtifact",
+      path: "inventories/legacy.json",
+      description:
+        "the validated and pinned authoritative legacy inventory produced by DISCOVER_LEGACY",
+    });
+
+    // Read-only status says so, and says it without claiming the lifecycle is
+    // frozen: DISCOVER_LEGACY is still the active checkpoint.
+    const status = await statusOf(fixture);
+    assert.equal(status.formatUpgrade.state, "INACTIVE");
+    assert.equal(status.formatUpgrade.active, false);
+    assert.equal(status.formatVersion, VISUAL_ACCEPTANCE_FORMAT);
+    assert.match(status.progressChecklist, /^FORMAT UPGRADE PENDING\n/);
+    assert.match(status.progressChecklist, /upgrade state: INACTIVE\n/);
+    assert.match(
+      status.progressChecklist,
+      /prerequisite: pinnedArtifact inventories\/legacy\.json\n/,
+    );
+    assert.match(
+      status.progressChecklist,
+      /next action: continue normal migration until the prerequisite is validated\/pinned\n/,
+    );
+    assert.doesNotMatch(status.progressChecklist, /FORMAT UPGRADE REQUIRED/);
+    assert.doesNotMatch(status.progressChecklist, /frozen behind the upgrade/);
+    assert.match(status.progressChecklist, /\[>\] \d+\/\d+ DISCOVER_LEGACY/);
+    assert.equal(status.progress.stopReason, null);
+    assert.equal(status.progress.blocker, null);
+
+    // Every read above wrote nothing: not a byte, not the revision, not the
+    // history, not the identity.
+    const afterStatus = await state(fixture);
+    assert.equal(afterStatus.revision, before.revision);
+    assert.deepEqual(afterStatus.toolkitIdentity, before.toolkitIdentity);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+
+    // And the normal command runs the lifecycle: the preview is a checkpoint,
+    // not an upgrade, and the real CLI executes DISCOVER_LEGACY.
+    const resumed = await discoverCli(fixture);
+    assert.notEqual(resumed.preview.state, "FORMAT_UPGRADE");
+    assert.equal(resumed.formatUpgraded, undefined);
+    assert.doesNotMatch(resumed.stdout, /FORMAT UPGRADE REQUIRED/);
+    assert.doesNotMatch(resumed.stdout, /loop: STOP reason=FORMAT_UPGRADE/);
+
+    await authorDiscoverLegacyAt17(fixture);
+    const advanced = await advanceCli(fixture);
+    assert.match(advanced.stdout, /loop: CONTINUE next=\/start-migration auth\n/);
+    assert.doesNotMatch(advanced.stdout, /format upgrade is owed/);
+    const after = await state(fixture);
+    assert.ok(after.completedSteps.includes("DISCOVER_LEGACY"), advanced.stdout);
+
+    // The stamp did not move, and no increment was recorded: only the registry
+    // promotes at or above the floor, and it has not run.
+    assert.equal(after.formatVersion, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(
+      (await historyEvents(fixture)).some((event) => event.event === "FORMAT_UPGRADED"),
+      false,
+    );
+    await readState(fixture.targetRoot, "auth");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-13: the DISCOVER_LEGACY pin closes the window on itself", async () => {
+  const fixture = await createFixture();
+  try {
+    await newbornFormat17(fixture);
+    await authorDiscoverLegacyAt17(fixture);
+    const before = await state(fixture);
+
+    // The boundary transaction: it validates and pins the legacy inventory, and
+    // it is not a format upgrade -- the stamp stays at 17 and no FORMAT_UPGRADED
+    // line is written.
+    await advance(fixture);
+    const after = await state(fixture);
+    assert.ok(after.artifactHashes["inventories/legacy.json"]);
+    assert.equal(after.formatVersion, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(after.currentStep, "DISCOVERY_COMPLETENESS");
+    assert.equal(
+      (await historyEvents(fixture)).some((event) => event.event === "FORMAT_UPGRADED"),
+      false,
+    );
+    assert.equal(after.revision, before.revision + 1);
+
+    // Immediately exclusive. The classifier now runs against real authority.
+    const pending = await pendingUpgrade(fixture);
+    assert.equal(pending.active, true);
+    assert.notEqual(pending.state, "INACTIVE");
+    assert.equal(pending.domain, "TRANSFORM", "the authored inventory has visible UI");
+
+    // And the very next lifecycle mutation is refused -- including the exact
+    // next checkpoint, which is what makes the window self-closing rather than
+    // a step allow-list.
+    await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+    const bytes = await snapshot(fixture.migrationRoot);
+    await assert.rejects(advance(fixture), FROZEN_BY_UPGRADE);
+    await assert.rejects(advanceCli(fixture), FROZEN_BY_UPGRADE);
+
+    // No checkpoint after the boundary can advance at format 17. The only step
+    // an advance may name is the current one, and that one is frozen -- so the
+    // cursor can never reach a later checkpoint while the stamp is 17. Naming a
+    // later step is refused by the step order itself, which is the second half
+    // of the same claim.
+    await assert.rejects(
+      advance(fixture, { step: "DISCOVERY_COMPLETENESS" }),
+      FROZEN_BY_UPGRADE,
+    );
+    for (const step of ["ASSESS_TARGET", "BUILD_BASELINE", "PLAN", "FINALIZE"]) {
+      await assert.rejects(
+        advance(fixture, { step }),
+        /current step is 'DISCOVERY_COMPLETENESS'/,
+        step,
+      );
+    }
+    const stalled = await state(fixture);
+    assert.equal(stalled.formatVersion, VISUAL_ACCEPTANCE_FORMAT);
+    assert.equal(stalled.currentStep, "DISCOVERY_COMPLETENESS");
+    assert.equal(stalled.revision, after.revision);
+    assert.equal(
+      (await historyEvents(fixture)).some((event) => event.event === "FORMAT_UPGRADED"),
+      false,
+    );
+    // The refusals wrote nothing: the snapshot was taken after the only
+    // authoring write, so every byte under it is unchanged.
+    assert.deepEqual(await snapshot(fixture.migrationRoot), bytes);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("FU-14: past the boundary, absent or corrupt authority is BLOCKED and still frozen", async () => {
+  const relative = "inventories/legacy.json";
+  for (const [name, content] of [
+    ["missing", null],
+    ["corrupt", "{ not json"],
+    ["malformed", JSON.stringify({ version: 1 })],
+  ]) {
+    const fixture = await createFixture();
+    try {
+      await newbornFormat17(fixture);
+      await authorDiscoverLegacyAt17(fixture);
+      await advance(fixture);
+      const pinned = await state(fixture);
+      assert.ok(pinned.artifactHashes[relative], name);
+
+      // The pin survives; the authority behind it does not.
+      const absolute = path.join(fixture.migrationRoot, relative);
+      if (content === null) await rm(absolute);
+      else await writeFile(absolute, `${content}\n`);
+      const bytes = await snapshot(fixture.migrationRoot);
+
+      // Activation reads the pin, so the increment stays exclusive -- and the
+      // domain classifier, which reads the file, refuses. An absent authority
+      // never becomes a no-op that advances the stamp past unperformed work.
+      const pending = await pendingUpgrade(fixture);
+      assert.equal(pending.active, true, name);
+      assert.equal(pending.state, "BLOCKED", name);
+      assert.equal(pending.domain, null, name);
+      assert.equal(pending.confirmationDigest, null, name);
+      assert.match(
+        pending.blockers.join(" "),
+        /authoritative legacy inventory could not establish whether this record has visible UI/,
+        name,
+      );
+
+      await assert.rejects(advance(fixture), FROZEN_BY_UPGRADE, name);
+      await assert.rejects(
+        commitNoOpFormatUpgrade(upgradeTarget(fixture)),
+        /not READY\/NO_OP|Nothing was written/,
+        name,
+      );
+      const after = await state(fixture);
+      assert.equal(after.formatVersion, VISUAL_ACCEPTANCE_FORMAT, name);
+      assert.equal(after.revision, pinned.revision, name);
+      assert.equal(
+        (await historyEvents(fixture)).some((event) => event.event === "FORMAT_UPGRADED"),
+        false,
+        name,
+      );
+      assert.deepEqual(await snapshot(fixture.migrationRoot), bytes, name);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("FU-11: the historical adoption spelling stays valid forever", () => {
+  // A. what every already-written line says.
+  assert.equal(isUiObservationsAdoption({ event: "UI_OBSERVATIONS_ADOPTED" }), true);
+  // B. what the registered adjacent row writes.
+  assert.equal(
+    isUiObservationsAdoption({
+      event: "FORMAT_UPGRADED",
+      transition: "UI_OBSERVATIONS_ADOPTED",
+    }),
+    true,
+  );
+  // And nothing else: a NO_OP increment is not an adoption, and neither is an
+  // unrelated event.
+  assert.equal(isUiObservationsAdoption({ event: "FORMAT_UPGRADED" }), false);
+  assert.equal(isUiObservationsAdoption({ event: "STEP_COMPLETED" }), false);
+  assert.equal(isUiObservationsAdoption(null), false);
 });

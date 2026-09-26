@@ -29,7 +29,7 @@ export const MIGRATION_MODES = ["auto", "step"];
 const MODE_MESSAGE = "--mode accepts 'auto' or 'step'.";
 
 const DISCOVER_USAGE =
-  "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--adopt-ui-observations [--confirm-adopt-ui-observations <digest>]] [--scan] [--status] [--doctor] [--slice <id>]";
+  "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--adopt-ui-observations [--confirm-adopt-ui-observations <digest>] (pre-format-17 records only; at format 17 and above the normal command owns every format upgrade)] [--scan] [--status] [--doctor] [--slice <id>]";
 
 const ARTIFACT_USAGE =
   "Usage: run-artifact.mjs <source> [--source <additional-source>]... [--type <type>] [--target <path>] [--source-root <path>] [--target-root <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--status] [--mode auto|step] [--slice <id>] [--json]";
@@ -410,6 +410,13 @@ export const MIGRATION_OUTCOMES = Object.freeze([
   "OPERATOR_DECISION",
   "BLOCKED",
   "FAILED",
+  // A format increment is owed but cannot commit yet (its declared input is
+  // absent, or the upgrader refused it): fail-closed, nothing was written, and
+  // the lifecycle stays frozen behind it.
+  "FORMAT_UPGRADE",
+  // Exactly one adjacent increment committed. A success stop, not a lifecycle
+  // step: the next normal invocation decides whether another one is owed.
+  "FORMAT_UPGRADED",
 ]);
 
 const EXIT_CODES = {
@@ -419,6 +426,8 @@ const EXIT_CODES = {
   FAILED: 1,
   OPERATOR_DECISION: BLOCKED_EXIT_CODE,
   BLOCKED: BLOCKED_EXIT_CODE,
+  FORMAT_UPGRADE: BLOCKED_EXIT_CODE,
+  FORMAT_UPGRADED: 0,
 };
 
 /**
@@ -446,6 +455,30 @@ export const exitCodeFor = (outcome) => {
  * first commit; Plan 03 is its first producer.
  */
 export const nextOutcome = ({ preview, result = null } = {}) => {
+  // The format upgrade outranks the lifecycle, so it is read before the
+  // confirmation question: an owed increment stops the invocation with its own
+  // typed reason rather than the generic BLOCKED, and a committed one stops it
+  // too -- a rerun of the same normal command decides what is owed next.
+  if (result?.upgraded === true) {
+    return {
+      outcome: "FORMAT_UPGRADED",
+      reason: `Format ${result.from} -> ${result.to} committed. Rerun the normal command to continue.`,
+      next: null,
+    };
+  }
+  // Active only: an owed-but-inactive increment names a prerequisite the normal
+  // lifecycle produces, so it is not a stop and never this invocation's outcome.
+  const pendingUpgrade = preview?.formatUpgrade?.active ? preview.formatUpgrade : null;
+  if (pendingUpgrade && pendingUpgrade.state !== "READY") {
+    return {
+      outcome: "FORMAT_UPGRADE",
+      reason:
+        pendingUpgrade.blockers?.length > 0
+          ? pendingUpgrade.blockers.join("; ")
+          : pendingUpgrade.nextAction,
+      next: null,
+    };
+  }
   if (!preview?.requiresConfirmation) {
     return {
       outcome: "BLOCKED",

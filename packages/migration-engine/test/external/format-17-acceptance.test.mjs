@@ -13,7 +13,8 @@
 
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -39,6 +40,7 @@ const installedToolkit = async () => {
     root: built.stagingRoot,
     engine: path.join(built.stagingRoot, "packages/migration-engine"),
     identity: built.identity,
+    manifest: built.manifest,
   }));
   return bundlePromise;
 };
@@ -637,4 +639,391 @@ test("an artifact transaction killed mid-write is recovered by the next installe
     1,
     "the recovered event was appended more than once",
   );
+});
+
+// --- 9. the engine-owned format upgrade, through the installed runtime -------
+//
+// The claim these tests prove is a *protocol*, not a transformation: from
+// the format-upgrade floor forward the agent types only the normal migration
+// command, and the installed engine decides which increment is owed, what input
+// it needs, and when it commits. The invocations below use the installed
+// discover or run command with no format-specific flag of any kind --
+// `--adopt-ui-observations` is asserted absent from both the commands and the
+// output, because a single occurrence of it here would mean the agent, not the
+// engine, chose the transition.
+//
+// The format-17 record is *seeded* by this checkout (like every other record in
+// this file) and then driven exclusively through the staged bundle.
+
+const UI_CANDIDATE = "ui-observations-adoption/candidate/legacy.json";
+
+/** The normal migration command, and the only one these tests are allowed. */
+const normalCommand = (toolkit, consumer, extra = []) =>
+  run(toolkit, "cli/discover-module.mjs", ["auth", ...extra], consumer.root);
+
+const digestOf = (content) => createHash("sha256").update(content).digest("hex");
+
+/**
+ * A legitimately persisted format-17 record: the pinned legacy inventory carries
+ * no `requiredObservations` and the stamp is the format that predates them. The
+ * format-18 bytes the record was authored with are exactly what legacy authority
+ * recovers afterwards, so they are returned for the candidate to be authored
+ * from -- nothing here is derived from TARGET material.
+ *
+ * `artifactHashes` and the integrity anchor are repinned because the inventory
+ * changed. That is the record's own consistency rule, not the mechanism under
+ * test: every assertion below is about what the installed engine does with a
+ * valid format-17 record, and the engine refuses to open an invalid one at all.
+ */
+const persistFormat17 = async (consumer, { visibleUi = true } = {}) => {
+  const relative = "inventories/legacy.json";
+  const absolute = path.join(consumer.recordRoot, relative);
+  const legacyAuthority = await readFile(absolute);
+  const inventory = JSON.parse(legacyAuthority.toString("utf8"));
+  inventory.uiBehaviors = inventory.uiBehaviors.map(
+    ({ requiredObservations: _dropped, ...rest }) => rest,
+  );
+  if (!visibleUi) {
+    inventory.hasVisibleUi = false;
+    inventory.uiBehaviors = [];
+  }
+  const downgraded = `${JSON.stringify(inventory, null, 2)}\n`;
+  await writeFile(absolute, downgraded, "utf8");
+  await consumer.editState((state) => ({
+    ...state,
+    formatVersion: 17,
+    artifactHashes: { ...state.artifactHashes, [relative]: digestOf(downgraded) },
+  }));
+  const integrityPath = path.join(consumer.recordRoot, "integrity.json");
+  const integrity = JSON.parse(await readFile(integrityPath, "utf8"));
+  const { artifactHashes } = JSON.parse(await readFile(consumer.statePath, "utf8"));
+  integrity.artifactHashesSha256 = digestOf(
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(artifactHashes).sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+      ),
+    ),
+  );
+  await writeFile(integrityPath, `${JSON.stringify(integrity, null, 2)}\n`, "utf8");
+  return legacyAuthority;
+};
+
+/**
+ * One adopted, pinned, format-17 consumer record. The identity adoption and the
+ * single lifecycle advance both run through the installed toolkit, so the
+ * inventory the downgrade rewrites is a genuinely pinned artifact rather than a
+ * freshly authored one.
+ */
+const seedFormat17Consumer = async (t, prefix, options) => {
+  const toolkit = await installedToolkit();
+  const consumer = await seedConsumer(t, prefix);
+  await run(toolkit, "cli/toolkit-identity.mjs", ["adopt", "--module", "auth"], consumer.root);
+  const advanced = await advance(toolkit, consumer.root);
+  assert.equal(advanced.code, 0, advanced.output);
+  const legacyAuthority = await persistFormat17(consumer, options);
+  const seeded = await consumer.snapshot();
+  assert.equal(seeded.state.formatVersion, 17, "the seed must persist format 17");
+  assert.equal(seeded.journal, null, "the seed left a transaction behind");
+  return { toolkit, consumer, legacyAuthority };
+};
+
+const formatUpgradeEvents = (snapshot) =>
+  snapshot.history.filter((event) => event.event === "FORMAT_UPGRADED");
+
+test("E2E-A: an installed toolkit upgrades a visible-UI format-17 record using only the normal command", async (t) => {
+  const { toolkit, consumer, legacyAuthority } = await seedFormat17Consumer(
+    t,
+    "amt acceptance format upgrade ",
+  );
+  const before = await consumer.snapshot();
+
+  // 1. The normal command identifies the increment, reports what it needs, and
+  // freezes the lifecycle. Nothing is written and no flag is prescribed.
+  const owed = await normalCommand(toolkit, consumer);
+  assert.equal(owed.code, 2, owed.output);
+  assert.match(owed.output, /FORMAT UPGRADE REQUIRED/);
+  assert.match(owed.output, /current upgrade: 17->18 \(UI_OBSERVATIONS_ADOPTED v1\)/);
+  assert.match(owed.output, /upgrade state: NEEDS_INPUT \(domain: TRANSFORM\)/);
+  assert.match(owed.output, /required input: candidateFile ui-observations-adoption\/candidate\/legacy\.json \(authority: legacy\)/);
+  assert.match(owed.output, /loop: STOP reason=FORMAT_UPGRADE/);
+  assert.ok(
+    !owed.output.includes("--adopt-ui-observations"),
+    `the engine prescribed a format-specific flag:\n${owed.output}`,
+  );
+  assert.deepEqual(await consumer.snapshot(), before, "an owed increment wrote to the record");
+
+  // 2. The candidate is authored from the record's own legacy authority, at the
+  // one path the engine named.
+  const candidate = path.join(consumer.recordRoot, UI_CANDIDATE);
+  await mkdir(path.dirname(candidate), { recursive: true });
+  await writeFile(candidate, legacyAuthority);
+
+  // 3. The *same* command, re-run. One increment commits and the invocation ends.
+  const upgraded = await normalCommand(toolkit, consumer);
+  assert.equal(upgraded.code, 0, upgraded.output);
+  assert.match(upgraded.output, /FORMAT_UPGRADED: 17 -> 18 \(domain TRANSFORM\)/);
+  // 4. The continuation is an executable command, not a state token.
+  assert.match(upgraded.output, /loop: CONTINUE next=\/start-migration auth/);
+  assert.ok(
+    !upgraded.output.includes("next=FORMAT_UPGRADE"),
+    `the directive named a state token:\n${upgraded.output}`,
+  );
+
+  const after = await consumer.snapshot();
+  assert.equal(after.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(after.state.revision, before.state.revision + 1);
+  assert.equal(after.journal, null, "the upgrade left its journal behind");
+  assert.equal(after.integrity.revision, after.state.revision);
+
+  const events = formatUpgradeEvents(after);
+  assert.equal(events.length, 1, "exactly one increment, exactly one canonical event");
+  assert.equal(events[0].transition, "UI_OBSERVATIONS_ADOPTED");
+  assert.equal(events[0].fromFormat, 17);
+  assert.equal(events[0].toFormat, MIGRATION_FORMAT_VERSION);
+  assert.equal(events[0].domain, "TRANSFORM");
+  assert.deepEqual(events[0].upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
+  assert.equal(
+    after.history.filter((event) => event.event === "UI_OBSERVATIONS_ADOPTED").length,
+    0,
+    "the canonical envelope is one row, not two",
+  );
+
+  // The checkpoint tuple is otherwise preserved: a format upgrade is not
+  // lifecycle progress.
+  assert.equal(after.state.status, before.state.status);
+  assert.equal(after.state.currentStep, before.state.currentStep);
+  assert.equal(after.state.activeSlice ?? null, before.state.activeSlice ?? null);
+  assert.deepEqual(after.state.completedSteps, before.state.completedSteps);
+  assert.deepEqual(after.state.pendingSteps, before.state.pendingSteps);
+  assert.deepEqual(after.state.completedSlices, before.state.completedSlices);
+  assert.deepEqual(after.state.pendingSlices, before.state.pendingSlices);
+  assert.deepEqual(after.state.toolkitIdentity, toolkit.identity);
+
+  // 5. The next invocation of that same command resumes the lifecycle at 18.
+  const resumed = await normalCommand(toolkit, consumer);
+  assert.ok(
+    !resumed.output.includes("FORMAT UPGRADE REQUIRED"),
+    `the lifecycle stayed frozen after the increment committed:\n${resumed.output}`,
+  );
+  assert.match(resumed.output, /Current checkpoint: DISCOVERY_COMPLETENESS/);
+  const resumedState = await consumer.snapshot();
+  assert.equal(resumedState.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(formatUpgradeEvents(resumedState).length, 1, "the increment re-applied");
+
+  const status = JSON.parse(
+    (await normalCommand(toolkit, consumer, ["--status"])).output,
+  );
+  assert.equal(status.formatUpgrade, null, "a caught-up record still owes an increment");
+});
+
+test("E2E-B: a format-17 record whose legacy authority declares no visible UI commits an atomic NO_OP", async (t) => {
+  const { toolkit, consumer } = await seedFormat17Consumer(
+    t,
+    "amt acceptance format upgrade noop ",
+    { visibleUi: false },
+  );
+  const before = await consumer.snapshot();
+
+  // READY/NO_OP with no input at all: the engine invents no work, and neither
+  // may the agent.
+  const status = JSON.parse(
+    (await normalCommand(toolkit, consumer, ["--status"])).output,
+  );
+  assert.equal(status.formatUpgrade.state, "READY");
+  assert.equal(status.formatUpgrade.domain, "NO_OP");
+  assert.equal(status.formatUpgrade.requiredInput, null);
+  assert.equal(await exists(path.join(consumer.recordRoot, UI_CANDIDATE)), false);
+
+  const upgraded = await normalCommand(toolkit, consumer);
+  assert.equal(upgraded.code, 0, upgraded.output);
+  assert.match(upgraded.output, /FORMAT_UPGRADED: 17 -> 18 \(domain NO_OP\)/);
+  assert.match(upgraded.output, /loop: CONTINUE next=\/start-migration auth/);
+
+  const after = await consumer.snapshot();
+  assert.equal(after.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(after.state.revision, before.state.revision + 1);
+  assert.equal(after.journal, null);
+  const events = formatUpgradeEvents(after);
+  assert.equal(events.length, 1, "a no-op is a committed increment, not a skipped one");
+  assert.equal(events[0].domain, "NO_OP");
+  assert.equal(events[0].transition, undefined);
+  assert.deepEqual(events[0].inputs, []);
+
+  // It moved the cursor and nothing else -- not one pin, not one checkpoint.
+  assert.deepEqual(after.state.artifactHashes, before.state.artifactHashes);
+  assert.equal(after.state.currentStep, before.state.currentStep);
+  assert.equal(after.state.status, before.state.status);
+  assert.deepEqual(after.state.completedSteps, before.state.completedSteps);
+  assert.deepEqual(after.state.pendingSlices, before.state.pendingSlices);
+  assert.equal(await exists(path.join(consumer.recordRoot, UI_CANDIDATE)), false);
+
+  // And the lifecycle is live again on the next invocation of the same command.
+  const resumed = await normalCommand(toolkit, consumer);
+  assert.ok(
+    !resumed.output.includes("FORMAT UPGRADE REQUIRED"),
+    `the record stayed frozen at 17:\n${resumed.output}`,
+  );
+  assert.match(resumed.output, /Current checkpoint: DISCOVERY_COMPLETENESS/);
+  assert.equal(formatUpgradeEvents(await consumer.snapshot()).length, 1);
+});
+
+test("E2E-C: reading the status of a pending format upgrade through the installation mutates nothing", async (t) => {
+  const { toolkit, consumer } = await seedFormat17Consumer(
+    t,
+    "amt acceptance format upgrade status ",
+  );
+  const before = await consumer.snapshot();
+  const bytesBefore = await readFile(
+    path.join(consumer.recordRoot, "history/history.ndjson"),
+    "utf8",
+  );
+
+  const status = await normalCommand(toolkit, consumer, ["--status"]);
+  assert.equal(status.code, 0, status.output);
+  const read = JSON.parse(status.output);
+
+  // The structured projection is present and complete.
+  assert.equal(read.formatUpgrade.recordFormat, 17);
+  assert.equal(read.formatUpgrade.runtimeFormat, MIGRATION_FORMAT_VERSION);
+  assert.equal(read.formatUpgrade.from, 17);
+  assert.equal(read.formatUpgrade.to, MIGRATION_FORMAT_VERSION);
+  assert.deepEqual(read.formatUpgrade.upgrader, {
+    id: "UI_OBSERVATIONS_ADOPTED",
+    version: 1,
+  });
+  assert.equal(read.formatUpgrade.state, "NEEDS_INPUT");
+  assert.equal(read.formatUpgrade.domain, "TRANSFORM");
+  assert.equal(read.formatUpgrade.requiredInput.path, UI_CANDIDATE);
+  assert.equal(read.formatUpgrade.requiredInput.authority, "legacy");
+  assert.ok(read.formatUpgrade.nextAction.length > 0);
+
+  // And the record is byte-identical: identity, format, revision, history, and
+  // no transaction residue.
+  const after = await consumer.snapshot();
+  assert.deepEqual(after, before, "a read mutated the record");
+  assert.deepEqual(after.state.toolkitIdentity, toolkit.identity);
+  assert.equal(after.state.formatVersion, 17);
+  assert.equal(after.state.revision, before.state.revision);
+  assert.equal(
+    await readFile(path.join(consumer.recordRoot, "history/history.ndjson"), "utf8"),
+    bytesBefore,
+  );
+  assert.equal(after.journal, null, "a read left a transaction behind");
+  assert.equal(formatUpgradeEvents(after).length, 0, "a read committed an increment");
+});
+
+test("E2E-D: the built bundle states both engines' upgrade floors and registries, and no internals", async () => {
+  const toolkit = await installedToolkit();
+  // Read from the staged bundle rather than the builder's return value: the
+  // manifest a consumer inspects is the file, not an in-memory object.
+  const manifest = JSON.parse(
+    await readFile(path.join(toolkit.root, "release-manifest.json"), "utf8"),
+  );
+  const { supports } = manifest;
+  assert.deepEqual(supports, toolkit.manifest.supports);
+
+  assert.equal(supports.moduleFormat, MIGRATION_FORMAT_VERSION);
+  assert.equal(supports.formatUpgradeFloor, 17);
+  assert.deepEqual(supports.formatUpgraders, [
+    { from: 17, to: 18, id: "UI_OBSERVATIONS_ADOPTED", version: 1 },
+  ]);
+
+  assert.equal(supports.artifactFormat, 13);
+  assert.equal(supports.artifactFormatUpgradeFloor, 13);
+  assert.deepEqual(supports.artifactFormatUpgraders, []);
+
+  // Identity only. A manifest states which increments a bundle can walk, never
+  // how -- and a serialized `domain`/`plan`/`commit` would be both a leak and a
+  // lie, since a function does not survive JSON at all.
+  for (const row of supports.formatUpgraders) {
+    assert.deepEqual(Object.keys(row).sort(), ["from", "id", "to", "version"]);
+  }
+  const serialized = JSON.stringify(supports);
+  for (const internal of ["=>", "function", "domain", "plan", "commit", "requiredInput"]) {
+    assert.ok(
+      !serialized.includes(internal),
+      `the manifest leaked '${internal}': ${serialized}`,
+    );
+  }
+});
+
+test("E2E-E: an early format-17 record discovers its authority before the normal command upgrades it", async (t) => {
+  const toolkit = await installedToolkit();
+  const consumer = await createUnstampedRecord({ prefix: "amt acceptance early format 17 " });
+  t.after(() => consumer.cleanup());
+  const legacyPath = path.join(consumer.recordRoot, "inventories/legacy.json");
+  const initial = await consumer.snapshot();
+  assert.equal(initial.state.currentStep, "DISCOVER_LEGACY");
+  assert.deepEqual(initial.state.completedSteps, ["RESOLVE"]);
+  assert.equal(initial.state.artifactHashes["inventories/legacy.json"], undefined);
+  assert.equal(JSON.parse(await readFile(legacyPath, "utf8")).hasVisibleUi, false);
+
+  // The fixture was born at the current format. Set the initial historical
+  // stamp before any installed command runs; every transition thereafter is
+  // performed by the installed engine, never by editing the cursor.
+  await consumer.editState((state) => ({ ...state, formatVersion: 17 }));
+  const early = await consumer.snapshot();
+  const status = await normalCommand(toolkit, consumer, ["--status"]);
+  assert.equal(status.code, 0, status.output);
+  const projected = JSON.parse(status.output).formatUpgrade;
+  assert.equal(projected.active, false);
+  assert.equal(projected.state, "INACTIVE");
+  assert.equal(projected.from, 17);
+  assert.equal(projected.to, 18);
+  assert.deepEqual(projected.upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
+  assert.equal(projected.prerequisite.path, "inventories/legacy.json");
+  assert.ok(projected.nextAction);
+  assert.deepEqual(await consumer.snapshot(), early, "inactive status wrote to the record");
+
+  // Author the old-format inventory as ordinary DISCOVER_LEGACY work. Keep the
+  // current-format bytes only as the later candidate's legacy-sourced content.
+  await consumer.authorDiscoverLegacy();
+  const candidateBytes = await readFile(legacyPath);
+  const inventory = JSON.parse(candidateBytes.toString("utf8"));
+  inventory.uiBehaviors = inventory.uiBehaviors.map(
+    ({ requiredObservations: _dropped, ...behavior }) => behavior,
+  );
+  await writeFile(legacyPath, `${JSON.stringify(inventory, null, 2)}\n`);
+  const normal = () => run(toolkit, "cli/run-migration.mjs", ["auth"], consumer.root);
+
+  const discovered = await normal();
+  assert.equal(discovered.code, 0, discovered.output);
+  assert.doesNotMatch(discovered.output, /normal progress \(frozen behind the upgrade\)/);
+  const pinned = await consumer.snapshot();
+  assert.equal(pinned.state.currentStep, "DISCOVERY_COMPLETENESS");
+  assert.ok(pinned.state.artifactHashes["inventories/legacy.json"]);
+  assert.equal(pinned.state.formatVersion, 17);
+  assert.equal(formatUpgradeEvents(pinned).length, 0);
+
+  const active = await normal();
+  assert.equal(active.code, 2, active.output);
+  assert.match(active.output, /FORMAT UPGRADE REQUIRED/);
+  assert.match(active.output, /upgrade state: NEEDS_INPUT \(domain: TRANSFORM\)/);
+  assert.match(active.output, /required input: candidateFile ui-observations-adoption\/candidate\/legacy\.json/);
+  assert.match(active.output, /loop: STOP reason=FORMAT_UPGRADE/);
+  assert.deepEqual(await consumer.snapshot(), pinned, "the active preflight advanced the lifecycle");
+
+  const candidate = path.join(consumer.recordRoot, UI_CANDIDATE);
+  await mkdir(path.dirname(candidate), { recursive: true });
+  await writeFile(candidate, candidateBytes);
+  const upgraded = await normal();
+  assert.equal(upgraded.code, 0, upgraded.output);
+  assert.match(upgraded.output, /FORMAT_UPGRADED: 17 -> 18 \(domain TRANSFORM\)/);
+  assert.match(upgraded.output, /loop: CONTINUE next=\/start-migration auth/);
+  assert.doesNotMatch(upgraded.output, /next=FORMAT_UPGRADE/);
+  const after = await consumer.snapshot();
+  assert.equal(after.state.formatVersion, 18);
+  assert.equal(after.state.currentStep, pinned.state.currentStep);
+  assert.equal(formatUpgradeEvents(after).length, 1);
+  assert.equal(formatUpgradeEvents(after)[0].transition, "UI_OBSERVATIONS_ADOPTED");
+
+  const resumed = await normal();
+  assert.doesNotMatch(resumed.output, /FORMAT UPGRADE REQUIRED/);
+  assert.equal((await consumer.snapshot()).state.formatVersion, 18);
+  assert.equal(formatUpgradeEvents(await consumer.snapshot()).length, 1);
+  for (const invocation of [discovered, active, upgraded, resumed]) {
+    assert.doesNotMatch(invocation.output, /--(?:confirm-)?adopt-ui-observations/);
+  }
 });

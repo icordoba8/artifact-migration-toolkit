@@ -239,6 +239,49 @@ recorded decision), and complete verified global contracts.
 The engine owns `state.json`, `integrity.json`, append-only
 `history/history.ndjson`, and transaction recovery. Never author those files.
 
+## Format Axis And Upgrades
+
+The artifact record's format axis is its own: contract `1`, format `13`,
+workflow `1.0`, independent of the module engine's numbers.
+
+```text
+ARTIFACT_FORMAT_VERSION            = 13
+ARTIFACT_FORMAT_UPGRADE_FLOOR      = 13
+ARTIFACT_FORMAT_UPGRADERS          = []      (correctly empty)
+```
+
+The upgrade floor is declared, not derived, and today it equals the runtime
+format. No persisted format can therefore be both at or above the floor and
+behind the runtime, so the registry has nothing to hold and the `formatUpgrade`
+field an artifact status returns is always `null`. **Format 13 performs no
+upgrade.** There is
+no historical 12→13 upgrader and none is invented: a record persisted at 12 is
+refused exactly as it always has been.
+
+Admission is the only thing the floor changes, and it changes nothing today. A
+persisted format is readable when it is the runtime format, or when it sits at or
+above the floor, behind the runtime, and every increment from there to the
+runtime has a registered upgrader. Anything else — below the floor, newer than
+the runtime, or a gap in the path — stays refused with the message it has always
+been refused with. With an empty registry that admits nothing new.
+
+The rule is prospective and enforced by the engine, not by convention. The first
+artifact bump, 13→14, must ship with exactly one registered adjacent upgrader:
+`assertRegistryCoverage({floor, runtimeFormat, registry})` runs from the
+format-upgrade suite and from the release gate before staging, and refuses a
+runtime format with no registered path from the floor. Declaring the new format
+self-healing or promoting buys no pass. When that row exists, an owed increment
+must explicitly declare `activation: null` for immediate activation or an
+activation predicate with an old-format `prerequisite {kind, path, description}`.
+An owed but INACTIVE increment leaves normal lifecycle progress live until that
+prerequisite is validated and pinned; an ACTIVE one freezes it. `requiredInput`
+is new material for an already-active upgrader. The typed `formatUpgrade`
+projection then reports INACTIVE or the active states `NEEDS_INPUT` | `READY` |
+`BLOCKED`, with `TRANSFORM` | `NO_OP` domain when classified. An ACTIVE upgrader
+commits exactly one increment per invocation through the journal above. The release manifest
+records `artifactFormatUpgradeFloor` and `artifactFormatUpgraders` so a bundle's
+upgrade path is inspectable from the bundle itself.
+
 ## Transaction Journal And Recovery
 
 `transaction.json` is the engine's two-phase commit journal, written before any

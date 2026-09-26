@@ -266,7 +266,7 @@ test("an unknown command may not self-confirm by default", () => {
 
 // -- §11.4 the exit-code mapping is total over the closed set and only it.
 
-test("exitCodeFor is total over the six outcomes", () => {
+test("exitCodeFor is total over the outcome set", () => {
   assert.deepEqual(MIGRATION_OUTCOMES, [
     "CONTINUE",
     "AWAITING_CONFIRMATION",
@@ -274,10 +274,15 @@ test("exitCodeFor is total over the six outcomes", () => {
     "OPERATOR_DECISION",
     "BLOCKED",
     "FAILED",
+    // An owed format increment stops like every other refusal; a committed one
+    // is a success stop, so the invocation exits 0 and the next one decides
+    // whether another increment is owed.
+    "FORMAT_UPGRADE",
+    "FORMAT_UPGRADED",
   ]);
   assert.deepEqual(
     MIGRATION_OUTCOMES.map(exitCodeFor),
-    [0, 0, 0, 2, 2, 1],
+    [0, 0, 0, 2, 2, 1, 2, 0],
   );
   for (const outcome of MIGRATION_OUTCOMES) {
     assert.equal(typeof exitCodeFor(outcome), "number", outcome);
@@ -399,6 +404,39 @@ test("nextOutcome types the four continuations the wrappers produce", () => {
   assert.equal(completed.next, null);
 });
 
+test("only an active format increment is this invocation's outcome", () => {
+  const upgrade = (overrides) => ({
+    requiresConfirmation: true,
+    blockers: [],
+    formatUpgrade: {
+      from: 17,
+      to: 18,
+      state: "NEEDS_INPUT",
+      blockers: [],
+      nextAction: "Author it.",
+      ...overrides,
+    },
+  });
+  // Owed, exclusive, not committable: the typed stop, unchanged.
+  assert.equal(nextOutcome({ preview: upgrade({ active: true }) }).outcome, "FORMAT_UPGRADE");
+  // Owed and merely informational: the lifecycle below it is what produces the
+  // prerequisite, so the invocation is an ordinary one.
+  const inactive = nextOutcome({
+    preview: upgrade({ active: false, state: "INACTIVE" }),
+    result: { state: { currentStep: "DISCOVER_LEGACY" } },
+  });
+  assert.equal(inactive.outcome, "CONTINUE");
+  assert.equal(inactive.next, "DISCOVER_LEGACY");
+  // And a committed increment still outranks both.
+  assert.equal(
+    nextOutcome({
+      preview: upgrade({ active: true }),
+      result: { upgraded: true, from: 17, to: 18 },
+    }).outcome,
+    "FORMAT_UPGRADED",
+  );
+});
+
 test("renderLoopDirective is byte-identical to the pre-change implementation", () => {
   const cases = [
     { outcome: "CONTINUE", stop: null },
@@ -432,6 +470,42 @@ test("renderLoopDirective is byte-identical to the pre-change implementation", (
   );
   assert.equal(
     renderLoopDirective({ moduleName: "auth", mode: "step", outcome: "BLOCKED" }),
+    "",
+  );
+});
+
+test("a committed increment continues the loop; an owed one stops it", () => {
+  // The driver starts a *new* normal invocation with no agent decision in
+  // between. STOP here would hand a format transition to a human.
+  // `next=` names the command the driver actually re-runs -- the same one
+  // CONTINUE names, never a symbolic token.
+  assert.equal(
+    renderLoopDirective({ moduleName: "auth", mode: "auto", outcome: "FORMAT_UPGRADED" }),
+    "loop: CONTINUE next=/start-migration auth\n",
+  );
+  assert.equal(
+    renderLoopDirective({ moduleName: "auth", outcome: "FORMAT_UPGRADED" }),
+    "loop: CONTINUE next=/start-migration auth\n",
+  );
+  // A front end with its own continuation command keeps it, exactly as CONTINUE
+  // does: that is the whole reason `next` is an argument.
+  for (const outcome of ["CONTINUE", "FORMAT_UPGRADED"]) {
+    assert.equal(
+      renderLoopDirective({ moduleName: "auth", outcome, next: "/run-artifact auth --auto" }),
+      "loop: CONTINUE next=/run-artifact auth --auto\n",
+    );
+  }
+  // Success stop, so the loop may keep going at all.
+  assert.equal(exitCodeFor("FORMAT_UPGRADED"), 0);
+  // Owed and uncommittable is the opposite: nothing was written and the input
+  // has to come from outside, so the loop must not spin on it.
+  assert.equal(
+    renderLoopDirective({ moduleName: "auth", outcome: "FORMAT_UPGRADE" }),
+    "loop: STOP reason=FORMAT_UPGRADE\n",
+  );
+  // `--mode step` is still the operator's, one transition at a time.
+  assert.equal(
+    renderLoopDirective({ moduleName: "auth", mode: "step", outcome: "FORMAT_UPGRADED" }),
     "",
   );
 });

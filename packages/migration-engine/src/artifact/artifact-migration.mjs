@@ -49,6 +49,7 @@ import {
   artifactApprover,
   recorderFor,
 } from "../operator-approval.mjs";
+import { nextIncrement, upgradeProjection } from "../format-upgrade.mjs";
 
 // Re-export for tests that need to verify the structural census directly.
 export { structuralUnitsRaw as structuralUnits };
@@ -119,6 +120,90 @@ export const ARTIFACT_RESOLUTIONS = Object.freeze([
   "TARGET_EXTEND",
   "MIGRATE_NEW",
 ]);
+
+/**
+ * The artifact engine's format-upgrade floor and registry, the same contract the
+ * module engine declares. Declared, never derived: at or above the floor the
+ * registry is the sole promoter of `formatVersion`, and below it nothing here
+ * applies.
+ *
+ * The floor is the current runtime format, so the registry is *correctly* empty
+ * -- there is no adjacent increment to register yet, and inventing a historical
+ * 12 -> 13 upgrader would claim a path this toolkit has never been able to walk.
+ * `assertRegistryCoverage` is what makes that self-correcting: bumping
+ * `ARTIFACT_FORMAT_VERSION` to 14 fails the release gate until exactly one
+ * 13 -> 14 row exists.
+ */
+export const ARTIFACT_FORMAT_UPGRADE_FLOOR = ARTIFACT_FORMAT_VERSION;
+export const ARTIFACT_FORMAT_UPGRADERS = Object.freeze([]);
+
+/**
+ * The cursor, over the shared walk. Today it can only ever answer `null`: floor
+ * and runtime are the same number, so no format is both at or above the floor
+ * and behind the runtime. It is the seam a registered row plugs into, not a
+ * guess about what that row will need.
+ *
+ * ponytail: no domain/plan classification, because an empty registry has nothing
+ * to classify. Ceiling: a registered row makes `state`/`domain`/`requiredInput`
+ * real, and the module engine's `pendingFormatUpgrade` is the shape to follow.
+ */
+export const artifactFormatUpgrade = (state) => {
+  const increment = nextIncrement(
+    ARTIFACT_FORMAT_UPGRADERS,
+    state?.formatVersion ?? 1,
+    ARTIFACT_FORMAT_VERSION,
+    ARTIFACT_FORMAT_UPGRADE_FLOOR,
+  );
+  if (!increment) return null;
+  const { from, to, row } = increment;
+  return upgradeProjection({
+    recordFormat: state.formatVersion,
+    runtimeFormat: ARTIFACT_FORMAT_VERSION,
+    from,
+    to,
+    upgrader: row ? { id: row.id, version: row.version } : null,
+    // Fail closed: a missing row means this toolkit cannot move the record, and
+    // `validateState` has already refused to admit it.
+    state: row ? "READY" : "BLOCKED",
+    domain: null,
+    blockers: row
+      ? []
+      : [
+          `No registered artifact format upgrader for ${from} -> ${to}. This toolkit cannot move the record past format ${from}; nothing was read or written.`,
+        ],
+    nextAction: row
+      ? `Commit the artifact format upgrade ${from} -> ${to} (${row.id} v${row.version}).`
+      : `Install a toolkit that registers the ${from} -> ${to} artifact format upgrader.`,
+  });
+};
+
+/**
+ * Admission, and only admission. A persisted format is readable when it is the
+ * runtime format, or when it sits at or above the floor, behind the runtime, and
+ * every increment from there to the runtime has a registered upgrader. Anything
+ * else -- below the floor, newer than the runtime, a gap in the path -- stays
+ * refused with the message it has always been refused with.
+ */
+const artifactFormatAdmissible = (formatVersion) => {
+  if (formatVersion === ARTIFACT_FORMAT_VERSION) return true;
+  if (
+    !Number.isInteger(formatVersion) ||
+    formatVersion < ARTIFACT_FORMAT_UPGRADE_FLOOR ||
+    formatVersion > ARTIFACT_FORMAT_VERSION
+  ) {
+    return false;
+  }
+  for (let at = formatVersion; at < ARTIFACT_FORMAT_VERSION; at += 1) {
+    const increment = nextIncrement(
+      ARTIFACT_FORMAT_UPGRADERS,
+      at,
+      ARTIFACT_FORMAT_VERSION,
+      ARTIFACT_FORMAT_UPGRADE_FLOOR,
+    );
+    if (!increment?.row) return false;
+  }
+  return true;
+};
 
 // ponytail: executable code detection for the code-validation gate.
 // Only extensions that carry runtime or compile-time semantics need validation.
@@ -1273,7 +1358,7 @@ const validateState = (state, expectedId) => {
   if (state.contractVersion !== ARTIFACT_CONTRACT_VERSION) {
     throw new Error(`Unsupported artifact contract ${state.contractVersion}.`);
   }
-  if (![ARTIFACT_FORMAT_VERSION].includes(state.formatVersion)) {
+  if (!artifactFormatAdmissible(state.formatVersion)) {
     throw new Error(`Unsupported artifact format ${state.formatVersion}.`);
   }
   if (state.workflowVersion !== ARTIFACT_WORKFLOW_VERSION) throw new Error("Unsupported artifact workflow version.");
@@ -3648,6 +3733,11 @@ const readArtifactStatus = async (options = {}) => {
     validation,
     progress,
     progressChecklist: renderProgress(progress),
+    // Same protocol as a module migration's `formatUpgrade`, and read-only like
+    // the rest of this function: projected from the record's own cursor, never
+    // committed here. `null` whenever the record is at the runtime format, which
+    // today is every record this engine admits.
+    formatUpgrade: artifactFormatUpgrade(state),
     // Read-only reporting, never a write: `UNSTAMPED` is what every record
     // created before the standalone toolkit reports, and status says so without
     // stamping anything.

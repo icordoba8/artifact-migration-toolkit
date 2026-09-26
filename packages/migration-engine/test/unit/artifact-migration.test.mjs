@@ -27,6 +27,9 @@ import { artifactPrerequisiteWork } from "../../src/resumable-migration.mjs";
 import { runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { lockPathFor } from "../../src/module-lock.mjs";
 import {
+  ARTIFACT_FORMAT_UPGRADE_FLOOR,
+  ARTIFACT_FORMAT_VERSION,
+  artifactFormatUpgrade,
   artifactArgumentsFor,
   artifactCommandFor,
   artifactEvidenceDigest,
@@ -1354,6 +1357,48 @@ test("a pending recoverable transaction reports ACTIVE from --status and is reco
       false,
     );
     assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the artifact engine admits its own format, refuses every other, and owes no upgrade", async () => {
+  const fixture = await createFixture();
+  try {
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    const files = ["state.json", "integrity.json", "history/history.ndjson"];
+    const before = await Promise.all(
+      files.map((relative) => readFile(path.join(fixture.artifactRoot, relative), "utf8")),
+    );
+    const state = JSON.parse(before[0]);
+    assert.equal(state.formatVersion, ARTIFACT_FORMAT_VERSION);
+    assert.equal(ARTIFACT_FORMAT_UPGRADE_FLOOR, ARTIFACT_FORMAT_VERSION);
+
+    // Floor === runtime, so a record at the runtime format owes nothing and the
+    // cursor has no increment to point at. Status projects it and writes nothing.
+    const status = await getArtifactStatus(fixture.options);
+    assert.equal(status.status, "ACTIVE", status.reason);
+    assert.equal(status.formatUpgrade, null);
+    assert.equal(status.state.revision, state.revision);
+    assert.deepEqual(
+      await Promise.all(
+        files.map((relative) => readFile(path.join(fixture.artifactRoot, relative), "utf8")),
+      ),
+      before,
+    );
+
+    // Below the floor and newer than the runtime are both refused, with the
+    // message they have always been refused with. Relaxed admission admits
+    // nothing that an empty registry cannot walk to the runtime format.
+    const statePath = path.join(fixture.artifactRoot, "state.json");
+    for (const formatVersion of [12, 14]) {
+      await writeFile(statePath, `${JSON.stringify({ ...state, formatVersion }, null, 2)}\n`);
+      await assert.rejects(
+        readArtifactState(fixture.targetRoot, state.artifactId),
+        new RegExp(`^Error: Unsupported artifact format ${formatVersion}\\.$`),
+      );
+      assert.equal(artifactFormatUpgrade({ ...state, formatVersion }), null);
+    }
   } finally {
     await fixture.cleanup();
   }

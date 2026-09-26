@@ -122,6 +122,19 @@ export {
   validateResumableMigration,
 } from "./resumable-migration.mjs";
 
+// -- format upgrades: the registry is the sole promoter at or above the floor.
+// Read-only projection (`pendingFormatUpgrade`), the freeze guard, and the one
+// mutating entry point the normal command dispatches to.
+export {
+  assertNoPendingFormatUpgrade,
+  commitFormatUpgrade,
+  commitNoOpFormatUpgrade,
+  FORMAT_UPGRADE_FLOOR,
+  FORMAT_UPGRADERS,
+  isUiObservationsAdoption,
+  pendingFormatUpgrade,
+} from "./resumable-migration.mjs";
+
 // -- slices
 export {
   inspectSliceArtifacts,

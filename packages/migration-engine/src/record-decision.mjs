@@ -62,6 +62,7 @@ import { withModuleLock } from "./module-lock.mjs";
 import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 import {
   assertDiscoveryCompletenessFormat,
+  assertNoPendingFormatUpgrade,
   assertRecordToolkitIdentity,
   AUTO_DECISIONS_FILE,
   BLOCKED_EXIT_CODE,
@@ -600,6 +601,16 @@ const withOperatorApproval = async ({
       "Recording an operator decision",
       locked.recordKind,
     );
+    // And the same freeze: a module record that owes a format increment records
+    // no decision either. The artifact engine has its own registry and floor, so
+    // the module guard is asked only about a module record.
+    if (locked.recordKind !== "artifact") {
+      assertNoPendingFormatUpgrade(
+        locked.state,
+        locked.recordName,
+        "Recording an operator decision",
+      );
+    }
     const lockedCandidate = locked.candidates.find(
       (candidate) => candidate.id === selected.id,
     );

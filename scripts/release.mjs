@@ -184,6 +184,10 @@ export const releaseCheck = async (root = repositoryRoot) => {
       );
     }
   }
+  // A runtime format with no adjacent upgrader is a bundle that can read a
+  // record it can never move. Collected like every other blocker so one run
+  // reports it, and re-asserted (throwing) at manifest time.
+  await engineFormatUpgrades(root).catch((error) => blockers.push(error.message));
   const { contentHash } = await contentHashOf(root);
   return { version: versions.root, commit, contentHash, blockers };
 };
@@ -318,22 +322,63 @@ export const buildReleaseArchive = async (built) => {
  * The supported persisted migration versions, read from the engine rather than
  * restated here. A release manifest that carried its own copy of these numbers
  * would be a second answer to a question the engine already answers.
+ *
+ * The format-upgrade gate runs here, for both engines, because this is where
+ * both engines are already loaded and it is strictly before the manifest that
+ * would otherwise advertise a format nothing can upgrade into. Only
+ * `{floor, runtimeFormat, registry}` is consulted: a format declared
+ * self-healing, promoting or featureful buys no pass.
  */
-const supportedMigrationVersions = async (root) => {
+export const supportedMigrationVersions = async (root = repositoryRoot) => {
+  const { core, artifact } = await engineFormatUpgrades(root);
+  return {
+    moduleContract: core.RESUMABLE_CONTRACT_VERSION,
+    moduleFormat: core.MIGRATION_FORMAT_VERSION,
+    moduleWorkflow: core.WORKFLOW_VERSION,
+    formatUpgradeFloor: core.FORMAT_UPGRADE_FLOOR,
+    formatUpgraders: releaseUpgraders(core.FORMAT_UPGRADERS),
+    artifactContract: artifact.ARTIFACT_CONTRACT_VERSION,
+    artifactFormat: artifact.ARTIFACT_FORMAT_VERSION,
+    artifactWorkflow: artifact.ARTIFACT_WORKFLOW_VERSION,
+    artifactFormatUpgradeFloor: artifact.ARTIFACT_FORMAT_UPGRADE_FLOOR,
+    artifactFormatUpgraders: releaseUpgraders(artifact.ARTIFACT_FORMAT_UPGRADERS),
+  };
+};
+
+/**
+ * Inspectable upgrade identity, and nothing else. `domain`, `plan`, `commit`
+ * and `requiredInput` are engine internals -- functions and record paths -- so
+ * they are deliberately not serialized: a manifest states which increments a
+ * bundle can walk, not how.
+ */
+const releaseUpgraders = (registry) =>
+  registry.map(({ from, to, id, version }) => ({ from, to, id, version }));
+
+/**
+ * Both engines' registries, gated. Exported so the release-safety tests call
+ * exactly what the release calls.
+ */
+export const engineFormatUpgrades = async (root = repositoryRoot) => {
   const core = await import(
     pathToFileURL(path.join(root, "packages/migration-engine/src/core.mjs")).href
   );
   const artifact = await import(
     pathToFileURL(path.join(root, "packages/migration-engine/src/artifact/artifact-migration.mjs")).href
   );
-  return {
-    moduleContract: core.RESUMABLE_CONTRACT_VERSION,
-    moduleFormat: core.MIGRATION_FORMAT_VERSION,
-    moduleWorkflow: core.WORKFLOW_VERSION,
-    artifactContract: artifact.ARTIFACT_CONTRACT_VERSION,
-    artifactFormat: artifact.ARTIFACT_FORMAT_VERSION,
-    artifactWorkflow: artifact.ARTIFACT_WORKFLOW_VERSION,
-  };
+  const { assertRegistryCoverage } = await import(
+    pathToFileURL(path.join(root, "packages/migration-engine/src/format-upgrade.mjs")).href
+  );
+  assertRegistryCoverage({
+    floor: core.FORMAT_UPGRADE_FLOOR,
+    runtimeFormat: core.MIGRATION_FORMAT_VERSION,
+    registry: core.FORMAT_UPGRADERS,
+  });
+  assertRegistryCoverage({
+    floor: artifact.ARTIFACT_FORMAT_UPGRADE_FLOOR,
+    runtimeFormat: artifact.ARTIFACT_FORMAT_VERSION,
+    registry: artifact.ARTIFACT_FORMAT_UPGRADERS,
+  });
+  return { core, artifact };
 };
 
 /** Re-hash a staged bundle against its own manifest. */

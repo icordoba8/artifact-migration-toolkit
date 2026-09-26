@@ -52,6 +52,12 @@ import {
 } from "./migration-utils.mjs";
 import { withModuleLock, writeJournalAtomic } from "./module-lock.mjs";
 import {
+  classifyUpgrade,
+  nextIncrement,
+  upgradeIsActive,
+  upgradeProjection,
+} from "./format-upgrade.mjs";
+import {
   activeToolkitIdentity,
   autoAdoptableToolkitTransition,
   digestToolkitIdentity,
@@ -194,6 +200,36 @@ export const usesVisualAcceptance = (state) =>
 export const REQUIRED_OBSERVATIONS_FORMAT = 18;
 export const usesRequiredObservations = (state) =>
   (state?.formatVersion ?? 1) >= REQUIRED_OBSERVATIONS_FORMAT;
+/**
+ * The format from which every increment is owned by the upgrade registry
+ * (`FORMAT_UPGRADERS`, below): at or above it, `state.formatVersion` is a real
+ * cursor that moves one adjacent step per committed transaction and is never
+ * walked past. Below it the pre-existing compatibility semantics are untouched
+ * -- `compatibilityBlocker`, `SELF_HEALING_FORMAT_VERSIONS`, `FORMAT_FEATURES`
+ * and the typed one-shot legacy adoptions.
+ *
+ * Declared, never derived: formats 10 and 11 are permanently non-promoting by
+ * design, so no adjacent upgrader for them can ever exist and a blunt
+ * "record < runtime freezes" rule cannot reach back to format 4.
+ *
+ * It lives beside the format constants rather than beside the registry so
+ * `formatIsPromoting` reads it with no temporal-dead-zone question.
+ */
+export const FORMAT_UPGRADE_FLOOR = VISUAL_ACCEPTANCE_FORMAT;
+
+/**
+ * The one reader of the required-observations adoption transition, in both of
+ * its spellings: the historical top-level event, written before the format
+ * registry existed and by the pre-floor explicit adoption, and the canonical
+ * `FORMAT_UPGRADED` envelope the registered adjacent 17 -> 18 row writes with
+ * the transition subordinate to it. Append-only history is never rewritten, so
+ * both are valid forever and exactly one predicate decides it.
+ */
+export const isUiObservationsAdoption = (event) =>
+  event?.event === "UI_OBSERVATIONS_ADOPTED" ||
+  (event?.event === "FORMAT_UPGRADED" &&
+    event?.transition === "UI_OBSERVATIONS_ADOPTED");
+
 export const UI_OBSERVATIONS_ADOPTION_ROOT = "ui-observations-adoption";
 export const UI_OBSERVATIONS_CANDIDATE_FILE = `${UI_OBSERVATIONS_ADOPTION_ROOT}/candidate/legacy.json`;
 const usesFigmaVisualContract = (state) =>
@@ -416,9 +452,17 @@ export const formatIsSupported = (version) =>
   version === MIGRATION_FORMAT_VERSION ||
   SELF_HEALING_FORMAT_VERSIONS.has(version);
 
-/** Whether an advance may promote a record's stamp *into* this format. */
+/**
+ * Whether an advance may promote a record's stamp *into* this format.
+ *
+ * Above the upgrade floor the registry is the sole promoter, so a future
+ * developer cannot add a row to `FORMAT_FEATURES` and have an ordinary advance
+ * stamp a format whose upgrader was never written. Below the floor this is
+ * exactly the table it always was.
+ */
 export const formatIsPromoting = (version) =>
-  !NON_PROMOTING_FORMAT_VERSIONS.includes(version);
+  !NON_PROMOTING_FORMAT_VERSIONS.includes(version) &&
+  version <= FORMAT_UPGRADE_FLOOR;
 
 /**
  * The format at which `integrity.json`, the history anchor, and the
@@ -500,7 +544,13 @@ export const renderLoopDirective = ({
 }) =>
   mode === "step"
     ? ""
-    : outcome === "CONTINUE"
+    : // A committed increment ends its invocation but not the run: the driver
+      // must start a *new* normal invocation with no agent decision in
+      // between, which is what CONTINUE means and STOP does not. It continues
+      // through the *same* `next` as CONTINUE -- `next=` names a command the
+      // front end can actually execute, so a symbolic token there would be a
+      // line the driver cannot obey.
+      outcome === "CONTINUE" || outcome === "FORMAT_UPGRADED"
       ? `loop: CONTINUE next=${next}\n`
       : `loop: STOP reason=${outcome}\n`;
 
@@ -2841,11 +2891,28 @@ const assertStateGraph = async (root, state, pendingJournal) => {
       }
       continue;
     }
+    // One registered format increment, committed on its own. A NO_OP domain
+    // moves nothing but the cursor -- no step, slice, pin or artifact -- so the
+    // replay bumps the revision and asserts it, exactly like UPGRADED_V4_TO_V5.
+    // A TRANSFORM increment carries its domain transition instead, and is read
+    // by the branch below: `isUiObservationsAdoption` matches both spellings.
+    if (event.event === "FORMAT_UPGRADED" && !isUiObservationsAdoption(event)) {
+      revision += 1;
+      for (const relative of event.preserved ?? []) {
+        preservedReworkHashes.add(relative);
+      }
+      if (Number.isInteger(event.revision) && event.revision !== revision) {
+        throw new Error(
+          `Migration history records revision ${event.revision} where the replayed transition sequence produces ${revision}. The audit record was rewritten or an event is missing.`,
+        );
+      }
+      continue;
+    }
     // The format-18 acceptance contract adopted in place. The legacy pin stays
     // required (its value moves, which the anchor covers); the prior inventory,
     // results and gates are pinned for life. A reopening adoption releases the
     // named slices' results and the FINALIZE pins exactly like COMPLETE_REOPENED.
-    if (event.event === "UI_OBSERVATIONS_ADOPTED") {
+    if (isUiObservationsAdoption(event)) {
       revision += 1;
       if (event.step === "VERIFY_SLICES") {
         currentStep = "VERIFY_SLICES";
@@ -6671,7 +6738,11 @@ const validateUiRuntimeEvidence = async ({
   if (!usesUiVerification(state) || !baseline.legacy.hasVisibleUi) return;
   if (!usesRequiredObservations(state)) {
     throw new Error(
-      `Visible UI needs format-${REQUIRED_OBSERVATIONS_FORMAT} requiredObservations before VERIFY_SLICES or FINALIZE can PASS. Preview UI_OBSERVATIONS_ADOPTED${state.designSource === "figma-mcp" && !usesVisualAcceptance(state) ? " with combined visual adoption" : ""} with: artifact-migration-discover ${state.migrationId} --adopt-ui-observations. Confirm using the digest printed by that command; TARGET proof cannot supply the contract.`,
+      // No CLI flag is named here any more. At or above the upgrade floor the
+      // engine's own FORMAT_UPGRADE target owns the transition and the normal
+      // command reports the required input, so this states the frozen fact and
+      // leaves the dispatch to the one place that decides it.
+      `Visible UI needs format-${REQUIRED_OBSERVATIONS_FORMAT} requiredObservations before VERIFY_SLICES or FINALIZE can PASS; this record is at format ${state.formatVersion}. Rerun '/start-migration ${state.migrationId}' and supply the input its FORMAT UPGRADE REQUIRED report names. TARGET proof cannot supply the contract.`,
     );
   }
   const parityIds = new Set(implementation.traceIds);
@@ -9501,6 +9572,83 @@ export const previewMigrationExecution = async ({
   // Fix E (candidate change): read-only slice/state consistency check, run
   // alongside the other resume-time revalidations below.
   await assertSliceStateConsistent(root, state);
+  // Dispatch order, read-only half. An active format increment outranks every
+  // lifecycle branch below, so its preview describes the increment rather than
+  // a checkpoint. Nothing is written: the mutating
+  // caller commits, and re-classifies under the module lock when it does,
+  // because a preview is racy by definition.
+  const formatUpgrade = upgradeProjection(
+    await pendingFormatUpgrade(root, state, resolved.canonical, {
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
+    }),
+  );
+  // Active only. An owed-but-inactive increment is informational: it names a
+  // prerequisite the lifecycle below is what produces, so this invocation falls
+  // through to that lifecycle instead of stopping on an upgrade it cannot yet
+  // classify. Read-only status is where it is reported.
+  if (formatUpgrade?.active) {
+    const ready = formatUpgrade.state === "READY";
+    const upgradePreview = {
+      migration: state.migrationId,
+      target: state.targetModule,
+      state: "FORMAT_UPGRADE",
+      currentCheckpoint: state.currentStep,
+      activeSlice: state.activeSlice,
+      action: ready
+        ? `Commit the ${formatUpgrade.from} -> ${formatUpgrade.to} format upgrade${formatUpgrade.upgrader ? ` (${formatUpgrade.upgrader.id} v${formatUpgrade.upgrader.version}, domain ${formatUpgrade.domain})` : ""}`
+        : `None. The ${formatUpgrade.from} -> ${formatUpgrade.to} format upgrade is ${formatUpgrade.state} and the lifecycle is frozen behind it.`,
+      reason: formatUpgrade.nextAction,
+      artifacts: ready
+        ? ["state.json", "history/history.ndjson", INTEGRITY_FILE]
+        : [],
+      expectedNextCheckpoint: state.currentStep,
+      expectedNextArtifact: formatUpgrade.requiredInput?.path ?? null,
+      currentFormatVersion: MIGRATION_FORMAT_VERSION,
+      currentWorkflowVersion: WORKFLOW_VERSION,
+      recordedFormatVersion: state.formatVersion,
+      recordedWorkflowVersion: state.workflowVersion,
+      recordedLegacyRevision: state.legacyRevision,
+      currentLegacyRevision,
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
+      revision: state.revision,
+      blockers: ready
+        ? []
+        : formatUpgrade.blockers.length > 0
+          ? formatUpgrade.blockers
+          : [formatUpgrade.nextAction],
+      requiresConfirmation: ready,
+      statePath,
+      openSpecDigest: requirementsAuthority?.digest ?? null,
+      openSpecStatus: requirementsAuthority ? "EXISTING" : "MISSING",
+      ...bindingFields,
+      formatUpgrade,
+    };
+    return {
+      ...upgradePreview,
+      registryBinding,
+      boundInputs,
+      progressChecklist: renderProgressChecklist(
+        state,
+        mode ?? DEFAULT_MODE,
+        "FORMAT_UPGRADE",
+        formatUpgrade.nextAction,
+        formatUpgrade,
+      ),
+      // Bound to the upgrade's own digest as well as the state bytes, so a
+      // candidate rewritten between preview and commit invalidates the
+      // confirmation exactly as a moved checkpoint does.
+      confirmationId: ready
+        ? confirmationIdFor({
+            ...upgradePreview,
+            ...boundInputs,
+            stateHash: await hashFile(statePath),
+            formatUpgradeDigest: formatUpgrade.confirmationDigest,
+          })
+        : null,
+    };
+  }
   const legacyRevisionChanged =
     state.legacyRevision.revision !== currentLegacyRevision.revision;
   const autoRefresh = autoRefreshesLegacyDrift({
@@ -10066,6 +10214,11 @@ export const repairSliceState = async (targetRoot, moduleName) =>
   withModuleLock(targetRoot, moduleName, async () => {
     const { state, statePath, root } = await readState(targetRoot, moduleName);
     assertRecordToolkitIdentity(state, moduleName, "Repairing this migration's slice state");
+    assertNoPendingFormatUpgrade(
+      state,
+      moduleName,
+      "Repairing this migration's slice state",
+    );
     const reconciliation = await reconcileSliceState(root, state);
     const artifactHashes = { ...state.artifactHashes };
     const hashRepairs = [];
@@ -11560,6 +11713,11 @@ export const adoptUiObservations = async ({
   moduleName,
   candidateDigest,
   confirmationDigest,
+  // Set only by `commitFormatUpgrade` for the registered adjacent 17 -> 18 row.
+  // It changes the history envelope and nothing else: the transaction, the
+  // writes, the pins and the preserved bytes are the same ones the pre-floor
+  // explicit adoption has always made, because there is only one of them.
+  formatUpgrade = null,
 }) => {
   const { registryData, resolved } = await readContext({ registryPath, moduleName });
   return withModuleLock(registryData.targetRoot, resolved.canonical, async () => {
@@ -11642,6 +11800,7 @@ export const adoptUiObservations = async ({
       {
         version: 1,
         transition: "UI_OBSERVATIONS_ADOPTED",
+        ...(formatUpgrade ? { upgrader: formatUpgrade.upgrader } : {}),
         note: "Adoption of the format-18 required UI observations contract from legacy authority. Not a refresh, replan, or restart; no TARGET proof was an input.",
         migrationId: state.migrationId,
         fromFormat: state.formatVersion,
@@ -11729,7 +11888,7 @@ export const adoptUiObservations = async ({
       revision: state.revision + 1,
       updatedAt: at,
     };
-    const event = {
+    const domainEvent = {
       event: "UI_OBSERVATIONS_ADOPTED",
       from: state.status === "COMPLETE" ? "COMPLETE" : state.currentStep,
       fromFormat: state.formatVersion,
@@ -11749,6 +11908,33 @@ export const adoptUiObservations = async ({
       at,
       revision: adopted.revision,
     };
+    // One event per transaction, so the canonical `FORMAT_UPGRADED` envelope
+    // wraps the domain fields instead of adding a second row. The pre-floor
+    // explicit adoption keeps writing the historical spelling: rewriting an
+    // append-only log is not an option, so both spellings are read forever
+    // (`isUiObservationsAdoption`).
+    const event = formatUpgrade
+      ? {
+          ...domainEvent,
+          event: "FORMAT_UPGRADED",
+          transition: "UI_OBSERVATIONS_ADOPTED",
+          domain: "TRANSFORM",
+          upgrader: formatUpgrade.upgrader,
+          inputs: [
+            {
+              kind: formatUpgrade.requiredInput?.kind ?? "candidateFile",
+              path: formatUpgrade.requiredInput?.path ?? UI_OBSERVATIONS_CANDIDATE_FILE,
+              digest: plan.candidateDigest,
+            },
+          ],
+          priorRevision: state.revision,
+          revision: adopted.revision,
+          priorStateDigest: `sha256:${hashContent(renderState(state))}`,
+          stateDigest: `sha256:${hashContent(renderState(adopted))}`,
+          priorStep: state.currentStep,
+          activeSlice: activeSlice ?? null,
+        }
+      : domainEvent;
     const integrityPath = path.join(root, INTEGRITY_FILE);
     const integrityBefore = await readFile(integrityPath, "utf8");
     const nextIntegrity = await renderIntegrityNow(root, adopted);
@@ -11801,6 +11987,415 @@ export const adoptUiObservations = async ({
       resolved,
     };
   });
+};
+
+// --- Format upgrades: the registry, the cursor, the no-op transaction -------
+
+/**
+ * One ordered, frozen row per adjacent format increment at or above
+ * `FORMAT_UPGRADE_FLOOR`. It lives here, beside the code it names, rather than
+ * in a module of its own: a registry module importing this engine while this
+ * engine reads the registry is an ESM cycle, and `format-upgrade.mjs` holds
+ * everything about the walk that is not engine-specific.
+ *
+ * `domain` is not "does this increment apply" -- it always applies. It answers
+ * only whether *this record* needs the row's domain work; a `NO_OP` still
+ * commits the increment.
+ */
+export const FORMAT_UPGRADERS = Object.freeze([
+  Object.freeze({
+    from: VISUAL_ACCEPTANCE_FORMAT,
+    to: REQUIRED_OBSERVATIONS_FORMAT,
+    id: "UI_OBSERVATIONS_ADOPTED",
+    version: 1,
+    requiredInput: Object.freeze({
+      kind: "candidateFile",
+      path: UI_OBSERVATIONS_CANDIDATE_FILE,
+      authority: "legacy",
+      description:
+        "A complete inventories/legacy.json authored from legacy runtime/source evidence and the pinned OpenSpec requirements, differing from the pinned inventory only by added requiredObservations. TARGET proof cannot supply it.",
+    }),
+    // The old-format authority this row consumes, and the boundary that makes
+    // it exclusive. Bootstrap writes `inventories/legacy.json` as a scaffold
+    // long before DISCOVER_LEGACY validates and pins it, and the scaffold's
+    // `hasVisibleUi: false` is not authority about anything -- so activation
+    // reads the *pin*, the one artifact of the successful DISCOVER_LEGACY
+    // advance, and never the file's contents. Before it exists the record is
+    // owed this increment and left to produce the authority; the moment it
+    // does, the window closes on itself with no step allow-list anywhere.
+    activation: Object.freeze({
+      predicate: (state) =>
+        Boolean(state?.artifactHashes?.[initialArtifacts.legacyInventory]),
+      prerequisite: Object.freeze({
+        kind: "pinnedArtifact",
+        path: initialArtifacts.legacyInventory,
+        description:
+          "the validated and pinned authoritative legacy inventory produced by DISCOVER_LEGACY",
+      }),
+    }),
+    // Authority, not a truthiness read: only a legacy inventory that passes the
+    // engine's own validator and explicitly declares `hasVisibleUi: false` can
+    // make this increment a no-op. Missing, unreadable, malformed or silent
+    // about visible UI all throw, and the caller turns that into BLOCKED --
+    // an absent authority must never advance the stamp past unperformed work.
+    domain: async (state, { root, roots }) =>
+      assertBoolean(
+        (await validateLegacyInventory(root, roots, state)).hasVisibleUi,
+        "Legacy hasVisibleUi",
+      )
+        ? "TRANSFORM"
+        : "NO_OP",
+    // Observations only, never the combined plan: a true format-17 record is
+    // already under the visual contract, so the combined wrapper degrades to
+    // this anyway and stays what it is -- the pre-floor compatibility path.
+    plan: (root, state) => uiObservationsAdoptionPlan(root, state, false),
+    commit: adoptUiObservations,
+  }),
+]);
+
+/**
+ * The cursor. At or above the floor a record behind the runtime format always
+ * owes exactly the next adjacent increment: there is no skip or silent
+ * self-heal. An inactive increment leaves old-format lifecycle progress live
+ * until its prerequisite is pinned. Below the floor the record owes nothing
+ * here and keeps its pre-existing semantics.
+ *
+ * Derived from `(formatVersion, runtime format, registry, record tree)` and
+ * nothing persisted, so status, preview and the transaction all see the same
+ * answer and a crash can never leave an "upgrade started" flag behind. Reads
+ * only; writes nothing.
+ *
+ * `identityBlocker` is how a read-only caller keeps the dispatch order it
+ * cannot enforce by throwing: identity outranks the format upgrade, so a record
+ * pinning a build this engine cannot prove it is reports the identity refusal
+ * and nothing about the record is read past the cursor itself.
+ */
+export const pendingFormatUpgrade = async (
+  root,
+  state,
+  moduleName,
+  roots,
+  { identityBlocker = null } = {},
+) => {
+  const recordFormat = state?.formatVersion ?? 1;
+  const increment = nextIncrement(
+    FORMAT_UPGRADERS,
+    recordFormat,
+    MIGRATION_FORMAT_VERSION,
+    FORMAT_UPGRADE_FLOOR,
+  );
+  if (!increment) return null;
+  const { from, to, row } = increment;
+  const cursor = {
+    recordFormat,
+    runtimeFormat: MIGRATION_FORMAT_VERSION,
+    from,
+    to,
+    // Overridden only by the INACTIVE branch below. Every other result is an
+    // exclusive increment: the lifecycle is frozen behind it.
+    active: true,
+  };
+  const rerun = `rerun /start-migration ${moduleName ?? state?.migrationId}`;
+  if (identityBlocker) {
+    return {
+      ...cursor,
+      upgrader: row ? { id: row.id, version: row.version } : null,
+      state: "BLOCKED",
+      domain: null,
+      requiredInput: null,
+      blockers: [identityBlocker],
+      nextAction: `Resolve the toolkit identity refusal above; the ${from} -> ${to} format upgrade is not classified until it is.`,
+      confirmationDigest: null,
+    };
+  }
+  if (!row) {
+    // Unreachable in a released build -- `assertRegistryCoverage` fails the
+    // release first -- so this is the fail-closed floor under that gate.
+    return {
+      ...cursor,
+      upgrader: null,
+      state: "BLOCKED",
+      domain: null,
+      requiredInput: null,
+      blockers: [
+        `No registered format upgrader for ${from} -> ${to}. This toolkit cannot move the record past format ${from}; nothing was read or written.`,
+      ],
+      nextAction: `Install a toolkit that registers the ${from} -> ${to} format upgrader.`,
+      confirmationDigest: null,
+    };
+  }
+  // The activation boundary, and the last thing decided from persisted state
+  // alone. While the row's old-format prerequisite does not exist the increment
+  // is owed but not exclusive: the historical lifecycle is what produces that
+  // prerequisite, so nothing is classified here -- no `row.domain`, no
+  // `row.plan`, no inventory validation -- and nothing is frozen.
+  if (!upgradeIsActive(row, state)) {
+    const { prerequisite } = row.activation;
+    return {
+      ...cursor,
+      active: false,
+      upgrader: { id: row.id, version: row.version },
+      state: "INACTIVE",
+      domain: null,
+      requiredInput: null,
+      prerequisite,
+      blockers: [],
+      nextAction: `Continue the normal migration until ${prerequisite.description} is validated and pinned; the ${from} -> ${to} format upgrade becomes mandatory the moment it is.`,
+      confirmationDigest: null,
+    };
+  }
+  // The row classifies from authoritative record material, so a record whose
+  // authority cannot be read or does not answer the question is BLOCKED, never
+  // NO_OP: "nothing needed doing" is a finding, and an unreadable inventory is
+  // the absence of one. Nothing is read or written past this point.
+  let domain;
+  try {
+    domain = await row.domain(state, { root, roots });
+  } catch (error) {
+    return {
+      ...cursor,
+      upgrader: { id: row.id, version: row.version },
+      state: "BLOCKED",
+      domain: null,
+      requiredInput: row.requiredInput,
+      blockers: [
+        `The authoritative legacy inventory could not establish whether this record has visible UI, so the ${from} -> ${to} format upgrade cannot be classified: ${error.message}`,
+      ],
+      nextAction: `Restore the record's authoritative ${initialArtifacts.legacyInventory}, then ${rerun}.`,
+      confirmationDigest: null,
+    };
+  }
+  const inputPresent =
+    domain === "NO_OP" ||
+    row.requiredInput === null ||
+    (await fileExists(path.join(root, row.requiredInput.path)));
+  const plan =
+    domain === "NO_OP" || !inputPresent ? null : await row.plan(root, state);
+  const { state: upgradeState, blockers } = classifyUpgrade({
+    domain,
+    inputPresent,
+    plan,
+  });
+  return {
+    ...cursor,
+    upgrader: { id: row.id, version: row.version },
+    state: upgradeState,
+    domain,
+    requiredInput: domain === "NO_OP" ? null : row.requiredInput,
+    blockers,
+    nextAction:
+      upgradeState === "NEEDS_INPUT"
+        ? `Author ${row.requiredInput.path} from ${row.requiredInput.authority} authority, then ${rerun}.`
+        : upgradeState === "BLOCKED"
+          ? `Resolve the refusal above, then ${rerun}.`
+          : domain === "NO_OP"
+            ? `Commit the no-op format upgrade ${from} -> ${to}: this record needs none of ${row.id}'s domain work.`
+            : `Commit the format upgrade ${from} -> ${to} (${row.id} v${row.version}).`,
+    confirmationDigest:
+      upgradeState === "READY" ? (plan?.candidateDigest ?? null) : null,
+  };
+};
+
+/**
+ * The degenerate case of the advance transaction, and the whole of it: one
+ * increment whose domain work this record does not need still commits, in one
+ * journalled transaction, or it does not happen at all.
+ *
+ * It moves the cursor and nothing else. `status`, `currentStep`, `activeSlice`,
+ * `completedSteps`, `pendingSteps`, `completedSlices`, `pendingSlices`,
+ * `artifactHashes`, the plan, the requirements and every application file are
+ * copied through byte-identical; only `formatVersion`, `revision`, `updatedAt`,
+ * `integrity.json` and the append-only history move. A skipped increment would
+ * leave "nothing needed doing" and "nothing was recorded" indistinguishable,
+ * which is exactly what the `domain: "NO_OP"` history line resolves.
+ */
+export const commitNoOpFormatUpgrade = async ({
+  registryPath,
+  moduleName,
+  hooks,
+}) => {
+  const { registryData, resolved } = await readContext({
+    registryPath,
+    moduleName,
+  });
+  return withModuleLock(registryData.targetRoot, resolved.canonical, async () => {
+    const root = migrationRoot(registryData.targetRoot, resolved.canonical);
+    const statePath = statePathFor(registryData.targetRoot, resolved.canonical);
+    await recoverPendingAdvance(registryData.targetRoot, root, statePath);
+    const { state } = await readState(registryData.targetRoot, resolved.canonical);
+    assertRecordToolkitIdentity(state, resolved.canonical, "upgrade the record format");
+    // Re-classified under the lock: a preview is racy by definition, and the
+    // classification is what authorizes writing the stamp without doing work.
+    const pending = await pendingFormatUpgrade(root, state, resolved.canonical, {
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
+    });
+    if (!pending) {
+      throw new Error(
+        `Migration '${resolved.canonical}' owes no format upgrade at format ${state.formatVersion}. Nothing was written.`,
+      );
+    }
+    if (pending.domain !== "NO_OP" || pending.state !== "READY") {
+      throw new Error(
+        [
+          `The ${pending.from} -> ${pending.to} format upgrade is ${pending.state}/${pending.domain ?? "UNREGISTERED"}, not READY/NO_OP, so it cannot be committed as a no-op.`,
+          ...pending.blockers,
+          "Nothing was written.",
+        ].join(" "),
+      );
+    }
+    const at = now();
+    const upgraded = {
+      ...state,
+      formatVersion: pending.to,
+      revision: state.revision + 1,
+      updatedAt: at,
+    };
+    const event = {
+      event: "FORMAT_UPGRADED",
+      fromFormat: pending.from,
+      toFormat: pending.to,
+      domain: "NO_OP",
+      upgrader: pending.upgrader,
+      inputs: [],
+      priorRevision: state.revision,
+      revision: upgraded.revision,
+      priorStateDigest: `sha256:${hashContent(renderState(state))}`,
+      stateDigest: `sha256:${hashContent(renderState(upgraded))}`,
+      priorStep: state.currentStep,
+      activeSlice: state.activeSlice ?? null,
+      at,
+    };
+    const integrityPath = path.join(root, INTEGRITY_FILE);
+    const integrityBefore = (await fileExists(integrityPath))
+      ? await readFile(integrityPath, "utf8")
+      : null;
+    const nextIntegrity = await renderIntegrityNow(root, upgraded);
+    await assertHistoryAppendable(registryData.targetRoot, root);
+    const journalFile = path.join(root, ADVANCE_JOURNAL);
+    await writeJournalAtomic(journalFile, {
+      fromRevision: state.revision,
+      toRevision: upgraded.revision,
+      event,
+      startedAt: at,
+      pid: process.pid,
+      // Idempotent: the rollback branch only runs when the state write never
+      // landed, so this restores the bytes already on disk. It is there so the
+      // journal names every file the transaction touches.
+      restore: [{ path: "state.json", content: renderState(state) }],
+      integrity: { content: nextIntegrity, before: integrityBefore },
+    });
+    await hooks?.afterWrite?.("journal");
+    await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
+    await hooks?.afterWrite?.("integrity");
+    await atomicWrite(registryData.targetRoot, statePath, renderState(upgraded));
+    await hooks?.afterWrite?.("state");
+    await appendHistoryOnce(registryData.targetRoot, root, event);
+    await hooks?.afterWrite?.("history");
+    await rm(journalFile, { force: true });
+    return {
+      changed: true,
+      upgraded: true,
+      from: pending.from,
+      to: pending.to,
+      statePath,
+      migrationRoot: root,
+      state: upgraded,
+      resolved,
+    };
+  });
+};
+
+/**
+ * The freeze, and the second gate under it: while an increment is active, no
+ * lifecycle mutation may run. Called from every mutating lifecycle path under
+ * its own module lock, after the toolkit-identity gate and before any write.
+ *
+ * Deliberately independent of the classifier: "is an increment owed and active"
+ * is decided from `(formatVersion, runtime format, registry, floor, persisted
+ * pins)` alone -- no I/O, no plan, no domain read -- so a record whose upgrade
+ * cannot even be classified still freezes, and the guard cannot itself fail
+ * open on a bad read.
+ *
+ * Owed is not enough: an increment whose old-format prerequisite the lifecycle
+ * has not produced yet is not exclusive, because freezing there would freeze
+ * the very step that produces it. `upgradeIsActive` is fail-closed, so a
+ * missing row still refuses.
+ */
+export const assertNoPendingFormatUpgrade = (state, name, action) => {
+  const increment = nextIncrement(
+    FORMAT_UPGRADERS,
+    state?.formatVersion ?? 1,
+    MIGRATION_FORMAT_VERSION,
+    FORMAT_UPGRADE_FLOOR,
+  );
+  if (!increment) return;
+  if (!upgradeIsActive(increment.row, state)) return;
+  throw Object.assign(
+    new Error(
+      `${action} is refused while a format upgrade is owed: the record is at format ${increment.from} and this toolkit is at format ${MIGRATION_FORMAT_VERSION}, so the ${increment.from} -> ${increment.to} increment commits first and nothing else may move. Nothing was written. Run '/start-migration ${name ?? state?.migrationId}' and supply whatever the reported FORMAT UPGRADE REQUIRED input names.`,
+    ),
+    { formatUpgrade: true },
+  );
+};
+
+/**
+ * Commit the one increment this record owes, whichever domain it is: the single
+ * mutating entry point the normal command dispatches to, so no front end has to
+ * know which row or which transaction performs the work.
+ *
+ * It creates no transaction of its own -- the row's `commit` for a TRANSFORM,
+ * `commitNoOpFormatUpgrade` for a NO_OP -- and both re-read, re-classify and
+ * re-verify under their own module lock, because this classification is taken
+ * outside it and is therefore advice.
+ */
+export const commitFormatUpgrade = async ({
+  registryPath,
+  moduleName,
+  confirmationDigest = null,
+  hooks,
+}) => {
+  const { registryData, resolved } = await readContext({ registryPath, moduleName });
+  const root = migrationRoot(registryData.targetRoot, resolved.canonical);
+  const { state } = await readState(registryData.targetRoot, resolved.canonical);
+  const pending = await pendingFormatUpgrade(root, state, resolved.canonical, {
+    legacyRoot: registryData.legacyRoot,
+    targetRoot: registryData.targetRoot,
+  });
+  if (!pending) {
+    throw new Error(
+      `Migration '${resolved.canonical}' owes no format upgrade at format ${state.formatVersion}. Nothing was written.`,
+    );
+  }
+  if (pending.state !== "READY") {
+    throw new Error(
+      [
+        `The ${pending.from} -> ${pending.to} format upgrade is ${pending.state}, not READY, so it cannot be committed.`,
+        ...pending.blockers,
+        pending.nextAction,
+        "Nothing was written.",
+      ].join(" "),
+    );
+  }
+  if (pending.domain === "NO_OP") {
+    return commitNoOpFormatUpgrade({ registryPath, moduleName, hooks });
+  }
+  const row = FORMAT_UPGRADERS.find((entry) => entry.from === pending.from);
+  const committed = await row.commit({
+    registryPath,
+    moduleName,
+    candidateDigest: confirmationDigest ?? pending.confirmationDigest,
+    // Present only on the registry-driven path, and the only thing that decides
+    // which history envelope the shared transaction writes.
+    formatUpgrade: {
+      from: pending.from,
+      to: pending.to,
+      upgrader: pending.upgrader,
+      requiredInput: pending.requiredInput,
+    },
+    hooks,
+  });
+  return { ...committed, upgraded: true, from: pending.from, to: pending.to };
 };
 
 // COMPLETE: a visible-UI parity audit. ACTIVE at VERIFY_SLICES/FINALIZE:
@@ -12552,6 +13147,15 @@ const bootstrapUnderLock = async ({
             : "Reopening this migration",
       );
     }
+    // Same ordering as `advanceUnderLock`, at the one point every branch below
+    // passes through: reopen (discovery/UI/complete), rework, amendment, visual
+    // contract adoption and refresh all dispatch from here, and so does the
+    // binding write of a plain resume.
+    assertNoPendingFormatUpgrade(
+      state,
+      resolved.canonical,
+      "Resuming this migration",
+    );
     await persistProjectRegistryBinding(binding);
     if (reopenDiscovery) {
       return reopenDiscoveryUnderLock({
@@ -13013,6 +13617,40 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
       freshness: context.state.evidenceFreshness,
     };
   }
+  // Read-only, and ordered. Identity outranks the format upgrade, so a record
+  // pinning a build this engine cannot prove it is reports that refusal and the
+  // increment is reported as BLOCKED without the record being read further. An
+  // unstamped record is still projected: adoption is a mutating path's problem,
+  // and status must say what is owed without stamping anything. Nothing in here
+  // writes -- no auto-adoption, no recovery, no commit.
+  const identityBlocker = context.state.toolkitIdentity
+    ? toolkitIdentityBlocker(
+        context.state.toolkitIdentity,
+        activeToolkitIdentity(),
+        {
+          action: "Classifying this record's pending format upgrade",
+          adoptCommand: toolkitAdoptCommand(resolved.canonical),
+        },
+      )
+    : null;
+  const formatUpgrade = upgradeProjection(
+    await pendingFormatUpgrade(
+      context.root,
+      context.state,
+      resolved.canonical,
+      { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot },
+      { identityBlocker },
+    ),
+  );
+  const progress = migrationProgress(context.state, {
+    mode: null,
+    uiEvidence,
+    formatUpgrade,
+    // Reported either way, but only an *active* increment stops the lifecycle:
+    // an INACTIVE one leaves the checklist live, because the checkpoint it names
+    // is what produces the prerequisite.
+    outcome: formatUpgrade?.active ? "FORMAT_UPGRADE" : null,
+  });
   return {
     module: context.state.legacyModule,
     target: context.state.targetModule,
@@ -13050,15 +13688,16 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
     legacyRevisionChanged:
       context.state.legacyRevision.revision !== currentLegacyRevision.revision,
     uiEvidence,
+    // The structured contract: the pending increment, or null when the record
+    // is at the runtime format or below the upgrade floor.
+    formatUpgrade,
     ...resumeGuidance(context.state),
     // The canonical projection, and the same text rendered from it. Both are
     // returned: `progress` is what a provider maps into a native task UI, and
     // `progressChecklist` is the unchanged fallback every existing caller
     // already reads.
-    progress: migrationProgress(context.state, { mode: null, uiEvidence }),
-    progressChecklist: renderProgress(
-      migrationProgress(context.state, { mode: null, uiEvidence }),
-    ),
+    progress,
+    progressChecklist: renderProgress(progress),
     statePath: context.statePath,
   };
 };
@@ -13264,7 +13903,14 @@ export const CHECKPOINT_STATES = Object.freeze([
 ]);
 
 /** The outcomes that mean the active checkpoint did not move. */
-const STOPPING_OUTCOMES = new Set(["BLOCKED", "OPERATOR_DECISION", "FAILED"]);
+// A pending format upgrade stops the invocation, so the active checkpoint
+// renders BLOCKED through the machinery that already renders every other stop.
+const STOPPING_OUTCOMES = new Set([
+  "BLOCKED",
+  "OPERATOR_DECISION",
+  "FAILED",
+  "FORMAT_UPGRADE",
+]);
 
 export const migrationProgress = (
   state,
@@ -13276,6 +13922,9 @@ export const migrationProgress = (
     uiEvidence = null,
     nextWorkKind = null,
     artifactMigration = null,
+    // The §4 projection or null. Passed in by the caller that read it; this
+    // function performs no I/O, exactly as with `uiEvidence`.
+    formatUpgrade = null,
   } = {},
 ) => {
   const recordLifecycle = lifecycle ?? stepsFor(state);
@@ -13346,6 +13995,9 @@ export const migrationProgress = (
     // function performs no I/O and computes no availability of its own, so a
     // caller without it (`migration_run`) reports null rather than a guess.
     uiEvidence,
+    // Reported above the checkpoints by `renderProgress`; only an active
+    // increment freezes the checklist below it.
+    formatUpgrade,
     blocker: stopped ? (reason ?? null) : null,
     stopReason: stopped ? (outcome ?? state.status) : null,
     nextWork: complete
@@ -13387,11 +14039,56 @@ const CHECKPOINT_MARKERS = {
  * do not survive a Windows terminal.
  */
 export const renderProgress = (progress) => {
-  const lines = [
+  const lines = [];
+  // The owed increment, stated before the checklist it concerns. Absent -- which
+  // is every record at the runtime format -- the block is not rendered and the
+  // bytes below are the bytes this function always produced.
+  const upgrade = progress.formatUpgrade ?? null;
+  if (upgrade) {
+    // Two headings, because they are two different facts. An inactive
+    // increment is owed and nothing more -- the checklist under it is live, so
+    // it must not claim to be frozen, and it names the prerequisite the
+    // lifecycle is expected to produce rather than an input to author.
+    const inactive = upgrade.active === false;
+    lines.push(
+      inactive ? "FORMAT UPGRADE PENDING" : "FORMAT UPGRADE REQUIRED",
+      `record format: ${upgrade.recordFormat}`,
+      `runtime format: ${upgrade.runtimeFormat}`,
+      `current upgrade: ${upgrade.from}->${upgrade.to}` +
+        (upgrade.upgrader
+          ? ` (${upgrade.upgrader.id} v${upgrade.upgrader.version})`
+          : " (no registered upgrader)"),
+      inactive
+        ? `upgrade state: ${upgrade.state}`
+        : `upgrade state: ${upgrade.state} (domain: ${upgrade.domain ?? "unclassified"})`,
+    );
+    if (inactive) {
+      lines.push(
+        `prerequisite: ${upgrade.prerequisite.kind} ${upgrade.prerequisite.path}`,
+        "next action: continue normal migration until the prerequisite is validated/pinned",
+      );
+    } else {
+      lines.push(
+        `required input: ${
+          upgrade.requiredInput
+            ? `${upgrade.requiredInput.kind} ${upgrade.requiredInput.path} (authority: ${upgrade.requiredInput.authority})`
+            : "none"
+        }`,
+      );
+      for (const blocker of upgrade.blockers ?? []) {
+        lines.push(`upgrade blocker: ${blocker}`);
+      }
+      lines.push(
+        `next action: ${upgrade.nextAction}`,
+        "--- normal progress (frozen behind the upgrade) ---",
+      );
+    }
+  }
+  lines.push(
     `progress: ${progress.module} -> ${progress.target}` +
       `  status=${progress.status}  revision=${progress.revision}` +
       `  mode=${progress.mode}`,
-  ];
+  );
   for (const checkpoint of progress.checkpoints) {
     const active =
       checkpoint.name === progress.activeCheckpoint && progress.activeSlice
@@ -13437,7 +14134,11 @@ export const renderProgressChecklist = (
   mode,
   outcome = null,
   reason = null,
-) => renderProgress(migrationProgress(state, { mode, outcome, reason }));
+  formatUpgrade = null,
+) =>
+  renderProgress(
+    migrationProgress(state, { mode, outcome, reason, formatUpgrade }),
+  );
 
 export const advanceMigration = async ({
   registryPath,
@@ -13490,6 +14191,11 @@ const advanceUnderLock = async ({
   const context = await readState(registryData.targetRoot, resolved.canonical);
   const state = context.state;
   assertRecordToolkitIdentity(state, resolved.canonical, "Advancing this migration");
+  // Identity first, then the format upgrade, then the lifecycle. An active
+  // increment freezes the checkpoint tuple: no advance shares an invocation
+  // with a format upgrade, and this guard is independent of the classifier so a
+  // record whose upgrade cannot even be classified still refuses.
+  assertNoPendingFormatUpgrade(state, resolved.canonical, "Advancing this migration");
   // Compare-and-swap: the confirmation authorized one exact revision and one
   // exact set of pinned artifacts. Another process that advanced (or a slice
   // that was verified) while this one waited for the lock invalidates it, so a

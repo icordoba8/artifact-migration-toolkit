@@ -147,9 +147,17 @@ Nothing broader. Then author the requested artifact and run again.
 
 - `CONTINUE` — execute exactly the next iteration the engine requires.
 - `STOP` — relay the typed stop and do not improvise progression.
+- `FORMAT_UPGRADE` — the record owes a format increment and the whole migration
+  lifecycle is frozen behind it. Stop. Supply only the input the engine's
+  `formatUpgrade` result names, or relay its blockers (see Format upgrades).
+- `FORMAT_UPGRADED` — exactly one increment committed and no checkpoint moved.
+  Obey the emitted `loop:` line literally; it continues through the same normal
+  command.
 
 Providers never decide checkpoint progression themselves. Never infer the next
 checkpoint, skip one that "looks done", or continue from conversation memory.
+Never select a format-specific transition: which increment is owed, and how it
+commits, is the engine's decision, reported as a typed outcome.
 
 ## Authorities and boundaries
 
@@ -364,7 +372,7 @@ constants by a contract test — the table cannot drift from the code.
 | Persisted source       | Result                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | contract 5, format 18  | executes the full lifecycle; every legacy UI behavior carries frozen `requiredObservations`                           |
-| contract 5, format 17  | executes the full lifecycle; a figma-mcp record is held to the Figma visual acceptance contract; never promoted to 18 |
+| contract 5, format 17  | owes 17→18; DISCOVER_LEGACY may first validate and pin the legacy inventory, after which the upgrade freezes the lifecycle until it commits (see Format upgrades) |
 | contract 5, format 16  | executes the full lifecycle with controlled same-slice rework and unclaimed-drift refusal at FINALIZE; never promoted to 17 |
 | contract 5, format 15  | executes the full lifecycle with multi-source/brownfield targets; self-heals to 16 on the next advance                |
 | contract 5, format 14  | executes with a recorded design source; self-heals forward                                                            |
@@ -392,10 +400,12 @@ constants by a contract test — the table cannot drift from the code.
   evidence and `matrices/visual-acceptance.json`) is the same kind: a format-16
   figma-mcp record keeps provenance-only visual semantics for its whole life.
   Format 18 (authored `requiredObservations` in the legacy inventory) is the
-  same kind: a pre-18 UI record stays readable, earns no new VERIFY_SLICES or
-  FINALIZE PASS, and reaches 18 only through `UI_OBSERVATIONS_ADOPTED`.
-  Preview with `artifact-migration-discover <module> --adopt-ui-observations`,
-  then run the printed `--confirm-adopt-ui-observations <digest>` command.
+  same kind for a record *below* the floor: a pre-17 UI record stays readable
+  and earns no new VERIFY_SLICES or FINALIZE PASS until it adopts them.
+- **At or above the format-upgrade floor** → the engine's registered upgrader
+  owns the increment. Nothing self-heals and nothing is skipped: the lifecycle
+  freezes, the normal command reports the owed `N → N+1` transition, and the
+  agent supplies only the input that transition names. See Format upgrades.
 - A record is never promoted into a feature it never ran, and a persisted
   version field is never hand-edited to route around a refusal.
 
@@ -408,6 +418,116 @@ transaction, recovery, rollback, and snapshot-retention rules:
 A `.agents/knowledge/migrations/modules/<module>.md` checklist is a retired
 contract-2/3 workflow. Bootstrap refuses while one exists; never parse,
 convert, move, or delete it — there is no automatic import path.
+
+## Format upgrades
+
+From the format-upgrade floor forward, moving a record's persisted
+`formatVersion` is the engine's job, not the agent's. Never choose, name, or
+type a format-specific transition; run the normal command and obey what comes
+back.
+
+| Engine | Floor | Registry |
+| --- | --- | --- |
+| module | `FORMAT_UPGRADE_FLOOR = 17` | one registered upgrader per increment from 17 to the runtime format |
+| artifact | `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13` | empty today, because the floor *is* the runtime format |
+
+Below the module floor nothing here applies: formats 4–16 keep their existing
+compatibility behavior (self-healing where the bump was additive, running the
+lifecycle they were born under where it was not), and the pre-17 one-shot
+adoptions remain the only way such a record reaches 17 or 18. Formats 4–16 were
+never retrofitted into adjacent upgraders.
+
+### The one protocol
+
+```text
+normal migration invocation                     (/start-migration <module>)
+  -> engine detects the owed N -> N+1 increment
+  -> if INACTIVE, continue old-format lifecycle until its prerequisite is pinned
+  -> then the increment becomes ACTIVE
+  -> the normal lifecycle freezes; no checkpoint, slice or decision may move
+  -> engine reports a typed FORMAT_UPGRADE target
+  -> supply ONLY the authoritative input that target requests
+  -> rerun the SAME normal migration command
+  -> engine commits exactly one increment      (FORMAT_UPGRADED)
+  -> obey the emitted `loop: CONTINUE next=<command>` literally
+  -> the later invocation continues upgrades, or resumes the lifecycle
+```
+
+One increment per upgrade invocation, always. The engine never jumps or
+promotes an owed increment through ordinary lifecycle progress. Owed does not
+automatically mean frozen: only an ACTIVE increment is exclusive.
+
+### The typed `formatUpgrade` result
+
+`migration_status` and active-upgrade preflight carry a structured `formatUpgrade`
+(`null` for a record at the runtime format), reporting `recordFormat`,
+`runtimeFormat`, `from`/`to`, `upgrader {id, version}`, `active`, `state`,
+`prerequisite`, `domain`, `requiredInput`, `blockers` and `nextAction`. Read that object; do not
+rediscover which transition is required.
+
+- `INACTIVE` (`active: false`) — the old-format `activation.prerequisite` has
+  not yet been validated and pinned. Status names it read-only; normal lifecycle
+  execution continues until it produces that authority. The format stays put
+  and no `FORMAT_UPGRADED` event is written.
+- `NEEDS_INPUT` — the increment's declared input is absent. Author exactly the
+  artifact `requiredInput` names, at the path it names, from the authority it
+  names. Nothing was written.
+- `BLOCKED` — the input exists (or the record's authority cannot be read) and
+  the upgrader refused it. Relay `blockers` verbatim. Nothing was written.
+- `READY` — the increment can commit. `domain: "TRANSFORM"` means the record
+  needs the upgrader's domain work; `domain: "NO_OP"` means it does not and
+  `requiredInput` is `null`. Both commit one atomic increment; neither is
+  skipped. Do not invent work for a `NO_OP`.
+
+`activation.prerequisite` is old-format authority needed before the upgrader
+becomes active; `requiredInput` is new material requested by an already-active
+upgrader. For 17→18, DISCOVER_LEGACY validates and pins
+`inventories/legacy.json`; its bootstrap scaffold is not authority. Once that
+pin exists, 17→18 is ACTIVE even if the file later goes missing or corrupt, and
+the upgrade blocks while the lifecycle remains frozen.
+
+For the module engine's active 17→18 increment the required input is
+`ui-observations-adoption/candidate/legacy.json`, with `authority: "legacy"`:
+author it from **validated legacy authority** (the record's pinned legacy
+inventory and legacy runtime/source evidence) plus the **pinned
+requirements/OpenSpec authority**. TARGET proof is never authority for
+`requiredObservations` — a Playwright capture of the new implementation proves
+the target does something, not that legacy required it. Read only the paths and
+evidence the `formatUpgrade` result names. A record whose validated legacy
+authority declares no visible UI needs no candidate at all: that increment is
+classified `READY`/`NO_OP` and the engine commits it on its own.
+
+### Status and loop contract
+
+- `FORMAT_UPGRADE` — an ACTIVE increment cannot commit yet. The migration
+  lifecycle is frozen: every advance, reopen, rework, amendment, slice-state
+  repair and decision recording refuses while it is active, and the checkpoint
+  tuple does not move. STOP until the required input or the blocker is
+  resolved. Exit code is the blocked code and the directive is
+  `loop: STOP reason=FORMAT_UPGRADE`.
+- `FORMAT_UPGRADED` — exactly one increment committed, in one journalled
+  transaction, with one canonical `FORMAT_UPGRADED` history event. No migration
+  checkpoint advanced in that invocation. The directive is
+  `loop: CONTINUE next=<the normal command>` — an executable front-end command,
+  never an internal state token. Re-invoke exactly that command; do not
+  substitute a format-specific one, and do not stop to ask.
+
+INACTIVE status prints `FORMAT UPGRADE PENDING` with a live normal checklist and
+does not set a stopping `FORMAT_UPGRADE` outcome. ACTIVE status prints
+`FORMAT UPGRADE REQUIRED` above the frozen normal checklist. Reading status
+never mutates: it writes no state, adopts no toolkit
+identity, and leaves `revision`, `formatVersion` and history untouched.
+
+### Historical compatibility surfaces
+
+`--adopt-visual-contract`, `--adopt-ui-observations` and
+`--confirm-adopt-ui-observations <digest>` are **pre-floor compatibility and
+admin surfaces only**: the one-shot path by which a record *below* format 17
+reaches the visual contract or the observations contract. They are not part of
+normal operation, and a record already at format 17 must never be driven with
+them — the engine's registered 17→18 increment owns that transition and the
+normal command dispatches it automatically. `references/migration-contract.md`
+holds the full pre-floor rules.
 
 ## Pre-execution confirmation
 
@@ -714,7 +834,7 @@ line:
 
 ```text
 loop: CONTINUE next=/start-migration <module>
-loop: STOP reason=AWAITING_CONFIRMATION | COMPLETE | OPERATOR_DECISION | BLOCKED | FAILED
+loop: STOP reason=AWAITING_CONFIRMATION | COMPLETE | OPERATOR_DECISION | BLOCKED | FAILED | FORMAT_UPGRADE
 ```
 
 That line, not the prose around it, decides whether another iteration runs.
@@ -726,6 +846,13 @@ On `CONTINUE`, run exactly the command `next=` names, in the same session. Do
 not emit a handoff block, do not print a `Next command:` line, and never ask
 the operator to say "continue" — a successful checkpoint or slice advance is
 not a stopping point.
+
+A committed format increment continues through that same line:
+`FORMAT_UPGRADED` prints `loop: CONTINUE next=/start-migration <module>`, so
+the next iteration is a fresh normal invocation and no agent decision sits
+between them. `next=` always names a command a front end can execute; it is
+never a state token, so there is no `next=FORMAT_UPGRADE`. An *owed* increment
+stops instead, with `reason=FORMAT_UPGRADE`.
 
 On every iteration, render canonical progress (see Progress presentation).
 On `STOP`, follow it with:

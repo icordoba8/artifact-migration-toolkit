@@ -17,6 +17,7 @@ import {
   assertExecutionConfirmation,
   autoAdoptToolkitIdentity,
   bootstrapMigration,
+  commitFormatUpgrade,
   getMigrationStatus,
   previewDiscoveryScan,
   previewUiObservationsAdoption,
@@ -270,7 +271,9 @@ export const runDiscoverCli = async (
   if (!preview.requiresConfirmation) {
     const { outcome } = nextOutcome({ preview });
     stdout.write(
-      "Execution: BLOCKED. No delegation, file modification, or state update was performed.\n",
+      outcome === "FORMAT_UPGRADE"
+        ? `Execution: FORMAT_UPGRADE. The ${preview.formatUpgrade.from} -> ${preview.formatUpgrade.to} format upgrade is ${preview.formatUpgrade.state} and the lifecycle is frozen behind it. No delegation, file modification, or state update was performed.\n`
+        : "Execution: BLOCKED. No delegation, file modification, or state update was performed.\n",
     );
     stdout.write(directive(options, outcome, emitDirective));
     process.exitCode = exitCodeFor(outcome);
@@ -318,6 +321,27 @@ export const runDiscoverCli = async (
       }),
     ),
   );
+  // Dispatch order, mutating half: recovery and identity have run above, so the
+  // owed increment commits here -- one of them, in its own transaction -- and
+  // the invocation stops. No format-specific flag is involved: the agent typed
+  // the normal command and the engine chose the target. Active only: an owed
+  // increment whose prerequisite the lifecycle has not produced yet is
+  // informational, and falls through to the lifecycle that produces it.
+  if (preview.formatUpgrade?.active === true) {
+    const result = await commitFormatUpgrade({
+      registryPath: options.registryPath,
+      moduleName: options.moduleName,
+      confirmationDigest: preview.formatUpgrade.confirmationDigest,
+    });
+    const { outcome } = nextOutcome({ preview, result });
+    stdout.write(
+      `FORMAT_UPGRADED: ${result.from} -> ${result.to} (domain ${preview.formatUpgrade.domain}) at revision ${result.state.revision}; ` +
+        `the lifecycle resumes on the next invocation. Rerun /start-migration ${options.moduleName}\n`,
+    );
+    stdout.write(directive(options, outcome, emitDirective));
+    process.exitCode = exitCodeFor(outcome);
+    return { preview, result, formatUpgraded: true };
+  }
   const result = await bootstrapMigration({
     ...options,
     openSpecProposal: preview.openSpecProposal,

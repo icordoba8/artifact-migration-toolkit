@@ -118,6 +118,28 @@ and must never be reimplemented here:
 | Safe paths and atomic writes | `migration-utils.mjs` |
 | Operator decision recording | `record-decision.mjs` — one gate, two ledgers |
 | Progress projection | `resumable-migration.mjs` (`migrationProgress`, `renderProgress`) |
+| Format-upgrade primitives | `format-upgrade.mjs` (`nextIncrement`, `classifyUpgrade`, `assertRegistryCoverage`, `upgradeProjection`) |
+
+### Format upgrades on this axis
+
+The artifact engine declares the same format-upgrade contract the module engine
+does, on its own axis: `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13`, which is exactly
+the current `ARTIFACT_FORMAT_VERSION`. Because the floor *is* the runtime
+format, no format is both at or above the floor and behind the runtime, so
+`ARTIFACT_FORMAT_UPGRADERS` is legitimately empty and the `formatUpgrade` field
+an artifact status returns is always `null` today. **Nothing about artifact behavior changes**: an artifact record at
+format 13 performs no upgrade, and there is no historical 12→13 upgrader —
+inventing one would claim a path this toolkit has never been able to walk.
+
+The rule is prospective. The first artifact format bump — 13→14 — must ship with
+exactly one registered adjacent upgrader, and the engine's own release gate owns
+that requirement: `assertRegistryCoverage` fails the release until the row
+exists, and no self-healing or promoting declaration buys a pass. Each future
+artifact upgrader must explicitly declare `activation: null` when immediately
+active, or an activation predicate and old-format prerequisite. An owed but
+INACTIVE increment leaves normal lifecycle execution live until its prerequisite
+is validated and pinned; an ACTIVE increment freezes it. `requiredInput` names
+new material only after activation. The agent still never selects the transition.
 
 A rule with two definition sites has two answers, and the second one is the one
 nobody re-reads. This engine once carried its own loop renderer and could emit
