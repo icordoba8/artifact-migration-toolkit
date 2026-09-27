@@ -2,5 +2,9 @@
   {
     "version": "1.3.0",
     "contentHash": "sha256:ec7937b497ba8769445e2ca7b8c2516d8d23c85f15532a2adcb5bcd6c90a6ffa"
+  },
+  {
+    "version": "1.3.1",
+    "contentHash": "sha256:4b97a2bb04627f9842c35564822f124998007a8ae6f325a61d6c6ea2de5b03bf"
   }
 ]
