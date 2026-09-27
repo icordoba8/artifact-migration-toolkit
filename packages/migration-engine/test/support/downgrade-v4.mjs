@@ -97,7 +97,7 @@ export const downgradeToV4 = async (root) => {
     .filter((event) => event.step !== "DISCOVERY_COMPLETENESS")
     // A contract-4 record also predates toolkit identity, so neither its
     // CREATED event nor its state ever carried one.
-    .map(({ toolkitIdentity, ...event }) => event);
+    .map(({ toolkitIdentity, seq, previousHash, hash, ...event }) => event);
   let replayed = 1;
   for (const event of events.slice(1)) {
     replayed += 1;

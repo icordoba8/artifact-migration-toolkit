@@ -23,15 +23,8 @@
 
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-import {
-  fixtureIdentityFile,
-  installFixtureIdentity,
-  removeFixtureIdentity,
-} from "../packages/migration-engine/test/support/fixture-identity.mjs";
-
-const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+import { pathToFileURL } from "node:url";
+import { withTestRoot } from "./test-isolation.mjs";
 
 /** Suites whose subject is the unidentified runtime itself. */
 const UNIDENTIFIED_SUITES = [
@@ -42,12 +35,12 @@ const UNIDENTIFIED_SUITES = [
 const isUnidentifiedSuite = (file) =>
   UNIDENTIFIED_SUITES.some((suite) => file.replaceAll("\\", "/").endsWith(suite));
 
-const runTests = (files, ...flags) =>
+const runTests = (root, files, ...flags) =>
   files.length === 0
     ? Promise.resolve(0)
     : new Promise((resolve, reject) => {
         const child = spawn(process.execPath, ["--test", ...flags, ...files], {
-          cwd: repositoryRoot,
+          cwd: root,
           stdio: "inherit",
         });
         child.on("error", reject);
@@ -66,25 +59,22 @@ if (files.length === 0) {
 // `dist/` directory, and two builds that clear and repopulate one path at once
 // make each other's bundle disappear mid-read. Two files, so serial costs
 // nothing; the identified pass keeps its default concurrency.
-const unidentified = await runTests(files.filter(isUnidentifiedSuite), "--test-concurrency=1");
-
-let identified = 0;
-const rest = files.filter((file) => !isUnidentifiedSuite(file));
-if (rest.length > 0) {
-  await installFixtureIdentity();
-  try {
-    identified = await runTests(rest);
-  } finally {
-    // Always, including on a throw: an identity file left in a source tree
-    // would silently identify every later command run from this checkout.
-    await removeFixtureIdentity();
+await withTestRoot(async (root) => {
+  const fixture = await import(pathToFileURL(path.join(root,
+    "packages/migration-engine/test/support/fixture-identity.mjs")).href);
+  const unidentified = await runTests(root, files.filter(isUnidentifiedSuite), "--test-concurrency=1");
+  let identified = 0;
+  const rest = files.filter((file) => !isUnidentifiedSuite(file));
+  if (rest.length > 0) {
+    await fixture.installFixtureIdentity();
+    try {
+      identified = await runTests(root, rest);
+    } finally {
+      await fixture.removeFixtureIdentity();
+    }
   }
-}
-
-if (unidentified !== 0 || identified !== 0) {
-  process.exitCode = 1;
-  console.error(
-    `engine:test failed (unidentified pass ${unidentified}, identified pass ${identified}). ` +
-      `The identified pass runs with ${fixtureIdentityFile}.`,
-  );
-}
+  if (unidentified !== 0 || identified !== 0) {
+    process.exitCode = 1;
+    console.error(`engine:test failed (unidentified ${unidentified}, identified ${identified}).`);
+  }
+});

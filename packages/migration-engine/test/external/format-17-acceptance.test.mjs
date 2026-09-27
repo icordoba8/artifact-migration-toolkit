@@ -17,11 +17,12 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { buildRelease } from "../../../../scripts/release.mjs";
+import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 import { createUnstampedRecord } from "../support/consumer-fixture.mjs";
 import { downgradeToV4, readTree } from "../support/downgrade-v4.mjs";
 import { MIGRATION_FORMAT_VERSION } from "../../src/resumable-migration.mjs";
@@ -33,15 +34,20 @@ const repositoryRoot = path.resolve(
   "../../../..",
 );
 
+const scratch = await mkdtemp(path.join(os.tmpdir(), "amt-format-17-release-"));
+after(() => rm(scratch, { recursive: true, force: true }));
+
 let bundlePromise;
 /** One installed toolkit for the whole file, built from the committed payload. */
 const installedToolkit = async () => {
-  bundlePromise ??= buildRelease({ force: true }).then((built) => ({
-    root: built.stagingRoot,
-    engine: path.join(built.stagingRoot, "packages/migration-engine"),
-    identity: built.identity,
-    manifest: built.manifest,
-  }));
+  bundlePromise ??= candidateReleaseRoot(scratch)
+    .then((root) => buildRelease({ root, force: true }))
+    .then((built) => ({
+      root: built.stagingRoot,
+      engine: path.join(built.stagingRoot, "packages/migration-engine"),
+      identity: built.identity,
+      manifest: built.manifest,
+    }));
   return bundlePromise;
 };
 

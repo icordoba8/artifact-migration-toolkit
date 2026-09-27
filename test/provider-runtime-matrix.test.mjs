@@ -18,6 +18,7 @@ import { promisify } from 'node:util';
 import { adapter, digest } from '../providers/install-support.mjs';
 import { ensureRuntime, verifyDownloadedAsset } from '../scripts/runtime-bootstrap.mjs';
 import { buildRelease } from '../scripts/release.mjs';
+import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
 
 const execFileAsync = promisify(execFile);
 const scratch = await mkdtemp(path.join(os.tmpdir(), 'provider runtime matrix '));
@@ -136,7 +137,7 @@ let built;
 /** One staged release, plus a synthetic distinct-identity release for version selection. */
 async function fixtures() {
   if (built) return built;
-  const base = await buildRelease({ force: true });
+  const base = await buildRelease({ root: await candidateReleaseRoot(scratch), force: true });
   const first = await packageRelease('release one', base.stagingRoot, base.identity.version, null);
   const second = await packageRelease('release two', base.stagingRoot, NEXT.version, NEXT);
   built = { first, second };

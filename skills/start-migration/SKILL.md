@@ -282,14 +282,37 @@ artifact-migration-discover <module> --status | --scan | --reopen-discovery
 artifact-migration-discover <module> [--target <t>] [--openspec-proposal-stdin] [--confirm-execution <id>]   # bootstrap
 artifact-migration-discover <module> --refresh --confirm-mismatch
 artifact-migration-discover <module> --reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]
+artifact-migration-discover <module> --rework-slice <id> --confirm-rework
+artifact-migration-discover <module> --reopen-ui <slice[,slice...]>
+artifact-migration-discover <module> --amend-slice <id> --add-file <path> [--add-file <path>...]
 artifact-migration-decision <module> --pending | --approve <stable-id> | --list
 artifact-migration-registry <module> --target <target> [--alias <alias>]
 artifact-migration-upgrade <module> [--confirm-upgrade <id> | --rollback | --recover]
 artifact-migration-validate <module> [--step <step> [--slice <id>] | --complete]
 artifact-migration-advance <module> --step <step> [--slice <id>] [--mode auto|step] [--confirm-advance <id>]
+artifact-migration-toolkit status|adopt|update|rollback --module <module> [--registry <path>]
 ```
 
 Validation is read-only; advance only after it passes.
+
+The three recovery transitions differ: `--rework-slice` returns an *active*
+slice with a recorded `FAIL` to implementation, preserving the failed attempt;
+`--reopen-ui` reopens completed slices for a visible-UI parity audit;
+`--amend-slice` is **add-only** — it adds files to a reopened slice's pinned
+`changedFiles`, requires at least one `--add-file`, and removes nothing. It is
+one of the two legitimate exits from `UNCLAIMED_TARGET_DRIFT`, the other being a
+`TARGET_DRIFT_ACCEPTED` operator decision.
+
+`artifact-migration-toolkit` is the one identity-maintenance executable, and it
+accepts exactly one identity target per invocation: `--module <module>`
+[`--registry <path>`] for a module record, or `--artifact <source>`
+[`--type <type>`] [`--source-root <path>`] [`--target-root <path>`] for an
+artifact record. An identity MISMATCH is reconciled through
+`artifact-migration-toolkit`, never by manually editing persisted migration
+state. `status` is read-only: it writes nothing, on any record, in any state.
+`state.json`, `integrity.json` and `history/history.ndjson` are never
+hand-edited to reconcile toolkit identity. `adopt`, `update` and `rollback`
+advance no checkpoint, so resume the lifecycle with its own command afterwards.
 
 Registry resolution is shared by every helper and generated provider: existing
 migration state, first-setup `--registry`, persisted

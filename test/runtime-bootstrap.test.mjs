@@ -12,6 +12,7 @@ const execFileAsync = promisify(execFile);
 
 import { apiJson, ensureRuntime, resolveRelease, verifyDownloadedAsset } from '../scripts/runtime-bootstrap.mjs';
 import { buildRelease, buildReleaseArchive } from '../scripts/release.mjs';
+import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
 
 const scratch = await mkdtemp(path.join(os.tmpdir(), 'runtime bootstrap '));
 after(() => rm(scratch, { recursive: true, force: true }));
@@ -19,7 +20,7 @@ let fixture;
 
 async function releaseFixture() {
   if (fixture) return fixture;
-  const built = await buildRelease({ force: true });
+  const built = await buildRelease({ root: await candidateReleaseRoot(scratch), force: true });
   const asset = await buildReleaseArchive(built);
   let requests = 0;
   const download = async (resolved, destination) => {

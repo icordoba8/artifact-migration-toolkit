@@ -1308,10 +1308,8 @@ const digestArtifactHashes = (artifactHashes) =>
  * one keeps both the byte length and the last line intact, and the history
  * replay ignores `at` entirely.
  *
- * ponytail: the newest event is not covered until the next transaction pins
- * it, because it is appended after the state write on purpose (that gap is
- * what `recoverPendingAdvance` repairs). Upgrade path: hash-chain each event
- * as it is appended, which subsumes this anchor.
+ * The byte-prefix anchor still stops before the newest append. historyChain's
+ * precommitted headHash covers that event through the journaled transaction.
  */
 const historyAnchorOf = (bytes) => ({
   bytes: bytes.length,
@@ -1325,7 +1323,7 @@ const historyAnchorNow = async (root) => {
   );
 };
 
-const renderIntegrity = (state, history, decisions, autoDecisions) =>
+const renderIntegrity = (state, history, decisions, autoDecisions, historyChain) =>
   `${JSON.stringify(
     {
       revision: state.revision,
@@ -1341,6 +1339,7 @@ const renderIntegrity = (state, history, decisions, autoDecisions) =>
       // a record that never ran under `--mode auto` writes the same bytes it
       // wrote before the AUTO principal existed.
       autoDecisions: autoDecisions ?? undefined,
+      historyChain: historyChain ?? undefined,
     },
     null,
     2,
@@ -1380,13 +1379,16 @@ const autoDecisionsAnchorNow = async (root) => {
  * write and therefore before its own history append -- so a caller cannot
  * accidentally anchor one and forget another.
  */
-const renderIntegrityNow = async (root, state) =>
-  renderIntegrity(
+const renderIntegrityNow = async (root, state, event) => {
+  const historyChain = await prepareHistoryEvent(root, event);
+  return renderIntegrity(
     state,
     await historyAnchorNow(root),
     await decisionsAnchorNow(root),
     await autoDecisionsAnchorNow(root),
+    historyChain,
   );
+};
 
 const readIntegrity = async (root) => {
   const file = path.join(root, INTEGRITY_FILE);
@@ -1531,9 +1533,6 @@ const assertHistoryAppendOnly = async (root, state, anchor) => {
  * current revision. Two of them means a write path bypassed the transaction; a
  * mismatched revision means the tail was appended by something other than the
  * transaction that moved state. Both were undetected.
- *
- * Cheaper and smaller than hash-chaining every event, which is the documented
- * upgrade path and a far larger change than this risk warrants.
  *
  * A trailing fragment a killed process left half-written is not a completed
  * event: `sealTornTail` owns that repair, and asserting over it here would turn
@@ -2706,11 +2705,6 @@ export const readState = async (targetRoot, moduleName) => {
  * around a closed checkpoint. Replaying the history makes every one of those
  * edits contradict a file the engine only ever appends to.
  *
- * ponytail: history is append-only by construction (`O_APPEND`) but it is not
- * cryptographically chained, so an editor with write access to the migration
- * tree can still forge state and history together. Ceiling accepted: that is
- * forging the audit record itself. Upgrade path: hash-chain each event.
- *
  * @param {null | object} [pendingJournal] the advance journal to tolerate an
  *   in-flight transition against; omitted, it is read from disk. Pass `null`
  *   for a strict replay with no tolerance -- what recovery uses to prove it
@@ -2719,11 +2713,11 @@ export const readState = async (targetRoot, moduleName) => {
  *   transition when a recoverable advance journal is present.
  */
 const assertStateGraph = async (root, state, pendingJournal) => {
-  const events = await readHistoryEvents(root);
   const journal =
     pendingJournal === undefined
       ? await readAdvanceJournal(root)
       : pendingJournal;
+  const events = await readHistoryEvents(root, await readIntegrity(root), journal);
   if (events.length === 0) {
     throw new Error(
       "Migration history is missing or empty. history/history.ndjson is the append-only audit record that anchors state.json; restore it before continuing.",
@@ -2870,9 +2864,9 @@ const assertStateGraph = async (root, state, pendingJournal) => {
     // required (only its value moves, which the integrity anchor covers); the
     // prior bytes join the permanent pin set like a rework's.
     //
-    // ponytail: replay only. This engine never appends the event -- porting
-    // `--amend-slice` itself is a separate job; this is what makes a live
-    // record that already carries one readable.
+    // Not replay-only: `amendSliceUnderLock` in this engine appends the event,
+    // so this branch reads back both a live amendment and one already carried
+    // by a record written elsewhere.
     if (event.event === "SLICE_SCOPE_AMENDED") {
       revision += 1;
       for (const relative of event.preserved ?? []) {
@@ -3111,15 +3105,59 @@ const assertStateGraph = async (root, state, pendingJournal) => {
 // concurrent second writer (last rename wins; a racing append can be lost).
 // This appends with a true OS-level append (`O_APPEND`, via the `a` flag),
 // never reading or rewriting existing content, so two concurrent writers
-// cannot silently clobber each other's line. The NDJSON format and event
-// shapes are unchanged.
+// cannot silently clobber each other's line. The NDJSON file remains the one
+// module-history record.
+const HISTORY_HASH_DOMAIN = "artifact-migration-tools/module-history/v1\n";
+const historyDigest = (bytes) =>
+  `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+const keyOrder = (left, right) => {
+  const a = Array.from(left), b = Array.from(right);
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    const diff = a[i].codePointAt(0) - b[i].codePointAt(0);
+    if (diff) return diff;
+  }
+  return a.length - b.length;
+};
+const canonicalHistoryJson = (value) => {
+  if (value === null || typeof value === "string" || typeof value === "boolean" ||
+      (typeof value === "number" && Number.isFinite(value))) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalHistoryJson).join(",")}]`;
+  if (isPlainObject(value)) return `{${Object.keys(value).sort(keyOrder)
+    .map((key) => `${JSON.stringify(key)}:${canonicalHistoryJson(value[key])}`).join(",")}}`;
+  throw new Error("Migration history event contains a non-JSON value; nothing was written.");
+};
+const hashHistoryEvent = (event) => {
+  const { hash, ...payload } = event;
+  return historyDigest(`${HISTORY_HASH_DOMAIN}${canonicalHistoryJson(payload)}`);
+};
+
+const prepareHistoryEvent = async (root, event) => {
+  if (!isPlainObject(event) || Object.hasOwn(event, "hash")) {
+    throw new Error("Migration history event is already chained or invalid; nothing was written.");
+  }
+  const integrity = await readIntegrity(root);
+  const existing = await readHistoryEvents(root, integrity);
+  const bytes = await readFile(path.join(root, initialArtifacts.history));
+  const legacyPrefixSha256 = integrity?.historyChain
+    ? integrity.historyChain.legacyPrefixSha256 : historyDigest(bytes);
+  const previousHash = existing.at(-1)?.hash ?? legacyPrefixSha256;
+  Object.assign(event, { at: event.at ?? now(), seq: existing.length + 1, previousHash });
+  event.hash = hashHistoryEvent(event);
+  return {
+    version: 1,
+    startSeq: integrity?.historyChain?.startSeq ?? event.seq,
+    legacyPrefixSha256,
+    headHash: event.hash,
+  };
+};
+
 const appendHistory = async (targetRoot, root, event) => {
   const historyPath = path.join(root, initialArtifacts.history);
   const secureHistoryPath = await assertSecurePath(targetRoot, historyPath);
   await mkdir(path.dirname(secureHistoryPath), { recursive: true });
   await appendFile(
     secureHistoryPath,
-    `${JSON.stringify({ at: now(), ...event })}\n`,
+    `${JSON.stringify(event.hash ? event : { at: now(), ...event })}\n`,
     { flag: "a", mode: 0o600 },
   );
 };
@@ -3142,7 +3180,8 @@ const assertHistoryAppendable = async (targetRoot, root) => {
  * Seals a trailing line a killed process left half-written, so the next append
  * starts on an event boundary.
  *
- * `readHistoryEvents` skips an unparseable tail, but `O_APPEND` does not: the
+ * A pending journal can tolerate an unparseable final fragment, but `O_APPEND`
+ * does not: the
  * replacement event would be spliced onto the fragment, and the combined line
  * stays unparseable and is ignored forever -- while recovery deletes the only
  * journal that could have retried. Two shapes are possible, and they are not
@@ -3189,13 +3228,16 @@ const sealHistoryTail = async (targetRoot, root) => {
 /** Appends `event` unless the recorded revision is already present. */
 const appendHistoryOnce = async (targetRoot, root, event) => {
   await sealHistoryTail(targetRoot, root);
-  const existing = await readHistoryEvents(root);
+  const existing = await readHistoryEvents(root, await readIntegrity(root), await readAdvanceJournal(root));
   if (
     existing.some(
       (recorded) =>
         recorded.event === event.event && recorded.revision === event.revision,
     )
   ) {
+    if (event.hash && existing.at(-1)?.hash !== event.hash) {
+      throw new Error("Migration history retry disagrees with the journaled event hash; restore the record before continuing.");
+    }
     return false;
   }
   await appendHistory(targetRoot, root, event);
@@ -3303,19 +3345,62 @@ const recoverPendingAdvance = async (targetRoot, root, statePath) => {
   );
 };
 
-const readHistoryEvents = async (root) => {
+const readHistoryEvents = async (root, integrity, pendingJournal) => {
   const historyPath = path.join(root, initialArtifacts.history);
   if (!(await fileExists(historyPath))) return [];
-  const content = await readFile(historyPath, "utf8");
+  const content = await readFile(historyPath);
   const events = [];
-  for (const line of content.split("\n")) {
-    if (!line.trim()) continue;
+  const ends = [];
+  let start = 0;
+  for (let end = content.indexOf(0x0a); end !== -1; end = content.indexOf(0x0a, start)) {
+    const line = content.subarray(start, end).toString("utf8");
+    if (!line.trim()) throw new Error(`Migration history line ${events.length + 1} is blank; restore it before continuing.`);
     try {
-      events.push(JSON.parse(line));
+      const event = JSON.parse(line);
+      if (!isPlainObject(event)) throw new Error("not an event object");
+      events.push(event);
     } catch {
-      // A partially written trailing line (e.g. a process killed mid-append)
-      // is not a completed event; ignore it rather than fail history reads.
+      throw new Error(`Migration history line ${events.length + 1} is malformed; restore it before continuing.`);
     }
+    start = end + 1;
+    ends.push(start);
+  }
+  if (start < content.length &&
+      (!pendingJournal || pendingJournal.corrupt || !isPlainObject(pendingJournal.event))) {
+    throw new Error(`Migration history line ${events.length + 1} is unterminated; recover the pending transaction or restore it.`);
+  }
+  const anchor = integrity === undefined ? (await readIntegrity(root))?.historyChain : integrity?.historyChain;
+  if (anchor) {
+    const digestShape = /^sha256:[0-9a-f]{64}$/;
+    if (anchor.version !== 1 || !Number.isInteger(anchor.startSeq) || anchor.startSeq < 1 ||
+        anchor.startSeq > events.length + 1 || !digestShape.test(anchor.headHash) ||
+        (anchor.startSeq === 1 ? anchor.legacyPrefixSha256 !== null :
+          !digestShape.test(anchor.legacyPrefixSha256))) {
+      throw new Error("Migration integrity.json has an invalid historyChain boundary; restore it before continuing.");
+    }
+    const prefix = content.subarray(0, ends[anchor.startSeq - 2] ?? 0);
+    if (anchor.startSeq > 1 && historyDigest(prefix) !== anchor.legacyPrefixSha256) {
+      throw new Error("Migration history legacy prefix differs from integrity.json; restore it before continuing.");
+    }
+    let previousHash = anchor.startSeq === 1 ? null : anchor.legacyPrefixSha256;
+    for (let i = anchor.startSeq - 1; i < events.length; i += 1) {
+      const event = events[i];
+      if (!isPlainObject(event) || event.seq !== i + 1 || event.previousHash !== previousHash ||
+          !digestShape.test(event.hash) || hashHistoryEvent(event) !== event.hash) {
+        throw new Error(`Migration history line ${i + 1} has an invalid hash, seq, or previousHash; restore it before continuing.`);
+      }
+      previousHash = event.hash;
+    }
+    if (previousHash !== anchor.headHash &&
+        !(pendingJournal?.event?.hash === anchor.headHash &&
+          pendingJournal.event.seq === events.length + 1 &&
+          pendingJournal.event.previousHash === previousHash &&
+          hashHistoryEvent(pendingJournal.event) === anchor.headHash)) {
+      throw new Error("Migration history headHash disagrees with integrity.json; recover the pending journal or restore the record.");
+    }
+  } else if (events.some((event) => Object.hasOwn(event, "hash") ||
+      Object.hasOwn(event, "previousHash") || Object.hasOwn(event, "seq"))) {
+    throw new Error("Migration history has chained events without an integrity.json historyChain boundary.");
   }
   return events;
 };
@@ -9109,7 +9194,16 @@ const assertNoUnclaimedTargetDrift = async (root, state, roots, slices) => {
       .map((finding) =>
         finding.reason ? `${finding.path} (${finding.reason})` : finding.path,
       )
-      .join(", ")}. Claim each file in the slice it belongs to, or record a TARGET_DRIFT_ACCEPTED operator decision for it. COMPLETE must mean every byte this migration changed is accounted for.`,
+      .join(
+        ", ",
+      )}. Two exits, both legitimate: claim each file in the slice it belongs to with '${engineCommand(
+      "cli/discover-module.mjs",
+      "<module>",
+      "--amend-slice",
+      "<slice>",
+      "--add-file",
+      "<path>",
+    )}' -- add-only, at least one --add-file, on a reopened slice -- or record a TARGET_DRIFT_ACCEPTED operator decision for it. COMPLETE must mean every byte this migration changed is accounted for.`,
   );
 };
 
@@ -9558,11 +9652,8 @@ export const previewMigrationExecution = async ({
   if (designSourceExplicit({ designSource, figma })) {
     assertDesignSourceUnchanged(state, design);
   }
-  // Under `auto` the principal that would type `--confirm-mismatch` is the one
-  // running: the mismatch it would be confirming is the revision pair the
-  // engine read itself, so retyping it proves nothing the record does not
-  // already hold. `step` keeps the refusal exactly.
-  if (refresh && !confirmMismatch && !isAutoAuthority(mode)) {
+  // Refresh requires an explicit operator decision in every mode.
+  if (refresh && !confirmMismatch) {
     throw new Error(
       "Refresh requires explicit mismatch confirmation. Use --refresh --confirm-mismatch only after confirming that the migration no longer matches the legacy behavior.",
     );
@@ -9651,18 +9742,7 @@ export const previewMigrationExecution = async ({
   }
   const legacyRevisionChanged =
     state.legacyRevision.revision !== currentLegacyRevision.revision;
-  const autoRefresh = autoRefreshesLegacyDrift({
-    mode,
-    drifted: legacyRevisionChanged,
-    refresh,
-    reopenDiscovery,
-    reopenUi,
-    reopenComplete,
-    reworkSlice,
-    amendSlice,
-    adoptVisualContract,
-  });
-  const refreshing = refresh || autoRefresh;
+  const refreshing = refresh;
   const blockers = requirementsBlocker ? [requirementsBlocker] : [];
   if (!requirementsBlocker) {
     try {
@@ -9919,9 +9999,7 @@ export const previewMigrationExecution = async ({
 
   if (refreshing) {
     action = "Refresh legacy evidence and reopen DISCOVER_LEGACY";
-    reason = autoRefresh
-      ? `The AUTO principal resolved repository evidence drift under --mode auto; the recorded revision is '${state.legacyRevision.revision}' and the current revision is '${currentLegacyRevision.revision}'.`
-      : `The user confirmed a legacy mismatch; the recorded revision is '${state.legacyRevision.revision}' and the current revision is '${currentLegacyRevision.revision}'.`;
+    reason = `The user confirmed a legacy mismatch; the recorded revision is '${state.legacyRevision.revision}' and the current revision is '${currentLegacyRevision.revision}'.`;
     artifacts = [
       "steps/01-resolve.md",
       "state.json",
@@ -10264,7 +10342,7 @@ export const repairSliceState = async (targetRoot, moduleName) =>
     const integrityBefore = (await fileExists(integrityPath))
       ? await readFile(integrityPath, "utf8")
       : null;
-    const nextIntegrity = await renderIntegrityNow(root, repaired);
+    const nextIntegrity = await renderIntegrityNow(root, repaired, event);
     await assertHistoryAppendable(targetRoot, root);
     const journalFile = path.join(root, ADVANCE_JOURNAL);
     await writeJournalAtomic(journalFile, {
@@ -10741,7 +10819,7 @@ const reopenDiscoveryUnderLock = async ({
   const integrityBefore = (await fileExists(integrityPath))
     ? await readFile(integrityPath, "utf8")
     : null;
-  const nextIntegrity = await renderIntegrityNow(root, reopened);
+  const nextIntegrity = await renderIntegrityNow(root, reopened, event);
   await assertHistoryAppendable(registryData.targetRoot, root);
   await writeJournalAtomic(path.join(root, ADVANCE_JOURNAL), {
     fromRevision: state.revision,
@@ -10924,7 +11002,7 @@ const reworkSliceUnderLock = async ({
 
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");
-  const nextIntegrity = await renderIntegrityNow(root, reworked);
+  const nextIntegrity = await renderIntegrityNow(root, reworked, event);
   const journalFile = path.join(root, ADVANCE_JOURNAL);
   await assertHistoryAppendable(registryData.targetRoot, root);
   await writeJournalAtomic(journalFile, {
@@ -11027,7 +11105,7 @@ const amendSliceUnderLock = async ({
   };
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");
-  const nextIntegrity = await renderIntegrityNow(root, amendedState);
+  const nextIntegrity = await renderIntegrityNow(root, amendedState, event);
   const journalFile = path.join(root, ADVANCE_JOURNAL);
   await assertHistoryAppendable(registryData.targetRoot, root);
   await writeJournalAtomic(journalFile, {
@@ -11345,7 +11423,7 @@ export const changeModuleToolkitIdentity = async ({
     };
     const integrityPath = path.join(root, INTEGRITY_FILE);
     const integrityBefore = await readFile(integrityPath, "utf8");
-    const nextIntegrity = await renderIntegrityNow(root, stamped);
+    const nextIntegrity = await renderIntegrityNow(root, stamped, event);
     const journalFile = path.join(root, ADVANCE_JOURNAL);
     await assertHistoryAppendable(registryData.targetRoot, root);
     await writeJournalAtomic(journalFile, {
@@ -11499,7 +11577,7 @@ const adoptVisualContractUnderLock = async ({
   };
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");
-  const nextIntegrity = await renderIntegrityNow(root, adopted);
+  const nextIntegrity = await renderIntegrityNow(root, adopted, event);
   const journalFile = path.join(root, ADVANCE_JOURNAL);
   await assertHistoryAppendable(registryData.targetRoot, root);
   await writeJournalAtomic(journalFile, {
@@ -11937,7 +12015,7 @@ export const adoptUiObservations = async ({
       : domainEvent;
     const integrityPath = path.join(root, INTEGRITY_FILE);
     const integrityBefore = await readFile(integrityPath, "utf8");
-    const nextIntegrity = await renderIntegrityNow(root, adopted);
+    const nextIntegrity = await renderIntegrityNow(root, adopted, event);
     const journalFile = path.join(root, ADVANCE_JOURNAL);
     await assertHistoryAppendable(registryData.targetRoot, root);
     await writeJournalAtomic(journalFile, {
@@ -12270,7 +12348,7 @@ export const commitNoOpFormatUpgrade = async ({
     const integrityBefore = (await fileExists(integrityPath))
       ? await readFile(integrityPath, "utf8")
       : null;
-    const nextIntegrity = await renderIntegrityNow(root, upgraded);
+    const nextIntegrity = await renderIntegrityNow(root, upgraded, event);
     await assertHistoryAppendable(registryData.targetRoot, root);
     const journalFile = path.join(root, ADVANCE_JOURNAL);
     await writeJournalAtomic(journalFile, {
@@ -12583,7 +12661,7 @@ const reopenUiUnderLock = async ({
   };
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");
-  const nextIntegrity = await renderIntegrityNow(root, reopened);
+  const nextIntegrity = await renderIntegrityNow(root, reopened, event);
   const journalFile = path.join(root, ADVANCE_JOURNAL);
   await assertHistoryAppendable(registryData.targetRoot, root);
   await writeJournalAtomic(journalFile, {
@@ -12662,44 +12740,6 @@ const reopenUiUnderLock = async ({
  * anyway are re-proven against the new revision. And it never edits the
  * target, so FINALIZE re-runs the unclaimed-drift refusal unchanged.
  * ------------------------------------------------------------------ */
-
-/**
- * `--mode auto` and the legacy repository moved underneath a live migration.
- *
- * The recorded revision and the current one are both facts the engine just
- * read, and the remedy is one deterministic transition it already implements:
- * reopen DISCOVER_LEGACY against the new revision and re-derive. Nothing is
- * lost that git does not still hold, every pin the refresh releases is
- * re-proven afterwards, and the alternative -- stopping to ask a human to
- * retype `--refresh --confirm-mismatch` -- adds no judgement, only a stop.
- *
- * Narrow on purpose. It applies only when the invocation asked for no other
- * transition: a reopen, a rework, an amendment or an adoption each have their
- * own drift rule, and an invocation that named one of them is not asking for a
- * refresh. `step` is untouched, and the refusal it gets is unchanged.
- */
-const autoRefreshesLegacyDrift = ({
-  mode,
-  drifted,
-  refresh,
-  reopenDiscovery,
-  reopenUi,
-  reopenComplete,
-  reworkSlice,
-  amendSlice,
-  adoptVisualContract,
-}) =>
-  Boolean(
-    drifted &&
-      !refresh &&
-      isAutoAuthority(mode) &&
-      !reopenDiscovery &&
-      (reopenUi?.length ?? 0) === 0 &&
-      (reopenComplete?.length ?? 0) === 0 &&
-      !reworkSlice &&
-      !amendSlice &&
-      !adoptVisualContract,
-  );
 
 /**
  * One definition site for what a reopen is allowed to do, read by the preview
@@ -12963,7 +13003,7 @@ const reopenCompleteUnderLock = async ({
 
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");
-  const nextIntegrity = await renderIntegrityNow(root, reopened);
+  const nextIntegrity = await renderIntegrityNow(root, reopened, event);
   const journalFile = path.join(root, ADVANCE_JOURNAL);
   await assertHistoryAppendable(registryData.targetRoot, root);
   await writeJournalAtomic(journalFile, {
@@ -13087,25 +13127,14 @@ const bootstrapUnderLock = async ({
     }
     // The mirror of the preview's rule, re-derived here from fresh reads rather
     // than carried across: the preview is advice, this is the gate.
-    if (refresh && !confirmMismatch && !isAutoAuthority(mode)) {
+    if (refresh && !confirmMismatch) {
       throw new Error(
         "Refresh requires explicit mismatch confirmation. Use --refresh --confirm-mismatch only after confirming that the migration no longer matches the legacy behavior.",
       );
     }
     await assertCurrentOpenSpecAuthority(registryData.targetRoot, state);
     const legacyRevision = await gitRevision(registryData.legacyRoot);
-    const autoRefresh = autoRefreshesLegacyDrift({
-      mode,
-      drifted: state.legacyRevision.revision !== legacyRevision.revision,
-      refresh,
-      reopenDiscovery,
-      reopenUi,
-      reopenComplete,
-      reworkSlice,
-      amendSlice,
-      adoptVisualContract: Boolean(adoption),
-    });
-    const refreshing = refresh || autoRefresh;
+    const refreshing = refresh;
     if (
       state.legacyRevision.revision !== legacyRevision.revision &&
       !refreshing &&
@@ -13301,16 +13330,14 @@ const bootstrapUnderLock = async ({
       toLegacyRevision: legacyRevision,
       invalidatedFrom: "DISCOVER_LEGACY",
       revision: refreshed.revision,
-      // Who decided this refresh happens, in the permanent audit record. An
-      // operator-typed `--refresh --confirm-mismatch` and an AUTO resolution of
-      // the same drift are different acts and the history says which.
-      principal: autoRefresh ? "AUTO" : "OPERATOR",
+      // Explicit --refresh --confirm-mismatch is operator authority in either mode.
+      principal: "OPERATOR",
     };
     const integrityPath = path.join(root, INTEGRITY_FILE);
     const integrityBefore = (await fileExists(integrityPath))
       ? await readFile(integrityPath, "utf8")
       : null;
-    const nextIntegrity = await renderIntegrityNow(root, refreshed);
+    const nextIntegrity = await renderIntegrityNow(root, refreshed, refreshEvent);
     await assertHistoryAppendable(registryData.targetRoot, root);
     await writeJournalAtomic(path.join(root, ADVANCE_JOURNAL), {
       fromRevision: state.revision,
@@ -13469,14 +13496,18 @@ const bootstrapUnderLock = async ({
     createdAt,
     updatedAt: createdAt,
   };
-  const createdHistory = `${JSON.stringify({
+  const createdEvent = {
     at: createdAt,
     event: "CREATED",
     step: "RESOLVE",
     nextStep: "DISCOVER_LEGACY",
     requirementsAuthority,
     ...(activeToolkitIdentity() ? { toolkitIdentity: activeToolkitIdentity() } : {}),
-  })}\n`;
+    seq: 1,
+    previousHash: null,
+  };
+  createdEvent.hash = hashHistoryEvent(createdEvent);
+  const createdHistory = `${JSON.stringify(createdEvent)}\n`;
   const files = {
     [STEP_FILES.RESOLVE]: resolveStep,
     ...stepTemplates(design),
@@ -13499,6 +13530,8 @@ const bootstrapUnderLock = async ({
       // A brand-new record has no decisions yet, and the empty-file anchor is
       // what `decisionsAnchorNow` would compute for it.
       historyAnchorOf(Buffer.alloc(0)),
+      undefined,
+      { version: 1, startSeq: 1, legacyPrefixSha256: null, headHash: createdEvent.hash },
     ),
     [initialArtifacts.history]: createdHistory,
   };
@@ -14452,7 +14485,7 @@ const advanceUnderLock = async ({
   const integrityBefore = (await fileExists(integrityPath))
     ? await readFile(integrityPath, "utf8")
     : null;
-  const nextIntegrity = await renderIntegrityNow(context.root, nextState);
+  const nextIntegrity = await renderIntegrityNow(context.root, nextState, event);
   await assertHistoryAppendable(registryData.targetRoot, context.root);
   const journalFile = path.join(context.root, ADVANCE_JOURNAL);
   // The four points a crash can land between. `hooks.afterWrite` is the same

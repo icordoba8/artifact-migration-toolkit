@@ -3,7 +3,7 @@
 /**
  * Release identity and the staged, checksum-verifiable release bundle.
  *
- * Three commands, one hash:
+ * Four commands, one hash:
  *
  *   --check   releasability gate: clean protected tree, versions agree, the
  *             generated provider trees are current. Writes nothing.
@@ -11,6 +11,7 @@
  *             `build-identity.json`, render the provider manifests' release
  *             placeholders, and write `release-manifest.json` + `SHA256SUMS`.
  *   --verify  re-hash a staged bundle against its own manifest.
+ *   --record  establish a version only from its verified published manifest.
  *
  * The content hash is explicitly acyclic. Its inputs are the canonical skills,
  * the engine payload, the lockfile and the *committed* provider payload with
@@ -33,10 +34,12 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { resolveRelease, downloadAsset, verifyDownloadedAsset } from "./runtime-bootstrap.mjs";
 
 import {
   TOOLKIT_CONTENT_HASH_PLACEHOLDER,
@@ -137,6 +140,83 @@ export const contentHashOf = async (root = repositoryRoot) => {
 
 const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));
 
+const RELEASED_VERSIONS = "released-versions.json";
+const exactVersion = (value) => typeof value === "string" && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
+const validContentHash = (value) => typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+
+const releasedVersions = async (root) => {
+  const rows = await readJson(path.join(root, RELEASED_VERSIONS)).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const versions = new Set();
+  if (!Array.isArray(rows) || rows.some((row) => {
+    if (!row || Object.keys(row).sort().join(",") !== "contentHash,version" ||
+        !exactVersion(row.version) || !validContentHash(row.contentHash) || versions.has(row.version)) return true;
+    versions.add(row.version);
+    return false;
+  })) throw new Error(`Invalid ${RELEASED_VERSIONS}`);
+  return rows;
+};
+
+/** Record publication evidence, never a local candidate's identity. */
+export const recordRelease = async (version, {
+  root = repositoryRoot,
+  resolve = resolveRelease,
+  download = downloadAsset,
+} = {}) => {
+  if (!exactVersion(version)) throw new Error("release:record requires one exact X.Y.Z version");
+  const resolved = await resolve(version);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "amt-release-record-"));
+  try {
+    if (resolved.version !== version || resolved.asset.name !== `${TOOLKIT_NAME}-v${version}.tar.gz`) {
+      throw new Error("Resolved release does not match the requested version/asset");
+    }
+    const archive = path.join(scratch, resolved.asset.name);
+    await download(resolved, archive);
+    await verifyDownloadedAsset(archive, resolved.asset.digest);
+
+    const tarOptions = { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 };
+    const { stdout: listing } = await execFileAsync("tar", ["-tzf", archive], tarOptions);
+    const entries = listing.trimEnd().split(/\r?\n/);
+    if (entries.some((entry) => {
+      const name = entry.replace(/\/$/, "");
+      return !name || path.isAbsolute(name) || /^[A-Za-z]:/.test(name) || name.includes("\\") ||
+        name.split("/").some((part) => !part || part === "." || part === "..");
+    })) throw new Error("Unsafe or empty release archive");
+    const member = `${TOOLKIT_NAME}-${version}/release-manifest.json`;
+    if (entries.filter((entry) => entry === member).length !== 1) {
+      throw new Error("Release archive must contain exactly one release-manifest.json member");
+    }
+    const { stdout: details } = await execFileAsync("tar", ["-tvzf", archive, "--", member], tarOptions);
+    const types = details.trimEnd().split(/\r?\n/);
+    if (types.length !== 1 || !types[0].startsWith("-") || !types[0].endsWith(` ${member}`)) {
+      throw new Error("Release manifest must be one regular file");
+    }
+    const { stdout } = await execFileAsync("tar", ["-xOzf", archive, "--", member], tarOptions);
+    const { toolkit } = JSON.parse(stdout);
+    if (toolkit?.version !== version || toolkit?.name !== TOOLKIT_NAME ||
+        toolkit?.commit !== resolved.commit || !validContentHash(toolkit?.contentHash)) {
+      throw new Error("Published manifest toolkit version, name, commit or contentHash is invalid");
+    }
+    const rows = await releasedVersions(root);
+    const established = rows.find((row) => row.version === version);
+    if (established) {
+      if (established.contentHash !== toolkit.contentHash) {
+        throw new Error(`Version ${version} is already established with a different contentHash; registry unchanged`);
+      }
+      return established;
+    }
+    const row = { version, contentHash: toolkit.contentHash };
+    rows.push(row);
+    rows.sort((a, b) => a.version.localeCompare(b.version, "en", { numeric: true }));
+    await writeFile(path.join(root, RELEASED_VERSIONS), `${JSON.stringify(rows, null, 2)}\n`);
+    return row;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+};
+
 export const declaredVersions = async (root = repositoryRoot) => ({
   root: (await readJson(path.join(root, "package.json"))).version,
   engine: (await readJson(path.join(root, "packages/migration-engine/package.json"))).version,
@@ -189,7 +269,12 @@ export const releaseCheck = async (root = repositoryRoot) => {
   // reports it, and re-asserted (throwing) at manifest time.
   await engineFormatUpgrades(root).catch((error) => blockers.push(error.message));
   const { contentHash } = await contentHashOf(root);
-  return { version: versions.root, commit, contentHash, blockers };
+  const established = (await releasedVersions(root)).find((row) => row.version === versions.root);
+  const versionConflict = established && established.contentHash !== contentHash
+    ? `Version ${versions.root} is already established with contentHash ${established.contentHash}. This build's payload bytes hash to ${contentHash} and cannot claim it — bump the version.`
+    : null;
+  if (versionConflict) blockers.push(versionConflict);
+  return { version: versions.root, commit, contentHash, blockers, versionConflict };
 };
 
 const renderIdentityPlaceholders = (content, identity) =>
@@ -200,7 +285,7 @@ const renderIdentityPlaceholders = (content, identity) =>
 
 export const buildRelease = async ({ root = repositoryRoot, force = false } = {}) => {
   const check = await releaseCheck(root);
-  if (check.blockers.length > 0 && !force) {
+  if (check.versionConflict || (check.blockers.length > 0 && !force)) {
     throw new Error(`Release is blocked:\n- ${check.blockers.join("\n- ")}`);
   }
   const identity = {
@@ -412,6 +497,11 @@ export const verifyRelease = async (stagingRoot) => {
 };
 
 const main = async (argv) => {
+  if (argv[0] === "--record") {
+    if (argv.length !== 2) throw new Error("Usage: release.mjs --record <version>");
+    process.stdout.write(`${JSON.stringify(await recordRelease(argv[1]), null, 2)}\n`);
+    return;
+  }
   if (argv.includes("--check")) {
     const check = await releaseCheck();
     process.stdout.write(`${JSON.stringify(check, null, 2)}\n`);
@@ -434,7 +524,7 @@ const main = async (argv) => {
     );
     return;
   }
-  throw new Error("Usage: release.mjs (--check | --build [--allow-dirty] | --verify <directory>)");
+  throw new Error("Usage: release.mjs (--check | --build [--allow-dirty] | --verify <directory> | --record <version>)");
 };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -629,9 +629,9 @@ for (const [label, prepare, expected] of [
     "CONTINUE",
   ],
   [
-    // A committed legacy change moves the pinned revision. Under `auto` that is
-    // repository evidence drift with one deterministic remedy, and the engine
-    // takes it as the AUTO principal -- on both transports, identically.
+    // A committed legacy change moves the pinned revision. AUTO blocks on that
+    // drift until an operator explicitly confirms the mismatch; both transports
+    // must report the same refusal without refreshing the record.
     "legacy revision drift",
     async (fixture) => {
       await initialize(fixture);
@@ -655,7 +655,7 @@ for (const [label, prepare, expected] of [
         { cwd: fixture.root },
       );
     },
-    "CONTINUE",
+    "BLOCKED",
   ],
 ]) {
   test(`migration_run and the CLI agree on ${label}`, async () => {
@@ -664,6 +664,9 @@ for (const [label, prepare, expected] of [
     try {
       await prepare(viaMcp);
       await prepare(viaCli);
+      const before = label === "legacy revision drift"
+        ? [await snapshot(viaMcp.migrationRoot), await snapshot(viaCli.migrationRoot)]
+        : null;
 
       const mcp = structured(
         await only(viaMcp, call(1, "migration_run", { module: "auth" })),
@@ -681,6 +684,12 @@ for (const [label, prepare, expected] of [
         (await state(viaMcp)).revision,
         (await state(viaCli)).revision,
       );
+      if (before) {
+        assert.match(mcp.log, /--refresh --confirm-mismatch/);
+        assert.match(cli.log, /--refresh --confirm-mismatch/);
+        assert.deepEqual(await snapshot(viaMcp.migrationRoot), before[0]);
+        assert.deepEqual(await snapshot(viaCli.migrationRoot), before[1]);
+      }
     } finally {
       await viaMcp.cleanup();
       await viaCli.cleanup();

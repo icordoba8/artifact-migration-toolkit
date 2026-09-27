@@ -96,6 +96,26 @@ trusted terminal or host elicitation — never by editing authored JSON.
 
 Do not hand-edit `state.json`, `integrity.json`, or `history/history.ndjson`.
 
+### Toolkit identity maintenance
+
+The record's `toolkitIdentity` is maintained only through the toolkit's own
+operator executable. On this axis the target is the artifact:
+
+```bash
+artifact-migration-toolkit status|adopt|update|rollback \
+  --artifact <source> [--type <type>] [--source-root <path>] [--target-root <path>]
+```
+
+Exactly one identity target is accepted per invocation: `--artifact <source>`
+here, or `--module <module>` [`--registry <path>`] for a module record.
+
+An identity MISMATCH is reconciled through `artifact-migration-toolkit`, never
+by manually editing persisted migration state. `status` is read-only: it writes
+nothing, on any record, in any state. `state.json`, `integrity.json` and
+`history/history.ndjson` are never hand-edited to reconcile toolkit identity.
+`adopt`, `update` and `rollback` advance no checkpoint — resume the lifecycle
+with its own command afterwards.
+
 ## Responsibility boundary
 
 This engine owns exactly four things: its own lifecycle, its own inventories,

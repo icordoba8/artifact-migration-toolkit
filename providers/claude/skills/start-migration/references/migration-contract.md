@@ -1077,10 +1077,42 @@ difference with no explicit classification never reaches `FINALIZE`.
 a known legacy defect is never reproduced for visual similarity — and both stay
 traceable through the pinned inventory.
 
+### Returning an active slice to implementation
+
+A slice whose verification recorded `FAIL` never advances. It returns to
+implementation with:
+
+```bash
+artifact-migration-discover <module> --rework-slice <id> --confirm-rework
+```
+
+The failed attempt's bytes are preserved into the permanent pin set before
+anything is rewritten, and the rework counter moves. `FINALIZE` classifies files
+under a slice with an active rework as `AUTHORIZED_REWORK`, not drift.
+
+### Adding files to a reopened slice's scope
+
+```bash
+artifact-migration-discover <module> --amend-slice <id> --add-file <path> [--add-file <path>...]
+```
+
+`--amend-slice` is **add-only**: it adds paths to a reopened slice's pinned
+`changedFiles` and removes nothing. At least one `--add-file` is required. In one
+journalled transaction it preserves the prior slice-record bytes, writes the
+amended record, re-pins both, and appends `SLICE_SCOPE_AMENDED`. No `FAIL` is
+recorded, no rework attempt is opened, and no step, slice, or plan moves;
+evidence freshness drops to `STALE` so the slice's Playwright TARGET UI evidence
+must be recaptured against the amended implementation. Under `--mode step` the
+amendment is operator-authorized through an operation sequence, and only that
+authorization can carry an `authorizedBy` into the event.
+
+It is one of the two legitimate exits from `UNCLAIMED_TARGET_DRIFT`.
+
 ### Reopening a `COMPLETE` migration on post-finalization evidence
 
-`--reopen-ui` covers a visible-UI parity audit and `--rework-slice` covers an
-*active* slice with a recorded `FAIL`. Neither covers authoritative evidence that
+`--reopen-ui` covers a visible-UI parity audit, `--rework-slice` covers an
+*active* slice with a recorded `FAIL`, and `--amend-slice` covers a reopened
+slice whose scope was too small. None covers authoritative evidence that
 arrives **after** `FINALIZE` and proves part of the finalized contract wrong. For
 that, and only that:
 
@@ -2068,7 +2100,12 @@ one of:
 | Accepted by a ledger-backed operator decision bound to its bytes | `OPERATOR_ACCEPTED` |
 | Anything else | `UNCLAIMED_TARGET_DRIFT` — blocks `FINALIZE` |
 
-The acceptance is a `TARGET_DRIFT_ACCEPTED` operator decision recorded by
+The refusal names both legitimate exits. The first is to claim the file in the
+slice it belongs to, with
+`artifact-migration-discover <module> --amend-slice <slice> --add-file <path>` on
+a reopened slice — add-only, at least one `--add-file`.
+
+The second is acceptance: a `TARGET_DRIFT_ACCEPTED` operator decision recorded by
 `record-decision.mjs` under the same challenge phrase as every other approval —
 never a CLI flag. It binds to the path's SHA-256, so editing the file after
 acceptance invalidates the decision and re-blocks.

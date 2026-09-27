@@ -923,6 +923,77 @@ test("every canonical file reaches all four provider trees, and only SKILL.md di
   assert.ok(compared > 20, `expected a real tree, compared ${compared} files`);
 });
 
+test("every generated skill copy carries the toolkit-identity operator surface and its no-hand-edit rule", async () => {
+  // Normalized because the canonical documents wrap these sentences at
+  // different columns; the rule is the text, not the line breaks.
+  const flatten = (text) => text.replace(/\s+/g, " ");
+  const required = [
+    "artifact-migration-toolkit status|adopt|update|rollback",
+    "An identity MISMATCH is reconciled through `artifact-migration-toolkit`, never by manually editing persisted migration state.",
+    "`status` is read-only",
+    "`state.json`, `integrity.json` and `history/history.ndjson` are never hand-edited to reconcile toolkit identity.",
+  ];
+
+  for (const skill of await canonicalSkillNames(repositoryRoot)) {
+    for (const provider of PROVIDERS) {
+      const relative = `providers/${provider}/skills/${skill}/SKILL.md`;
+      const generated = flatten(await readText(repositoryRoot, relative));
+      for (const rule of required) {
+        assert.ok(
+          generated.includes(flatten(rule)),
+          `${relative} must document: ${rule}`,
+        );
+      }
+      for (const verb of ["status", "adopt", "update", "rollback"]) {
+        assert.ok(
+          generated.includes(`artifact-migration-toolkit`) &&
+            generated.includes(verb),
+          `${relative} must document the '${verb}' identity command`,
+        );
+      }
+    }
+  }
+});
+
+test("every generated start-migration copy carries the module recovery transitions", async () => {
+  // F-05. These transitions are executable in production but were absent from
+  // the operator surface, so the only discoverable exit from a recoverable
+  // refusal was an operator decision.
+  const flatten = (text) => text.replace(/\s+/g, " ");
+  const surfaces = {
+    "SKILL.md": [
+      "artifact-migration-discover <module> --rework-slice <id> --confirm-rework",
+      "artifact-migration-discover <module> --reopen-ui <slice[,slice...]>",
+      "artifact-migration-discover <module> --amend-slice <id> --add-file <path> [--add-file <path>...]",
+      "`--amend-slice` is **add-only**",
+      "requires at least one `--add-file`",
+      "one of the two legitimate exits from `UNCLAIMED_TARGET_DRIFT`",
+    ],
+    "references/migration-contract.md": [
+      "artifact-migration-discover <module> --rework-slice <id> --confirm-rework",
+      "artifact-migration-discover <module> --amend-slice <id> --add-file <path> [--add-file <path>...]",
+      "`--amend-slice` is **add-only**",
+      "At least one `--add-file` is required.",
+      "appends `SLICE_SCOPE_AMENDED`",
+      "The refusal names both legitimate exits.",
+      "`TARGET_DRIFT_ACCEPTED` operator decision",
+    ],
+  };
+
+  for (const provider of PROVIDERS) {
+    for (const [document, required] of Object.entries(surfaces)) {
+      const relative = `providers/${provider}/skills/start-migration/${document}`;
+      const generated = flatten(await readText(repositoryRoot, relative));
+      for (const rule of required) {
+        assert.ok(
+          generated.includes(flatten(rule)),
+          `${relative} must document: ${rule}`,
+        );
+      }
+    }
+  }
+});
+
 test("every provider entry point names its skill and carries no workflow logic", async () => {
   const entryPoints = {
     claude: (skill) => `providers/claude/skills/${skill}/SKILL.md`,

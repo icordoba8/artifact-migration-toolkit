@@ -30,7 +30,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -51,7 +51,7 @@ import {
   WORKFLOW_VERSION,
 } from "../../src/resumable-migration.mjs";
 import { ARTIFACT_FORMAT_VERSION } from "../../src/artifact/artifact-migration.mjs";
-import { buildRelease, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
+import { buildRelease, payloadPaths, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -211,8 +211,9 @@ test("this file runs as an unidentified runtime, which is the premise of every c
 // -- release identity ---------------------------------------------------------
 
 test("release identity is derived from the payload and is checksum-verifiable", async (t) => {
-  const check = await releaseCheck();
-  const manifest = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+  const root = await releaseFixtureRoot();
+  const check = await releaseCheck(root);
+  const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   assert.match(check.contentHash, /^sha256:[0-9a-f]{64}$/);
   assert.match(check.commit, /^[0-9a-f]{40}$/);
   assert.equal(check.version, manifest.version);
@@ -232,7 +233,7 @@ test("release identity is derived from the payload and is checksum-verifiable", 
   // never inputs to it. A committed source file that contained the hash would
   // change the hash that produced it.
   const committedManifest = await readFile(
-    path.join(repositoryRoot, "providers/claude/adapter.json"),
+    path.join(root, "providers/claude/adapter.json"),
     "utf8",
   );
   assert.ok(
@@ -256,7 +257,7 @@ test("release identity is derived from the payload and is checksum-verifiable", 
   // provider installed a skill cannot change what it says it is.
   for (const skill of ["start-migration", "migrate-artifact"]) {
     const committedText = await readFile(
-      path.join(repositoryRoot, `skills/${skill}/release-identity.json`),
+      path.join(root, `skills/${skill}/release-identity.json`),
       "utf8",
     );
     assert.ok(!committedText.includes("{{"), `${skill} committed identity has a placeholder`);
@@ -315,14 +316,37 @@ test("a release bundle carries no mutable reference an installer could follow", 
 
 // -- the staged bundle --------------------------------------------------------
 
-/**
- * One release build per test process, reused. `--allow-dirty` so the suite runs
- * during development; `releaseCheck` above is the gate that a *real* release is
- * clean, and it is asserted separately rather than skipped here.
- */
+/** One isolated, unregistered release per process; production identity stays real. */
+let fixtureRootPromise;
+after(async () => {
+  if (fixtureRootPromise) await rm(await fixtureRootPromise, { recursive: true, force: true });
+});
+const releaseFixtureRoot = () => {
+  fixtureRootPromise ??= (async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "amt-identity-release-"));
+    for (const relative of await payloadPaths(repositoryRoot)) {
+      const destination = path.join(root, relative);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(path.join(repositoryRoot, relative), destination);
+      if (["package.json", "packages/migration-engine/package.json"].includes(relative) ||
+          path.basename(relative) === "release-identity.json") {
+        const manifest = JSON.parse(await readFile(destination, "utf8"));
+        await writeFile(destination, `${JSON.stringify({ ...manifest, version: "0.0.1" }, null, 2)}\n`);
+      }
+    }
+    await writeFile(path.join(root, "released-versions.json"), "[]\n");
+    await symlink(path.join(repositoryRoot, "packages/migration-engine/node_modules"),
+      path.join(root, "packages/migration-engine/node_modules"), "junction");
+    return root;
+  })();
+  return fixtureRootPromise;
+};
+
 let bundlePromise;
 const sharedBundle = async () => {
-  bundlePromise ??= buildRelease({ force: true }).then((built) => built.stagingRoot);
+  bundlePromise ??= releaseFixtureRoot()
+    .then((root) => buildRelease({ root, force: true }))
+    .then((built) => built.stagingRoot);
   return bundlePromise;
 };
 

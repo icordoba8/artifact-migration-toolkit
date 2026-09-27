@@ -90,7 +90,7 @@ once canonically and projected.
 
 ## 3. Internally decidable vs genuinely external
 
-**Internally decidable** (all of 1–13 above): every one of them is a function of
+**Internally decidable** (items 1–13 above, except legacy refresh in item 12): every one of them is a function of
 evidence the engine already holds — the preflight verdict, the confirmation ID
 it just minted itself, the slice plan, the decision ledger, the dirty manifest,
 the git revision, `build-identity.json`. Nothing about them requires a human to
@@ -336,8 +336,11 @@ owner decision, recorded here before the tests were touched, as §5.2 asked:
 - `autoAdoptableToolkitTransition` narrows AUTO adoption.
 - `--reopen-complete`: AUTO acknowledges a legacy revision it read itself;
   `acknowledgedBy` persisted in the reopen record and the reason text.
-- legacy revision drift under auto self-refreshes
-  (`autoRefreshesLegacyDrift`); the `REFRESHED` event carries `principal`.
+- Legacy revision drift under AUTO blocks without an explicit operator
+  refresh. Use `--refresh --confirm-mismatch` in either mode; `--refresh` alone
+  is refused. Explicit refresh records `REFRESHED` with `principal: "OPERATOR"`.
+  A blocked AUTO resume appends no `REFRESHED` event and preserves state and
+  `currentStep`. This F-03 contract supersedes the earlier self-refresh posture.
 - MCP: `recordTrustedDecision: null` means "no human here", not "nobody"; AUTO
   answers by mode and never reads the transport's stdio.
 
@@ -380,8 +383,9 @@ gate run, `ponytail-audit`, and the release.
 3. **`--reopen-complete`'s `--confirm-legacy-revision`** (§2 item 13) is *not*
    yet addressed — it still demands a human-typed SHA. It is internally
    decidable from `gitRevision`; under auto it should be derived and recorded.
-4. **Legacy revision drift** (§2 item 12) still tells the operator to "rerun
-   with `--refresh --confirm-mismatch`". Under auto this should self-refresh.
+4. **Legacy revision drift** (§2 item 12) requires the explicit operator pair
+   `--refresh --confirm-mismatch`, including under AUTO (F-03). AUTO has no
+   autonomous refresh authority.
 5. **MCP relay** (§2 item 14) still surfaces a "trusted terminal path".
 6. **Canonical skill prose**: `skills/start-migration/SKILL.md` (the
    `OPERATOR_DECISION` loop rules ~222-236, the helper table ~270-277, ~337,

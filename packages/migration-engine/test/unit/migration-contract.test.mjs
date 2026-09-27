@@ -6932,7 +6932,7 @@ const downgradeToFormat9 = async (fixture) => {
   const root = fixture.migrationRoot;
   const events = (await historyEvents(fixture))
     .filter((event) => event.step !== "DISCOVERY_COMPLETENESS")
-    .map((event) =>
+    .map(({ seq, previousHash, hash, ...event }) =>
       event.nextStep === "DISCOVERY_COMPLETENESS"
         ? { ...event, nextStep: "ASSESS_TARGET" }
         : { ...event },
@@ -7556,10 +7556,19 @@ test("--refresh without --confirm-mismatch is refused and writes nothing", async
   try {
     await initialize(fixture);
     const before = await snapshot(fixture.root);
-    await assert.rejects(
-      discoverCli(fixture, [...STEP, "--refresh"]),
-      /Refresh requires explicit mismatch confirmation/,
-    );
+    for (const mode of [STEP, AUTO]) {
+      await assert.rejects(
+        discoverCli(fixture, [...mode, "--refresh"]),
+        /Refresh requires explicit mismatch confirmation/,
+      );
+      const resolution = await resolutionFor(fixture);
+      const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", mode: mode[1] });
+      await assert.rejects(
+        bootstrapMigration({ ...resolution, moduleName: "auth", mode: mode[1], refresh: true,
+          boundInputs: preview.boundInputs }),
+        /Refresh requires explicit mismatch confirmation/,
+      );
+    }
     assert.deepEqual(await snapshot(fixture.root), before);
   } finally {
     await fixture.cleanup();
@@ -7678,7 +7687,7 @@ const canonicalRecord = async (fixture) => {
     path.join(fixture.migrationRoot, "integrity.json"),
   );
   const events = (await historyEvents(fixture)).map(
-    ({ at, ...event }) => event,
+    ({ at, hash, previousHash, ...event }) => event,
   );
   return JSON.stringify(
     {
@@ -7915,11 +7924,42 @@ test("--mode step never self-confirms a bootstrap", async () => {
   }
 });
 
-test("--mode auto owns --refresh, and --mode step leaves it two-phase", async () => {
+test("AUTO legacy drift blocks without refresh and preserves the entire record", async () => {
   const fixture = await createFixture();
   try {
-    // The AUTO principal decides `--refresh` on its own evidence: argv accepts
-    // it, and the invocation executes in one phase.
+    await driveTo(fixture, "DISCOVERY_COMPLETENESS");
+    await writeFile(path.join(fixture.legacyRoot, "auth/marker.txt"), "changed legacy\n");
+    await execFileAsync("git", ["add", "legacy/auth/marker.txt"], { cwd: fixture.root });
+    await execFileAsync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test",
+      "commit", "-qm", "legacy drift"], { cwd: fixture.root });
+    const before = await snapshot(fixture.root);
+    const persisted = await state(fixture);
+    const history = await historyEvents(fixture);
+    const blocked = await discoverCli(fixture, AUTO);
+    assert.equal(blocked.blocked, true);
+    assert.match(blocked.stdout, /--refresh --confirm-mismatch/);
+    // Also exercise the fresh under-lock refusal, without relying on preview.
+    await assert.rejects(
+      bootstrapMigration({ ...(await resolutionFor(fixture)), moduleName: "auth", mode: "auto",
+        boundInputs: blocked.preview.boundInputs }),
+      /Legacy revision changed.*--refresh --confirm-mismatch/,
+    );
+    assert.deepEqual(await state(fixture), persisted);
+    assert.equal((await state(fixture)).currentStep, persisted.currentStep);
+    assert.notEqual(persisted.currentStep, "DISCOVER_LEGACY");
+    assert.deepEqual(await historyEvents(fixture), history);
+    assert.equal((await historyEvents(fixture)).filter((entry) => entry.event === "REFRESHED").length, 0);
+    assert.deepEqual(await snapshot(fixture.root), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("explicit --refresh --confirm-mismatch records OPERATOR in auto and step", async () => {
+  const fixture = await createFixture();
+  try {
+    // Explicit operator authorization works in either mode. AUTO only supplies
+    // the mechanical execution confirmation; it does not decide to refresh.
     assert.deepEqual(
       parseDiscoverArguments([
         "auth",
@@ -7936,6 +7976,8 @@ test("--mode auto owns --refresh, and --mode step leaves it two-phase", async ()
     const auto = await discoverCli(fixture, ["--refresh", "--confirm-mismatch"]);
     assert.equal(auto.awaitingConfirmation, undefined, auto.stdout);
     assert.notDeepEqual(await snapshot(fixture.root), before);
+    assert.equal((await historyEvents(fixture)).at(-1).event, "REFRESHED");
+    assert.equal((await historyEvents(fixture)).at(-1).principal, "OPERATOR");
 
     // `--mode step` is byte-identical to the pre-AUTO behaviour.
     const stepped = await discoverCli(fixture, [
@@ -7945,6 +7987,14 @@ test("--mode auto owns --refresh, and --mode step leaves it two-phase", async ()
     ]);
     assert.equal(stepped.awaitingConfirmation, true);
     assert.doesNotMatch(stepped.stdout, /self-confirmed/);
+    const confirmed = await discoverCli(fixture, [
+      ...STEP, "--refresh", "--confirm-mismatch",
+      "--confirm-execution", stepped.preview.confirmationId,
+    ]);
+    assert.equal(confirmed.result.state.currentStep, "DISCOVER_LEGACY");
+    const refreshes = (await historyEvents(fixture)).filter((entry) => entry.event === "REFRESHED");
+    assert.equal(refreshes.length, 2);
+    assert.ok(refreshes.every((entry) => entry.principal === "OPERATOR"));
   } finally {
     await fixture.cleanup();
   }
@@ -8778,9 +8828,7 @@ test("a genuine stop names a typed reason instead of continuing", async () => {
     assert.equal(blockedDiscover.blocked, true);
     assert.equal(loopDirective(blockedDiscover), "loop: STOP reason=BLOCKED");
 
-    // `--refresh` is no longer one of them: it is the AUTO principal's own
-    // decision, so it continues rather than handing back. See
-    // `test/unit/auto-authority.test.mjs`.
+    // An explicitly authorized refresh needs no mechanical confirmation in AUTO.
     const refresh = await discoverCli(fixture, ["--refresh", "--confirm-mismatch"]);
     assert.equal(refresh.awaitingConfirmation, undefined, refresh.stdout);
     assert.notEqual(loopDirective(refresh), "loop: STOP reason=AWAITING_CONFIRMATION");
@@ -14017,6 +14065,24 @@ test("R-W4-a: an unclaimed modified target file blocks FINALIZE by name", async 
 
     assert.match(failure.message, /UNCLAIMED_TARGET_DRIFT/);
     assert.ok(failure.message.includes(stray), "the refusal names the path");
+    // F-05. A refusal that names only the acceptance exit reads as "approve it
+    // or abandon", so it names both: the amendment that claims the file, in
+    // real CLI syntax, and the operator decision that accepts it.
+    assert.match(
+      failure.message,
+      /discover-module\.mjs <module> --amend-slice <slice> --add-file <path>/,
+      "the refusal renders the amendment exit as a runnable command",
+    );
+    assert.match(
+      failure.message,
+      /add-only, at least one --add-file/,
+      "the refusal states the amendment is add-only",
+    );
+    assert.match(
+      failure.message,
+      /TARGET_DRIFT_ACCEPTED operator decision/,
+      "the refusal keeps naming the operator-acceptance exit",
+    );
     assert.notEqual((await state(fixture)).status, "COMPLETE");
   } finally {
     await fixture.cleanup();
@@ -14641,6 +14707,74 @@ const historyLines = async (fixture) =>
   )
     .split("\n")
     .filter(Boolean);
+
+test("F-06: module history links, rejects edits, and bridges a legacy prefix", async () => {
+  const file = (fixture) => path.join(fixture.migrationRoot, "history/history.ndjson");
+  const integrityFile = (fixture) => path.join(fixture.migrationRoot, "integrity.json");
+  const canonical = (value) => JSON.stringify(value, (_key, item) =>
+    item && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item);
+  const hash = (event) => {
+    const { hash: _old, ...payload } = event;
+    return `sha256:${createHash("sha256").update(`artifact-migration-tools/module-history/v1\n${canonical(payload)}`).digest("hex")}`;
+  };
+  for (const damage of ["earlier", "delete", "reorder", "previousHash", "head"]) {
+    const fixture = await createFixture();
+    try {
+      await driveTo(fixture, "DISCOVERY_COMPLETENESS");
+      const lines = await historyLines(fixture);
+      const events = lines.map(JSON.parse);
+      const integrity = await readJson(integrityFile(fixture));
+      assert.equal(events[0].seq, 1);
+      assert.equal(events[0].previousHash, null);
+      assert.equal(events[0].hash, hash(events[0]));
+      assert.equal(events[1].previousHash, events[0].hash);
+      assert.equal(integrity.historyChain.headHash, events.at(-1).hash);
+      if (damage === "earlier") events[0].at = "2020-01-01T00:00:00.000Z";
+      if (damage === "delete") events.shift();
+      if (damage === "reorder") events.reverse();
+      if (damage === "previousHash") events.at(-1).previousHash = `sha256:${"0".repeat(64)}`;
+      if (damage === "head") {
+        events.at(-1).at = "2020-01-01T00:00:00.000Z";
+        events.at(-1).hash = hash(events.at(-1));
+      }
+      const before = await readFile(integrityFile(fixture));
+      await writeFile(file(fixture), `${events.map(JSON.stringify).join("\n")}\n`);
+      await assert.rejects(readState(fixture.targetRoot, "auth"), /history|integrity/i, damage);
+      await assert.rejects(previewMigrationExecution({
+        ...(await resolutionFor(fixture)), moduleName: "auth",
+      }), /history|integrity/i, damage);
+      assert.deepEqual(await readFile(integrityFile(fixture)), before, "refusal writes nothing");
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+  const legacy = await createFixture();
+  try {
+    await initialize(legacy);
+    const old = (await historyLines(legacy)).map(JSON.parse).map(({ seq, previousHash, hash, ...event }) => event);
+    const bytes = `${old.map(JSON.stringify).join("\n")}\n`;
+    const integrity = await readJson(integrityFile(legacy));
+    delete integrity.historyChain;
+    integrity.history = { bytes: Buffer.byteLength(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
+    await writeFile(file(legacy), bytes);
+    await writeJson(integrityFile(legacy), integrity);
+    await readState(legacy.targetRoot, "auth");
+    await completeStepDoc(legacy, "DISCOVER_LEGACY");
+    await writeJson(path.join(legacy.migrationRoot, "inventories/legacy.json"), LEGACY_INVENTORY);
+    await writeClassification(legacy, MODULE_CLASSIFICATION);
+    await advance(legacy);
+    const bridged = (await historyLines(legacy)).map(JSON.parse);
+    const adopted = await readJson(integrityFile(legacy));
+    assert.deepEqual(bridged[0], old[0], "legacy line is unchanged");
+    assert.equal(bridged[1].previousHash, `sha256:${integrity.history.sha256}`);
+    assert.equal(adopted.historyChain.startSeq, 2);
+    assert.equal(adopted.historyChain.headHash, bridged[1].hash);
+    await readState(legacy.targetRoot, "auth");
+  } finally {
+    await legacy.cleanup();
+  }
+});
 
 test("R-W6-d: a crash between the state write and the integrity write recovers, replays, and drops the journal", async () => {
   const fixture = await createFixture();
@@ -16255,14 +16389,28 @@ test("R3-1: the installed toolkit reopens a COMPLETE record under --mode auto wi
     const claim = await assertClaimNotLive(fixture, "slice-a");
     const evidence = await postFinalizationEvidence(fixture);
 
-    const { buildRelease, buildReleaseArchive } = await import(
+    const { buildRelease, buildReleaseArchive, payloadPaths } = await import(
       "../../../../scripts/release.mjs"
     );
     // The real skill file, not a copy of its logic.
     const { ensureRuntime, verifyDownloadedAsset } = await import(
       "../../../../skills/start-migration/scripts/runtime.mjs"
     );
-    const built = await buildRelease({ force: true });
+    // A candidate fixture has its own unregistered version, never published v1.3.0.
+    const releaseRoot = path.join(fixture.root, "candidate");
+    for (const relative of await payloadPaths(repositoryRoot)) {
+      const destination = path.join(releaseRoot, relative);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(path.join(repositoryRoot, relative), destination);
+      if (["package.json", "packages/migration-engine/package.json"].includes(relative) ||
+          path.basename(relative) === "release-identity.json") {
+        await writeJson(destination, { ...(await readJson(destination)), version: "0.0.1" });
+      }
+    }
+    await writeJson(path.join(releaseRoot, "released-versions.json"), []);
+    await symlink(path.join(repositoryRoot, "packages/migration-engine/node_modules"),
+      path.join(releaseRoot, "packages/migration-engine/node_modules"), "junction");
+    const built = await buildRelease({ root: releaseRoot, force: true });
     const asset = await buildReleaseArchive(built);
     const runtime = await ensureRuntime(
       {

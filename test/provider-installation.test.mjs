@@ -6,6 +6,7 @@ import path from 'node:path';
 import test, { after } from 'node:test';
 import { adapter, digest, verifyBundle } from '../providers/install-support.mjs';
 import { buildRelease } from '../scripts/release.mjs';
+import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
 import { createUnstampedRecord } from '../packages/migration-engine/test/support/consumer-fixture.mjs';
 
 const canonicalSkills = JSON.parse(await readFile(new URL('../skills-lock.json', import.meta.url)));
@@ -16,7 +17,10 @@ let releases;
 let childId = 0;
 async function bundles() {
   if (releases) return releases;
-  const built = await buildRelease({ force: true });
+  // 'release two' below is version 1.1.1, and the update gate this file proves
+  // is the one that refuses an *older* toolkit, so the candidate stays newer.
+  const candidate = await candidateReleaseRoot(scratch, { version: '1.3.1' });
+  const built = await buildRelease({ root: candidate, force: true });
   const first = path.join(scratch, 'release one');
   await cp(built.stagingRoot, first, { recursive: true });
   const pin = digest(await readFile(path.join(first, 'release-manifest.json')));

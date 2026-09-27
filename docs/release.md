@@ -152,6 +152,19 @@ as a skill edit does.
 The engine package release content hash is separate from the skill hashes; a
 skill hash does not identify the engine package.
 
+`released-versions.json` records only established published versions and their
+payload `contentHash`, outside the payload hash itself. `release:check` and
+`release:build` only read it: different payload bytes cannot claim an established
+version, even with `--allow-dirty`; identical bytes and unregistered versions
+pass this check. Building a candidate never reserves its version.
+
+After external immutable publication, run `pnpm release:record <version>` to
+resolve and digest-verify the published asset and read only its manifest through
+tar stdout. The recorded hash comes from `release-manifest.json#toolkit`, whose
+version, name and commit must match the publication. This is the sole registry
+writer: identical records are byte-preserving no-ops; conflicting hashes fail
+without mutation. Working-tree bytes are never publication evidence.
+
 ### Per-skill release identity
 
 `skills/<name>/release-identity.json` is how an *installed* skill states what it
