@@ -1097,6 +1097,44 @@ test("a standard tree install carries the real toolkit version, with no placehol
   }
 });
 
+// -- G-01: the documented AUTO authority is the engine's AUTO authority.
+//
+// The released skill claimed `auto` "never self-confirms a bootstrap and never
+// accepts `--refresh`". Both are false: `maySelfConfirm` is `isAutoAuthority`
+// for every command, and `--refresh --confirm-mismatch --mode auto` is a valid
+// operator authorization whose REFRESHED event names OPERATOR. Only the
+// canonical source is edited, so this reads the real generated copies too --
+// documentation drift that reaches providers is the failure that shipped.
+test("the canonical AUTO rule states the real contract and reaches every provider", async () => {
+  for (const relative of [
+    "skills/start-migration/SKILL.md",
+    ...PROVIDERS.map((provider) => `providers/${provider}/skills/start-migration/SKILL.md`),
+  ]) {
+    // The rule is one hard-wrapped paragraph, so match it unwrapped: where the
+    // line breaks fall is formatting, not contract.
+    const text = (await readText(repositoryRoot, relative)).replace(/\s+/g, " ");
+    // No categorical refusal of an explicitly authorized refresh, and no claim
+    // that a bootstrap is exempt from self-confirmation.
+    assert.doesNotMatch(text, /never accepts `--refresh`/, relative);
+    assert.doesNotMatch(text, /never self-confirms a bootstrap/, relative);
+    // Autonomous refresh stays forbidden, explicitly.
+    assert.match(
+      text,
+      /never refreshes a legacy mismatch or drift on its own initiative/,
+      relative,
+    );
+    // Explicit operator authorization, valid in auto, with OPERATOR provenance.
+    assert.match(
+      text,
+      /`--refresh --confirm-mismatch`, including while running `--mode auto`/,
+      relative,
+    );
+    assert.match(text, /`REFRESHED` event records `principal: OPERATOR`/, relative);
+    // AUTO is an authority, not an exemption from the authorization rules.
+    assert.match(text, /not an exemption from the authorization rules/, relative);
+  }
+});
+
 test("a committed skill identity that disagrees with the root manifest blocks the release", async () => {
   const blockerFor = (check, skill) =>
     check.blockers.filter((blocker) => blocker.startsWith(`skills/${skill}/${IDENTITY_BASENAME}`));

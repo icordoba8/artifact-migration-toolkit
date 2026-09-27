@@ -323,8 +323,16 @@ override state. On first setup only, add `--registry
 
 - `--mode` defaults to `auto` and selects who supplies each confirmation, never
   what a confirmation authorizes. `auto` eliminates mechanical confirmations,
-  never genuine operator decisions or project-level binding changes: it never
-  self-confirms a bootstrap and never accepts `--refresh`.
+  never genuine operator decisions or project-level binding changes: AUTO is an
+  execution authority, not an exemption from the authorization rules, so every
+  transition it confirms still re-verifies its confirmation ID against the
+  previewed bytes and still writes its ledger line. What AUTO must never do is
+  originate an authorization only the operator can give — it never refreshes a
+  legacy mismatch or drift on its own initiative, and no loop may add
+  `--refresh` for it. An operator may still authorize a refresh explicitly with
+  `--refresh --confirm-mismatch`, including while running `--mode auto`; that
+  refresh is operator-originated and its `REFRESHED` event records
+  `principal: OPERATOR`.
 - `--status` is read-only and rejects being combined with any other flag,
   `--mode` included.
 - `--slice` selects an active or pending slice; it cannot bypass required

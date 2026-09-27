@@ -9850,6 +9850,11 @@ export const previewMigrationExecution = async ({
     if (!reopenUiEligible(state)) {
       blockers.push(reopenUiIneligible(state));
     }
+    const notApplicable = await reopenUiNotApplicable(root, state, {
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
+    });
+    if (notApplicable) blockers.push(notApplicable);
     const planned = (await inspectSliceArtifacts(root)).plannedSlices;
     for (const sliceId of reopenUi) {
       if (!planned.includes(sliceId)) {
@@ -12486,6 +12491,26 @@ const reopenUiEligible = (state) =>
 const reopenUiIneligible = (state) =>
   `--reopen-ui is legal only for a COMPLETE migration, or an ACTIVE one at VERIFY_SLICES or FINALIZE; the current status is '${state.status}' at '${state.currentStep}'.`;
 
+/**
+ * There is no visible-UI parity to reopen on a migration that has none.
+ *
+ * The one UI authority is the record's own validated inventory -- the same read
+ * every UI gate uses, so a `ui-remediation.json` that already raised
+ * `hasVisibleUi` counts here exactly as it counts there, and no second
+ * UI-detection rule enters the engine. An inventory this release cannot read is
+ * deliberately not an answer: it leaves the existing behavior alone rather than
+ * inventing a refusal out of an unreadable record.
+ */
+const reopenUiNotApplicable = async (root, state, roots) => {
+  const inventory = await validateLegacyInventory(root, roots, state).then(
+    (value) => value,
+    () => null,
+  );
+  return inventory && inventory.hasVisibleUi !== true
+    ? "--reopen-ui is not applicable: the pinned legacy inventory declares hasVisibleUi false, so this migration has no visible UI to reverify. Nothing was changed."
+    : null;
+};
+
 const reopenUiUnderLock = async ({
   registryData,
   resolved,
@@ -12497,6 +12522,11 @@ const reopenUiUnderLock = async ({
   if (!reopenUiEligible(state)) {
     throw new Error(reopenUiIneligible(state));
   }
+  const notApplicable = await reopenUiNotApplicable(root, state, {
+    legacyRoot: registryData.legacyRoot,
+    targetRoot: registryData.targetRoot,
+  });
+  if (notApplicable) throw new Error(notApplicable);
   const fromActive = state.status === "ACTIVE";
   const plan = await readJson(
     path.join(root, initialArtifacts.slices),

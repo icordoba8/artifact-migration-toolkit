@@ -5654,9 +5654,12 @@ test("UI-9: changing an owning slice file narrowly stales its UI evidence", asyn
   }
 });
 
-test("UI-10: non-UI migrations complete without UI runtime evidence", async () => {
-  const fixture = await createFixture();
-  try {
+/**
+ * A COMPLETE record that never had visible UI. Extracted from UI-10 so the
+ * non-applicable `--reopen-ui` regression drives the same record rather than a
+ * second, subtly different non-UI fixture.
+ */
+const driveNonUiToComplete = async (fixture) => {
     const nonUiLegacy = {
       ...LEGACY_INVENTORY,
       hasVisibleUi: false,
@@ -5731,7 +5734,45 @@ test("UI-10: non-UI migrations complete without UI runtime evidence", async () =
       })),
     });
     await advance(fixture);
+};
+
+test("UI-10: non-UI migrations complete without UI runtime evidence", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveNonUiToComplete(fixture);
     assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("UI-10b: --reopen-ui is refused on a record with no visible UI, and writes nothing", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveNonUiToComplete(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+    const read = (relative) =>
+      readFile(path.join(fixture.migrationRoot, relative), "utf8");
+    const before = {
+      state: await read("state.json"),
+      integrity: await read("integrity.json"),
+      history: await read("history/history.ndjson"),
+    };
+    const reopen = await reopenUi(fixture, ["slice-a"]);
+    assert.match(
+      reopen.preview.blockers.join("\n"),
+      /--reopen-ui is not applicable: the pinned legacy inventory declares hasVisibleUi false/,
+    );
+    await assert.rejects(reopen.run(), /--reopen-ui is not applicable/);
+    assert.deepEqual(
+      {
+        state: await read("state.json"),
+        integrity: await read("integrity.json"),
+        history: await read("history/history.ndjson"),
+      },
+      before,
+    );
+    await assert.rejects(read("ui-remediation.json"), /ENOENT/);
   } finally {
     await fixture.cleanup();
   }
