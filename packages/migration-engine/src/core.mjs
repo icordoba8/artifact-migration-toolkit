@@ -208,6 +208,7 @@ export {
   assertNoPendingTransaction,
   assertProjectRootContainment,
   assertSafeName,
+  assertPonytailTarget,
   assertSecurePath,
   atomicWrite,
   committedChangesSince,

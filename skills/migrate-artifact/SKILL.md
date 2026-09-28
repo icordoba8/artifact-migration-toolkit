@@ -32,7 +32,7 @@ artifact-migrate <primary-source> \
   [--source <additional-source>]... \
   [--type <type>] [--target <path>] \
   [--source-root <path>] [--target-root <path>] \
-  [--status] [--mode auto|step] [--slice <id>] [--json]
+  [--ponytail full|full-audit] [--status] [--mode auto|step] [--slice <id>] [--json]
 ```
 
 `/migrate-artifact <source>` is the provider-facing equivalent. Defaults are
@@ -41,6 +41,14 @@ The primary source identifies the artifact. Repeat `--source` for additional
 exact files; the source binding contains only those paths. With matching roots
 and no remapping, the target binding starts with the same path set. The source
 binding remains frozen as legacy provenance while target files change in place.
+
+Ponytail is opt-in for this artifact record. `--ponytail full` applies Ponytail
+Full during implementation and requires one Ponytail Review before completion.
+`--ponytail full-audit` also requires Ponytail Audit after verification and
+before the artifact pre-commit review. Omit the flag to leave Ponytail disabled;
+session-level `/ponytail` mode does not set the record option. The engine
+persists the selected mode and checks the evidence described under
+`references/artifact-contract.md#finalize`. A bare `--ponytail` is invalid.
 
 ## Protocol
 
@@ -54,7 +62,8 @@ binding remains frozen as legacy provenance while target files change in place.
 2. Run the bare command and read its typed `outcome`, `request`, and canonical
    `progress`. One invocation performs at most one transition.
 3. Author only the paths named by `request.artifacts`, using
-   `references/artifact-contract.md`.
+   `references/artifact-contract.md`. With Ponytail enabled, also author its
+   review and audit evidence under the artifact record before `FINALIZE`.
 4. Repeat only on `CONTINUE`. Stop on `AWAITING_CONFIRMATION`, `COMPLETE`,
    `OPERATOR_DECISION`, `BLOCKED`, or `FAILED`. `CONTINUE` means the next
    artifact is not authored yet; an engine fault is `BLOCKED`, and `--status`

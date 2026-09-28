@@ -21,6 +21,7 @@ import {
   exitCodeFor,
   MIGRATION_OUTCOMES,
   renderLoopDirective,
+  assertPonytailTarget,
 } from "../core.mjs";
 import { getArtifactStatus, runArtifact } from "./artifact-migration.mjs";
 
@@ -37,6 +38,7 @@ export const parseArtifactArguments = (arguments_) => {
       "target-root": { type: "string" },
       status: { type: "boolean", default: false },
       mode: { type: "string" },
+      ponytail: { type: "string" },
       slice: { type: "string" },
       "design-source": { type: "string" },
       figma: { type: "string", multiple: true },
@@ -44,6 +46,7 @@ export const parseArtifactArguments = (arguments_) => {
     },
   });
   assertOptionCombination("artifact", { positionals, values });
+  if (values.ponytail !== undefined) assertPonytailTarget(values.ponytail);
   return {
     source: positionals[0],
     sources: values.source,
@@ -53,6 +56,7 @@ export const parseArtifactArguments = (arguments_) => {
     targetRoot: values["target-root"],
     status: values.status,
     mode: values.mode,
+    ponytail: values.ponytail,
     slice: values.slice,
     designSource: values["design-source"],
     figma: values.figma,
@@ -120,6 +124,7 @@ export const runArtifactCli = async (
     sourceRoot: parsed.sourceRoot,
     targetRoot: parsed.targetRoot,
     mode: parsed.mode,
+    ponytail: parsed.ponytail,
     slice: parsed.slice,
     designSource: parsed.designSource,
     figma: parsed.figma,

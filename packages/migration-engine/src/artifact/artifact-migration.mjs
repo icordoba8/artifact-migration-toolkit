@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 
 import {
   assertSafeName,
+  assertPonytailTarget,
   assertSecurePath,
   atomicWrite,
   createDecisionCandidate,
@@ -989,6 +990,7 @@ const OPTIONAL_STATE_KEYS = [
   "toolkitIdentity",
   "designSource",
   "figmaSources",
+  "ponytail",
 ];
 const RESOLUTION_KIND = {
   TARGET_REUSE: "REUSE",
@@ -1025,7 +1027,7 @@ const samePath = (left, right) => {
       : path.resolve(value);
   return normalize(left) === normalize(right);
 };
-export const artifactArgumentsFor = ({ artifactType, source, target, sourcePaths, sourceBinding, bindings, designSource, figmaSources }) => [
+export const artifactArgumentsFor = ({ artifactType, source, target, sourcePaths, sourceBinding, bindings, designSource, figmaSources, ponytail }) => [
   source.path,
   ...(sourcePaths ?? sourceBinding?.paths ?? bindings?.source?.paths ?? [source.path])
     .filter((file) => file !== source.path)
@@ -1045,6 +1047,7 @@ export const artifactArgumentsFor = ({ artifactType, source, target, sourcePaths
         ...(figmaSources ?? []).flatMap((item) => ["--figma", item.raw]),
       ]
     : []),
+  ...(ponytail ? ["--ponytail", ponytail] : []),
 ];
 
 export const artifactCommandFor = (binding) =>
@@ -1289,7 +1292,9 @@ export const resolveArtifact = async ({
   formatVersion = ARTIFACT_FORMAT_VERSION,
   designSource,
   figma,
+  ponytail,
 } = {}) => {
+  if (ponytail !== undefined) assertPonytailTarget(ponytail);
   const resolvedSourceRoot = path.resolve(sourceRoot);
   const resolvedTargetRoot = path.resolve(targetRoot);
   await Promise.all([
@@ -1325,6 +1330,7 @@ export const resolveArtifact = async ({
     target: { root: resolvedTargetRoot, path: targetPath },
     targetPaths,
     root: artifactRoot(resolvedTargetRoot, id),
+    ...(ponytail ? { ponytail } : {}),
     ...design,
   };
 };
@@ -1385,6 +1391,7 @@ const validateState = (state, expectedId) => {
   } else if (state.figmaSources !== undefined) {
     throw new Error("Artifact state figmaSources require designSource.");
   }
+  if (state.ponytail !== undefined) assertPonytailTarget(state.ponytail);
   if (!["ACTIVE", "COMPLETE"].includes(state.status)) throw new Error(`Invalid artifact status '${state.status}'.`);
   if (state.currentStep !== "COMPLETE" && !MIGRATION_STEPS.includes(state.currentStep)) {
     throw new Error(`Unknown artifact checkpoint '${state.currentStep}'.`);
@@ -1648,6 +1655,7 @@ const initialArtifactState = (resolved, sourceBinding, targetBinding, timestamp)
   ...(resolved.designSource
     ? { designSource: resolved.designSource, figmaSources: resolved.figmaSources }
     : {}),
+  ...(resolved.ponytail ? { ponytail: resolved.ponytail } : {}),
   resolution: null,
   hasVisibleUi: null,
   status: "ACTIVE",
@@ -1690,7 +1698,7 @@ const validateTransactionInput = (input, label) => {
       input,
       label,
       ["kind", "artifactType", "source", "target"],
-      ["designSource", "figmaSources", "sourcePaths"],
+      ["designSource", "figmaSources", "sourcePaths", "ponytail"],
     );
     assertSafeName(input.artifactType, `${label}.artifactType`);
     for (const key of ["source", "target"]) {
@@ -1715,6 +1723,7 @@ const validateTransactionInput = (input, label) => {
         throw new Error(`${label}.figmaSources are not canonical.`);
       }
     }
+    if (input.ponytail !== undefined) assertPonytailTarget(input.ponytail);
   } else if (input.kind === "ADVANCE") {
     exactObject(input, label, ["kind", "selectedSlice"]);
     if (input.selectedSlice !== null) nonEmpty(input.selectedSlice, `${label}.selectedSlice`);
@@ -1847,6 +1856,7 @@ const proveBootstrapTransaction = async (root, transaction) => {
     sourcePaths: input.sourcePaths ?? [input.source.path],
     target: input.target,
     targetPaths: targetPathsFor(input.source.path, input.target.path, input.sourcePaths ?? [input.source.path]),
+    ...(input.ponytail ? { ponytail: input.ponytail } : {}),
     // The journal's design fields are optional (see validateTransactionInput);
     // absent means normal execution resolved the default, so recovery resolves
     // it through the same shared resolver rather than reproducing a record with
@@ -2159,6 +2169,7 @@ export const previewArtifact = async (options = {}) => {
     target: resolved.target,
     designSource: resolved.designSource,
     figmaSources: resolved.figmaSources,
+    ...(resolved.ponytail ? { ponytail: resolved.ponytail } : {}),
     sourceBinding,
     targetBinding,
   };
@@ -2192,6 +2203,7 @@ const createArtifactRecord = async (resolved, options, confirmExecution) => {
       target: resolved.target,
       designSource: resolved.designSource,
       figmaSources: resolved.figmaSources,
+      ...(resolved.ponytail ? { ponytail: resolved.ponytail } : {}),
     },
     state,
     event,
@@ -3183,7 +3195,7 @@ const validateVerification = async (root, state, capability) => {
 const validateGateEvidence = async (state, item, label, scope, extra = []) => {
   exactObject(item, label, ["path", "sha256", "boundTo", ...extra]);
   const relative = normalizeRelative(item.path, `${label}.path`);
-  if (!scope.has(relative)) {
+  if (scope && !scope.has(relative)) {
     throw new Error(
       `${label} cites '${relative}', which is not one of this migration's changed or declared target files.`,
     );
@@ -3193,6 +3205,25 @@ const validateGateEvidence = async (state, item, label, scope, extra = []) => {
   if (item.boundTo.sourceDigest !== state.bindings.source.digest || item.boundTo.targetDigest !== state.bindings.target.digest) {
     throw new Error(`${label} is stale.`);
   }
+};
+
+const ponytailTime = (value, label) => {
+  const time = Date.parse(value);
+  if (typeof value !== "string" || !Number.isFinite(time) || new Date(time).toISOString() !== value) {
+    throw new Error(`${label} must be an ISO timestamp.`);
+  }
+  return time;
+};
+
+const validatePonytailEvidence = async (state, gate, kind) => {
+  const label = `final gate '${gate.name}' ponytailEvidence`;
+  const item = gate.ponytailEvidence;
+  if (!item) throw new Error(`Ponytail target '${state.ponytail}' requires ${gate.name} ${kind} evidence.`);
+  const expectedPath = `${STATE_ROOT}/${state.artifactId}/evidence/ponytail-${kind}.md`;
+  if (item.path !== expectedPath) throw new Error(`${label}.path must be '${expectedPath}'.`);
+  await validateGateEvidence(state, item, label, null, ["kind", "producedAt"]);
+  if (item.kind !== kind) throw new Error(`${label}.kind must be '${kind}'.`);
+  return ponytailTime(item.producedAt, `${label}.producedAt`);
 };
 
 // Every file this migration wrote, across every planned slice.
@@ -3229,8 +3260,11 @@ const validateFinal = async (root, state) => {
     PRECOMMIT_GATE: architecture.precommit,
   };
   const names = [];
+  let ponytailReviewAt;
+  let ponytailAuditAt;
+  let precommitReviewedAt;
   for (const [index, gate] of arrayOf(document.gates, "final gates.gates").entries()) {
-    exactObject(gate, `final gates.gates[${index}]`, ["name", "status", "evidence"]);
+    exactObject(gate, `final gates.gates[${index}]`, ["name", "status", "evidence"], ["ponytailEvidence", "reviewedAt"]);
     names.push(nonEmpty(gate.name, `final gates.gates[${index}].name`));
     if (gate.status !== "PASS") throw new Error(`final gate '${gate.name}' did not PASS.`);
     const evidence = arrayOf(gate.evidence, `final gate '${gate.name}' evidence`);
@@ -3242,8 +3276,19 @@ const validateFinal = async (root, state) => {
     if (failures.length > 0) {
       throw new Error(`final gate '${gate.name}' cannot PASS: ${failures.join(" ")}`);
     }
+    if (state.ponytail && gate.name === "SIMPLIFY_ONCE") {
+      ponytailReviewAt = await validatePonytailEvidence(state, gate, "review");
+    }
+    if (state.ponytail === "full-audit" && gate.name === "PRECOMMIT_GATE") {
+      ponytailAuditAt = await validatePonytailEvidence(state, gate, "audit");
+      precommitReviewedAt = ponytailTime(gate.reviewedAt, "PRECOMMIT_GATE.reviewedAt");
+    }
   }
   sameMembers(names, FINAL_GATES, "final gate names");
+  if (state.ponytail === "full-audit" &&
+      (ponytailReviewAt > ponytailAuditAt || ponytailAuditAt >= precommitReviewedAt)) {
+    throw new Error("Ponytail Review and Audit must precede the artifact pre-commit review in order.");
+  }
   const uiRows = arrayOf(document.uiEvidence, "final gates.uiEvidence");
   if (state.hasVisibleUi) {
     const referenced = [];
@@ -3612,6 +3657,10 @@ const assertInvocationMatches = (state, options) => {
   if (options.sourceRoot && !samePath(options.sourceRoot, state.source.root)) throw new Error("Invocation sourceRoot conflicts with persisted state.");
   if (options.target && normalizeRelative(options.target, "target") !== state.target.path) throw new Error("Invocation target conflicts with persisted state.");
   if (options.targetRoot && !samePath(options.targetRoot, state.target.root)) throw new Error("Invocation targetRoot conflicts with persisted state.");
+  if (options.ponytail !== undefined) {
+    assertPonytailTarget(options.ponytail);
+    if (options.ponytail !== state.ponytail) throw new Error("Invocation Ponytail target conflicts with persisted state.");
+  }
   const designExplicit =
     options.designSource !== undefined ||
     (Array.isArray(options.figma) ? options.figma.length > 0 : options.figma !== undefined);
@@ -3718,6 +3767,13 @@ const readArtifactStatus = async (options = {}) => {
       ...outcomeResult(state, "BLOCKED", reason, null, { exists: true, root: location.root, stale: fresh }, "STALE"),
       status: "STALE",
     };
+  }
+  if (state.status === "COMPLETE" && state.ponytail) {
+    try {
+      await validateFinal(location.root, state);
+    } catch (error) {
+      return { ...blockedArtifactResult(state, error.message, null, artifactCommandFor(state)), exists: true, root: location.root };
+    }
   }
   const progress = migrationProgress(progressState(state), {
     lifecycle: MIGRATION_STEPS,
@@ -3875,7 +3931,16 @@ const previewAdvance = async (root, state, options) => {
         : `Relevant artifact drift detected (source: ${fresh.sourceDrift.join(", ") || "none"}; target: ${fresh.targetDrift.join(", ") || "none"}).`,
     };
   }
-  if (state.status === "COMPLETE") return { state, outcome: "COMPLETE", reason: "Artifact migration is complete." };
+  if (state.status === "COMPLETE") {
+    if (state.ponytail) {
+      try {
+        await validateFinal(root, state);
+      } catch (error) {
+        return { state, outcome: "BLOCKED", reason: error.message };
+      }
+    }
+    return { state, outcome: "COMPLETE", reason: "Artifact migration is complete." };
+  }
   const snapshot = {
     artifactId: state.artifactId,
     revision: state.revision,

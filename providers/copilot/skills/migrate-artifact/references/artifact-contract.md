@@ -196,6 +196,19 @@ this migration changed in a slice, declared in `target.json`, or the bound
 target itself. A hash of an unrelated pre-existing file proves nothing and is
 refused.
 
+For a record created with `--ponytail full`, the `SIMPLIFY_ONCE` gate also
+requires `ponytailEvidence` of the form
+`{kind:"review",path,sha256,boundTo:{sourceDigest,targetDigest},producedAt}`.
+The path must be `.agents/knowledge/migrations/artifacts/<artifact-id>/evidence/ponytail-review.md`
+under the target root. `--ponytail full-audit` additionally requires the same
+shape with `kind:"audit"` on `PRECOMMIT_GATE`, pointing to
+`evidence/ponytail-audit.md` in that artifact record. That gate must also carry
+`reviewedAt`. Both timestamps are canonical ISO timestamps. Run the Audit after
+verification; the engine requires Review before Audit and Audit before
+`reviewedAt`.
+The engine checks each evidence file's current hash and source/target binding
+before allowing `COMPLETE`. No Ponytail flag adds no Ponytail requirement.
+
 Two gates carry the mandatory architecture rules they are named after, asserted
 against this migration's changed files only:
 

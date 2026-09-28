@@ -32,7 +32,7 @@ const DISCOVER_USAGE =
   "Usage: discover-module.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--openspec-proposal-stdin] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--refresh --confirm-mismatch] [--reopen-discovery] [--reopen-ui <slice[,slice...]>] [--reopen-complete <slice[,slice...]> --reopen-reason <text> --reopen-evidence <path> --confirm-reopen [--confirm-legacy-revision <sha>]] [--rework-slice <id> --confirm-rework] [--amend-slice <id> --add-file <path>...] [--adopt-visual-contract --confirm-adopt-visual-contract] [--adopt-ui-observations [--confirm-adopt-ui-observations <digest>] (pre-format-17 records only; at format 17 and above the normal command owns every format upgrade)] [--scan] [--status] [--doctor] [--slice <id>]";
 
 const ARTIFACT_USAGE =
-  "Usage: run-artifact.mjs <source> [--source <additional-source>]... [--type <type>] [--target <path>] [--source-root <path>] [--target-root <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--status] [--mode auto|step] [--slice <id>] [--json]";
+  "Usage: run-artifact.mjs <source> [--source <additional-source>]... [--type <type>] [--target <path>] [--source-root <path>] [--target-root <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail full|full-audit] [--status] [--mode auto|step] [--slice <id>] [--json]";
 
 const RUN_USAGE =
   "Usage: run-migration.mjs <module> [--registry <path>] [--target <target>] [--legacy <module>]... [--adopt-target] [--mock] [--brief <path>] [--design-source target-system|figma-mcp] [--figma <url>]... [--ponytail [full|full-audit]] [--mode auto|step] [--slice <id>] [--json]";
@@ -354,10 +354,10 @@ export const assertOptionCombination = (
     }
     if (
       values.status &&
-      (values.mode || values.slice || values["design-source"] || hasFigma(values))
+      (values.mode || values.slice || values.ponytail || values["design-source"] || hasFigma(values))
     ) {
       throw new Error(
-        "--status is read-only and cannot be combined with --mode, --slice, --design-source, or --figma.",
+        "--status is read-only and cannot be combined with --mode, --slice, --ponytail, --design-source, or --figma.",
       );
     }
     return;

@@ -778,6 +778,111 @@ const driveToComplete = async (fixture, resolution = "TARGET_EXTEND", options = 
   return result;
 };
 
+test("migrate-artifact parses only explicit Ponytail targets", () => {
+  for (const ponytail of ["full", "full-audit"]) {
+    assert.equal(parseArtifactArguments(["widget", "--ponytail", ponytail]).ponytail, ponytail);
+  }
+  assert.equal(parseArtifactArguments(["widget"]).ponytail, undefined);
+  assert.throws(() => parseArtifactArguments(["widget", "--ponytail", "turbo"]), /Invalid Ponytail target 'turbo'/);
+  assert.throws(() => parseArtifactArguments(["widget", "--ponytail"]), /Option '--ponytail <value>' argument missing/);
+  assert.throws(() => parseArtifactArguments(["widget", "--status", "--ponytail", "full"]), /--status is read-only/);
+});
+
+test("migrate-artifact skill and all four provider examples use executable Ponytail values", async () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const skill = await readFile(path.join(repositoryRoot, "skills/migrate-artifact/SKILL.md"), "utf8");
+  const reference = await readFile(path.join(repositoryRoot, "docs/command-reference.md"), "utf8");
+  assert.match(skill, /--ponytail full\|full-audit/);
+  for (const provider of ["Claude Code", "Codex", "OpenCode", "GitHub Copilot"]) {
+    const section = reference.split(`## ${provider}\n`)[1]?.split(/^## /m)[0];
+    assert.ok(section, `${provider} documentation exists`);
+    for (const value of ["full", "full-audit"]) {
+      assert.ok(section.includes(`migrate-artifact skill for src/shared/button.ts with --ponytail ${value}`) ||
+        section.includes(`/migrate-artifact src/shared/button.ts --ponytail ${value}`),
+      `${provider} documents artifact ${value}`);
+      assert.equal(parseArtifactArguments(["src/shared/button.ts", "--ponytail", value]).ponytail, value);
+    }
+  }
+});
+
+const drivePonytailToFinal = async (fixture) => {
+  await driveToBuild(fixture, "TARGET_EXTEND");
+  await advanceBaseline(fixture, "TARGET_EXTEND");
+  await advancePlan(fixture, "TARGET_EXTEND");
+  await advanceImplementation(fixture, "TARGET_EXTEND");
+  await advanceVerification(fixture, { ui: false });
+  await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+};
+
+const ponytailEvidence = async (fixture, kind, producedAt) => {
+  const relative = `.agents/knowledge/migrations/artifacts/${fixture.id}/evidence/ponytail-${kind}.md`;
+  await mkdir(path.join(fixture.artifactRoot, "evidence"), { recursive: true });
+  await writeFile(path.join(fixture.targetRoot, relative), `${kind} completed for ${fixture.id}\n`);
+  const state = await stateOf(fixture);
+  return {
+    kind,
+    path: relative,
+    sha256: await digest(path.join(fixture.targetRoot, relative)),
+    boundTo: { sourceDigest: state.bindings.source.digest, targetDigest: state.bindings.target.digest },
+    producedAt,
+  };
+};
+
+test("artifact Ponytail full requires Review evidence before COMPLETE", async () => {
+  const fixture = await createFixture();
+  fixture.options.ponytail = "full";
+  try {
+    await drivePonytailToFinal(fixture);
+    const state = await stateOf(fixture);
+    assert.equal(state.ponytail, "full");
+    assert.equal(parseArtifactArguments(artifactArgumentsFor(state)).ponytail, "full");
+    const gates = await gatesDocument(fixture);
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    assert.match((await runArtifact(fixture.options)).reason, /requires SIMPLIFY_ONCE review evidence/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    const reviewAt = new Date(Date.parse(state.updatedAt) + 1000).toISOString();
+    gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE").ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+    await rm(path.join(fixture.artifactRoot, "evidence/ponytail-review.md"));
+    assert.equal((await getArtifactStatus(fixture.options)).outcome, "BLOCKED");
+    assert.equal((await runArtifact(fixture.options)).outcome, "BLOCKED");
+    await assert.rejects(validateArtifactComplete(fixture.options), /ENOENT|missing|no such file/i);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("artifact Ponytail full-audit requires Review then Audit before PRECOMMIT_GATE", async () => {
+  const fixture = await createFixture();
+  fixture.options.ponytail = "full-audit";
+  try {
+    await drivePonytailToFinal(fixture);
+    const state = await stateOf(fixture);
+    assert.equal(state.ponytail, "full-audit");
+    const gates = await gatesDocument(fixture);
+    const reviewAt = new Date(Date.parse(state.updatedAt) + 1000).toISOString();
+    const auditAt = new Date(Date.parse(state.updatedAt) + 2000).toISOString();
+    const precommitAt = new Date(Date.parse(state.updatedAt) + 3000).toISOString();
+    gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE").ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    assert.match((await runArtifact(fixture.options)).reason, /requires PRECOMMIT_GATE audit evidence/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    const precommit = gates.gates.find((gate) => gate.name === "PRECOMMIT_GATE");
+    precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", auditAt);
+    precommit.reviewedAt = auditAt;
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    assert.match((await runArtifact(fixture.options)).reason, /precede the artifact pre-commit review/);
+    precommit.reviewedAt = precommitAt;
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("E/F: completed standalone artifacts are reused by multiple parents without mutation", async () => {
   const fixture = await createFixture();
   try {
@@ -1433,6 +1538,7 @@ test("every emitted nextCommand parses to the same artifact binding", async () =
   try {
     await bootstrap(fixture);
     const state = await stateOf(fixture);
+    assert.equal(state.ponytail, undefined);
     const binding = {
       artifactType: state.artifactType,
       source: state.source,
