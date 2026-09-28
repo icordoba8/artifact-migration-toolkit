@@ -10,5 +10,9 @@
   {
     "version": "1.3.2",
     "contentHash": "sha256:0689419be9d2919aafef11e4035fec488ca884f960cd92e74b180d26ca252902"
+  },
+  {
+    "version": "1.3.3",
+    "contentHash": "sha256:19ef07f431c6472ae6019ed19b9f658ca551f519fa0262afa128fd8b20c3b064"
   }
 ]
