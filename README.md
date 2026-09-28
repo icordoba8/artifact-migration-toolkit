@@ -3,6 +3,26 @@
 The canonical, standalone source for the `start-migration` and `migrate-artifact`
 skills and the one migration engine that implements them.
 
+See the [migration command reference](docs/command-reference.md) for every
+supported client, skill selection, invocation syntax, and Ponytail behavior.
+
+## Supported targets
+
+| Target | migrate-artifact | start-migration |
+| --- | --- | --- |
+| Claude Code | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` |
+| Codex | `Use the migrate-artifact skill for src/shared/button.ts` | `Start migration auth using the start-migration skill` |
+| OpenCode | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` |
+| GitHub Copilot | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` |
+
+`migrate-artifact` migrates one artifact into an existing target application.
+`start-migration` starts a complete feature/module migration workflow.
+GitHub Copilot slash prompts run in a supported IDE's agent chat.
+
+`migrate-artifact` supports `--ponytail full` (Review evidence before `COMPLETE`)
+and `--ponytail full-audit` (Review and Audit evidence in Review → Audit →
+pre-commit review order). The command reference above has the details.
+
 Release provenance is toolkit-owned: each bundle records this repository's
 commit, version, and content hash in `release-manifest.json` and
 `packages/migration-engine/build-identity.json`.

@@ -78,9 +78,9 @@ For `migrate-artifact`, pass an explicit value: `--ponytail full` or
 The artifact record persists the option. At `FINALIZE`, `full` requires hashed,
 bound Review evidence on `SIMPLIFY_ONCE`; `full-audit` also requires Audit
 evidence on `PRECOMMIT_GATE`. Run Audit after verification; the engine requires
-its timestamp before that gate's `reviewedAt`. Evidence files live in the
-artifact record's `evidence/` directory. No flag leaves the current completion
-gates unchanged.
+Review → Audit → pre-commit review order by checking their timestamps against
+`PRECOMMIT_GATE.reviewedAt`. Evidence files live in the artifact record's
+`evidence/` directory. No flag leaves the current completion gates unchanged.
 
 Start with read-only status; resume the active checkpoint. `start-migration`
 prefers connected `start-migration` MCP (`migration_status`, then
@@ -93,7 +93,7 @@ blocker. Human approvals require host elicitation or the engine's trusted
 terminal decision command; `--mode auto` does not impersonate a human.
 Completion means ready for commit; neither skill commits or publishes.
 
-# Supported Targets / Providers / Clients
+## Supported targets
 
 The matrix contains every target in `scripts/providers-sync.mjs` and every
 provider adapter. In each row, `auth` is a sample module and
