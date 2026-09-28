@@ -3286,7 +3286,7 @@ const validateFinal = async (root, state) => {
   }
   sameMembers(names, FINAL_GATES, "final gate names");
   if (state.ponytail === "full-audit" &&
-      (ponytailReviewAt > ponytailAuditAt || ponytailAuditAt >= precommitReviewedAt)) {
+      (ponytailReviewAt >= ponytailAuditAt || ponytailAuditAt >= precommitReviewedAt)) {
     throw new Error("Ponytail Review and Audit must precede the artifact pre-commit review in order.");
   }
   const uiRows = arrayOf(document.uiEvidence, "final gates.uiEvidence");

@@ -870,6 +870,13 @@ test("artifact Ponytail full-audit requires Review then Audit before PRECOMMIT_G
     assert.match((await runArtifact(fixture.options)).reason, /requires PRECOMMIT_GATE audit evidence/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
     const precommit = gates.gates.find((gate) => gate.name === "PRECOMMIT_GATE");
+    // Equality at either boundary is not order: Review == Audit, then Audit ==
+    // pre-commit review, must both be refused before the strict run succeeds.
+    precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", reviewAt);
+    precommit.reviewedAt = precommitAt;
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    assert.match((await runArtifact(fixture.options)).reason, /precede the artifact pre-commit review/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
     precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", auditAt);
     precommit.reviewedAt = auditAt;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
