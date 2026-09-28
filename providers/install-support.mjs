@@ -83,31 +83,73 @@ const end = '# END artifact-migration-tools\n';
  * bytes; this pattern only tells "absent" apart from "there but not ours".
  */
 const ownedBlock = /# BEGIN artifact-migration-tools\n[\s\S]*?\n# END artifact-migration-tools\n/;
+const serverFor = (provider, release) => {
+  const launch = { command: process.execPath, args: [path.join(release, 'packages/migration-engine/src/mcp-server.mjs')] };
+  return provider === 'opencode' ? { type: 'local', command: [launch.command, ...launch.args], enabled: true }
+    : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
+};
+
+async function historicalTemplateMatches(release, provider, layout, adapter) {
+  const template = await readFile(await safePath(release, `providers/${provider}/${adapter.mcpTemplate}`), 'utf8');
+  if (layout[3] === null) {
+    const sections = template.split('[mcp_servers.start-migration]\n');
+    return sections.length === 2 && sections[1].trim() === 'command = "node"\nargs = ["{{ENGINE_MCP_ENTRY}}"]';
+  }
+  const launch = { command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] };
+  const expected = provider === 'opencode' ? { type: 'local', command: ['node', '{{ENGINE_MCP_ENTRY}}'], enabled: true }
+    : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
+  return same(JSON.parse(template)?.[layout[3]]?.['start-migration'], expected);
+}
+
+async function historicalOwned(receipt, provider, layout) {
+  const owned = [];
+  for (const item of receipt.releases ?? []) {
+    if (item.release === receipt.release && item.pin === receipt.pin) continue;
+    if (typeof item.release !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(item.pin ?? '')) continue;
+    if (path.dirname(item.release) !== receipt.store) continue;
+    let manifest;
+    try {
+      manifest = await verifyBundle(item.release, item.pin);
+      if (item.release !== path.join(receipt.store, `${manifest.toolkit.version}-${item.pin.slice(7)}`)) continue;
+      const adapter = JSON.parse(await readFile(await safePath(item.release, `providers/${provider}/adapter.json`)));
+      if (adapter.provider !== provider || !same(adapter.toolkit, manifest.toolkit) ||
+          !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
+    } catch { continue; }
+    owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release)).owned, agents: serverFor('claude', item.release) });
+  }
+  return owned;
+}
 /**
  * Provider configuration is a shared, consumer-owned resource: a consumer tool
  * may regenerate it and drop the registration this toolkit installed. So the
- * three states are distinguished rather than collapsed into one failure.
+ * exact, missing, verified historical and conflicting states are distinguished.
  *
  * present  -- byte/semantically equal to what the receipt proves we wrote.
  * missing  -- absent entirely. Reported as `missing` so the caller can restore
  *             exactly the receipt-owned registration and nothing else.
+ * stale   -- exactly matches a recorded, verified historical release.
  * modified -- present at the owned location but different. Never overwritten.
  *
  * Ownership is always `previous` (the receipt's `configOwned`), never the
  * `start-migration` name: an entry under that name that the receipt does not
  * prove is ours is a conflict, not something to repair.
  */
-function mergeConfig(raw, layout, previous, server) {
+function mergeConfig(raw, layout, previous, server, historical = []) {
   if (layout[3] === null) {
     let text = raw?.toString() ?? '';
     let missing = false;
+    let stale = false;
     if (previous) {
       // Exact receipt bytes, removed exactly, exactly once -- unchanged from
       // v1.0-v1.2, so removal still restores the consumer's file byte for byte.
       const parts = text.split(previous);
       if (parts.length === 2) text = parts.join('');
-      else if (ownedBlock.test(text)) throw new Error('Owned MCP configuration was modified');
-      else missing = true;
+      else {
+        const matches = historical.filter(owned => typeof owned === 'string' && text.split(owned).length === 2);
+        if (matches.length === 1) { text = text.replace(matches[0], ''); stale = true; }
+        else if (ownedBlock.test(text)) throw new Error('Owned MCP configuration was modified');
+        else missing = true;
+      }
     }
     if (/start-migration|BEGIN artifact-migration-tools|END artifact-migration-tools/.test(text)) throw new Error('Conflicting MCP configuration');
     const separator = text && !text.endsWith('\n') ? '\n' : '';
@@ -119,17 +161,48 @@ function mergeConfig(raw, layout, previous, server) {
     const owned = fresh && missing && previous.replace(/^\n/, '') === fresh
       ? `${previous.startsWith('\n') ? '' : separator}${previous}`
       : fresh && `${separator}${fresh}`;
-    return { bytes: Buffer.from(text + (owned ?? '')), owned: owned ?? null, missing };
+    return { bytes: Buffer.from(text + (owned ?? '')), owned: owned ?? null, missing, stale };
   }
   const config = raw ? JSON.parse(raw) : {};
   const key = layout[3];
   if (!config || Array.isArray(config) || typeof config !== 'object' || (config[key] && (Array.isArray(config[key]) || typeof config[key] !== 'object'))) throw new Error('MCP config must be an object');
   const existing = config[key]?.['start-migration'];
+  if ((raw?.toString().match(/"start-migration"\s*:/g) ?? []).length !== (existing === undefined ? 0 : 1)) throw new Error('Conflicting or modified MCP configuration');
   const missing = Boolean(previous) && existing === undefined;
-  if (!missing && (previous ? !same(existing, previous) : existing !== undefined)) throw new Error('Conflicting or modified MCP configuration');
+  const stale = previous && existing !== undefined && !same(existing, previous) && historical.some(owned => same(existing, owned));
+  if (!missing && !stale && (previous ? !same(existing, previous) : existing !== undefined)) throw new Error('Conflicting or modified MCP configuration');
   if (server) (config[key] ??= {})['start-migration'] = server;
   else if (config[key]) { delete config[key]['start-migration']; if (!Object.keys(config[key]).length) delete config[key]; }
-  return { bytes: Buffer.from(json(config)), owned: server, missing };
+  return { bytes: Buffer.from(json(config)), owned: server, missing, stale };
+}
+
+function mergeAgents(raw, previous, server, historical, provider) {
+  if (raw === null) return null;
+  const config = JSON.parse(raw);
+  const entries = config?.mcpServers;
+  const existing = entries?.['start-migration'];
+  if (!config || Array.isArray(config) || typeof config !== 'object' ||
+      !entries || Array.isArray(entries) || typeof entries !== 'object' ||
+      (config.targets !== undefined && (!Array.isArray(config.targets) || !config.targets.every(target => typeof target === 'string')))) {
+    if (existing !== undefined || raw.includes('"start-migration"')) throw new Error('Conflicting or modified MCP configuration');
+    return null;
+  }
+  if (existing === undefined) return null;
+  if (!previous) throw new Error('Conflicting or modified MCP configuration');
+  if ((raw.toString().match(/"start-migration"\s*:/g) ?? []).length !== 1 ||
+      (config.targets && !config.targets.includes(provider))) throw new Error('Conflicting or modified MCP configuration');
+  if (!existing || Array.isArray(existing) || typeof existing !== 'object') throw new Error('Conflicting or modified MCP configuration');
+  const { targets, ...registration } = existing;
+  if (targets !== undefined && (!Array.isArray(targets) || !targets.includes(provider) ||
+      !targets.every(target => typeof target === 'string' && target.length > 0) || new Set(targets).size !== targets.length)) {
+    throw new Error('Conflicting or modified MCP configuration');
+  }
+  const current = serverFor('claude', previous.release);
+  if (!same(registration, current) && !historical.some(item => same(registration, item.agents))) throw new Error('Conflicting or modified MCP configuration');
+  const desired = server ? serverFor('claude', server) : null;
+  if (!desired || same(registration, desired)) return null;
+  entries['start-migration'] = { ...desired, ...(targets && { targets }) };
+  return Buffer.from(json(config));
 }
 
 async function replace(file, bytes) {
@@ -153,8 +226,7 @@ async function validateSelection(receipt, provider, layout) {
   const pkg = JSON.parse(await readFile(path.join(receipt.release, 'packages/migration-engine/package.json')));
   const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(receipt.release, 'packages/migration-engine', entry)]]));
   if (!same(receipt.commands, commands)) throw new Error('Installation CLI selection conflict');
-  const launch = { command: process.execPath, args: [path.join(receipt.release, 'packages/migration-engine/src/mcp-server.mjs')] };
-  const server = provider === 'opencode' ? { type: 'local', command: [launch.command, ...launch.args], enabled: true } : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
+  const server = serverFor(provider, receipt.release);
   if (!same(receipt.mcp, server)) throw new Error('Installation MCP selection conflict');
   const owned = mergeConfig(null, layout, null, server).owned;
   if (!same(receipt.configOwned, owned) && !(typeof owned === 'string' && receipt.configOwned === `\n${owned}`)) throw new Error('Invalid configuration ownership');
@@ -180,26 +252,35 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   if (previous && (previous.provider !== provider || previous.scope !== scope || previous.root !== root || previous.store !== store || (previous.mode ?? 'provider') !== mode)) throw new Error('Installation selection conflict');
   if (!['install', 'update', 'rollback', 'remove', 'doctor'].includes(action)) throw new Error(`Unknown action: ${action}`);
   if (previous) await validateSelection(previous, provider, layout);
+  const history = previous ? await historicalOwned(previous, provider, layout) : [];
+  const historical = history.map(item => item.native);
   if (action !== 'install' && !previous) throw new Error('No installation selected');
   if (action === 'install' && previous) throw new Error('Already installed; select update explicitly');
   const configFile = await safePath(root, layout[2]);
   const rawConfig = await optional(configFile);
+  const agentsFile = scope === 'project' ? await safePath(root, '.agents/mcp.json') : null;
+  const rawAgents = agentsFile ? await optional(agentsFile) : null;
   for (const [relative, hash] of Object.entries(previous?.files ?? {})) {
     if (!ownedPath(relative, provider, layout)) throw new Error(`Invalid ownership manifest: ${relative}`);
     if (digest(await readFile(await safePath(root, relative))) !== hash) throw new Error(`Owned file modified: ${relative}`);
   }
   if (action === 'doctor') {
-    // Self-healing registration. `mergeConfig` has already refused a modified
-    // one; only a provably absent registration is restored, and only from the
-    // receipt, so unrelated servers and unrelated provider configuration are
-    // carried through untouched.
-    const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp);
+    // Restore missing or verified historical registrations after both surfaces
+    // have rejected conflicts; leave unrelated configuration untouched.
+    const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp, historical);
+    const agents = mergeAgents(rawAgents, previous, previous.release, history, provider);
     let mcpRepair = null;
-    if (merged.missing) {
-      await replace(configFile, merged.bytes);
+    if (merged.missing || merged.stale || agents) {
+      try {
+        if (agents) await replace(agentsFile, agents);
+        if (merged.missing || merged.stale) await replace(configFile, merged.bytes);
+      } catch (error) {
+        if (agents) await replace(agentsFile, rawAgents);
+        throw error;
+      }
       // A host that cannot load an MCP server mid-process needs a restart. The
       // runtime still succeeds: this invocation continues on absolute CLI paths.
-      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: configFile, restartRequired: true };
+      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: merged.missing || merged.stale ? configFile : agentsFile, restartRequired: true };
     }
     const servers = layout[3] ? JSON.parse(merged.bytes)[layout[3]] ?? {} : { 'start-migration': previous.mcp };
     return { ...previous, outcome: 'OK', mcpRepair, mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
@@ -216,8 +297,8 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     const engine = path.join(release, 'packages/migration-engine');
     const pkg = JSON.parse(await readFile(path.join(bundle, 'packages/migration-engine/package.json')));
     const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(engine, entry)]]));
-    const mcp = { command: process.execPath, args: [path.join(engine, 'src/mcp-server.mjs')] };
-    server = provider === 'opencode' ? { type: 'local', command: [mcp.command, ...mcp.args], enabled: true } : provider === 'copilot' ? { type: 'stdio', ...mcp } : mcp;
+    const mcp = serverFor('claude', release);
+    server = serverFor(provider, release);
     for (const relative of mode === 'runtime' ? [] : source.files) {
       let destination;
       if (relative.startsWith('skills/')) destination = `${layout[0]}/${relative.slice(7)}`;
@@ -242,10 +323,11 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     receipt = { provider, scope, mode, root, store, toolkit: manifest.toolkit, skills: manifest.skills, release, pin, commands, mcp: server, files: Object.fromEntries([...writes].map(([name, bytes]) => [name, digest(bytes)])), releases: [...(previous?.releases ?? []).filter(item => item.release !== release), { release, pin }] };
     // Check ownership/config before staging any release or changing a consumer.
   }
-  const merged = mergeConfig(rawConfig, layout, previous?.configOwned, server);
+  const merged = mergeConfig(rawConfig, layout, previous?.configOwned, server, historical);
+  const agents = mergeAgents(rawAgents, previous, receipt?.release, history, provider);
   if (receipt) receipt.configOwned = merged.owned;
   const backups = new Map();
-  for (const relative of new Set([...Object.keys(previous?.files ?? {}), ...writes.keys(), layout[2], `.artifact-migration-tools/${provider}.json`])) {
+  for (const relative of new Set([...Object.keys(previous?.files ?? {}), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `.artifact-migration-tools/${provider}.json`])) {
     const file = await safePath(root, relative);
     const bytes = await optional(file);
     if (writes.has(relative) && bytes && !previous?.files[relative]) throw new Error(`Unowned file exists: ${relative}`);
@@ -270,6 +352,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     for (const relative of Object.keys(previous?.files ?? {})) if (!writes.has(relative)) await rm(await safePath(root, relative));
     for (const [relative, bytes] of writes) await replace(await safePath(root, relative), bytes);
     await replace(configFile, merged.bytes);
+    if (agents) await replace(agentsFile, agents);
     if (receipt) await replace(receiptFile, Buffer.from(json(receipt)));
     else await rm(receiptFile);
   } catch (error) {

@@ -285,6 +285,116 @@ for (const provider of NAMES) {
   });
 }
 
+for (const provider of NAMES) {
+  test(`B-stale/${provider}: verified history converges; unproven or modified history stays blocked`, async () => {
+    const { first, second } = await fixtures();
+    const root = await seedConsumer(`stale ${provider}`);
+    const store = path.join(scratch, `stale ${provider} store`);
+    await install(provider, root, store, first);
+    const old = await readReceipt(root, provider);
+    await install(provider, root, store, second, { version: second.version });
+    const current = await readReceipt(root, provider);
+    const native = await readConfig(root, provider);
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null);
+    assert.equal(await readConfig(root, provider), native);
+    await assert.rejects(stat(path.join(root, '.agents')), { code: 'ENOENT' });
+
+    const writeRegistration = async value => {
+      const file = configFile(root, provider);
+      if (SURFACES[provider].key) {
+        const config = JSON.parse(native);
+        config[SURFACES[provider].key]['start-migration'] = value;
+        await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
+      } else await writeFile(file, native.replace(OWNED_BLOCK, value));
+    };
+    const oldEntry = SURFACES[provider].key ? old.mcp : old.configOwned.replace(/^\n/, '');
+    await writeRegistration(oldEntry);
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair.repaired, true);
+    await assertReceiptOwnsRegistration(root, provider, current);
+    await assertUnrelatedPreserved(root, provider);
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null);
+
+    await writeRegistration(oldEntry);
+    const receipt = await readReceipt(root, provider);
+    receipt.releases = receipt.releases.filter(item => item.release !== old.release);
+    await writeFile(receiptFile(root, provider), `${JSON.stringify(receipt, null, 2)}\n`);
+    const unproven = await readConfig(root, provider);
+    await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified/i);
+    assert.equal(await readConfig(root, provider), unproven);
+    await writeFile(receiptFile(root, provider), `${JSON.stringify(current, null, 2)}\n`);
+
+    const sums = path.join(old.release, 'SHA256SUMS');
+    const validSums = await readFile(sums);
+    await writeFile(sums, 'invalid\n');
+    await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified/i);
+    assert.equal(await readConfig(root, provider), unproven);
+    await writeFile(sums, validSums);
+
+    for (const kind of ['path', 'args', 'extra', 'foreign']) {
+      let changed;
+      if (SURFACES[provider].key) {
+        changed = structuredClone(oldEntry);
+        if (kind === 'path') {
+          if (Array.isArray(changed.command)) changed.command[1] = '/foreign/mcp-server.mjs';
+          else changed.args[0] = '/foreign/mcp-server.mjs';
+        } else if (kind === 'args') {
+          if (Array.isArray(changed.command)) changed.command.push('--changed');
+          else changed.args.push('--changed');
+        } else if (kind === 'extra') changed.unowned = true;
+        else changed.command = 'foreign';
+      } else {
+        changed = kind === 'path' ? oldEntry.replace(old.release, '/foreign')
+          : kind === 'args' ? oldEntry.replace(/(args = \[[^\n]*)(\]\n)/, '$1, "--changed"$2')
+            : kind === 'extra' ? oldEntry.replace(OWNED_BLOCK, match => match.replace('# END', 'extra = true\n# END'))
+              : oldEntry.replace(/command = "[^"]*"/, 'command = "foreign"');
+      }
+      await writeRegistration(changed);
+      const before = await readConfig(root, provider);
+      await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified|conflict/i, `${provider}/${kind}`);
+      assert.equal(await readConfig(root, provider), before, `${provider}/${kind}`);
+    }
+    if (SURFACES[provider].key) {
+      const duplicate = native.replace('"start-migration":', '"start-migration": {"command":"foreign"}, "start-migration":');
+      await writeFile(configFile(root, provider), duplicate);
+      await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified|conflict/i, `${provider}/duplicate`);
+    }
+
+    await writeRegistration(SURFACES[provider].key ? current.mcp : current.configOwned.replace(/^\n/, ''));
+    const agentsFile = path.join(root, '.agents/mcp.json');
+    await mkdir(path.dirname(agentsFile), { recursive: true });
+    const launch = receipt => ({ command: process.execPath, args: [path.join(receipt.release, 'packages/migration-engine/src/mcp-server.mjs')] });
+    const agents = { mcpServers: { other: { command: 'other', args: [], targets: ['claude'] }, 'start-migration': { ...launch(current), targets: [provider, 'antigravity'] } }, keep: { untouched: true } };
+    await writeFile(agentsFile, JSON.stringify(agents));
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null);
+    assert.equal(await readFile(agentsFile, 'utf8'), JSON.stringify(agents));
+    agents.mcpServers['start-migration'] = { ...launch(old), targets: [provider, 'antigravity'] };
+    await writeFile(agentsFile, JSON.stringify(agents));
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair.repaired, true);
+    const settled = JSON.parse(await readFile(agentsFile, 'utf8'));
+    assert.deepEqual(settled, { ...agents, mcpServers: { ...agents.mcpServers, 'start-migration': { ...launch(current), targets: [provider, 'antigravity'] } } });
+    const settledBytes = await readFile(agentsFile, 'utf8');
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null);
+    assert.equal(await readFile(agentsFile, 'utf8'), settledBytes);
+
+    for (const kind of ['path', 'args', 'extra', 'foreign']) {
+      const changed = structuredClone(agents);
+      const entry = changed.mcpServers['start-migration'];
+      if (kind === 'path') entry.args[0] = '/foreign/mcp-server.mjs';
+      else if (kind === 'args') entry.args.push('--changed');
+      else if (kind === 'extra') entry.unowned = true;
+      else entry.command = 'foreign';
+      const before = JSON.stringify(changed);
+      await writeFile(agentsFile, before);
+      await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified|conflict/i, `${provider}/.agents/${kind}`);
+      assert.equal(await readFile(agentsFile, 'utf8'), before);
+    }
+    const ambiguous = settledBytes.replace('"start-migration":', '"start-migration":{"command":"foreign"},"start-migration":');
+    await writeFile(agentsFile, ambiguous);
+    await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified|conflict/i, `${provider}/.agents/duplicate`);
+    assert.equal(await readFile(agentsFile, 'utf8'), ambiguous);
+  });
+}
+
 // --- C. cross-provider offline reuse, all 12 ordered transitions ------------
 
 for (const source of NAMES) {
