@@ -38,10 +38,10 @@ import {
 } from "../core.mjs";
 import {
   compareVisualFact,
-  FIGMA_CONTEXT_FILE,
   pendingVisualUnbackedCandidates,
-  validateFigmaContext,
+  TARGET_VERIFICATION_ROLE,
   validateVisualAcceptance,
+  visualAuthorityOf,
   VISUAL_ACCEPTANCE_FILE,
   VISUAL_ACCEPTANCE_FORMAT,
 } from "../resumable-migration.mjs";
@@ -1040,7 +1040,9 @@ export const artifactArgumentsFor = ({ artifactType, source, target, sourcePaths
   source.root,
   "--target-root",
   target.root,
-  ...(designSource === "figma-mcp"
+  // Forwarded for every non-default source, so the delegated artifact record
+  // is pinned to the same authority the module record chose.
+  ...(designSource && designSource !== "target-system"
     ? [
         "--design-source",
         designSource,
@@ -2705,36 +2707,52 @@ const validateTargetInventory = async (root, state) => {
   return { relative, document, source, nativeIds, targetFiles };
 };
 
-// Artifact records keep format 13 for compatibility; the shared Figma
+// Artifact records keep format 13 for compatibility; the shared visual-authority
 // validators receive the format-17 view that opts into the existing strict
 // start-migration contract without creating a second contract.
-const strictFigmaState = (state) => ({
+const strictVisualState = (state) => ({
   ...state,
   formatVersion: VISUAL_ACCEPTANCE_FORMAT,
   migrationId: state.artifactId,
+  // The same source-binding projection `artifactDecisionBoundTo` uses: an
+  // artifact record's legacy revision lives on its source binding, and the
+  // legacy-runtime authority is bound to it exactly as a module record's is.
+  legacyRevision: { revision: state.bindings?.source?.revision },
+});
+
+/** This record's pinned visual authority, or null under `target-system`. */
+const artifactVisualAuthority = (state) =>
+  visualAuthorityOf(strictVisualState(state));
+
+/**
+ * The behaviors the shared validators read as the discovered UI inventory.
+ * `legacy-runtime` frames are bound to a discovered behavior state exactly as
+ * the module engine binds them, so both engines feed the same shape in.
+ */
+const artifactUiInventory = (source) => ({
+  uiBehaviors: source.document.behaviors
+    .filter((row) => row.visible)
+    .map((row) => ({
+      id: row.id,
+      runtimeStates: row.runtimeStates,
+      conditional: false,
+    })),
 });
 
 const artifactVisualAcceptance = async (root, state, source, target) =>
   validateVisualAcceptance(
     root,
-    strictFigmaState(state),
-    {
-      uiBehaviors: source.document.behaviors
-        .filter((row) => row.visible)
-        .map((row) => ({
-          id: row.id,
-          runtimeStates: row.runtimeStates,
-          conditional: false,
-        })),
-    },
+    strictVisualState(state),
+    artifactUiInventory(source),
     { uiMismatches: [] },
   );
 
-const artifactVisualDecisions = async (root, state) => {
-  if (state.designSource !== "figma-mcp") return [];
+const artifactVisualDecisions = async (root, state, source) => {
+  if (!visualAuthorityOf(strictVisualState(state))) return [];
   const candidates = await pendingVisualUnbackedCandidates(
     root,
-    strictFigmaState(state),
+    strictVisualState(state),
+    source ? artifactUiInventory(source) : undefined,
   );
   if (candidates.length === 0) return [];
   const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
@@ -2883,10 +2901,9 @@ const validateBaseline = async (root, state, { final = false } = {}) => {
     }
   }
   sameMembers(globalIds, target.source.contractIds, "global-contract source coverage");
-  const visualRows =
-    state.designSource === "figma-mcp"
-      ? await artifactVisualAcceptance(root, state, target.source, target)
-      : null;
+  const visualRows = artifactVisualAuthority(state)
+    ? await artifactVisualAcceptance(root, state, target.source, target)
+    : null;
   return { files, parity, native, design, global, target, visualRows };
 };
 
@@ -3018,7 +3035,9 @@ const validateBoundTo = (boundTo, state, label, sliceDigest, origin) => {
     boundTo,
     label,
     ["sourceDigest", "targetDigest", "sliceDigest"],
-    state.designSource === "figma-mcp" ? ["figmaContextDigest"] : [],
+    artifactVisualAuthority(state)
+      ? [artifactVisualAuthority(state).boundToDigestField]
+      : [],
   );
   if (boundTo.sourceDigest !== state.bindings.source.digest ||
     (origin === "TARGET" && boundTo.targetDigest !== state.bindings.target.digest) ||
@@ -3026,23 +3045,31 @@ const validateBoundTo = (boundTo, state, label, sliceDigest, origin) => {
     throw new Error(`${label} is stale for the current source/target binding.`);
   }
   if (boundTo.sliceDigest !== sliceDigest) throw new Error(`${label}.sliceDigest is stale.`);
+  const authority = artifactVisualAuthority(state);
   if (
-    state.designSource === "figma-mcp" &&
-    boundTo.figmaContextDigest !== state.artifactHashes[FIGMA_CONTEXT_FILE]
+    authority &&
+    boundTo[authority.boundToDigestField] !==
+      state.artifactHashes[authority.contextFile]
   ) {
-    throw new Error(`${label}.figmaContextDigest is stale.`);
+    throw new Error(`${label}.${authority.boundToDigestField} is stale.`);
   }
 };
 
 const validateArtifactVisualEvidence = async (root, state, row, visualRow, label) => {
+  const authority = artifactVisualAuthority(state);
   const fail = (problem) => {
     throw new Error(
-      `VISUAL_ACCEPTANCE_FAIL: ${label} (${visualRow.id}, Figma node ${visualRow.figmaNodeId}) ${problem}.`,
+      `VISUAL_ACCEPTANCE_FAIL: ${label} (${visualRow.id}, Figma node ${visualRow[authority.rowFrameKey]}) ${problem}.`,
     );
   };
-  const node = (value) => String(value ?? "").trim().replace("-", ":");
-  if (node(row.figmaNodeId) !== node(visualRow.figmaNodeId)) {
-    fail(`names figmaNodeId '${row.figmaNodeId}'`);
+  const key = (value) => authority.normalizeFrameKey(value);
+  if (key(row[authority.recordFrameKey]) !== key(visualRow[authority.rowFrameKey])) {
+    fail(`names ${authority.recordFrameKey} '${row[authority.recordFrameKey]}'`);
+  }
+  // P5: the artifact engine's TARGET rows are the same lifecycle slot as the
+  // module engine's, so a block that declares the authority's role is refused.
+  if (row.capture?.role !== undefined && row.capture.role !== TARGET_VERIFICATION_ROLE) {
+    fail(`declares capture.role '${row.capture.role}', not ${TARGET_VERIFICATION_ROLE}`);
   }
   const expectedViewport = `${visualRow.viewport.width}x${visualRow.viewport.height}`;
   if (`${row.viewport.width}x${row.viewport.height}` !== expectedViewport) {
@@ -3118,7 +3145,7 @@ const validateVerification = async (root, state, capability) => {
       "artifacts",
       "boundTo",
       "provider",
-    ], ["sessionId", "figmaNodeId", "measurements"]);
+    ], ["sessionId", "figmaNodeId", "legacyFrameId", "capture", "measurements"]);
     const behaviorId = nonEmpty(row.behaviorId, `runtimeEvidence[${index}].behaviorId`);
     if (row.origin !== "LEGACY" && row.origin !== "TARGET") throw new Error(`runtimeEvidence[${index}].origin must be 'LEGACY' or 'TARGET'.`);
     nonEmpty(row.state, `runtimeEvidence[${index}].state`);
@@ -3384,14 +3411,16 @@ export const checkpointArtifacts = (state) => {
     case "DISCOVERY_COMPLETENESS": return ["inventories/completeness.json"];
     case "ASSESS_TARGET": return [
       "inventories/target.json",
-      ...(state.designSource === "figma-mcp" ? [FIGMA_CONTEXT_FILE] : []),
+      ...(artifactVisualAuthority(state)
+        ? [artifactVisualAuthority(state).contextFile]
+        : []),
     ];
     case "BUILD_BASELINE": return [
       "matrices/parity.json",
       "matrices/target-native.json",
       "matrices/design-system.json",
       "matrices/global-contract.json",
-      ...(state.designSource === "figma-mcp" ? [VISUAL_ACCEPTANCE_FILE] : []),
+      ...(artifactVisualAuthority(state) ? [VISUAL_ACCEPTANCE_FILE] : []),
     ];
     case "PLAN": return ["slices/index.json"];
     case "IMPLEMENT_SLICES": return [`slices/${state.activeSlice}.json`];
@@ -3490,15 +3519,25 @@ const runCheckpointValidation = async (root, state, capability) => {
       case "DISCOVERY_COMPLETENESS": return { ready: true, result: await validateCompleteness(root, state) };
       case "ASSESS_TARGET": {
         const result = await validateTargetInventory(root, state);
-        if (state.designSource === "figma-mcp") {
-          await validateFigmaContext(root, strictFigmaState(state));
+        const authority = artifactVisualAuthority(state);
+        if (authority) {
+          await authority.validateContext(
+            root,
+            strictVisualState(state),
+            undefined,
+            artifactUiInventory(result.source),
+          );
         }
         return { ready: true, result };
       }
       case "BUILD_BASELINE": {
         const visual = reconcileArtifactDecisions(
           state,
-          await artifactVisualDecisions(root, state),
+          await artifactVisualDecisions(
+            root,
+            state,
+            await validateSourceInventory(root, state),
+          ),
         );
         if (visual.approvable.length > 0) {
           return {
@@ -3816,11 +3855,13 @@ const pinsFor = async (root, state, validation) => {
     case "DISCOVERY_COMPLETENESS": await add("inventories/completeness.json"); break;
     case "ASSESS_TARGET":
       await add("inventories/target.json");
-      if (state.designSource === "figma-mcp") await add(FIGMA_CONTEXT_FILE);
+      if (artifactVisualAuthority(state)) {
+        await add(artifactVisualAuthority(state).contextFile);
+      }
       break;
     case "BUILD_BASELINE":
       for (const relative of Object.values(validation.result.files)) await add(`${relative}#immutable`);
-      if (state.designSource === "figma-mcp") await add(VISUAL_ACCEPTANCE_FILE);
+      if (artifactVisualAuthority(state)) await add(VISUAL_ACCEPTANCE_FILE);
       break;
     case "PLAN": await add("slices/index.json"); break;
     case "IMPLEMENT_SLICES": await add(validation.result.relative); break;
@@ -4204,7 +4245,7 @@ export const artifactOperatorDecisions = async (options = {}) => {
   const state = await readArtifactState(location.targetRoot, location.id);
   assertInvocationMatches(state, options);
   const source = await validateSourceInventory(location.root, state);
-  const visual = await artifactVisualDecisions(location.root, state);
+  const visual = await artifactVisualDecisions(location.root, state, source);
   const decisions = [...source.decisions, ...visual];
   return {
     state,

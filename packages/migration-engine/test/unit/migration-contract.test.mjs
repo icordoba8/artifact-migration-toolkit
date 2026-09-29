@@ -10317,6 +10317,12 @@ const figmaAtAssessTarget = async (
   legacy = LEGACY_INVENTORY,
 ) => {
   await initFigma(fixture, extra);
+  return atAssessTarget(fixture, formatVersion, legacy);
+};
+
+/** The design-source-independent half of the drive above, shared with
+ * `legacy-runtime` so both origins reach ASSESS_TARGET the same way. */
+const atAssessTarget = async (fixture, formatVersion, legacy) => {
   if (formatVersion) {
     const statePath = path.join(fixture.migrationRoot, "state.json");
     await writeJson(statePath, {
@@ -10742,6 +10748,450 @@ test("figma-mcp: --reopen-ui keeps the stamped format version and the figma pin"
   } finally {
     await fixture.cleanup();
   }
+});
+
+// --- Format 17: legacy-runtime as a pinned visual authority -------------------
+//
+// The same lifecycle, the same contract, the same comparison as figma-mcp,
+// reached through the one VISUAL_AUTHORITIES adapter. Every case below drives
+// the real CLI/state machine, so a second visual pipeline would fail here.
+
+const LEGACY_CONTEXT_FILE = "inventories/legacy-runtime-context.json";
+const LEGACY_FRAME_ID = "UIB-1::DEFAULT";
+const LEGACY_AUTHORITY_DIR = "inventories/legacy-runtime/UIB-1-DEFAULT";
+// The authority screenshot bytes. The target captures the identical bytes at
+// its own disjoint path: a perfect 1:1 migration, which must PASS.
+const SHARED_RENDER = "identical render bytes\n";
+
+const initLegacy = (fixture, extra = {}) =>
+  initialize(fixture, { designSource: "legacy-runtime", ...extra });
+
+/** One pinned authority capture set, persisted under the authority's own root. */
+const writeLegacyContext = async (fixture, { frame = {}, sources = {} } = {}) => {
+  const persist = async (name, bytes) => {
+    const reference = `${LEGACY_AUTHORITY_DIR}/${name}`;
+    const absolute = path.join(fixture.migrationRoot, reference);
+    await mkdir(path.dirname(absolute), { recursive: true });
+    await writeFile(absolute, bytes);
+    return {
+      reference,
+      hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    };
+  };
+  const recorded = (await state(fixture)).legacyRevision.revision;
+  const written = {
+    id: LEGACY_FRAME_ID,
+    uiBehaviorId: "UIB-1",
+    state: "DEFAULT",
+    states: ["DEFAULT"],
+    viewport: FIGMA_VIEWPORT,
+    url: "http://localhost/auth/sign-in",
+    rootLocator: "getByRole('main')",
+    legacyRevision: recorded,
+    capturedAt: "2026-09-29T00:00:00.000Z",
+    capture: {
+      role: "LEGACY_AUTHORITY",
+      mode: "element",
+      deviceScaleFactor: 1,
+      colorScheme: "light",
+      reducedMotion: "reduce",
+      compare: { width: 1180, height: 640 },
+    },
+    extraction: {
+      retrievedAt: "2026-09-29T00:00:00.000Z",
+      fidelity: "COMPLETE",
+      limitations: [],
+    },
+    sources: {
+      snapshot: await persist(
+        "snapshot.json",
+        `${JSON.stringify({
+          proofFormat: "playwright-ui-proof/v1",
+          observation: {
+            url: "http://localhost/auth/sign-in",
+            controls: [{ role: "button", name: "Sign in", state: "DEFAULT" }],
+          },
+        })}\n`,
+      ),
+      screenshot: await persist("screenshot.png", SHARED_RENDER),
+      measurements: await persist(
+        "observations.json",
+        `${JSON.stringify({ viewport: FIGMA_VIEWPORT, values: MEASURED })}\n`,
+      ),
+      ...sources,
+    },
+    ...frame,
+  };
+  await writeJson(path.join(fixture.migrationRoot, LEGACY_CONTEXT_FILE), {
+    version: 1,
+    frames: [written],
+  });
+  return written;
+};
+
+/** The legacy twin of `visualAcceptance`: the same matrix, bound by frame id. */
+const legacyAcceptance = ({ row = {} } = {}) => {
+  const contract = visualAcceptance();
+  const { figmaNodeId, figmaState, ...rest } = contract.rows[0];
+  return {
+    ...contract,
+    rows: [{ ...rest, legacyFrameId: LEGACY_FRAME_ID, ...row }],
+  };
+};
+
+const legacyPin = async (fixture) =>
+  (await state(fixture)).artifactHashes[LEGACY_CONTEXT_FILE];
+
+/** TARGET runtime evidence for the legacy-backed row, captured at the slice's
+ * own path with the authority's byte-identical render. */
+const legacyEvidence = async (
+  fixture,
+  { values = MEASURED, legacyFrameId = LEGACY_FRAME_ID, capture, render = SHARED_RENDER, screenshot, measurements } = {},
+) => {
+  const pin = await legacyPin(fixture);
+  const captured =
+    screenshot ??
+    (await writeCapture(fixture, "slice-a", "uib-1-default.png", render));
+  const measured =
+    measurements ??
+    (await writeCapture(
+      fixture,
+      "slice-a",
+      "observations.json",
+      `${JSON.stringify({ viewport: FIGMA_VIEWPORT, values })}\n`,
+    ));
+  return (records) =>
+    records.map((record) =>
+      record.origin === "TARGET"
+        ? {
+            ...record,
+            viewport: FIGMA_VIEWPORT,
+            legacyFrameId,
+            screenshot: captured,
+            measurements: measured,
+            ...(capture ? { capture } : {}),
+            boundTo: { ...record.boundTo, visualContextDigest: pin },
+          }
+        : record,
+    );
+};
+
+/** legacy-runtime up to ASSESS_TARGET, authority not yet authored. */
+const legacyAtAssessTarget = async (fixture, extra = {}) => {
+  await initLegacy(fixture, extra);
+  await atAssessTarget(fixture, undefined, LEGACY_INVENTORY);
+};
+
+/** legacy-runtime up to (not through) VERIFY_SLICES. */
+const driveLegacyToVerify = async (fixture, { contract } = {}) => {
+  await legacyAtAssessTarget(fixture);
+  await writeLegacyContext(fixture);
+  await advance(fixture);
+  await completeStepDoc(fixture, "BUILD_BASELINE");
+  await writeMatrices(fixture);
+  await registerAuth(fixture);
+  await writeVisualAcceptance(fixture, contract ?? legacyAcceptance());
+  await advance(fixture);
+  await completeStepDoc(fixture, "PLAN");
+  await writeJson(path.join(fixture.migrationRoot, "slices/index.json"), {
+    version: 1,
+    slices: SLICES,
+  });
+  await advance(fixture);
+  await completeStepDoc(fixture, "IMPLEMENT_SLICES");
+  await completeStepDoc(fixture, "VERIFY_SLICES");
+};
+
+test("legacy-17: bootstrap pins the source, renders the authority, and refuses --figma", async () => {
+  const fixture = await createFixture();
+  try {
+    await initLegacy(fixture);
+    const persisted = await state(fixture);
+    assert.equal(persisted.designSource, "legacy-runtime");
+    assert.equal(persisted.figmaSources, undefined);
+    const resolveDoc = await readFile(
+      path.join(fixture.migrationRoot, "steps/01-resolve.md"),
+      "utf8",
+    );
+    assert.match(resolveDoc, /- Design source: `legacy-runtime`/);
+    assert.match(
+      resolveDoc,
+      /- Visual authority: `inventories\/legacy-runtime-context\.json`/,
+    );
+    assert.doesNotMatch(resolveDoc, /Figma source/);
+    const stepDoc = await readFile(
+      path.join(fixture.migrationRoot, "steps/03-assess-target.md"),
+      "utf8",
+    );
+    assert.match(stepDoc, /inventories\/legacy-runtime-context\.json/);
+    assert.match(stepDoc, /LEGACY_AUTHORITY/);
+    const baselineDoc = await readFile(
+      path.join(fixture.migrationRoot, "steps/04-build-baseline.md"),
+      "utf8",
+    );
+    assert.match(baselineDoc, /legacyFrameId/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("legacy-17: --design-source legacy-runtime refuses --figma links", async () => {
+  const fixture = await createFixture();
+  try {
+    await assert.rejects(
+      initLegacy(fixture, { figma: [FIGMA_URL] }),
+      /--figma links require --design-source figma-mcp/,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("legacy-17: ASSESS_TARGET refuses an absent, mis-bound or substituted authority", async () => {
+  const fixture = await createFixture();
+  try {
+    await legacyAtAssessTarget(fixture);
+    // Absent: fails closed before anything is pinned.
+    await rejectsAt(fixture, /inventories\/legacy-runtime-context\.json/);
+    // A frame naming an undiscovered behavior state.
+    await writeLegacyContext(fixture, {
+      frame: { id: "UIB-1::MISSING", state: "MISSING", states: ["MISSING"] },
+    });
+    await rejectsAt(fixture, /is not a discovered state of a UI behavior/);
+    // legacyRevision bound to a different legacy tree.
+    await writeLegacyContext(fixture, { frame: { legacyRevision: "b".repeat(40) } });
+    await rejectsAt(fixture, /is not this record's pinned legacy revision/);
+    // P5 at the authority slot: the target's role cannot be declared here.
+    const valid = await writeLegacyContext(fixture);
+    await writeLegacyContext(fixture, {
+      frame: { capture: { ...valid.capture, role: "TARGET_VERIFICATION" } },
+    });
+    await rejectsAt(fixture, /capture\.role must be 'LEGACY_AUTHORITY'/);
+    // P4 at the authority slot: an authority source under evidence/.
+    await writeLegacyContext(fixture);
+    const planted = await writeCapture(
+      fixture,
+      "slice-a",
+      "planted.png",
+      SHARED_RENDER,
+    );
+    await writeLegacyContext(fixture, {
+      sources: {
+        screenshot: {
+          reference: "evidence/slice-a/ui/planted.png",
+          hash: planted.hash,
+        },
+      },
+    });
+    await rejectsAt(fixture, /does not resolve under inventories\/legacy-runtime\//);
+    // The valid authority closes the checkpoint and is pinned.
+    await writeLegacyContext(fixture);
+    await advance(fixture);
+    const pinned = await state(fixture);
+    assert.ok(pinned.artifactHashes[LEGACY_CONTEXT_FILE]);
+    assert.equal(
+      pinned.artifactHashes["inventories/figma-context.json"],
+      undefined,
+    );
+    // Pinned means immutable: editing the authority now refuses every read.
+    await writeLegacyContext(fixture, {
+      frame: { url: "http://localhost/auth/other" },
+    });
+    await assert.rejects(
+      advance(fixture),
+      /Completed artifact changed after validation: inventories\/legacy-runtime-context\.json/,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("legacy-17: the record reaches COMPLETE through the shared visual pipeline", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveLegacyToVerify(fixture);
+    const pin = await legacyPin(fixture);
+    assert.ok(pin);
+    for (const slice of SLICES) {
+      await authorSlice(fixture, slice.id);
+      await advance(fixture, { slice: slice.id });
+      await authorEvidence(
+        fixture,
+        slice.id,
+        slice.id === "slice-a"
+          ? {
+              mutate: await legacyEvidence(fixture, {
+                capture: { role: "TARGET_VERIFICATION", mode: "element" },
+              }),
+            }
+          : {},
+      );
+      await advance(fixture, { slice: slice.id });
+      // Resume after every checkpoint: the replayed history must derive the
+      // same authority pin, and the record must keep its source and role.
+      const resumed = await state(fixture);
+      assert.equal(resumed.designSource, "legacy-runtime");
+      assert.equal(resumed.artifactHashes[LEGACY_CONTEXT_FILE], pin);
+      const preview = await previewMigrationExecution({
+        ...(await resolutionFor(fixture)),
+        moduleName: "auth",
+      });
+      assert.equal(preview.visualContract.authority.contextFile, LEGACY_CONTEXT_FILE);
+      assert.equal(preview.visualContract.authority.digest, pin);
+      const authority = await readJson(
+        path.join(fixture.migrationRoot, LEGACY_CONTEXT_FILE),
+      );
+      assert.equal(authority.frames[0].capture.role, "LEGACY_AUTHORITY");
+    }
+    await completeStepDoc(fixture, "FINALIZE");
+    await writeMatrices(fixture, true);
+    const context = {
+      legacyRevision: await revisionOf(fixture.legacyRoot),
+      targetRevision: await revisionOf(fixture.targetRoot),
+      requirementsDigest: (await state(fixture)).requirementsAuthority.digest,
+      legacyDirtyDigest: (await dirtyManifest(fixture.legacyRoot)).digest,
+      targetDirtyDigest: (
+        await dirtyManifest(fixture.targetRoot, TARGET_DIRTY_SCOPE)
+      ).digest,
+    };
+    await writeJson(path.join(fixture.migrationRoot, "gates.json"), {
+      version: 1,
+      gates: GATES.map((gate) => ({
+        gate,
+        result: "PASS",
+        attempts: 1,
+        evidence: [gateEvidence(context)],
+      })),
+    });
+    await advance(fixture);
+    const completed = await state(fixture);
+    assert.equal(completed.status, "COMPLETE");
+    assert.equal(completed.artifactHashes[LEGACY_CONTEXT_FILE], pin);
+    assert.ok(completed.artifactHashes["matrices/visual-acceptance.json"]);
+
+    // The 1:1 outcome: the authority capture and the target capture are the
+    // same bytes at disjoint paths, and the record still reached COMPLETE.
+    const authorityBytes = await readFile(
+      path.join(fixture.migrationRoot, LEGACY_AUTHORITY_DIR, "screenshot.png"),
+    );
+    const targetBytes = await readFile(
+      path.join(fixture.migrationRoot, "evidence/slice-a/ui/uib-1-default.png"),
+    );
+    assert.deepEqual(authorityBytes, targetBytes);
+
+    // History replay still derives exactly this pin on the next read.
+    const replayed = await previewMigrationExecution({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+    });
+    assert.equal(replayed.visualContract.authority.digest, pin);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("legacy-17: the engine, not the authored result, decides a legacy-backed state", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveLegacyToVerify(fixture);
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    // A measurement that diverges from the contract is refused by the same
+    // compareVisualFact path figma-mcp uses.
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await legacyEvidence(fixture, {
+        values: { ...MEASURED, contentWidth: 1100 },
+      }),
+    });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /VISUAL_ACCEPTANCE_FAIL: .*contentWidth expected 1280px/,
+    );
+    // P5: TARGET evidence may not declare the authority's role.
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await legacyEvidence(fixture, {
+        capture: { role: "LEGACY_AUTHORITY", mode: "element" },
+      }),
+    });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /VISUAL_CAPTURE_ROLE: .*cited as TARGET_VERIFICATION/,
+    );
+    // P4: TARGET evidence may not cite the authority's own capture tree.
+    const authority = (
+      await readJson(path.join(fixture.migrationRoot, LEGACY_CONTEXT_FILE))
+    ).frames[0].sources;
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await legacyEvidence(fixture, {
+        screenshot: {
+          reference: `../migrations/auth/${authority.screenshot.reference}`,
+          hash: authority.screenshot.hash,
+        },
+      }),
+    });
+    await assert.rejects(
+      advance(fixture, { slice: "slice-a" }),
+      /VISUAL_AUTHORITY_SUBSTITUTION/,
+    );
+    // The honest capture verifies.
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await legacyEvidence(fixture),
+    });
+    assert.ok(await advance(fixture, { slice: "slice-a" }));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("legacy-17: the three design sources keep disjoint pins and one state shape", async () => {
+  const keysFor = async (drive) => {
+    const fixture = await createFixture();
+    try {
+      await drive(fixture);
+      const persisted = await state(fixture);
+      return {
+        state: Object.keys(persisted).sort(),
+        pins: Object.keys(persisted.artifactHashes).sort(),
+      };
+    } finally {
+      await fixture.cleanup();
+    }
+  };
+  const target = await keysFor(async (fixture) => {
+    await initialize(fixture);
+    await atAssessTarget(fixture, undefined, LEGACY_INVENTORY);
+    await advance(fixture);
+  });
+  const figma = await keysFor(async (fixture) => {
+    await figmaAtAssessTarget(fixture);
+    await writeFigmaContext(fixture);
+    await advance(fixture);
+  });
+  const legacy = await keysFor(async (fixture) => {
+    await legacyAtAssessTarget(fixture);
+    await writeLegacyContext(fixture);
+    await advance(fixture);
+  });
+  // figmaSources is the one state key a figma-mcp record carries and the other
+  // two do not; legacy-runtime introduces no state key at all.
+  assert.deepEqual(legacy.state, target.state);
+  assert.deepEqual(
+    figma.state.filter((key) => key !== "figmaSources"),
+    target.state,
+  );
+  // Each authority is pinned only by the record that owns it.
+  assert.ok(figma.pins.includes("inventories/figma-context.json"));
+  assert.ok(!figma.pins.includes(LEGACY_CONTEXT_FILE));
+  assert.ok(legacy.pins.includes(LEGACY_CONTEXT_FILE));
+  assert.ok(!legacy.pins.includes("inventories/figma-context.json"));
+  assert.deepEqual(
+    legacy.pins.filter((pin) => pin !== LEGACY_CONTEXT_FILE),
+    target.pins,
+  );
+  assert.deepEqual(
+    figma.pins.filter((pin) => pin !== "inventories/figma-context.json"),
+    target.pins,
+  );
 });
 
 // --- Format 17: Figma visual acceptance contract -----------------------------

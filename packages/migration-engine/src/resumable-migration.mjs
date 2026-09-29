@@ -232,10 +232,13 @@ export const isUiObservationsAdoption = (event) =>
 
 export const UI_OBSERVATIONS_ADOPTION_ROOT = "ui-observations-adoption";
 export const UI_OBSERVATIONS_CANDIDATE_FILE = `${UI_OBSERVATIONS_ADOPTION_ROOT}/candidate/legacy.json`;
-const usesFigmaVisualContract = (state) =>
-  usesVisualAcceptance(state) &&
-  usesDesignSource(state) &&
-  state.designSource === "figma-mcp";
+/**
+ * Whether this record derives a format-17 visual contract at all. True for
+ * every record whose design source pins a visual authority (`VISUAL_AUTHORITIES`),
+ * false for `target-system`, which designs nothing and is held to nothing.
+ */
+const usesVisualContract = (state) =>
+  usesVisualAcceptance(state) && visualAuthorityOf(state) !== null;
 
 /**
  * Whether evidence has to say *which* source it belongs to. Attribution exists
@@ -857,6 +860,124 @@ export const VISUAL_ACCEPTANCE_FILE = "matrices/visual-acceptance.json";
 // the transition, which preserves the old bytes under ADOPTION_ROOT.
 export const FIGMA_CONTEXT_ADOPTION_FILE =
   "inventories/figma-context.adopted.json";
+// Format 17, legacy-runtime only: the pinned visual authority. Authored and
+// pinned at ASSESS_TARGET exactly where the Figma context is, immutable for the
+// migration's life, and the origin of every visual fact the contract derives.
+export const LEGACY_RUNTIME_CONTEXT_FILE =
+  "inventories/legacy-runtime-context.json";
+// Where the authority's own captures live. P4: nothing under here may be cited
+// as TARGET verification evidence, and nothing under `evidence/` may be cited
+// as an authority source. Different root, different checkpoint, different pin.
+export const LEGACY_RUNTIME_EVIDENCE_ROOT = "inventories/legacy-runtime/";
+const TARGET_EVIDENCE_ROOT = "evidence/";
+/**
+ * P5. The lifecycle slot a capture was produced for, declared in the record
+ * itself rather than only in the engine's head. The authority is captured at
+ * ASSESS_TARGET, before the target exists; target verification is captured at
+ * VERIFY_SLICES, after it does. A block whose role disagrees with the slot it
+ * is cited from is refused -- and note that no rule anywhere compares the two
+ * roles' image hashes for *inequality*: byte-identical captures are the correct
+ * 1:1 outcome of a migration and must pass.
+ */
+export const LEGACY_AUTHORITY_ROLE = "LEGACY_AUTHORITY";
+export const TARGET_VERIFICATION_ROLE = "TARGET_VERIFICATION";
+
+/**
+ * The one adapter table that makes the format-17 acceptance pipeline pluggable.
+ * Exactly the fields that differ between the two supported origins -- there is
+ * no normalized-frame layer beyond them, and no entry for a hypothetical third
+ * authority. `validateVisualAcceptance`, `compareVisualFact`,
+ * `assertVisualAcceptance`, the pin/replay filters and both front ends stay
+ * exactly one implementation each.
+ *
+ * `validateContext` is wrapped in an arrow because the validators are declared
+ * far below this table; the table is only ever read at call time.
+ */
+export const VISUAL_AUTHORITIES = Object.freeze({
+  "figma-mcp": Object.freeze({
+    contextFile: FIGMA_CONTEXT_FILE,
+    validateContext: (root, state, contextFile) =>
+      validateFigmaContext(root, state, contextFile),
+    rowFrameKey: "figmaNodeId",
+    rowStateKey: "figmaState",
+    recordFrameKey: "figmaNodeId",
+    normalizeFrameKey: (value) => figmaNodeKey(value),
+    boundToDigestField: "figmaContextDigest",
+  }),
+  "legacy-runtime": Object.freeze({
+    contextFile: LEGACY_RUNTIME_CONTEXT_FILE,
+    validateContext: (root, state, contextFile, legacy) =>
+      validateLegacyRuntimeContext(root, state, contextFile, legacy),
+    rowFrameKey: "legacyFrameId",
+    // The runtime state a legacy frame shows is the row's own state; there is
+    // no second design-side state vocabulary to map through.
+    rowStateKey: "state",
+    recordFrameKey: "legacyFrameId",
+    normalizeFrameKey: (value) => String(value ?? "").trim(),
+    boundToDigestField: "visualContextDigest",
+  }),
+});
+
+/** The authority-neutral frame identity a row or an evidence record binds. */
+const frameKeyOf = (authority, source, field) =>
+  authority.normalizeFrameKey(source?.[authority[field]]);
+
+/** A record-relative, forward-slash path, for the two P4 root comparisons. */
+const recordRelative = (root, absolute) =>
+  path.relative(root, absolute).split(path.sep).join("/");
+
+/**
+ * P4, target side. A TARGET screenshot, measurement or proof reference may not
+ * resolve inside the authority's own capture tree: the authority was pinned at
+ * ASSESS_TARGET and citing it here would let the thing being measured *be* the
+ * thing it is measured against. Only an independent capture at the slice's own
+ * path can be cited. Nothing here compares hashes -- byte-identical authority
+ * and target images at disjoint paths are the correct 1:1 outcome and pass.
+ */
+/**
+ * P5. A declared capture role must be the role of the lifecycle slot it is
+ * cited from. The block stays optional so no existing record gains an
+ * obligation; declaring the *wrong* role is what is refused.
+ */
+const assertCaptureRole = (capture, expected, label) => {
+  const role = capture?.role;
+  if (role !== undefined && role !== expected) {
+    throw new Error(
+      `VISUAL_CAPTURE_ROLE: ${label}.capture.role is '${role}', but this evidence is cited as ${expected}. A capture declares the lifecycle slot it was produced for, and the two slots are never interchangeable.`,
+    );
+  }
+};
+
+const assertTargetEvidencePath = (reference, label) => {
+  const spelled = String(reference ?? "").split(path.sep).join("/");
+  if (
+    spelled === LEGACY_RUNTIME_EVIDENCE_ROOT.slice(0, -1) ||
+    spelled.includes(LEGACY_RUNTIME_EVIDENCE_ROOT)
+  ) {
+    throw new Error(
+      `VISUAL_AUTHORITY_SUBSTITUTION: ${label} '${reference}' resolves inside ${LEGACY_RUNTIME_EVIDENCE_ROOT}, the pinned visual authority's own capture tree. Target verification evidence is captured at VERIFY_SLICES under evidence/<slice>/ and never cites the authority it is compared against.`,
+    );
+  }
+};
+
+/** The pinned visual authority of a record, or null for `target-system`. */
+export const visualAuthorityOf = (state) =>
+  (usesDesignSource(state) && VISUAL_AUTHORITIES[state?.designSource]) || null;
+
+const AUTHORITY_CONTEXT_FILES = new Set(
+  Object.values(VISUAL_AUTHORITIES).map((authority) => authority.contextFile),
+);
+
+/**
+ * The one rule both the pin filter and the history-replay filter read: an
+ * authority context is pinned at ASSESS_TARGET only by the record whose design
+ * source owns it. A target-system record authored neither, and a figma-mcp
+ * record must never be held to the legacy one (or the reverse), or the next
+ * resume fails the "pins exactly" assertion.
+ */
+const pinsAuthorityContext = (state, relative) =>
+  !AUTHORITY_CONTEXT_FILES.has(relative) ||
+  visualAuthorityOf(state)?.contextFile === relative;
 export const ADOPTION_ROOT = "visual-contract-adoption";
 /**
  * `--reopen-complete` only. Where a COMPLETE record's superseded verification
@@ -953,6 +1074,9 @@ const IMMUTABLE_STEP_ARTIFACTS = {
     // Pinned only for a figma-mcp record; filtered out otherwise in
     // `completedArtifactHashes`, exactly like the capability matrix.
     FIGMA_CONTEXT_FILE,
+    // The same slot for the other authority: pinned only for a legacy-runtime
+    // record, immutable from here on by `validateCompletedHashes`.
+    LEGACY_RUNTIME_CONTEXT_FILE,
   ],
   // The capability matrix carries no mutable field -- slice assignment lives in
   // slices/index.json, not here -- so unlike behavior-parity it is pinned as a
@@ -2124,6 +2248,13 @@ const stepTemplates = ({ designSource, figmaSources } = {}) => ({
             `Every frame records \`nodeId\` (a recorded link, or a concrete descendant of a recorded node link with \`ancestry\` \`{ sourceNodeId, path, metadata }\`: \`path\` from the source to the node and \`metadata\` the verbatim \`get_metadata\` output of the source node persisted as \`{ reference, hash }\`),\`name\`, \`type\`, \`viewport\`, \`states\`, \`extraction\` (\`retrievedAt\`, \`fidelity\` COMPLETE or DEGRADED with its \`limitations\`), and \`sources\`: the verbatim \`get_metadata\`, \`get_design_context\` (split over child nodes when too large), \`get_variable_defs\` and \`get_screenshot\` outputs persisted under \`inventories/figma/\`, each as \`{ reference, hash }\`. Never replace them with a summary.`,
           ]
         : []),
+      // The other authority: captured from the running legacy app, never read
+      // from legacy source, and pinned here for the migration's whole life.
+      ...(designSource === "legacy-runtime"
+        ? [
+            `Capture every required legacy UI behavior state from the running legacy app and author \`${LEGACY_RUNTIME_CONTEXT_FILE}\` as a JSON object with a non-empty \`frames\` array. Each frame records \`id\` (\`<uiBehaviorId>::<state>\`), \`uiBehaviorId\`, \`state\`, \`states\`, \`viewport\`, \`url\`, \`rootLocator\`, this record's pinned \`legacyRevision\`, \`capture\` (\`role\` \`${LEGACY_AUTHORITY_ROLE}\`, \`mode\` \`element\`, \`deviceScaleFactor\` 1, \`compare\` {width, height}), \`extraction\` (\`retrievedAt\`, \`fidelity\` COMPLETE or DEGRADED with its \`limitations\`), and \`sources\`: the element screenshot, the \`${UI_PROOF_FORMAT}\` accessibility snapshot and the \`{viewport, values}\` measurements, persisted under \`${LEGACY_RUNTIME_EVIDENCE_ROOT}\` as \`{ reference, hash }\`. The legacy runtime is authoritative for visual appearance only; legacy code and UI structure are never an implementation authority.`,
+          ]
+        : []),
     ],
   }),
   "steps/04-build-baseline.md": renderStep({
@@ -2143,6 +2274,11 @@ const stepTemplates = ({ designSource, figmaSources } = {}) => ({
       ...(designSource === "figma-mcp"
         ? [
             `Derive \`${VISUAL_ACCEPTANCE_FILE}\` from \`${FIGMA_CONTEXT_FILE}\`: one row per required UI behavior state, binding \`figmaNodeId\`, \`figmaState\`, the frame \`viewport\`, expected visual facts (\`px\`, \`count\`, \`equals\`, \`present\`), and an explicit \`tolerance\`; the row is the only thing that binds a runtime state to Figma, and nothing is inferred from frame names or states. A state with no row goes under \`unbacked\` with its reason, and stays blocked until an operator approves its VISUAL_UNBACKED candidate (\`record-decision.mjs <module> --pending\`, approved at a terminal) and the entry cites that \`decisionId\` and \`decisionDigest\`. A state with a row can never be unbacked.`,
+          ]
+        : []),
+      ...(designSource === "legacy-runtime"
+        ? [
+            `Derive \`${VISUAL_ACCEPTANCE_FILE}\` from \`${LEGACY_RUNTIME_CONTEXT_FILE}\`: one row per required UI behavior state, binding \`legacyFrameId\` (the pinned frame's \`id\`), the frame \`viewport\`, expected visual facts (\`px\`, \`count\`, \`equals\`, \`present\`) taken from that frame's pinned measurements, and an explicit \`tolerance\`; the row is the only thing that binds a runtime state to the legacy authority. A state with no row goes under \`unbacked\` with its reason and an approved VISUAL_UNBACKED decision. A state with a row can never be unbacked.`,
           ]
         : []),
     ],
@@ -2305,6 +2441,10 @@ const createResolveStep = ({
 - Ponytail: ${ponytail ? `\`${ponytail}\`` : "`DISABLED`"}
 - Data source mode: \`${dataSourceMode}\`
 - Design source: \`${designSource ?? "target-system"}\`${
+  VISUAL_AUTHORITIES[designSource]
+    ? `\n- Visual authority: \`${VISUAL_AUTHORITIES[designSource].contextFile}\``
+    : ""
+}${
   designSource === "figma-mcp" && Array.isArray(figmaSources)
     ? `\n${figmaSources
         .map(
@@ -3009,17 +3149,11 @@ const assertStateGraph = async (root, state, pendingJournal) => {
           !usesCapabilityOwnership(state)
         )
           continue;
-        // The Figma context is pinned at ASSESS_TARGET only for a figma-mcp
-        // record; a target-system (or pre-14) record never authored it.
-        if (
-          relative === FIGMA_CONTEXT_FILE &&
-          !(usesDesignSource(state) && state.designSource === "figma-mcp")
-        )
-          continue;
-        if (
-          relative === VISUAL_ACCEPTANCE_FILE &&
-          !usesFigmaVisualContract(state)
-        )
+        // The authority context is pinned at ASSESS_TARGET only by the record
+        // whose design source owns it; a target-system (or pre-14) record
+        // never authored one at all.
+        if (!pinsAuthorityContext(state, relative)) continue;
+        if (relative === VISUAL_ACCEPTANCE_FILE && !usesVisualContract(state))
           continue;
         requiredHashes.add(relative);
       }
@@ -3409,15 +3543,14 @@ const completedArtifactHashes = async (root, state, step, sliceId) => {
   const relativePaths = (IMMUTABLE_STEP_ARTIFACTS[step] ?? []).filter(
     // A pre-11 record authored no capability matrix and is never promoted into
     // one after BUILD_BASELINE closed, so it must not be pinned to a file it
-    // was never held to. The Figma context is authored only for a figma-mcp
-    // record, so a target-system record is never pinned to it either.
+    // was never held to. An authority context is authored only by the record
+    // whose design source owns it, so a target-system record -- or a figma-mcp
+    // record faced with the legacy slot -- is never pinned to it either.
     (relative) =>
       (relative !== CAPABILITY_OWNERSHIP_FILE ||
         usesCapabilityOwnership(state)) &&
-      (relative !== FIGMA_CONTEXT_FILE ||
-        (usesDesignSource(state) && state.designSource === "figma-mcp")) &&
-      (relative !== VISUAL_ACCEPTANCE_FILE ||
-        usesFigmaVisualContract(state)) &&
+      pinsAuthorityContext(state, relative) &&
+      (relative !== VISUAL_ACCEPTANCE_FILE || usesVisualContract(state)) &&
       (relative !== TARGET_BASELINE_FILE || isBrownfield(state)),
   );
   if (step === "IMPLEMENT_SLICES" && sliceId) {
@@ -6006,7 +6139,7 @@ const validateBaseline = async (root, { final = false, roots, state } = {}) => {
         ]),
       )
     : [];
-  const visualRows = usesFigmaVisualContract(state)
+  const visualRows = usesVisualContract(state)
     ? await validateVisualAcceptance(root, state, legacy, target)
     : null;
   return {
@@ -6919,7 +7052,13 @@ const validateUiRuntimeEvidence = async ({
           )
         : undefined;
     if (visualRow) {
-      await assertVisualAcceptance({ record, visualRow, label, roots });
+      await assertVisualAcceptance({
+        record,
+        visualRow,
+        label,
+        roots,
+        authority: visualAuthorityOf(state),
+      });
     }
     const viewportKey = `${viewport.width}x${viewport.height}`;
     baselineViewport ??= viewportKey;
@@ -6988,14 +7127,15 @@ const validateUiRuntimeEvidence = async ({
                 : implementationBinding.current,
           }
         : {}),
-      // Only the target (visual) evidence is design-dependent, and only under
-      // figma-mcp. Binding the canonical Figma-context digest here -- and
-      // nowhere in the seven final gates -- means a changed design forces
-      // re-verification of the visual rows alone, never functional parity.
-      ...(origin === "TARGET" &&
-      usesDesignSource(state) &&
-      state.designSource === "figma-mcp"
-        ? { figmaContextDigest: state.artifactHashes[FIGMA_CONTEXT_FILE] }
+      // Only the target (visual) evidence is design-dependent, and only when a
+      // visual authority is pinned. Binding the canonical authority digest here
+      // -- and nowhere in the seven final gates -- means a changed authority
+      // forces re-verification of the visual rows alone, never functional parity.
+      ...(origin === "TARGET" && visualAuthorityOf(state)
+        ? {
+            [visualAuthorityOf(state).boundToDigestField]:
+              state.artifactHashes[visualAuthorityOf(state).contextFile],
+          }
         : {}),
       uiContractDigest: expectedUiContractDigest,
     })) {
@@ -7008,6 +7148,10 @@ const validateUiRuntimeEvidence = async ({
     assertNonEmpty(record.reference, `${label}.reference`);
     if (!isContentIdentity(record.hash)) {
       throw new Error(`${label}.hash must be a SHA-256 digest.`);
+    }
+    if (origin === "TARGET") {
+      assertTargetEvidencePath(record.reference, `${label}.reference`);
+      assertCaptureRole(record.capture, TARGET_VERIFICATION_ROLE, label);
     }
     const proofPath = await assertEvidenceReference(
       { reference: record.reference, hash: record.hash },
@@ -7189,6 +7333,12 @@ const validateUiRuntimeEvidence = async ({
         );
       }
       screenshotHashes.add(digestSlot);
+      if (origin === "TARGET") {
+        assertTargetEvidencePath(
+          record.screenshot.reference,
+          `${label}.screenshot.reference`,
+        );
+      }
       await assertEvidenceReference(
         {
           reference: record.screenshot.reference,
@@ -7397,14 +7547,14 @@ const validateVerifiedSlice = async (root, sliceId, state, roots) => {
   const baseline = await validateBaseline(root, { roots, state });
   // Format 17: a design-system gap is a visual divergence the slice itself
   // declares, so it cannot sit PENDING inside a visual PASS.
-  if (usesFigmaVisualContract(state)) {
+  if (usesVisualContract(state)) {
     const traced = new Set(implementation.traceIds);
     const gap = baseline.designRows.find(
       (row) => traced.has(row.id) && !TERMINAL_DESIGN_SYSTEM.has(row.status),
     );
     if (gap) {
       throw new Error(
-        `DESIGN_SYSTEM_GAP: ${sliceId} traces design-system row ${gap.id} with status '${gap.status}', so it cannot verify against Figma. Make the row COMPLIANT, or record EXCEPTION_APPROVED with its explicit exceptionApproval, before verifying.`,
+        `DESIGN_SYSTEM_GAP: ${sliceId} traces design-system row ${gap.id} with status '${gap.status}', so it cannot verify against ${visualAuthorityOf(state).contextFile}. Make the row COMPLIANT, or record EXCEPTION_APPROVED with its explicit exceptionApproval, before verifying.`,
       );
     }
   }
@@ -7885,8 +8035,8 @@ const visualUnbackedCandidate = ({ state, frames, matrix, contextDigest, item })
         String(item.reason ?? ""),
         ...[...frames.values()].map((frame) =>
           frame.extraction.fidelity === "COMPLETE"
-            ? `Figma evidence: node ${frame.nodeId} '${frame.name}' ${frame.viewport.width}x${frame.viewport.height}, COMPLETE, states: ${frame.states.join(" | ")}`
-            : `DEGRADED Figma evidence, fidelity not established: node ${frame.nodeId} '${frame.name}' (${frame.extraction.limitations.join("; ")})`,
+            ? `Figma evidence: node ${frame.key} '${frame.name}' ${frame.viewport.width}x${frame.viewport.height}, COMPLETE, states: ${frame.states.join(" | ")}`
+            : `DEGRADED Figma evidence, fidelity not established: node ${frame.key} '${frame.name}' (${frame.extraction.limitations.join("; ")})`,
         ),
       ].join("\n"),
       boundTo: {
@@ -7894,7 +8044,9 @@ const visualUnbackedCandidate = ({ state, frames, matrix, contextDigest, item })
         figmaSources: (state.figmaSources ?? [])
           .map((source) => `${source.fileKey}#${source.nodeId ?? "*"}`)
           .sort(),
-        figmaContextDigest: contextDigest,
+        // The same slot under both authorities, named by the adapter: what the
+        // operator approved is bound to the exact authority bytes it saw.
+        [visualAuthorityOf(state).boundToDigestField]: contextDigest,
         visualContractDigest: visualContractDigest(matrix),
       },
     }),
@@ -7912,18 +8064,30 @@ const backedRowFor = (matrix, item) =>
  * `record-decision.mjs`, which owns every approval; nothing here records.
  * During adoption the fresh context is read as format 17 would read it.
  */
-export const pendingVisualUnbackedCandidates = async (root, state) => {
-  if (state.designSource !== "figma-mcp") return [];
+export const pendingVisualUnbackedCandidates = async (root, state, legacy) => {
+  const authority = visualAuthorityOf(state);
+  if (!authority) return [];
+  // `--adopt-visual-contract` is a Figma-only migration path (a pre-17 record
+  // adopting format-17 Figma evidence); no legacy-runtime record can predate
+  // its own authority, so the adoption file is read only for that origin.
   const adopting =
     !usesVisualAcceptance(state) &&
+    authority.contextFile === FIGMA_CONTEXT_FILE &&
     (await fileExists(path.join(root, FIGMA_CONTEXT_ADOPTION_FILE)));
   if (!usesVisualAcceptance(state) && !adopting) return [];
-  const contextFile = adopting ? FIGMA_CONTEXT_ADOPTION_FILE : FIGMA_CONTEXT_FILE;
+  const contextFile = adopting
+    ? FIGMA_CONTEXT_ADOPTION_FILE
+    : authority.contextFile;
   const strictState = { ...state, formatVersion: VISUAL_ACCEPTANCE_FORMAT };
   let frames;
   let matrix;
   try {
-    frames = await validateFigmaContext(root, strictState, contextFile);
+    frames = await authority.validateContext(
+      root,
+      strictState,
+      contextFile,
+      legacy,
+    );
     matrix = JSON.parse(
       await readFile(path.join(root, VISUAL_ACCEPTANCE_FILE), "utf8"),
     );
@@ -7995,6 +8159,13 @@ export const validateFigmaContext = async (
           : null;
       if (!absolute || !isWithin(root, absolute) || !(await fileExists(absolute))) {
         fail(`${label} must reference a file persisted inside the migration record`);
+      }
+      // P4: the authority is pinned at ASSESS_TARGET, before any slice exists,
+      // so it can never legitimately cite the target's verification tree.
+      if (recordRelative(root, absolute).startsWith(TARGET_EVIDENCE_ROOT)) {
+        fail(
+          `${label} '${entry.reference}' resolves under ${TARGET_EVIDENCE_ROOT}; a pinned visual authority never cites target verification evidence`,
+        );
       }
       // A persisted UI binding, so it reads through the shared identity
       // policy: the captured XML and text are text, and a checkout that only
@@ -8138,7 +8309,214 @@ export const validateFigmaContext = async (
         `${at}.ancestry.metadata describes node '${nodeId}' at a size other than its viewport ${viewport.width}x${viewport.height}`,
       );
     }
-    frames.set(nodeId, { ...frame, nodeId });
+    // `key` is the authority-neutral frame identity every shared reader uses;
+    // `nodeId` stays exactly what it was for every Figma-only reader.
+    frames.set(nodeId, { ...frame, nodeId, key: nodeId });
+  }
+  return frames;
+};
+
+/**
+ * Format 17, legacy-runtime: the pinned visual authority, validated with
+ * `validateFigmaContext`'s own primitives -- containment + `fileIdentityMatches`
+ * on every persisted source, the COMPLETE/DEGRADED extraction rule, the
+ * positive-integer viewport rule, the duplicate-key rule -- plus the rules that
+ * bind it to *this* record's legacy tree rather than to a design file.
+ *
+ * The authority is captured before the target exists and is pinned at
+ * ASSESS_TARGET, which is what makes substitution a recorded act: a frame is
+ * bound to the pinned `legacyRevision`, declares `capture.role:
+ * "LEGACY_AUTHORITY"`, and may cite nothing under `evidence/` (P4/P5).
+ */
+export const validateLegacyRuntimeContext = async (
+  root,
+  state,
+  contextFile = LEGACY_RUNTIME_CONTEXT_FILE,
+  legacy,
+) => {
+  const fail = (problem) => {
+    throw new Error(
+      `${contextFile} ${problem}. This migration records designSource: legacy-runtime, so ASSESS_TARGET cannot close without it: capture every required legacy UI behavior state from the running legacy app and author ${LEGACY_RUNTIME_CONTEXT_FILE} as a JSON object with a non-empty "frames" array, each frame naming its uiBehaviorId, state, viewport, rootLocator, this record's legacyRevision, a capture block {role: "LEGACY_AUTHORITY", mode: "element", compare {width, height}}, and sources {snapshot, screenshot, measurements} persisted under ${LEGACY_RUNTIME_EVIDENCE_ROOT} as {reference, hash}.`,
+    );
+  };
+  const filePath = path.join(root, contextFile);
+  if (!(await fileExists(filePath))) fail("does not exist");
+  let context;
+  try {
+    context = JSON.parse(await readFile(filePath, "utf8"));
+  } catch (error) {
+    fail(`is invalid JSON: ${error.message}`);
+  }
+  if (!isPlainObject(context)) fail("must be a JSON object");
+  if (!Array.isArray(context.frames) || context.frames.length === 0) {
+    fail('must record a non-empty "frames" array');
+  }
+  const inventory =
+    legacy ??
+    JSON.parse(
+      await readFile(path.join(root, "inventories/legacy.json"), "utf8"),
+    );
+  const discovered = new Map(
+    (inventory.uiBehaviors ?? []).map((uiBehavior) => [
+      uiBehavior.id,
+      uiBehavior.runtimeStates ?? [],
+    ]),
+  );
+  const frames = new Map();
+  for (const [index, frame] of context.frames.entries()) {
+    const at = `frames[${index}]`;
+    if (!isPlainObject(frame)) fail(`${at} must be a JSON object`);
+    const uiBehaviorId = frame.uiBehaviorId;
+    const runtimeState = frame.state;
+    if (!discovered.get(uiBehaviorId)?.includes(runtimeState)) {
+      fail(
+        `${at} names '${uiBehaviorId}' state '${runtimeState}', which is not a discovered state of a UI behavior in inventories/legacy.json`,
+      );
+    }
+    const key = `${uiBehaviorId}::${runtimeState}`;
+    if (frame.id !== key) fail(`${at}.id must be '${key}'`);
+    if (frames.has(key)) fail(`${at}.id '${key}' is recorded twice`);
+    if (
+      !Array.isArray(frame.states) ||
+      frame.states.length !== 1 ||
+      frame.states[0] !== runtimeState
+    ) {
+      fail(`${at}.states must be exactly ['${runtimeState}']`);
+    }
+    // The authority is bound to the pinned legacy tree: a re-capture taken
+    // after the legacy source moved cannot pass without an explicit --refresh.
+    if (frame.legacyRevision !== state.legacyRevision?.revision) {
+      fail(
+        `${at}.legacyRevision '${frame.legacyRevision}' is not this record's pinned legacy revision '${state.legacyRevision?.revision}'`,
+      );
+    }
+    if (typeof frame.rootLocator !== "string" || !frame.rootLocator.trim()) {
+      fail(
+        `${at}.rootLocator must name the element that owns the behavior's surface`,
+      );
+    }
+    const viewport = frame.viewport;
+    if (
+      !isPlainObject(viewport) ||
+      !["width", "height"].every(
+        (axis) => Number.isInteger(viewport[axis]) && viewport[axis] > 0,
+      )
+    ) {
+      fail(`${at}.viewport must record positive integer width and height`);
+    }
+    const capture = frame.capture;
+    if (!isPlainObject(capture)) fail(`${at}.capture is required`);
+    if (capture.role !== LEGACY_AUTHORITY_ROLE) {
+      fail(
+        `${at}.capture.role must be '${LEGACY_AUTHORITY_ROLE}'; '${capture.role}' is the role of a different lifecycle slot`,
+      );
+    }
+    if (capture.mode !== "element") {
+      fail(
+        `${at}.capture.mode must be 'element' (scoped to rootLocator); a full-page capture makes unrelated app chrome dominate the comparison`,
+      );
+    }
+    const compare = capture.compare;
+    if (
+      !isPlainObject(compare) ||
+      !["width", "height"].every(
+        (axis) => Number.isInteger(compare[axis]) && compare[axis] > 0,
+      )
+    ) {
+      fail(
+        `${at}.capture.compare must declare the positive integer width and height both sides are compared at`,
+      );
+    }
+    const extraction = frame.extraction;
+    if (
+      !isPlainObject(extraction) ||
+      typeof extraction.retrievedAt !== "string" ||
+      Number.isNaN(Date.parse(extraction.retrievedAt)) ||
+      !Array.isArray(extraction.limitations) ||
+      !(
+        (extraction.fidelity === "COMPLETE" &&
+          extraction.limitations.length === 0) ||
+        (extraction.fidelity === "DEGRADED" &&
+          extraction.limitations.length > 0)
+      )
+    ) {
+      fail(
+        `${at}.extraction must record an ISO retrievedAt and fidelity COMPLETE with no limitations, or DEGRADED with every limitation`,
+      );
+    }
+    const sources = isPlainObject(frame.sources) ? frame.sources : {};
+    const read = {};
+    for (const kind of ["snapshot", "screenshot", "measurements"]) {
+      const entry = sources[kind];
+      const absolute =
+        isPlainObject(entry) && typeof entry.reference === "string"
+          ? path.resolve(root, entry.reference)
+          : null;
+      if (
+        !absolute ||
+        !isWithin(root, absolute) ||
+        !(await fileExists(absolute))
+      ) {
+        fail(
+          `${at}.sources.${kind} must reference a file persisted inside the migration record`,
+        );
+      }
+      // P4: the authority predates every slice, so it can never legitimately
+      // live in the target's verification tree. Citing one there would let a
+      // post-implementation capture be pinned as the thing it is measured against.
+      if (!recordRelative(root, absolute).startsWith(LEGACY_RUNTIME_EVIDENCE_ROOT)) {
+        fail(
+          `${at}.sources.${kind} '${entry.reference}' does not resolve under ${LEGACY_RUNTIME_EVIDENCE_ROOT}; authority captures and target verification evidence never share a root`,
+        );
+      }
+      if (!(await fileIdentityMatches(entry.hash, absolute))) {
+        fail(
+          `${at}.sources.${kind} '${entry.reference}' no longer matches its recorded hash; the persisted legacy authority capture is stale`,
+        );
+      }
+      read[kind] = absolute;
+    }
+    let measurements;
+    try {
+      measurements = JSON.parse(await readFile(read.measurements, "utf8"));
+    } catch (error) {
+      fail(`${at}.sources.measurements is not JSON: ${error.message}`);
+    }
+    if (
+      !isPlainObject(measurements) ||
+      !isPlainObject(measurements.values) ||
+      Object.keys(measurements.values).length === 0
+    ) {
+      fail(
+        `${at}.sources.measurements must parse as {viewport, values} with at least one measured value`,
+      );
+    }
+    if (
+      measurements.viewport?.width !== viewport.width ||
+      measurements.viewport?.height !== viewport.height
+    ) {
+      fail(
+        `${at}.sources.measurements was captured at viewport ${measurements.viewport?.width}x${measurements.viewport?.height}, the frame declares ${viewport.width}x${viewport.height}`,
+      );
+    }
+    let snapshot;
+    try {
+      snapshot = JSON.parse(await readFile(read.snapshot, "utf8"));
+    } catch (error) {
+      fail(`${at}.sources.snapshot is not JSON: ${error.message}`);
+    }
+    if (snapshot?.proofFormat !== UI_PROOF_FORMAT) {
+      fail(
+        `${at}.sources.snapshot is not '${UI_PROOF_FORMAT}' structured proof (proofFormat '${snapshot?.proofFormat}')`,
+      );
+    }
+    const controls = snapshot?.observation?.controls;
+    if (!Array.isArray(controls) || controls.length === 0) {
+      fail(
+        `${at}.sources.snapshot.observation.controls must observe at least one control`,
+      );
+    }
+    frames.set(key, { ...frame, key, name: key, measurements });
   }
   return frames;
 };
@@ -8149,13 +8527,15 @@ const MAX_TOLERANCE_PX = 16;
 const MAX_TOLERANCE_RATIO = 0.1;
 
 /**
- * Format 17. The derived visual contract: validated against the Figma evidence
- * it claims to come from, and required to cover every required UI behavior
- * state. A state no COMPLETE frame designs may be listed under `unbacked` only
- * with a cited VISUAL_UNBACKED operator decision bound to this migration, the
- * state, the Figma context digest and the visual contract digest. Only an
- * explicit row binds a state to Figma; an explicitly backed state cannot be
- * unbacked, and nothing is inferred from frame names or states.
+ * Format 17. The derived visual contract: validated against the pinned visual
+ * authority it claims to come from -- Figma or the legacy runtime, read through
+ * the one `VISUAL_AUTHORITIES` adapter -- and required to cover every required
+ * UI behavior state. A state no COMPLETE frame establishes may be listed under
+ * `unbacked` only with a cited VISUAL_UNBACKED operator decision bound to this
+ * migration, the state, the authority context digest and the visual contract
+ * digest. Only an explicit row binds a state to its authority frame; an
+ * explicitly backed state cannot be unbacked, and nothing is inferred from
+ * frame names or states.
  */
 export const validateVisualAcceptance = async (
   root,
@@ -8164,9 +8544,15 @@ export const validateVisualAcceptance = async (
   target,
   contextFile,
 ) => {
-  const frames = await validateFigmaContext(root, state, contextFile);
+  const authority = visualAuthorityOf(state);
+  const frames = await authority.validateContext(
+    root,
+    state,
+    contextFile,
+    legacy,
+  );
   const contextDigest = `sha256:${await hashFile(
-    path.join(root, contextFile ?? FIGMA_CONTEXT_FILE),
+    path.join(root, contextFile ?? authority.contextFile),
   )}`;
   const decisions = await readRecordedDecisions(root);
   const matrix = assertPlainObject(
@@ -8198,20 +8584,20 @@ export const validateVisualAcceptance = async (
   for (const row of rows) {
     const label = `Visual acceptance row ${row.id}`;
     claim(row, label);
-    const frame = frames.get(figmaNodeKey(row.figmaNodeId));
+    const frame = frames.get(frameKeyOf(authority, row, "rowFrameKey"));
     if (!frame) {
       throw new Error(
-        `${label}.figmaNodeId '${row.figmaNodeId}' is not a frame in ${FIGMA_CONTEXT_FILE}.`,
+        `${label}.${authority.rowFrameKey} '${row[authority.rowFrameKey]}' is not a frame in ${authority.contextFile}.`,
       );
     }
     if (frame.extraction.fidelity !== "COMPLETE") {
       throw new Error(
-        `${label} binds node '${frame.nodeId}', whose Figma extraction is DEGRADED (${frame.extraction.limitations.join("; ")}). Fidelity cannot be established from it: re-extract the node (split get_design_context over its children) before deriving acceptance from it.`,
+        `${label} binds node '${frame.key}', whose Figma extraction is DEGRADED (${frame.extraction.limitations.join("; ")}). Fidelity cannot be established from it: re-extract the node (split get_design_context over its children) before deriving acceptance from it.`,
       );
     }
-    if (!frame.states.includes(row.figmaState)) {
+    if (!frame.states.includes(row[authority.rowStateKey])) {
       throw new Error(
-        `${label}.figmaState '${row.figmaState}' is not one of node '${frame.nodeId}' states (${frame.states.join(", ")}).`,
+        `${label}.${authority.rowStateKey} '${row[authority.rowStateKey]}' is not one of node '${frame.key}' states (${frame.states.join(", ")}).`,
       );
     }
     if (
@@ -8219,7 +8605,7 @@ export const validateVisualAcceptance = async (
       row.viewport?.height !== frame.viewport.height
     ) {
       throw new Error(
-        `${label}.viewport must be node '${frame.nodeId}' viewport ${frame.viewport.width}x${frame.viewport.height}.`,
+        `${label}.viewport must be node '${frame.key}' viewport ${frame.viewport.width}x${frame.viewport.height}.`,
       );
     }
     const tolerance = assertPlainObject(row.tolerance, `${label}.tolerance`);
@@ -8282,7 +8668,7 @@ export const validateVisualAcceptance = async (
     const backed = backedRowFor(matrix, item);
     if (backed) {
       throw new Error(
-        `${label} declares '${item.uiBehaviorId}' state '${item.state}' unbacked, but row ${backed.id} explicitly binds it to Figma node '${backed.figmaNodeId}' state '${backed.figmaState}'. That row is authoritative; an explicitly backed state cannot be unbacked, not even by an operator.`,
+        `${label} declares '${item.uiBehaviorId}' state '${item.state}' unbacked, but row ${backed.id} explicitly binds it to Figma node '${backed[authority.rowFrameKey]}' state '${backed[authority.rowStateKey]}'. That row is authoritative; an explicitly backed state cannot be unbacked, not even by an operator.`,
       );
     }
     claim(item, label);
@@ -8351,14 +8737,25 @@ export const compareVisualFact = (fact, actual, tolerance) => {
  * observation file the row references -- never from the row's own prose -- and
  * the engine, not the row's `result`, decides.
  */
-const assertVisualAcceptance = async ({ record, visualRow, label, roots }) => {
+const assertVisualAcceptance = async ({
+  record,
+  visualRow,
+  label,
+  roots,
+  authority,
+}) => {
   const refuse = (problem) => {
     throw new Error(
-      `VISUAL_ACCEPTANCE_FAIL: ${label} (${visualRow.id}, Figma node ${visualRow.figmaNodeId}) ${problem}. Figma-backed states are accepted by comparing runtime measurements with ${VISUAL_ACCEPTANCE_FILE}; an authored result: "PASS" cannot verify them. Fix the target and re-measure, or record FAIL and rework the slice.`,
+      `VISUAL_ACCEPTANCE_FAIL: ${label} (${visualRow.id}, Figma node ${visualRow[authority.rowFrameKey]}) ${problem}. Figma-backed states are accepted by comparing runtime measurements with ${VISUAL_ACCEPTANCE_FILE}; an authored result: "PASS" cannot verify them. Fix the target and re-measure, or record FAIL and rework the slice.`,
     );
   };
-  if (figmaNodeKey(record.figmaNodeId) !== figmaNodeKey(visualRow.figmaNodeId)) {
-    refuse(`names figmaNodeId '${record.figmaNodeId}'`);
+  if (
+    frameKeyOf(authority, record, "recordFrameKey") !==
+    frameKeyOf(authority, visualRow, "rowFrameKey")
+  ) {
+    refuse(
+      `names ${authority.recordFrameKey} '${record[authority.recordFrameKey]}'`,
+    );
   }
   const expectedViewport = `${visualRow.viewport.width}x${visualRow.viewport.height}`;
   if (`${record.viewport.width}x${record.viewport.height}` !== expectedViewport) {
@@ -8368,6 +8765,7 @@ const assertVisualAcceptance = async ({ record, visualRow, label, roots }) => {
   }
   if (!record.screenshot) refuse("has no runtime screenshot");
   const source = assertPlainObject(record.measurements, `${label}.measurements`);
+  assertTargetEvidencePath(source.reference, `${label}.measurements.reference`);
   await assertEvidenceReference(source, `${label}.measurements`, roots, {
     require: true,
   });
@@ -8439,9 +8837,11 @@ const validateStep = async (root, state, step, sliceId, roots) => {
       state?.requirementsAuthority,
     );
     // Runs before completedArtifactHashes pins the file, so an absent or
-    // unbound context fails here instead of as a raw ENOENT out of hashFile.
-    if (usesDesignSource(state) && state.designSource === "figma-mcp") {
-      await validateFigmaContext(root, state);
+    // unbound authority context fails here instead of as a raw ENOENT out of
+    // hashFile -- the fail-closed ordering, now for either authority.
+    const authority = visualAuthorityOf(state);
+    if (authority) {
+      await authority.validateContext(root, state, undefined, legacy);
     }
   }
   if (step === "BUILD_BASELINE") await validateBaseline(root, { roots, state });
@@ -10051,6 +10451,22 @@ export const previewMigrationExecution = async ({
     statePath,
     openSpecDigest: requirementsAuthority?.digest ?? null,
     openSpecStatus: requirementsAuthority ? "EXISTING" : "MISSING",
+    // Present only when an authority is pinned, so a target-system preview --
+    // and the confirmation id derived from it -- is byte-identical to before.
+    ...(visualAuthorityOf(state)
+      ? {
+          visualContract: {
+            version: VISUAL_ACCEPTANCE_FORMAT,
+            authority: {
+              designSource: state.designSource,
+              contextFile: visualAuthorityOf(state).contextFile,
+              digest:
+                state.artifactHashes?.[visualAuthorityOf(state).contextFile] ??
+                null,
+            },
+          },
+        }
+      : {}),
     ...bindingFields,
     // Hashed into the confirmation: the operator approves these exact
     // evidence bytes and this exact set of slices, not "some adoption".
@@ -13728,6 +14144,22 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
     ponytail: context.state.ponytail ?? null,
     designSource: context.state.designSource ?? "target-system",
     figmaSources: context.state.figmaSources ?? [],
+    // Which authority this record's visual contract is derived from, and the
+    // pinned artifact that is the authority. Null for target-system, which
+    // derives no visual contract at all.
+    visualContract: visualAuthorityOf(context.state)
+      ? {
+          version: VISUAL_ACCEPTANCE_FORMAT,
+          authority: {
+            designSource: context.state.designSource,
+            contextFile: visualAuthorityOf(context.state).contextFile,
+            digest:
+              context.state.artifactHashes?.[
+                visualAuthorityOf(context.state).contextFile
+              ] ?? null,
+          },
+        }
+      : null,
     currentStep: context.state.currentStep,
     activeSlice: context.state.activeSlice,
     completedSteps: context.state.completedSteps,

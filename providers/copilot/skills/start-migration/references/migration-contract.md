@@ -602,8 +602,8 @@ audit evidence at `PRECOMMIT_GATE`. Mock mode records intent only;
 the target project's architecture and configuration conventions determine how
 the data source is implemented.
 
-`designSource` is `target-system` (default) or `figma-mcp`, and is a format-14
-field: a record created before format 14 omits it and behaves as
+`designSource` is `target-system` (default), `figma-mcp`, or `legacy-runtime`,
+and is a format-14 field: a record created before format 14 omits it and behaves as
 `target-system` by omission. It is bootstrap-fixed and immutable for the
 migration's lifetime, exactly like `dataSourceMode`; a resume that explicitly
 names a different design source is refused. Under `figma-mcp`, Figma is the
@@ -621,6 +621,29 @@ evidence, so a changed design re-opens visual verification alone; it is never
 bound into the seven final gates, functional parity, or architectural evidence.
 Provenance is all that digest proves. From format 17, a figma-mcp record is also
 held to fidelity: see "Figma visual acceptance (format 17)".
+
+Under `legacy-runtime` the running legacy app is the visual authority and
+`--figma` links are refused, so `figmaSources` is absent. Its authority is the
+agent-authored `inventories/legacy-runtime-context.json`, pinned at
+`ASSESS_TARGET` into `artifactHashes["inventories/legacy-runtime-context.json"]`
+and immutable for the migration's lifetime. Each frame names `uiBehaviorId` and
+`state` (a discovered state of `inventories/legacy.json`), `id`
+`<uiBehaviorId>::<state>`, `viewport`, `url`, `rootLocator`, this record's
+pinned `legacyRevision`, `capture` (`role: "LEGACY_AUTHORITY"`, `mode:
+"element"`, `deviceScaleFactor: 1`, `compare {width, height}`), `extraction`,
+and `sources` — the element `screenshot`, the `playwright-ui-proof/v1`
+`snapshot` and the `{viewport, values}` `measurements`, each `{reference,
+hash}` and persisted under `inventories/legacy-runtime/`. Visual acceptance rows
+then bind `legacyFrameId` where a figma-mcp row binds `figmaNodeId`/`figmaState`,
+and TARGET evidence binds `visualContextDigest` where a figma-mcp record binds
+`figmaContextDigest`. Everything else — the matrix, the comparison, the
+unbacked/operator rule, FINALIZE revalidation — is the one shared format-17
+pipeline. Two rules keep the two roles apart: authority sources resolve only
+under `inventories/legacy-runtime/` and never under `evidence/`, and TARGET
+evidence never resolves under `inventories/legacy-runtime/`; a declared
+`capture.role` must match the slot it is cited from (`TARGET_VERIFICATION` for
+slice evidence). Byte-identical authority and target screenshots at disjoint
+paths are a perfect 1:1 match and pass — no rule compares them for inequality.
 `legacySources` and `targetAdoption` are format-15 fields; a record created
 before format 15 carries neither, and one that carries them at an older format
 is refused.

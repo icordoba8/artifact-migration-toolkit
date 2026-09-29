@@ -4475,6 +4475,187 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
   }
 });
 
+/** The legacy-runtime twin of `writeFigmaContext`: the same pinned-authority
+ * slot, the same lifecycle position, the shared adapter. */
+const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
+  const base = "inventories/legacy-runtime/B-1-DEFAULT";
+  const state = await stateOf(fixture);
+  const persist = async (name, value) => {
+    const file = await writeJson(fixture.artifactRoot, `${base}/${name}`, value);
+    return {
+      reference: `${base}/${name}`,
+      hash: `sha256:${await digest(file)}`,
+    };
+  };
+  await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", {
+    version: 1,
+    frames: [
+      {
+        id: "B-1::DEFAULT",
+        uiBehaviorId: "B-1",
+        state: "DEFAULT",
+        states: ["DEFAULT"],
+        viewport: { width: 1280, height: 720 },
+        url: "http://localhost/widget",
+        rootLocator: "getByRole('dialog')",
+        legacyRevision: state.bindings.source.revision,
+        capturedAt: "2026-09-29T00:00:00.000Z",
+        capture: {
+          role: "LEGACY_AUTHORITY",
+          mode: "element",
+          deviceScaleFactor: 1,
+          compare: { width: 360, height: 200 },
+        },
+        extraction: {
+          retrievedAt: "2026-09-29T00:00:00.000Z",
+          fidelity: "COMPLETE",
+          limitations: [],
+        },
+        sources: {
+          snapshot: await persist("snapshot.json", {
+            proofFormat: "playwright-ui-proof/v1",
+            observation: {
+              url: "http://localhost/widget",
+              controls: [{ role: "dialog", name: "Dialog", state: "DEFAULT" }],
+            },
+          }),
+          screenshot: await persist("screenshot.json", { png: "identical" }),
+          measurements: await persist("observations.json", {
+            viewport: { width: 1280, height: 720 },
+            values: { dialogWidth: 360 },
+          }),
+        },
+        ...frame,
+      },
+    ],
+  });
+};
+
+const writeLegacyVisualAcceptance = (fixture) =>
+  writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", {
+    rows: [
+      {
+        id: "VA-1",
+        uiBehaviorId: "B-1",
+        state: "DEFAULT",
+        legacyFrameId: "B-1::DEFAULT",
+        viewport: { width: 1280, height: 720 },
+        tolerance: { px: 8, ratio: 0.02 },
+        expect: {
+          dialogWidth: { locator: "[role=dialog]", kind: "px", value: 360 },
+        },
+      },
+    ],
+    unbacked: [],
+  });
+
+test("legacy-runtime parity: migrate-artifact pins the same authority and takes the same visual path", async () => {
+  const parsed = parseArtifactArguments([
+    "widget",
+    "--design-source",
+    "legacy-runtime",
+  ]);
+  assert.equal(parsed.designSource, "legacy-runtime");
+
+  const fixture = await createFixture();
+  const options = { ...fixture.options, designSource: parsed.designSource };
+  try {
+    // The shared rule, reached through the artifact front end.
+    await assert.rejects(
+      bootstrap(fixture, {
+        ...options,
+        figma: ["https://www.figma.com/design/File123/Dialog?node-id=12-34"],
+      }),
+      /--figma links require --design-source figma-mcp/,
+    );
+    await bootstrap(fixture, options);
+    assert.equal((await stateOf(fixture)).designSource, "legacy-runtime");
+    // The artifact record keeps its own empty-array spelling, unchanged.
+    assert.deepEqual((await stateOf(fixture)).figmaSources, []);
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(
+      fixture.artifactRoot,
+      "inventories/target.json",
+      await targetInventory(fixture, "TARGET_REUSE"),
+    );
+    // ASSESS_TARGET cannot close without the authority, and pins it once it can.
+    const missing = await runArtifact(fixture.options);
+    assert.match(missing.reason, /legacy-runtime-context\.json does not exist/);
+    await writeLegacyRuntimeContext(fixture);
+    const assessed = await runArtifact(fixture.options);
+    assert.equal(assessed.outcome, "CONTINUE", assessed.reason);
+    const pinned = await stateOf(fixture);
+    assert.equal(pinned.currentStep, "BUILD_BASELINE");
+    const pin = pinned.artifactHashes["inventories/legacy-runtime-context.json"];
+    assert.ok(pin, "the authority is pinned at ASSESS_TARGET");
+    assert.equal(
+      pinned.artifactHashes["inventories/figma-context.json"],
+      undefined,
+    );
+
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeLegacyVisualAcceptance(fixture);
+    const baseline = await runArtifact(fixture.options);
+    assert.equal(baseline.outcome, "CONTINUE", baseline.reason);
+    await advancePlan(fixture, "TARGET_REUSE");
+    await advanceImplementation(fixture, "TARGET_REUSE");
+
+    const measurementPath = "evidence/slice-1/ui/measurements.json";
+    const measurement = await writeJson(fixture.artifactRoot, measurementPath, {
+      viewport: { width: 1280, height: 720 },
+      values: { dialogWidth: 230 },
+    });
+    const verification = await verificationDocument(fixture, { ui: true });
+    Object.assign(verification.runtimeEvidence[0], {
+      legacyFrameId: "B-1::DEFAULT",
+      measurements: { path: measurementPath, sha256: await digest(measurement) },
+    });
+    verification.runtimeEvidence[0].boundTo.visualContextDigest = pin;
+    await writeJson(
+      fixture.artifactRoot,
+      "evidence/slice-1/result.json",
+      verification,
+    );
+    // The same shared comparison decides, and the same refusal identifier.
+    const failed = await runArtifact(fixture.options);
+    assert.match(failed.reason, /VISUAL_ACCEPTANCE_FAIL.*expected 360px/);
+
+    // P5 through the artifact engine: the authority's role is not the target's.
+    await writeJson(fixture.artifactRoot, measurementPath, {
+      viewport: { width: 1280, height: 720 },
+      values: { dialogWidth: 360 },
+    });
+    verification.runtimeEvidence[0].measurements.sha256 = await digest(measurement);
+    verification.runtimeEvidence[0].capture = { role: "LEGACY_AUTHORITY" };
+    await writeJson(
+      fixture.artifactRoot,
+      "evidence/slice-1/result.json",
+      verification,
+    );
+    const role = await runArtifact(fixture.options);
+    assert.match(role.reason, /declares capture\.role 'LEGACY_AUTHORITY'/);
+
+    delete verification.runtimeEvidence[0].capture;
+    await writeJson(
+      fixture.artifactRoot,
+      "evidence/slice-1/result.json",
+      verification,
+    );
+    const passed = await runArtifact(fixture.options);
+    assert.equal(passed.outcome, "CONTINUE", passed.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    assert.equal(
+      (await stateOf(fixture)).artifactHashes[
+        "inventories/legacy-runtime-context.json"
+      ],
+      pin,
+      "the authority digest survives every checkpoint",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("Figma parity: DEGRADED frames cannot back acceptance and pinned evidence rejects tampering", async () => {
   const fixture = await createFixture();
   const options = {

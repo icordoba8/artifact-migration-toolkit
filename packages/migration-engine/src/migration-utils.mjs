@@ -62,7 +62,11 @@ export const assertSafeName = (value, label = "module") => {
   return value;
 };
 
-export const DESIGN_SOURCES = ["target-system", "figma-mcp"];
+export const DESIGN_SOURCES = [
+  "target-system",
+  "figma-mcp",
+  "legacy-runtime",
+];
 
 const FIGMA_FILE_KEY = /^[A-Za-z0-9]+$/;
 // Figma encodes node ids in the URL as `<page>-<node>`; the canonical form is
@@ -138,8 +142,8 @@ export const assertFigmaSource = (raw) => {
 /**
  * The one rule that ties `--design-source` and `--figma` together, shared by
  * the bootstrap and the read-only preview so both agree on what gets pinned.
- * `target-system` (default) forbids Figma links; `figma-mcp` requires at least
- * one and dedupes by `fileKey#nodeId`.
+ * `target-system` (default) and `legacy-runtime` forbid Figma links; `figma-mcp`
+ * requires at least one and dedupes by `fileKey#nodeId`.
  */
 export const resolveDesignSource = ({ designSource, figma } = {}) => {
   const mode = designSource ?? "target-system";
@@ -149,11 +153,13 @@ export const resolveDesignSource = ({ designSource, figma } = {}) => {
     );
   }
   const links = Array.isArray(figma) ? figma : figma ? [figma] : [];
-  if (mode === "target-system") {
+  // Every non-Figma source takes the same branch: the links belong to exactly
+  // one origin, so `legacy-runtime` refuses them exactly as `target-system` does.
+  if (mode !== "figma-mcp") {
     if (links.length > 0) {
       throw new Error("--figma links require --design-source figma-mcp.");
     }
-    return { designSource: "target-system", figmaSources: [] };
+    return { designSource: mode, figmaSources: [] };
   }
   const figmaSources = [];
   const seen = new Set();

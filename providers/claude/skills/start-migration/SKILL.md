@@ -367,14 +367,17 @@ override state. On first setup only, add `--registry
   _omitting_ `--mock` on a migration already created as `mock` keeps it in
   mock mode rather than reverting to standard — the flag only ever matters
   at bootstrap, not on every subsequent resume.
-- `--design-source target-system|figma-mcp` selects the visual authority at
-  bootstrap; the default is `target-system` (current behavior). `figma-mcp`
-  requires one or more `--figma <url>` links (`/design/` or `/make/`; FigJam
-  and Slides are refused) and makes Figma the visual/UX authority while legacy
-  stays authoritative for behavior, routes, and business rules and the target
-  stays authoritative for architecture and design-system components. Like
-  `--mock` it is fixed for the migration's lifetime: naming a different design
-  source on resume is rejected, and omitting the flags resumes the recorded one
+- `--design-source target-system|figma-mcp|legacy-runtime` selects the visual
+  authority at bootstrap; the default is `target-system` (current behavior).
+  `figma-mcp` requires one or more `--figma <url>` links (`/design/` or
+  `/make/`; FigJam and Slides are refused) and makes Figma the visual/UX
+  authority. `legacy-runtime` makes the *running legacy app* the visual
+  authority, refuses `--figma` links, and obliges ASSESS_TARGET to pin
+  `inventories/legacy-runtime-context.json`. Under either, legacy stays
+  authoritative for behavior, routes, and business rules and the target stays
+  authoritative for architecture and design-system components. Like `--mock` it
+  is fixed for the migration's lifetime: naming a different design source on
+  resume is rejected, and omitting the flags resumes the recorded one
   untouched. See "Design source (Figma MCP)".
 - Ponytail is opt-in. Bare `--ponytail` means `full`. Never enable Ponytail
   from provider or session defaults — its absence must always be the

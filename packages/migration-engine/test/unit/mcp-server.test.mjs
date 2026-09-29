@@ -192,6 +192,7 @@ test("tools/list is exactly the four tools of D6-2", async () => {
   assert.deepEqual(run.inputSchema.properties.designSource.enum, [
     "target-system",
     "figma-mcp",
+    "legacy-runtime",
   ]);
   assert.equal(run.inputSchema.properties.figma.type, "array");
   assert.equal(run.inputSchema.properties.figma.items.type, "string");

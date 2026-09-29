@@ -515,11 +515,11 @@ test("a committed increment continues the loop; an owed one stops it", () => {
 test("--design-source rejects an unknown value on discover and run", () => {
   assert.equal(
     refusal("discover", { "design-source": "sketch" }),
-    "--design-source accepts target-system or figma-mcp.",
+    "--design-source accepts target-system or figma-mcp or legacy-runtime.",
   );
   assert.equal(
     refusal("run", { "design-source": "sketch" }),
-    "--design-source accepts target-system or figma-mcp.",
+    "--design-source accepts target-system or figma-mcp or legacy-runtime.",
   );
 });
 

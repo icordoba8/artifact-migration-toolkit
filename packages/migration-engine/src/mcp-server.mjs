@@ -116,7 +116,7 @@ const RUN_INPUT_SCHEMA = {
       type: "string",
       enum: [...DESIGN_SOURCES],
       description:
-        "Bootstrap-fixed design source. 'figma-mcp' makes Figma the visual/UX authority and requires one or more figma links; defaults to 'target-system'.",
+        "Bootstrap-fixed design source. 'figma-mcp' makes Figma the visual/UX authority and requires one or more figma links; 'legacy-runtime' makes the running legacy app the pinned visual authority and refuses figma links; defaults to 'target-system'.",
     },
     figma: {
       type: "array",
