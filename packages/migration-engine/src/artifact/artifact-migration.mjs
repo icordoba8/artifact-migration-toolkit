@@ -38,6 +38,7 @@ import {
 } from "../core.mjs";
 import {
   compareVisualFact,
+  compareVisualEvidence,
   pendingVisualUnbackedCandidates,
   TARGET_VERIFICATION_ROLE,
   validateVisualAcceptance,
@@ -1478,8 +1479,8 @@ const HISTORY_EVENT_KEYS = ["seq", "at", "event", "from", "to", "slice", "revisi
 
 /**
  * The only events allowed to carry anything beyond the fixed nine keys, and the
- * only extra keys they may carry. Everything else stays exactly as strict as it
- * was: an unknown key on an ADVANCED event is still a rejected record.
+ * only extra keys they may carry. ADVANCED may record a verified visualComparison;
+ * any other unknown key is still rejected.
  *
  * `BOOTSTRAPPED` carries the creating toolkit's identity when there was one, so
  * it is optional there; the two identity events must carry both ends of the
@@ -1488,6 +1489,8 @@ const HISTORY_EVENT_KEYS = ["seq", "at", "event", "from", "to", "slice", "revisi
 const historyEventExtraKeys = (event) =>
   event === "BOOTSTRAPPED"
     ? ["toolkitIdentity"]
+    : event === "ADVANCED"
+      ? ["visualComparison"]
     : TOOLKIT_IDENTITY_EVENTS.includes(event)
       ? ["previous", "next"]
       : [];
@@ -2129,6 +2132,9 @@ const buildAdvanceTransaction = async (root, previousState, preview, selectedSli
     from: previousState.currentStep,
     to: state.currentStep,
     slice: previousState.activeSlice,
+    ...(previousState.currentStep === "VERIFY_SLICES" && preview.validation.result.visualComparison?.length
+      ? { visualComparison: preview.validation.result.visualComparison }
+      : {}),
   });
   return {
     version: TRANSACTION_VERSION,
@@ -2808,12 +2814,17 @@ const validateBaseline = async (root, state, { final = false } = {}) => {
   versionOne(native.version, "target-native matrix");
   const nativeIds = [];
   for (const [index, row] of arrayOf(native.rows, "target-native matrix.rows").entries()) {
-    exactObject(row, `target-native matrix.rows[${index}]`, ["id", "path", "description", "status", "evidence"]);
+    exactObject(row, `target-native matrix.rows[${index}]`, ["id", "path", "description", "status", "evidence"], ["controls"]);
     nativeIds.push(nonEmpty(row.id, `target-native matrix row[${index}].id`));
     normalizeRelative(row.path, `target-native matrix '${row.id}' path`);
     nonEmpty(row.description, `target-native matrix '${row.id}' description`);
     if (!["PLANNED", "PRESERVED", "VERIFIED"].includes(row.status)) throw new Error(`target-native row '${row.id}' status is invalid.`);
     if (final && !["PRESERVED", "VERIFIED"].includes(row.status)) throw new Error(`target-native row '${row.id}' is not preserved.`);
+    for (const control of arrayOf(row.controls ?? [], `target-native row '${row.id}' controls`)) {
+      exactObject(control, `target-native row '${row.id}' control`, ["role", "name"]);
+      nonEmpty(control.role, `target-native row '${row.id}' control role`);
+      nonEmpty(control.name, `target-native row '${row.id}' control name`);
+    }
     const evidence = arrayOf(row.evidence, `target-native row '${row.id}' evidence`);
     if (final && evidence.length === 0) throw new Error(`target-native row '${row.id}' requires final evidence.`);
     for (const [evidenceIndex, item] of evidence.entries()) {
@@ -3055,7 +3066,7 @@ const validateBoundTo = (boundTo, state, label, sliceDigest, origin) => {
   }
 };
 
-const validateArtifactVisualEvidence = async (root, state, row, visualRow, label) => {
+const validateArtifactVisualEvidence = async (root, state, row, visualRow, label, nativeRows) => {
   const authority = artifactVisualAuthority(state);
   const fail = (problem) => {
     throw new Error(
@@ -3103,6 +3114,33 @@ const validateArtifactVisualEvidence = async (root, state, row, visualRow, label
     return miss ? [`${name} ${miss}`] : [];
   });
   if (failures.length > 0) fail(`diverges from the design: ${failures.join("; ")}`);
+  if (visualRow.version !== 2) return null;
+  const frame = visualRow.authorityFrame;
+  const screenshot = row.artifacts.find((item) => item.kind === "SCREENSHOT");
+  const snapshot = row.artifacts.find((item) => item.kind === "ACCESSIBILITY_SNAPSHOT");
+  const targetProof = state.designSource === "legacy-runtime"
+    ? await readJsonAt(root, snapshot.path, "TARGET accessibility snapshot")
+    : null;
+  if (targetProof && targetProof.proofFormat !== "playwright-ui-proof/v1") {
+    throw new Error(`VISUAL_STRUCTURE_DIVERGENCE: ${label} TARGET snapshot is not playwright-ui-proof/v1`);
+  }
+  return compareVisualEvidence({
+    visualRow,
+    targetCapture: row.capture,
+    authority: state.designSource,
+    targetReference: screenshot.path,
+    readAuthorityPng: () => readFile(path.join(root, frame.sources.screenshot.reference)),
+    readTargetPng: () => readFile(path.join(root, screenshot.path)),
+    readAuthorityControls: async () => {
+      const proof = await readJsonAt(root, frame.sources.snapshot.reference, "legacy authority snapshot");
+      if (proof.proofFormat !== "playwright-ui-proof/v1" || !Array.isArray(proof.observation?.controls)) {
+        fail("authority snapshot is not scoped playwright-ui-proof/v1 controls");
+      }
+      return proof.observation.controls;
+    },
+    targetControls: targetProof?.observation?.controls,
+    nativeRows,
+  });
 };
 
 const validateVerification = async (root, state, capability) => {
@@ -3134,6 +3172,7 @@ const validateVerification = async (root, state, capability) => {
   const slots = new Set();
   const targetSlots = new Set();
   const capturePaths = new Set();
+  const visualComparison = [];
   for (const [index, row] of arrayOf(document.runtimeEvidence, "slice verification.runtimeEvidence").entries()) {
     exactObject(row, `runtimeEvidence[${index}]`, [
       "behaviorId",
@@ -3187,13 +3226,15 @@ const validateVerification = async (root, state, capability) => {
           )
         : null;
     if (visualRow) {
-      await validateArtifactVisualEvidence(
+      const comparison = await validateArtifactVisualEvidence(
         root,
         state,
         row,
         visualRow,
         `runtimeEvidence[${index}]`,
+        implementation.plan.baseline.native.rows,
       );
+      if (comparison) visualComparison.push(comparison);
     }
     // Logical observation identity: origin + behavior + runtime state. A given
     // logical slot is captured at most once; byte-identical images across
@@ -3212,7 +3253,7 @@ const validateVerification = async (root, state, capability) => {
   } else if (document.runtimeEvidence.length > 0) {
     throw new Error("Non-UI artifact cannot carry runtime UI evidence.");
   }
-  return { relative, document, implementation, semanticDigest: artifactEvidenceDigest(document) };
+  return { relative, document, implementation, semanticDigest: artifactEvidenceDigest(document), visualComparison };
 };
 
 // Gate evidence is a claim about *this* migration. A bare hash of any file that
@@ -3338,6 +3379,15 @@ const validateFinal = async (root, state) => {
           if ((await secureHash(root, artifactPath, "runtime artifact path")) !== artifact.sha256) {
             throw new Error(`runtime artifact hash does not match ${artifactPath}.`);
           }
+        }
+        const visualRow = runRow.origin === "TARGET"
+          ? baseline.visualRows?.find((item) => item.uiBehaviorId === runRow.behaviorId && item.state === runRow.state)
+          : null;
+        if (visualRow) {
+          await validateArtifactVisualEvidence(
+            root, { ...state, activeSlice: sliceId }, runRow, visualRow,
+            `final UI evidence '${sliceId}' runtimeEvidence[${rowIndex}]`, baseline.native.rows,
+          );
         }
       }
     }

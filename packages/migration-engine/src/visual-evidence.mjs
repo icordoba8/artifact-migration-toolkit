@@ -4,7 +4,7 @@
  * second copy of any rule here is the one thing that would let the module and
  * artifact pipelines drift apart, so there is exactly one.
  *
- * Three responsibilities and nothing else:
+ * Four responsibilities and nothing else:
  *   1. `REQUIRED_FACTS` -- the fixed taxonomy a v2 contract must cover, so a
  *      one-fact PASS is not expressible.
  *   2. `normalizeVisualValue` -- the single space the authority value, the
@@ -12,10 +12,108 @@
  *      Figma `#0B5FFF` and a browser `rgb(11, 95, 255)` are the same fact.
  *   3. The three Figma provenance resolvers, each reading a value back out of
  *      bytes the engine has already re-hashed.
+ *   4. PNG decode, box resampling, pixel counts and control multiset deltas.
  *
  * Nothing here decides PASS or FAIL and nothing here reads the filesystem: it
  * takes bytes and returns values or throws. The verdict stays in the engines.
  */
+
+import pixelmatch from "pixelmatch";
+import { PNG } from "pngjs";
+
+export const decodePng = (bytes) => {
+  try {
+    return PNG.sync.read(bytes);
+  } catch (error) {
+    throw new Error(`VISUAL_PNG_INVALID: ${error.message}`);
+  }
+};
+
+// Box filtering uses premultiplied channels so translucent edge pixels stay
+// correct when the result is composited over the capture's declared matte.
+export const resampleTo = (image, width, height) => {
+  if (![width, height].every((value) => Number.isInteger(value) && value > 0)) {
+    throw new Error("VISUAL_COMPARE_RASTER: width and height must be positive integers");
+  }
+  if (image.width === width && image.height === height) return image;
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const top = y * image.height / height;
+    const bottom = (y + 1) * image.height / height;
+    for (let x = 0; x < width; x++) {
+      const left = x * image.width / width;
+      const right = (x + 1) * image.width / width;
+      const sums = [0, 0, 0, 0];
+      for (let sy = Math.floor(top); sy < Math.ceil(bottom); sy++) {
+        for (let sx = Math.floor(left); sx < Math.ceil(right); sx++) {
+          const area = (Math.min(right, sx + 1) - Math.max(left, sx)) *
+            (Math.min(bottom, sy + 1) - Math.max(top, sy));
+          const offset = (sy * image.width + sx) * 4;
+          const alpha = image.data[offset + 3] / 255;
+          for (let channel = 0; channel < 3; channel++) {
+            sums[channel] += image.data[offset + channel] * alpha * area;
+          }
+          sums[3] += alpha * area;
+        }
+      }
+      const area = (right - left) * (bottom - top);
+      const offset = (y * width + x) * 4;
+      const alpha = sums[3] / area;
+      for (let channel = 0; channel < 3; channel++) {
+        data[offset + channel] = alpha ? Math.round(sums[channel] / sums[3]) : 0;
+      }
+      data[offset + 3] = Math.round(alpha * 255);
+    }
+  }
+  return { width, height, data };
+};
+
+export const perceptualDelta = (authority, target, compare) => {
+  const { width, height, matte } = compare;
+  if (!/^#[0-9a-f]{6}$/i.test(matte)) {
+    throw new Error("VISUAL_CAPTURE_MISMATCH: matte must be an opaque #RRGGBB color");
+  }
+  const background = [1, 3, 5].map((at) => Number.parseInt(matte.slice(at, at + 2), 16));
+  const flatten = (image) => {
+    const raster = resampleTo(image, width, height);
+    const data = Buffer.from(raster.data);
+    for (let offset = 0; offset < data.length; offset += 4) {
+      const alpha = data[offset + 3] / 255;
+      for (let channel = 0; channel < 3; channel++) {
+        data[offset + channel] = Math.round(data[offset + channel] * alpha + background[channel] * (1 - alpha));
+      }
+      data[offset + 3] = 255;
+    }
+    return data;
+  };
+  const diffPixels = pixelmatch(flatten(authority), flatten(target), null, width, height, { includeAA: false });
+  return { diffPixels, diffRatio: diffPixels / (width * height) };
+};
+
+export const structuralDelta = (authorityControls, targetControls) => {
+  const tally = (controls) => {
+    const counts = new Map();
+    for (const { role, name } of controls) {
+      const key = JSON.stringify([role, name]);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const authority = tally(authorityControls);
+  const target = tally(targetControls);
+  const missing = [];
+  const extra = [];
+  const countDiffs = [];
+  for (const key of new Set([...authority.keys(), ...target.keys()])) {
+    const [role, name] = JSON.parse(key);
+    const expected = authority.get(key) ?? 0;
+    const actual = target.get(key) ?? 0;
+    if (!actual) missing.push({ role, name, count: expected });
+    else if (!expected) extra.push({ role, name, count: actual });
+    else if (expected !== actual) countDiffs.push({ role, name, expected, actual });
+  }
+  return { missing, extra, countDiffs };
+};
 
 /** The hardened contract. `version: 1` survives only as already-pinned history. */
 export const HARDENED_VISUAL_VERSION = 2;

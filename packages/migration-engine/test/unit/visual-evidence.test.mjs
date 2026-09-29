@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PNG } from "pngjs";
+import pixelmatch from "pixelmatch";
 
 import {
   FIXED_VISUAL_TOLERANCE,
   HARDENED_VISUAL_VERSION,
+  decodePng,
+  resampleTo,
+  perceptualDelta,
+  structuralDelta,
   REQUIRED_FACTS,
   REQUIRED_FACT_KINDS,
   REQUIRED_FACT_NAMES,
@@ -17,6 +23,59 @@ import {
   variableValueSet,
   xmlAttribute,
 } from "../../src/visual-evidence.mjs";
+
+const raster = (scale = 1, shift = 0, alpha = 255) => {
+  const image = new PNG({ width: 40 * scale, height: 20 * scale });
+  for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+    const offset = (y * image.width + x) * 4;
+    const dark = x >= (5 + shift) * scale && x < (20 + shift) * scale && y >= 4 * scale && y < 15 * scale;
+    image.data.fill(dark ? 20 : 240, offset, offset + 3);
+    image.data[offset + 3] = alpha;
+  }
+  return image;
+};
+
+test("Slice C: PNG decode, 2x box filter, alpha matte, and pixel deltas", () => {
+  const image = raster();
+  const compare = { width: 40, height: 20, matte: "#ffffff" };
+  assert.equal(perceptualDelta(image, image, compare).diffPixels, 0);
+  assert.deepEqual(resampleTo(raster(2), 40, 20).data, image.data);
+  assert.equal(perceptualDelta(raster(2), image, compare).diffPixels, 0);
+  assert.ok(perceptualDelta(image, raster(1, 4), compare).diffRatio > 0.05);
+  assert.equal(perceptualDelta(raster(1, 0, 0), raster(1, 4, 0), compare).diffPixels, 0);
+  assert.equal(perceptualDelta(raster(1, 0, 0), raster(1, 4, 0), { ...compare, matte: "#000000" }).diffPixels, 0);
+  assert.equal(decodePng(PNG.sync.write(image)).width, 40);
+  assert.throws(() => decodePng(Buffer.from("not a PNG")), /VISUAL_PNG_INVALID/);
+  const translucent = { width: 1, height: 1, data: Buffer.from([255, 0, 0, 128]) };
+  const onWhite = { width: 1, height: 1, data: Buffer.from([255, 127, 127, 255]) };
+  assert.equal(perceptualDelta(translucent, onWhite, { width: 1, height: 1, matte: "#ffffff" }).diffPixels, 0);
+  assert.equal(perceptualDelta(translucent, onWhite, { width: 1, height: 1, matte: "#000000" }).diffPixels, 1);
+});
+
+test("Slice C: antialiasing-only edge pixels are excluded", () => {
+  const a = Buffer.alloc(5 * 5 * 4, 255);
+  const b = Buffer.from(a);
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 2; x++) {
+    const offset = (y * 5 + x) * 4;
+    a.fill(0, offset, offset + 3);
+    b.fill(0, offset, offset + 3);
+  }
+  for (let y = 1; y < 4; y++) {
+    a.fill(128, (y * 5 + 2) * 4, (y * 5 + 2) * 4 + 3);
+    b.fill(180, (y * 5 + 2) * 4, (y * 5 + 2) * 4 + 3);
+  }
+  assert.equal(pixelmatch(a, b, null, 5, 5, { includeAA: true }), 3);
+  assert.equal(perceptualDelta({ width: 5, height: 5, data: a }, { width: 5, height: 5, data: b }, { width: 5, height: 5, matte: "#ffffff" }).diffPixels, 0);
+});
+
+test("Slice C: control multiset reports missing, extra, and multiplicity", () => {
+  const button = { role: "button", name: "Save" };
+  const link = { role: "link", name: "Help" };
+  assert.deepEqual(structuralDelta([button], [button]), { missing: [], extra: [], countDiffs: [] });
+  assert.deepEqual(structuralDelta([button], []).missing, [{ ...button, count: 1 }]);
+  assert.deepEqual(structuralDelta([button], [button, button]).countDiffs, [{ ...button, expected: 1, actual: 2 }]);
+  assert.deepEqual(structuralDelta([button], [button, link]).extra, [{ ...link, count: 1 }]);
+});
 
 // The pure half of the hardened visual contract: values in, values or refusals
 // out. No fixtures, no filesystem, no engine -- if any of this needed one, the

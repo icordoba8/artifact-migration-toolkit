@@ -31,6 +31,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { PNG } from "pngjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -80,6 +81,8 @@ import {
   BLOCKED_EXIT_CODE,
   CAPABILITY_OWNERSHIP_FILE,
   compareVisualFact,
+  compareVisualEvidence,
+  validateVisualAcceptance,
   compatibilityBlocker,
   createDecisionCandidate,
   getMigrationStatus,
@@ -9952,6 +9955,22 @@ test("a host answering the delegated decision without a human writes no artifact
 const FIGMA_URL = "https://www.figma.com/design/ABC123def/Flow?node-id=12-34";
 const FIGMA_NODE = "12:34";
 const FIGMA_VIEWPORT = { width: 1280, height: 720 };
+const VISUAL_COMPARE = { width: 40, height: 20 };
+const visualPng = (scale = 1, shift = 0) => {
+  const png = new PNG({ width: 40 * scale, height: 20 * scale });
+  for (let y = 0; y < png.height; y++) for (let x = 0; x < png.width; x++) {
+    const dark = x >= (5 + shift) * scale && x < (20 + shift) * scale && y >= 4 * scale && y < 15 * scale;
+    const offset = (y * png.width + x) * 4;
+    png.data.fill(dark ? 30 : 245, offset, offset + 3);
+    png.data[offset + 3] = 255;
+  }
+  return PNG.sync.write(png);
+};
+const VISUAL_TARGET_CAPTURE = {
+  role: "TARGET_VERIFICATION", mode: "element", rootLocator: "getByRole('main')",
+  deviceScaleFactor: 1, colorScheme: "light", reducedMotion: "reduce",
+  matte: "#ffffff", compare: VISUAL_COMPARE, imageWidth: 40, imageHeight: 20,
+};
 
 /**
  * Format 17: the canonical Figma evidence for one frame, persisted inside the
@@ -9988,6 +10007,8 @@ const writeFigmaContext = async (
     type: "FRAME",
     viewport,
     states: ["default"],
+    rootLocator: "getByRole('main')",
+    capture: { ...VISUAL_TARGET_CAPTURE, role: "FIGMA_AUTHORITY", imageWidth: 80, imageHeight: 40 },
     extraction: {
       retrievedAt: "2026-07-01T00:00:00.000Z",
       fidelity: "COMPLETE",
@@ -10009,7 +10030,7 @@ const writeFigmaContext = async (
         "variable-defs.json",
         `${JSON.stringify(FIGMA_VARIABLES)}\n`,
       ),
-      screenshot: await persist("screenshot.png", "figma render bytes\n"),
+      screenshot: await persist("screenshot.png", visualPng(2)),
     },
     ...frame,
     facts: frame.facts ?? figmaFacts(box, node),
@@ -10378,7 +10399,7 @@ const figmaEvidence = async (
     fixture,
     "slice-a",
     "uib-1-default.png",
-    `target render ${JSON.stringify(values)}\n`,
+    visualPng(),
   );
   const measurements = await writeCapture(
     fixture,
@@ -10394,6 +10415,7 @@ const figmaEvidence = async (
             viewport,
             figmaNodeId,
             screenshot,
+            capture: VISUAL_TARGET_CAPTURE,
             measurements,
             boundTo: bind
               ? { ...record.boundTo, figmaContextDigest: pin }
@@ -10893,7 +10915,7 @@ const LEGACY_FRAME_ID = "UIB-1::DEFAULT";
 const LEGACY_AUTHORITY_DIR = "inventories/legacy-runtime/UIB-1-DEFAULT";
 // The authority screenshot bytes. The target captures the identical bytes at
 // its own disjoint path: a perfect 1:1 migration, which must PASS.
-const SHARED_RENDER = "identical render bytes\n";
+const SHARED_RENDER = visualPng();
 
 const initLegacy = (fixture, extra = {}) =>
   initialize(fixture, { designSource: "legacy-runtime", ...extra });
@@ -10924,10 +10946,14 @@ const writeLegacyContext = async (fixture, { frame = {}, sources = {} } = {}) =>
     capture: {
       role: "LEGACY_AUTHORITY",
       mode: "element",
+      rootLocator: "getByRole('main')",
       deviceScaleFactor: 1,
       colorScheme: "light",
       reducedMotion: "reduce",
-      compare: { width: 1180, height: 640 },
+      matte: "#ffffff",
+      compare: VISUAL_COMPARE,
+      imageWidth: 40,
+      imageHeight: 20,
     },
     extraction: {
       retrievedAt: "2026-09-29T00:00:00.000Z",
@@ -10978,7 +11004,7 @@ const legacyPin = async (fixture) =>
  * own path with the authority's byte-identical render. */
 const legacyEvidence = async (
   fixture,
-  { values = MEASURED, legacyFrameId = LEGACY_FRAME_ID, capture, render = SHARED_RENDER, screenshot, measurements } = {},
+  { values = MEASURED, legacyFrameId = LEGACY_FRAME_ID, capture = VISUAL_TARGET_CAPTURE, render = SHARED_RENDER, screenshot, measurements } = {},
 ) => {
   const pin = await legacyPin(fixture);
   const captured =
@@ -11001,7 +11027,7 @@ const legacyEvidence = async (
             legacyFrameId,
             screenshot: captured,
             measurements: measured,
-            ...(capture ? { capture } : {}),
+            capture,
             boundTo: { ...record.boundTo, visualContextDigest: pin },
           }
         : record,
@@ -11015,12 +11041,19 @@ const legacyAtAssessTarget = async (fixture, extra = {}) => {
 };
 
 /** legacy-runtime up to (not through) VERIFY_SLICES. */
-const driveLegacyToVerify = async (fixture, { contract } = {}) => {
+const driveLegacyToVerify = async (fixture, { contract, nativeControls } = {}) => {
   await legacyAtAssessTarget(fixture);
   await writeLegacyContext(fixture);
   await advance(fixture);
   await completeStepDoc(fixture, "BUILD_BASELINE");
   await writeMatrices(fixture);
+  if (nativeControls) {
+    const file = path.join(fixture.migrationRoot, "matrices/target-native.json");
+    const matrix = await readJson(file);
+    matrix.rows[0].verificationStatus = "PRESERVED";
+    matrix.rows[0].controls = nativeControls;
+    await writeJson(file, matrix);
+  }
   await registerAuth(fixture);
   await writeVisualAcceptance(fixture, contract ?? legacyAcceptance());
   await advance(fixture);
@@ -11033,6 +11066,133 @@ const driveLegacyToVerify = async (fixture, { contract } = {}) => {
   await completeStepDoc(fixture, "IMPLEMENT_SLICES");
   await completeStepDoc(fixture, "VERIFY_SLICES");
 };
+
+test("Slice C: capture equality refuses each mismatch before decoding", async () => {
+  const frame = {
+    rootLocator: "getByRole('main')",
+    capture: { ...VISUAL_TARGET_CAPTURE, role: "LEGACY_AUTHORITY" },
+    sources: { screenshot: { reference: "authority.png" } },
+  };
+  const visualRow = { id: "VA-C", authorityFrame: frame };
+  let read = 0;
+  const inputs = {
+    visualRow, targetCapture: VISUAL_TARGET_CAPTURE, authority: "legacy-runtime",
+    targetReference: "target.png",
+    readAuthorityPng: () => { read++; return visualPng(); },
+    readTargetPng: () => { read++; return visualPng(); },
+    readAuthorityControls: () => [{ role: "button", name: "Sign in" }],
+    targetControls: [{ role: "button", name: "Sign in" }],
+  };
+  for (const [field, value] of [
+    ["deviceScaleFactor", 2], ["mode", "fullPage"], ["colorScheme", "dark"],
+    ["reducedMotion", "no-preference"], ["matte", "#000000"],
+    ["compare", { width: 41, height: 20 }], ["rootLocator", "getByRole('body')"],
+  ]) {
+    read = 0;
+    await assert.rejects(compareVisualEvidence({ ...inputs, targetCapture: { ...VISUAL_TARGET_CAPTURE, [field]: value } }), /VISUAL_CAPTURE_MISMATCH/, field);
+    assert.equal(read, 0, `${field} must refuse before either PNG is read`);
+  }
+  await assert.rejects(compareVisualEvidence({ ...inputs, targetCapture: { ...VISUAL_TARGET_CAPTURE, imageWidth: 41 } }), /decoded 40x20, recorded 41x20/);
+  await assert.rejects(compareVisualEvidence({ ...inputs, visualRow: {
+    ...visualRow, authorityFrame: { ...frame, capture: { ...frame.capture, imageHeight: 21 } },
+  } }), /decoded 40x20, recorded 40x21/);
+  await assert.rejects(compareVisualEvidence({ ...inputs, readTargetPng: () => Buffer.from("bad png") }), /VISUAL_PNG_INVALID/);
+  assert.equal((await compareVisualEvidence(inputs)).diffPixels, 0);
+});
+
+test("Slice C: structural extras require a terminal target-native row", async () => {
+  const button = { role: "button", name: "Sign in" };
+  const extra = { role: "link", name: "Help" };
+  const visualRow = { id: "VA-C", authorityFrame: {
+    rootLocator: "getByRole('main')",
+    capture: { ...VISUAL_TARGET_CAPTURE, role: "LEGACY_AUTHORITY" },
+    sources: { screenshot: { reference: "authority.png" } },
+  } };
+  const base = {
+    visualRow, targetCapture: VISUAL_TARGET_CAPTURE, authority: "legacy-runtime",
+    targetReference: "target.png", readAuthorityPng: () => visualPng(),
+    readTargetPng: () => visualPng(), readAuthorityControls: () => [button],
+    targetControls: [button],
+  };
+  assert.deepEqual((await compareVisualEvidence(base)).structural, { missing: [], extra: [], countDiffs: [] });
+  await assert.rejects(compareVisualEvidence({ ...base, targetControls: [extra] }), /VISUAL_STRUCTURE_DIVERGENCE/);
+  await assert.rejects(compareVisualEvidence({ ...base, targetControls: [button, button] }), /VISUAL_STRUCTURE_DIVERGENCE/);
+  await assert.rejects(compareVisualEvidence({ ...base, targetControls: [button, extra] }), /VISUAL_STRUCTURE_DIVERGENCE.*unauthorized extra/);
+  const nativeRows = [{ id: "NR-1", verificationStatus: "PRESERVED", controls: [extra] }];
+  const allowed = await compareVisualEvidence({ ...base, targetControls: [button, extra], nativeRows });
+  assert.deepEqual(allowed.extrasAuthorized, [{ ...extra, nativeRowId: "NR-1" }]);
+  await assert.rejects(compareVisualEvidence({ ...base, targetControls: [button, extra], nativeRows: [{ ...nativeRows[0], verificationStatus: "PENDING" }] }), /VISUAL_STRUCTURE_DIVERGENCE/);
+});
+
+test("Slice C: unchanged facts cannot waive a shifted layout", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveLegacyToVerify(fixture);
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a", { mutate: await legacyEvidence(fixture, { render: visualPng(1, 4) }) });
+    await assert.rejects(advance(fixture, { slice: "slice-a" }), /VISUAL_DIVERGENCE.*diffRatio.*threshold/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("Slice C: terminal native control authorization is recorded in VERIFY_SLICES", async () => {
+  const fixture = await createFixture();
+  const extra = { role: "link", name: "Help" };
+  try {
+    await driveLegacyToVerify(fixture, { nativeControls: [extra] });
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await legacyEvidence(fixture),
+      mutateProof: (proof) => ({ ...proof, observation: {
+        ...proof.observation,
+        controls: [...proof.observation.controls, {
+          ...extra, state: "DEFAULT", present: true,
+          assertions: [{ predicate: "presence", expected: true }],
+        }],
+      } }),
+    });
+    await advance(fixture, { slice: "slice-a" });
+    const history = (await readFile(path.join(fixture.migrationRoot, "history/history.ndjson"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(history.findLast((event) => event.step === "VERIFY_SLICES").visualComparison[0].extrasAuthorized,
+      [{ ...extra, nativeRowId: "NR-1" }]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("Slice C: an already pinned v1 contract retains its pre-image comparison path", async () => {
+  const fixture = await createFixture();
+  try {
+    await figmaAtAssessTarget(fixture);
+    const frame = await writeFigmaContext(fixture);
+    const invalidPng = Buffer.from("historical screenshot was not a PNG");
+    await writeFile(path.join(fixture.migrationRoot, frame.sources.screenshot.reference), invalidPng);
+    const contextFile = path.join(fixture.migrationRoot, "inventories/figma-context.json");
+    const context = await readJson(contextFile);
+    context.frames[0].sources.screenshot.hash = `sha256:${createHash("sha256").update(invalidPng).digest("hex")}`;
+    await writeJson(contextFile, context);
+    await advance(fixture);
+    await writeVisualAcceptance(fixture, {
+      ...visualAcceptance({ row: { tolerance: { px: 1, ratio: 0 } } }), version: 1,
+    });
+    const persisted = await state(fixture);
+    const matrixBytes = await readFile(path.join(fixture.migrationRoot, "matrices/visual-acceptance.json"));
+    const historical = { ...persisted, artifactHashes: {
+      ...persisted.artifactHashes,
+      "matrices/visual-acceptance.json": `sha256:${createHash("sha256").update(matrixBytes).digest("hex")}`,
+    } };
+    const rows = await validateVisualAcceptance(fixture.migrationRoot, historical, LEGACY_INVENTORY, TARGET_INVENTORY);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].version, undefined);
+    assert.equal(rows[0].authorityFrame, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 test("legacy-17: bootstrap pins the source, renders the authority, and refuses --figma", async () => {
   const fixture = await createFixture();
@@ -11144,6 +11304,7 @@ test("legacy-17: the record reaches COMPLETE through the shared visual pipeline"
     await driveLegacyToVerify(fixture);
     const pin = await legacyPin(fixture);
     assert.ok(pin);
+    let comparisonAtVerify;
     for (const slice of SLICES) {
       await authorSlice(fixture, slice.id);
       await advance(fixture, { slice: slice.id });
@@ -11153,12 +11314,22 @@ test("legacy-17: the record reaches COMPLETE through the shared visual pipeline"
         slice.id === "slice-a"
           ? {
               mutate: await legacyEvidence(fixture, {
-                capture: { role: "TARGET_VERIFICATION", mode: "element" },
+                capture: VISUAL_TARGET_CAPTURE,
               }),
             }
           : {},
       );
       await advance(fixture, { slice: slice.id });
+      if (slice.id === "slice-a") {
+        const history = (await readFile(path.join(fixture.migrationRoot, "history/history.ndjson"), "utf8"))
+          .trim().split("\n").map(JSON.parse);
+        const comparison = history.findLast((event) => event.step === "VERIFY_SLICES")?.visualComparison?.[0];
+        assert.equal(comparison?.rowId, "VIS-1");
+        assert.equal(comparison?.diffPixels, 0);
+        assert.equal(comparison?.threshold, 0.0005);
+        assert.deepEqual(comparison?.extrasAuthorized, []);
+        comparisonAtVerify = comparison;
+      }
       // Resume after every checkpoint: the replayed history must derive the
       // same authority pin, and the record must keep its source and role.
       const resumed = await state(fixture);
@@ -11195,6 +11366,16 @@ test("legacy-17: the record reaches COMPLETE through the shared visual pipeline"
         evidence: [gateEvidence(context)],
       })),
     });
+    for (const relative of [
+      `${LEGACY_AUTHORITY_DIR}/screenshot.png`,
+      "evidence/slice-a/ui/uib-1-default.png",
+    ]) {
+      const file = path.join(fixture.migrationRoot, relative);
+      const original = await readFile(file);
+      await writeFile(file, visualPng(1, 4));
+      await assert.rejects(advance(fixture), /changed|hash|VISUAL_DIVERGENCE/i);
+      await writeFile(file, original);
+    }
     await advance(fixture);
     const completed = await state(fixture);
     assert.equal(completed.status, "COMPLETE");
@@ -11217,6 +11398,9 @@ test("legacy-17: the record reaches COMPLETE through the shared visual pipeline"
       moduleName: "auth",
     });
     assert.equal(replayed.visualContract.authority.digest, pin);
+    const replayedHistory = (await readFile(path.join(fixture.migrationRoot, "history/history.ndjson"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(replayedHistory.find((event) => event.step === "VERIFY_SLICES")?.visualComparison?.[0], comparisonAtVerify);
   } finally {
     await fixture.cleanup();
   }

@@ -14,6 +14,7 @@ import { createRequire as requireFrom } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { PNG } from "pngjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -668,6 +669,23 @@ const advanceImplementation = async (fixture, resolution) => {
   assert.equal((await stateOf(fixture)).currentStep, "VERIFY_SLICES");
 };
 
+const ARTIFACT_COMPARE = { width: 40, height: 20 };
+const artifactPng = (scale = 1, shift = 0) => {
+  const image = new PNG({ width: 40 * scale, height: 20 * scale });
+  for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+    const offset = (y * image.width + x) * 4;
+    const dark = x >= (5 + shift) * scale && x < (20 + shift) * scale && y >= 4 * scale && y < 15 * scale;
+    image.data.fill(dark ? 20 : 240, offset, offset + 3);
+    image.data[offset + 3] = 255;
+  }
+  return PNG.sync.write(image);
+};
+const ARTIFACT_TARGET_CAPTURE = {
+  role: "TARGET_VERIFICATION", mode: "element", rootLocator: "getByRole('dialog')",
+  deviceScaleFactor: 1, colorScheme: "light", reducedMotion: "reduce",
+  matte: "#ffffff", compare: ARTIFACT_COMPARE, imageWidth: 40, imageHeight: 20,
+};
+
 const verificationDocument = async (fixture, { ui = false, sessionId = "session-a" } = {}) => {
   const state = await stateOf(fixture);
   const target = await targetEvidence(fixture);
@@ -675,10 +693,13 @@ const verificationDocument = async (fixture, { ui = false, sessionId = "session-
   if (ui) {
     const snapshotPath = "evidence/slice-1/ui/default.md";
     const screenshotPath = "evidence/slice-1/ui/default.png";
-    const snapshot = await writeJson(fixture.artifactRoot, snapshotPath, { role: "button", name: "Save" });
+    const snapshot = await writeJson(fixture.artifactRoot, snapshotPath, {
+      proofFormat: "playwright-ui-proof/v1",
+      observation: { controls: [{ role: "dialog", name: "Dialog" }] },
+    });
     const screenshot = path.join(fixture.artifactRoot, screenshotPath);
     await mkdir(path.dirname(screenshot), { recursive: true });
-    await writeFile(screenshot, Buffer.from([137, 80, 78, 71]));
+    await writeFile(screenshot, artifactPng());
     runtimeEvidence.push({
       behaviorId: "B-1",
       origin: "TARGET",
@@ -705,6 +726,7 @@ const verificationDocument = async (fixture, { ui = false, sessionId = "session-
       },
       provider: "playwright",
       sessionId,
+      capture: ARTIFACT_TARGET_CAPTURE,
     });
   }
   return {
@@ -4362,7 +4384,7 @@ const writeFigmaContext = async (fixture, fidelity = "COMPLETE") => {
   await writeFile(files.metadata, FIGMA_METADATA);
   await writeFile(files.design, FIGMA_DESIGN_CONTEXT);
   const screenshot = path.join(fixture.artifactRoot, `${base}/screenshot.png`);
-  await writeFile(screenshot, Buffer.from([137, 80, 78, 71]));
+  await writeFile(screenshot, artifactPng(2));
   const reference = async (file) => ({
     reference: path.relative(fixture.artifactRoot, file).replaceAll("\\", "/"),
     hash: `sha256:${await digest(file)}`,
@@ -4404,6 +4426,8 @@ const writeFigmaContext = async (fixture, fidelity = "COMPLETE") => {
         type: "FRAME",
         viewport: { width: 1280, height: 720 },
         states: ["default"],
+        rootLocator: "getByRole('dialog')",
+        capture: { ...ARTIFACT_TARGET_CAPTURE, role: "FIGMA_AUTHORITY", imageWidth: 80, imageHeight: 40 },
         extraction: {
           retrievedAt: "2026-09-21T00:00:00.000Z",
           fidelity,
@@ -4578,10 +4602,23 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
       values: ARTIFACT_MEASURED,
     });
     verification.runtimeEvidence[0].measurements.sha256 = await digest(measurement);
+    const figmaShot = verification.runtimeEvidence[0].artifacts.find((item) => item.kind === "SCREENSHOT");
+    const figmaShotPath = path.join(fixture.artifactRoot, figmaShot.path);
+    await writeFile(figmaShotPath, artifactPng(1, 4));
+    figmaShot.sha256 = await digest(figmaShotPath);
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    assert.match((await runArtifact(fixture.options)).reason, /VISUAL_DIVERGENCE.*diffRatio/);
+    await writeFile(figmaShotPath, artifactPng());
+    figmaShot.sha256 = await digest(figmaShotPath);
     await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
     const passed = await runArtifact(fixture.options);
     assert.equal(passed.outcome, "CONTINUE", passed.reason);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    const history = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    const comparison = history.findLast((event) => event.from === "VERIFY_SLICES")?.visualComparison?.[0];
+    assert.equal(comparison?.diffPixels, 0);
+    assert.equal(comparison?.threshold, 0.05);
   } finally {
     await fixture.cleanup();
   }
@@ -4599,6 +4636,9 @@ const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
       hash: `sha256:${await digest(file)}`,
     };
   };
+  const screenshotFile = path.join(fixture.artifactRoot, base, "screenshot.png");
+  await mkdir(path.dirname(screenshotFile), { recursive: true });
+  await writeFile(screenshotFile, artifactPng());
   await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", {
     version: 2,
     frames: [
@@ -4615,8 +4655,10 @@ const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
         capture: {
           role: "LEGACY_AUTHORITY",
           mode: "element",
+          rootLocator: "getByRole('dialog')",
           deviceScaleFactor: 1,
-          compare: { width: 360, height: 200 },
+          colorScheme: "light", reducedMotion: "reduce", matte: "#ffffff",
+          compare: ARTIFACT_COMPARE, imageWidth: 40, imageHeight: 20,
         },
         extraction: {
           retrievedAt: "2026-09-29T00:00:00.000Z",
@@ -4631,7 +4673,7 @@ const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
               controls: [{ role: "dialog", name: "Dialog", state: "DEFAULT" }],
             },
           }),
-          screenshot: await persist("screenshot.json", { png: "identical" }),
+          screenshot: { reference: `${base}/screenshot.png`, hash: `sha256:${await digest(screenshotFile)}` },
           measurements: await persist("observations.json", {
             viewport: { width: 1280, height: 720 },
             values: ARTIFACT_MEASURED,
@@ -4745,7 +4787,26 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
     const role = await runArtifact(fixture.options);
     assert.match(role.reason, /declares capture\.role 'LEGACY_AUTHORITY'/);
 
-    delete verification.runtimeEvidence[0].capture;
+    verification.runtimeEvidence[0].capture = ARTIFACT_TARGET_CAPTURE;
+    const legacyShot = verification.runtimeEvidence[0].artifacts.find((item) => item.kind === "SCREENSHOT");
+    const legacyShotPath = path.join(fixture.artifactRoot, legacyShot.path);
+    await writeFile(legacyShotPath, artifactPng(1, 4));
+    legacyShot.sha256 = await digest(legacyShotPath);
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    assert.match((await runArtifact(fixture.options)).reason, /VISUAL_DIVERGENCE.*diffRatio/);
+    await writeFile(legacyShotPath, artifactPng());
+    legacyShot.sha256 = await digest(legacyShotPath);
+    const legacySnapshot = verification.runtimeEvidence[0].artifacts.find((item) => item.kind === "ACCESSIBILITY_SNAPSHOT");
+    const legacySnapshotPath = path.join(fixture.artifactRoot, legacySnapshot.path);
+    const snapshotBytes = await readFile(legacySnapshotPath);
+    const snapshotDocument = JSON.parse(snapshotBytes);
+    snapshotDocument.observation.controls.push({ role: "link", name: "Help" });
+    await writeJson(fixture.artifactRoot, legacySnapshot.path, snapshotDocument);
+    legacySnapshot.sha256 = await digest(legacySnapshotPath);
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    assert.match((await runArtifact(fixture.options)).reason, /VISUAL_STRUCTURE_DIVERGENCE.*unauthorized extra/);
+    await writeFile(legacySnapshotPath, snapshotBytes);
+    legacySnapshot.sha256 = await digest(legacySnapshotPath);
     await writeJson(
       fixture.artifactRoot,
       "evidence/slice-1/result.json",
@@ -4754,6 +4815,11 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
     const passed = await runArtifact(fixture.options);
     assert.equal(passed.outcome, "CONTINUE", passed.reason);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    const history = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    const comparison = history.findLast((event) => event.from === "VERIFY_SLICES")?.visualComparison?.[0];
+    assert.equal(comparison?.diffPixels, 0);
+    assert.equal(comparison?.authority, "legacy-runtime");
     assert.equal(
       (await stateOf(fixture)).artifactHashes[
         "inventories/legacy-runtime-context.json"
@@ -4761,6 +4827,21 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
       pin,
       "the authority digest survives every checkpoint",
     );
+    await writeBaseline(fixture, "TARGET_REUSE", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture, { ui: true }));
+    for (const file of [
+      path.join(fixture.artifactRoot, "inventories/legacy-runtime/B-1-DEFAULT/screenshot.png"),
+      legacyShotPath,
+    ]) {
+      const original = await readFile(file);
+      await writeFile(file, artifactPng(1, 4));
+      const refused = await runArtifact(fixture.options);
+      assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+      assert.match(refused.reason, /hash|changed|VISUAL_DIVERGENCE/i);
+      await writeFile(file, original);
+    }
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
   } finally {
     await fixture.cleanup();
   }

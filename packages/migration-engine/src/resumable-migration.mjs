@@ -61,6 +61,9 @@ import {
   FIGMA_PROVENANCE_KINDS,
   FIXED_VISUAL_TOLERANCE,
   HARDENED_VISUAL_VERSION,
+  decodePng,
+  perceptualDelta,
+  structuralDelta,
   REQUIRED_FACT_KINDS,
   REQUIRED_FACT_NAMES,
   assertProvenancePrecedence,
@@ -6081,6 +6084,13 @@ const validateBaseline = async (root, { final = false, roots, state } = {}) => {
   );
   const nativeRows = assertArray(nativeMatrix.rows, "Target-native rows");
   assertUniqueIds(nativeRows, "Target-native rows");
+  for (const row of nativeRows) {
+    for (const control of assertArray(row.controls ?? [], `Target-native row ${row.id}.controls`)) {
+      assertPlainObject(control, `Target-native row ${row.id}.controls[]`);
+      assertNonEmpty(control.role, `Target-native row ${row.id}.controls[].role`);
+      assertNonEmpty(control.name, `Target-native row ${row.id}.controls[].name`);
+    }
+  }
   const targetNativeIds = new Set(target.nativeBehaviors.map((row) => row.id));
   const mappedNativeIds = new Set(
     nativeRows.map((row) =>
@@ -6990,8 +7000,9 @@ const validateUiRuntimeEvidence = async ({
   sliceId,
   state,
   roots,
+  root,
 }) => {
-  if (!usesUiVerification(state) || !baseline.legacy.hasVisibleUi) return;
+  if (!usesUiVerification(state) || !baseline.legacy.hasVisibleUi) return [];
   if (!usesRequiredObservations(state)) {
     throw new Error(
       // No CLI flag is named here any more. At or above the upgrade floor the
@@ -7041,6 +7052,7 @@ const validateUiRuntimeEvidence = async ({
   // the same picture. Bounded by the contract itself, not by a magic number.
   const screenshotSlots = new Set();
   const screenshotHashes = new Set();
+  const visualComparison = [];
   let baselineViewport = null;
   const exercised = new Set();
   const satisfiedPostActions = new Set();
@@ -7187,6 +7199,7 @@ const validateUiRuntimeEvidence = async ({
     if (!isContentIdentity(record.hash)) {
       throw new Error(`${label}.hash must be a SHA-256 digest.`);
     }
+    let targetControls;
     if (origin === "TARGET") {
       assertTargetEvidencePath(record.reference, `${label}.reference`);
       assertCaptureRole(record.capture, TARGET_VERIFICATION_ROLE, label);
@@ -7288,6 +7301,7 @@ const validateUiRuntimeEvidence = async ({
         proof.observation,
         `${label} proof.observation`,
       );
+      targetControls = controls;
       if (!controls.some((control) => control.state === record.state)) {
         throw new Error(
           `${label} proof.observation has no control observed in required state '${record.state}'.`,
@@ -7345,6 +7359,7 @@ const validateUiRuntimeEvidence = async ({
         }
       }
     }
+    let screenshotPath;
     if (record.screenshot) {
       assertPlainObject(record.screenshot, `${label}.screenshot`);
       assertNonEmpty(
@@ -7377,7 +7392,7 @@ const validateUiRuntimeEvidence = async ({
           `${label}.screenshot.reference`,
         );
       }
-      await assertEvidenceReference(
+      screenshotPath = await assertEvidenceReference(
         {
           reference: record.screenshot.reference,
           hash: record.screenshot.hash,
@@ -7386,6 +7401,24 @@ const validateUiRuntimeEvidence = async ({
         roots,
         { require: true },
       );
+    }
+    if (visualRow?.version === HARDENED_VISUAL_VERSION) {
+      const frame = visualRow.authorityFrame;
+      const authorityName = state.designSource;
+      visualComparison.push(await compareVisualEvidence({
+        visualRow,
+        targetCapture: record.capture,
+        authority: authorityName,
+        targetReference: record.screenshot.reference,
+        readAuthorityPng: () => readFile(path.join(root, frame.sources.screenshot.reference)),
+        readTargetPng: () => readFile(screenshotPath),
+        readAuthorityControls: async () => {
+          const snapshot = await readJson(path.join(root, frame.sources.snapshot.reference), "Legacy authority snapshot");
+          return snapshot.observation.controls;
+        },
+        targetControls,
+        nativeRows: baseline.nativeRows,
+      }));
     }
   }
   for (const uiBehavior of required) {
@@ -7429,6 +7462,7 @@ const validateUiRuntimeEvidence = async ({
       }
     }
   }
+  return visualComparison;
 };
 
 /* ------------------------------------------------------------------ *
@@ -7596,16 +7630,17 @@ const validateVerifiedSlice = async (root, sliceId, state, roots) => {
       );
     }
   }
-  await validateUiRuntimeEvidence({
+  const visualComparison = await validateUiRuntimeEvidence({
     evidence,
     implementation,
     baseline,
     sliceId,
     state,
     roots,
+    root,
   });
   await assertPostAnchorEvidence(root, sliceId, state, roots, evidence);
-  return evidence;
+  return { visualComparison };
 };
 
 /**
@@ -8371,6 +8406,10 @@ export const validateFigmaContext = async (
     const facts = hardened
       ? await resolveFigmaFacts({ frame, nodeId, at, fail, metadata, persisted })
       : {};
+    if (hardened) {
+      try { assertVisualCaptureBlock(frame, frame.capture, at); }
+      catch (error) { fail(error.message); }
+    }
     // `key` is the authority-neutral frame identity every shared reader uses;
     // `nodeId` stays exactly what it was for every Figma-only reader.
     frames.set(nodeId, { ...frame, nodeId, key: nodeId, facts });
@@ -8619,6 +8658,10 @@ export const validateLegacyRuntimeContext = async (
         `${at}.capture.compare must declare the positive integer width and height both sides are compared at`,
       );
     }
+    if (hardened) {
+      try { assertVisualCaptureBlock(frame, capture, at, true); }
+      catch (error) { fail(error.message); }
+    }
     const extraction = frame.extraction;
     if (
       !isPlainObject(extraction) ||
@@ -8748,6 +8791,109 @@ export const validateLegacyRuntimeContext = async (
 // waiver; they are the calibration knob if a real design needs more slack.
 const MAX_TOLERANCE_PX = 16;
 const MAX_TOLERANCE_RATIO = 0.1;
+// PROVISIONAL: unproven on real migrations. Slice D owns calibration; never
+// widen one of these to admit a known divergent layout.
+export const PROVISIONAL_VISUAL_DIFF_THRESHOLDS = Object.freeze({
+  "legacy-runtime": 0.0005,
+  "figma-mcp": 0.05,
+});
+
+const assertVisualCaptureBlock = (frame, capture, label, runtime = false) => {
+  if (!isPlainObject(capture)) throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture is required`);
+  if (capture.mode !== "element" || typeof frame.rootLocator !== "string" || !frame.rootLocator.trim()) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label} requires an element capture scoped to the authority rootLocator`);
+  }
+  if (capture.rootLocator !== frame.rootLocator) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture.rootLocator must equal '${frame.rootLocator}'`);
+  }
+  if (!Number.isFinite(capture.deviceScaleFactor) || capture.deviceScaleFactor <= 0 ||
+      (runtime && capture.deviceScaleFactor !== 1)) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture.deviceScaleFactor must be 1 for a runtime element capture`);
+  }
+  if (!["light", "dark", "no-preference"].includes(capture.colorScheme)) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture.colorScheme must be a Playwright color scheme`);
+  }
+  if (capture.reducedMotion !== "reduce") {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture.reducedMotion must be reduce`);
+  }
+  if (typeof capture.matte !== "string" || !/^#[0-9a-f]{6}$/i.test(capture.matte)) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture.matte must be an opaque #RRGGBB color`);
+  }
+  for (const dimensions of [capture.compare, capture]) {
+    const fields = dimensions === capture ? ["imageWidth", "imageHeight"] : ["width", "height"];
+    if (!isPlainObject(dimensions) || fields.some((field) => !Number.isInteger(dimensions[field]) || dimensions[field] <= 0)) {
+      throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture.${dimensions === capture ? "imageWidth/imageHeight" : "compare"} must be positive integers`);
+    }
+  }
+};
+
+/** The one v2 image and control comparison used by both migration engines. */
+export const compareVisualEvidence = async ({
+  visualRow, targetCapture, authority, targetReference, readAuthorityPng,
+  readTargetPng, readAuthorityControls, targetControls, nativeRows = [],
+}) => {
+  const frame = visualRow.authorityFrame;
+  const sourceReference = frame.sources.screenshot.reference;
+  assertVisualCaptureBlock(frame, frame.capture, `${visualRow.id} authority`, authority === "legacy-runtime");
+  assertVisualCaptureBlock(frame, targetCapture, `${visualRow.id} TARGET`, true);
+  for (const field of ["mode", "deviceScaleFactor", "colorScheme", "reducedMotion", "matte"]) {
+    if (frame.capture[field] !== targetCapture[field]) {
+      throw new Error(`VISUAL_CAPTURE_MISMATCH: ${visualRow.id}.capture.${field} differs between '${sourceReference}' and '${targetReference}'`);
+    }
+  }
+  if (frame.capture.compare.width !== targetCapture.compare.width ||
+      frame.capture.compare.height !== targetCapture.compare.height) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: ${visualRow.id}.capture.compare differs between '${sourceReference}' and '${targetReference}'`);
+  }
+  const decode = async (read, capture, reference) => {
+    let image;
+    try {
+      image = decodePng(await read());
+    } catch (error) {
+      throw new Error(`VISUAL_PNG_INVALID: '${reference}' ${error.message}`);
+    }
+    if (image.width !== capture.imageWidth || image.height !== capture.imageHeight) {
+      throw new Error(`VISUAL_CAPTURE_MISMATCH: '${reference}' decoded ${image.width}x${image.height}, recorded ${capture.imageWidth}x${capture.imageHeight}`);
+    }
+    return image;
+  };
+  const source = await decode(readAuthorityPng, frame.capture, sourceReference);
+  const target = await decode(readTargetPng, targetCapture, targetReference);
+  const compare = frame.capture.compare;
+  const { diffPixels, diffRatio } = perceptualDelta(source, target, { ...compare, matte: frame.capture.matte });
+  const threshold = PROVISIONAL_VISUAL_DIFF_THRESHOLDS[authority];
+  if (threshold === undefined) throw new Error(`VISUAL_CAPTURE_MISMATCH: unknown visual authority '${authority}'`);
+  if (diffRatio > threshold) {
+    throw new Error(`VISUAL_DIVERGENCE: ${visualRow.id} diffPixels ${diffPixels}, diffRatio ${diffRatio}, threshold ${threshold}; authority '${sourceReference}', TARGET '${targetReference}'`);
+  }
+  let structural = null;
+  const extrasAuthorized = [];
+  if (authority === "legacy-runtime") {
+    const authorityControls = await readAuthorityControls();
+    if (!Array.isArray(authorityControls) || !Array.isArray(targetControls) ||
+        [...authorityControls, ...targetControls].some((control) =>
+          typeof control?.role !== "string" || !control.role.trim() ||
+          typeof control?.name !== "string" || !control.name.trim())) {
+      throw new Error(`VISUAL_STRUCTURE_DIVERGENCE: ${visualRow.id} requires scoped {role, name} controls on both sides`);
+    }
+    structural = structuralDelta(authorityControls, targetControls);
+    if (structural.missing.length || structural.countDiffs.length) {
+      throw new Error(`VISUAL_STRUCTURE_DIVERGENCE: ${visualRow.id} ${JSON.stringify(structural)}`);
+    }
+    const licenses = nativeRows.flatMap((row) =>
+      ["PRESERVED", "VERIFIED"].includes(row.verificationStatus ?? row.status)
+        ? (row.controls ?? []).map((control) => ({ ...control, nativeRowId: row.id }))
+        : []);
+    for (const extra of structural.extra) {
+      for (let count = 0; count < extra.count; count++) {
+        const index = licenses.findIndex((control) => control.role === extra.role && control.name === extra.name);
+        if (index < 0) throw new Error(`VISUAL_STRUCTURE_DIVERGENCE: ${visualRow.id} unauthorized extra ${extra.role} '${extra.name}'`);
+        extrasAuthorized.push(licenses.splice(index, 1)[0]);
+      }
+    }
+  }
+  return { rowId: visualRow.id, authority, diffPixels, diffRatio, threshold, compare, structural, extrasAuthorized };
+};
 
 /**
  * Format 17. The derived visual contract: validated against the pinned visual
@@ -8983,6 +9129,7 @@ export const validateVisualAcceptance = async (
         expect: expected,
         tolerance: FIXED_VISUAL_TOLERANCE,
         version: HARDENED_VISUAL_VERSION,
+        authorityFrame: frame,
       });
     }
   }
@@ -9219,7 +9366,7 @@ const validateStep = async (root, state, step, sliceId, roots) => {
     );
   }
   if (step === "VERIFY_SLICES") {
-    await withUiProofReopenHint(
+    return withUiProofReopenHint(
       root,
       sliceId ?? state.activeSlice,
       state,
@@ -15296,6 +15443,9 @@ const advanceUnderLock = async ({
     event: "STEP_COMPLETED",
     step: currentStep,
     slice: activeSlice ?? null,
+    ...(currentStep === "VERIFY_SLICES" && validated?.visualComparison?.length
+      ? { visualComparison: validated.visualComparison }
+      : {}),
     nextStep,
     nextSlice: nextState.activeSlice,
     revision: nextState.revision,
