@@ -4332,24 +4332,70 @@ test("R-W7-d: the artifact front ends carry no second copy of a shared rule", as
   assert.throws(() => parseArtifactArguments([]), /Usage: run-artifact\.mjs/);
 });
 
+const FIGMA_METADATA =
+  '<frame id="12:34" name="Dialog" x="0" y="0" width="1280" height="720">' +
+  '<vector id="12:35" name="icon/close" width="24" height="24" />' +
+  "</frame>";
+const FIGMA_DESIGN_CONTEXT =
+  "font-family: Inter, sans-serif; font-size: 14px; font-weight: 600;\n" +
+  "line-height: 20px; border-width: 1px; box-shadow: 0 1px 2px rgba(0,0,0,0.2);\n" +
+  "opacity: 1; visibility: visible;\n";
+const FIGMA_VARIABLES = {
+  "color/text": "#16202C",
+  "color/surface": "#FFFFFF",
+  "color/border": "#D9E1EA",
+  "spacing/lg": "8px",
+  "spacing/gap": "4px",
+  "radius/md": "4px",
+  dialogWidth: 360,
+  dialogRows: 3,
+};
+
 const writeFigmaContext = async (fixture, fidelity = "COMPLETE") => {
   const base = "inventories/figma/12-34";
   const files = {
-    metadata: await writeJson(fixture.artifactRoot, `${base}/metadata.xml`, {
-      xml: '<frame id="12:34" name="Dialog" width="1280" height="720"></frame>',
-    }),
-    design: await writeJson(fixture.artifactRoot, `${base}/design-context.json`, { component: "Dialog" }),
-    variables: await writeJson(fixture.artifactRoot, `${base}/variables.json`, { spacing: 8 }),
+    metadata: await writeJson(fixture.artifactRoot, `${base}/metadata.xml`, {}),
+    design: await writeJson(fixture.artifactRoot, `${base}/design-context.txt`, {}),
+    variables: await writeJson(fixture.artifactRoot, `${base}/variables.json`, FIGMA_VARIABLES),
   };
-  // Metadata is the one Figma output whose contract is verbatim XML, not JSON.
-  await writeFile(files.metadata, '<frame id="12:34" name="Dialog" width="1280" height="720"></frame>');
+  // Metadata and design context are verbatim MCP output, not JSON documents.
+  await writeFile(files.metadata, FIGMA_METADATA);
+  await writeFile(files.design, FIGMA_DESIGN_CONTEXT);
   const screenshot = path.join(fixture.artifactRoot, `${base}/screenshot.png`);
   await writeFile(screenshot, Buffer.from([137, 80, 78, 71]));
   const reference = async (file) => ({
     reference: path.relative(fixture.artifactRoot, file).replaceAll("\\", "/"),
     hash: `sha256:${await digest(file)}`,
   });
+  const dc = (selector, value) => ({
+    value,
+    provenance: {
+      kind: "designContext",
+      reference: `${base}/design-context.txt`,
+      nodeId: "12:34",
+      selector,
+    },
+  });
+  const variable = (selector, value) => ({
+    value,
+    provenance: {
+      kind: "variableDefs",
+      reference: `${base}/variables.json`,
+      nodeId: "12:34",
+      selector,
+    },
+  });
+  const box = (selector, value) => ({
+    value,
+    provenance: {
+      kind: "metadata",
+      reference: `${base}/metadata.xml`,
+      nodeId: "12:34",
+      selector,
+    },
+  });
   await writeJson(fixture.artifactRoot, "inventories/figma-context.json", {
+    version: 2,
     frames: [
       {
         fileKey: "File123",
@@ -4365,17 +4411,85 @@ const writeFigmaContext = async (fixture, fidelity = "COMPLETE") => {
         },
         sources: {
           metadata: await reference(files.metadata),
-          designContext: [await reference(files.design)],
+          designContext: [{ ...(await reference(files.design)), nodeId: "12:34" }],
           variableDefs: await reference(files.variables),
           screenshot: await reference(screenshot),
+        },
+        facts: {
+          width: box("width", 1280),
+          height: box("height", 720),
+          padding: variable("/spacing~1lg", "8px"),
+          gap: variable("/spacing~1gap", "4px"),
+          color: variable("/color~1text", "#16202C"),
+          backgroundColor: variable("/color~1surface", "#FFFFFF"),
+          borderColor: variable("/color~1border", "#D9E1EA"),
+          borderRadius: variable("/radius~1md", "4px"),
+          fontFamily: dc("font-family", "Inter, sans-serif"),
+          fontSize: dc("font-size", "14px"),
+          fontWeight: dc("font-weight", 600),
+          lineHeight: dc("line-height", "20px"),
+          borderWidth: dc("border-width", "1px"),
+          boxShadow: dc("box-shadow", "0 1px 2px rgba(0,0,0,0.2)"),
+          opacity: dc("opacity", 1),
+          visibility: dc("visibility", "visible"),
+          assets: box("assets", ["icon/close"]),
+          dialogWidth: variable("/dialogWidth", 360),
+          dialogRows: variable("/dialogRows", 3),
         },
       },
     ],
   });
 };
 
+/** The v2 taxonomy as one artifact contract row's `expect`. */
+const ARTIFACT_EXPECT = {
+  width: { locator: "[role=dialog]", kind: "px", value: 1280 },
+  height: { locator: "[role=dialog]", kind: "px", value: 720 },
+  padding: { locator: "[role=dialog]", kind: "px", value: 8 },
+  gap: { locator: "[role=dialog]", kind: "px", value: 4 },
+  color: { locator: "[role=dialog]", kind: "equals", value: "#16202c" },
+  backgroundColor: { locator: "[role=dialog]", kind: "equals", value: "#ffffff" },
+  borderColor: { locator: "[role=dialog]", kind: "equals", value: "#d9e1ea" },
+  borderRadius: { locator: "[role=dialog]", kind: "px", value: 4 },
+  borderWidth: { locator: "[role=dialog]", kind: "px", value: 1 },
+  fontFamily: { locator: "[role=dialog]", kind: "equals", value: "Inter, sans-serif" },
+  fontSize: { locator: "[role=dialog]", kind: "px", value: 14 },
+  fontWeight: { locator: "[role=dialog]", kind: "equals", value: 600 },
+  lineHeight: { locator: "[role=dialog]", kind: "px", value: 20 },
+  boxShadow: { locator: "[role=dialog]", kind: "equals", value: "0 1px 2px rgba(0,0,0,0.2)" },
+  opacity: { locator: "[role=dialog]", kind: "equals", value: 1 },
+  visibility: { locator: "[role=dialog]", kind: "equals", value: "visible" },
+  assets: { locator: "[role=dialog] img", kind: "equals", value: ["icon/close"] },
+  dialogWidth: { locator: "[role=dialog]", kind: "px", value: 360 },
+  dialogRows: { locator: "[role=row]", kind: "count", value: 3 },
+};
+
+/** A perfect implementation, measured the way a browser spells it. */
+const ARTIFACT_MEASURED = {
+  width: 1280,
+  height: 720,
+  padding: "8px",
+  gap: "4px",
+  color: "rgb(22, 32, 44)",
+  backgroundColor: "rgb(255, 255, 255)",
+  borderColor: "rgb(217, 225, 234)",
+  borderRadius: "4px",
+  borderWidth: "1px",
+  fontFamily: '"Inter", sans-serif',
+  fontSize: "14px",
+  fontWeight: "600",
+  lineHeight: "20px",
+  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+  opacity: "1",
+  visibility: "visible",
+  assets: ["icon/close"],
+  dialogWidth: 360,
+  dialogRows: 3,
+};
+
 const writeVisualAcceptance = (fixture) =>
   writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", {
+    version: 2,
     rows: [
       {
         id: "VA-1",
@@ -4384,10 +4498,7 @@ const writeVisualAcceptance = (fixture) =>
         figmaNodeId: "12:34",
         figmaState: "default",
         viewport: { width: 1280, height: 720 },
-        tolerance: { px: 8, ratio: 0.02 },
-        expect: {
-          dialogWidth: { locator: "[role=dialog]", kind: "px", value: 360 },
-        },
+        expect: ARTIFACT_EXPECT,
       },
     ],
     unbacked: [],
@@ -4441,13 +4552,14 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
     await writeVisualAcceptance(fixture);
     const baseline = await runArtifact(fixture.options);
     assert.equal(baseline.outcome, "CONTINUE", baseline.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "PLAN", baseline.reason);
     await advancePlan(fixture, "TARGET_REUSE");
     await advanceImplementation(fixture, "TARGET_REUSE");
 
     const measurementPath = "evidence/slice-1/ui/measurements.json";
     const measurement = await writeJson(fixture.artifactRoot, measurementPath, {
       viewport: { width: 1280, height: 720 },
-      values: { dialogWidth: 230 },
+      values: { ...ARTIFACT_MEASURED, dialogWidth: 230 },
     });
     const verification = await verificationDocument(fixture, { ui: true });
     state = await stateOf(fixture);
@@ -4463,7 +4575,7 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
 
     await writeJson(fixture.artifactRoot, measurementPath, {
       viewport: { width: 1280, height: 720 },
-      values: { dialogWidth: 360 },
+      values: ARTIFACT_MEASURED,
     });
     verification.runtimeEvidence[0].measurements.sha256 = await digest(measurement);
     await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
@@ -4488,7 +4600,7 @@ const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
     };
   };
   await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", {
-    version: 1,
+    version: 2,
     frames: [
       {
         id: "B-1::DEFAULT",
@@ -4522,7 +4634,7 @@ const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
           screenshot: await persist("screenshot.json", { png: "identical" }),
           measurements: await persist("observations.json", {
             viewport: { width: 1280, height: 720 },
-            values: { dialogWidth: 360 },
+            values: ARTIFACT_MEASURED,
           }),
         },
         ...frame,
@@ -4533,6 +4645,7 @@ const writeLegacyRuntimeContext = async (fixture, frame = {}) => {
 
 const writeLegacyVisualAcceptance = (fixture) =>
   writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", {
+    version: 2,
     rows: [
       {
         id: "VA-1",
@@ -4540,10 +4653,7 @@ const writeLegacyVisualAcceptance = (fixture) =>
         state: "DEFAULT",
         legacyFrameId: "B-1::DEFAULT",
         viewport: { width: 1280, height: 720 },
-        tolerance: { px: 8, ratio: 0.02 },
-        expect: {
-          dialogWidth: { locator: "[role=dialog]", kind: "px", value: 360 },
-        },
+        expect: ARTIFACT_EXPECT,
       },
     ],
     unbacked: [],
@@ -4603,7 +4713,7 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
     const measurementPath = "evidence/slice-1/ui/measurements.json";
     const measurement = await writeJson(fixture.artifactRoot, measurementPath, {
       viewport: { width: 1280, height: 720 },
-      values: { dialogWidth: 230 },
+      values: { ...ARTIFACT_MEASURED, dialogWidth: 230 },
     });
     const verification = await verificationDocument(fixture, { ui: true });
     Object.assign(verification.runtimeEvidence[0], {
@@ -4623,7 +4733,7 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
     // P5 through the artifact engine: the authority's role is not the target's.
     await writeJson(fixture.artifactRoot, measurementPath, {
       viewport: { width: 1280, height: 720 },
-      values: { dialogWidth: 360 },
+      values: ARTIFACT_MEASURED,
     });
     verification.runtimeEvidence[0].measurements.sha256 = await digest(measurement);
     verification.runtimeEvidence[0].capture = { role: "LEGACY_AUTHORITY" };

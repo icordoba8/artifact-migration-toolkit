@@ -1021,11 +1021,21 @@ comparison → PASS/FAIL.
   `{ reference, hash }`. The engine pins the context when `ASSESS_TARGET`
   closes and re-hashes every persisted source at each verification.
 - `BUILD_BASELINE` — derive `matrices/visual-acceptance.json` from that
-  evidence: one row per required UI behavior state with `figmaNodeId`,
-  `figmaState`, the frame `viewport`, a small `expect` set of acceptance facts
-  (`px` dimensions, `count`, `equals` for layout mode or order, `present` for a
-  structural role), each with the `locator` Playwright measures, and an explicit
-  `tolerance` `{ px ≤ 16, ratio ≤ 0.1 }`. The row is the only binding of a state to
+  evidence at `"version": 2`: one row per required UI behavior state with
+  `figmaNodeId`, `figmaState`, the frame `viewport`, and an `expect` set that
+  covers the **full visual taxonomy** — `width`/`height`, `padding`/`gap`,
+  `color`/`backgroundColor`, `fontFamily`, `fontSize`, `fontWeight`,
+  `lineHeight`, `borderWidth`/`borderColor`/`borderRadius`, `boxShadow`,
+  `opacity`/`visibility`, `assets`, at least one bounded `count`, **plus every
+  fact the authority frame establishes** — each with the `locator` Playwright
+  measures. A count declares `value`, or both `min` and `max`. Tolerance is
+  **fixed at ±1px**: authoring a `tolerance` is refused. Every value is compared
+  after normalization, so a Figma `#0B5FFF` and a browser `rgb(11, 95, 255)` are
+  one fact; a value no normalization can place (`rem`, `em`, a named colour) is
+  refused rather than guessed at. `"version": 1` remains readable only for a
+  record that pinned it before version 2 existed, and is never a certification
+  path a new record may choose.
+  The row is the only binding of a state to
   Figma; nothing is inferred from frame names or states. A state with no row
   goes under `unbacked` with its reason, and only a cited `VISUAL_UNBACKED`
   operator decision (`artifact-migration-decision`, approved at a terminal) makes it
@@ -1035,8 +1045,9 @@ comparison → PASS/FAIL.
   `figmaNodeId`, the contract `viewport`, a runtime `screenshot`, and
   `measurements` `{ reference, hash[, pointer] }` naming the persisted Playwright
   observation file (`{ viewport, values }`, measured with
-  `getBoundingClientRect`/locator counts). The engine compares `values` with the
-  contract under its tolerance and owns the verdict: an authored `result: "PASS"`
+  `getBoundingClientRect`/locator counts and computed styles). The engine
+  compares `values` with the
+  contract at the fixed ±1px and owns the verdict: an authored `result: "PASS"`
   over a divergence is refused as `VISUAL_ACCEPTANCE_FAIL` — fix and re-measure,
   or record FAIL and rework. A slice tracing a design-system row that is not
   `COMPLIANT` or `EXCEPTION_APPROVED` cannot verify. Every TARGET row still binds

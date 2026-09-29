@@ -1425,7 +1425,7 @@ at every verification):
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "rows": [
     {
       "id": "VIS-004",
@@ -1435,13 +1435,27 @@ at every verification):
       "figmaState": "list initial",
       "viewport": { "width": 360, "height": 800 },
       "expect": {
-        "contentWidth": { "kind": "px", "value": 360, "locator": "main" },
-        "itemWidth": { "kind": "px", "value": 344, "locator": "getByTestId('list-item').first()" },
-        "listItems": { "kind": "count", "min": 1, "locator": "getByTestId('list-item')" },
+        "width": { "kind": "px", "value": 360, "locator": "main" },
+        "height": { "kind": "px", "value": 800, "locator": "main" },
+        "padding": { "kind": "px", "value": 16, "locator": "main" },
+        "gap": { "kind": "px", "value": 12, "locator": "main" },
+        "color": { "kind": "equals", "value": "#16202c", "locator": "main" },
+        "backgroundColor": { "kind": "equals", "value": "#ffffff", "locator": "main" },
+        "fontFamily": { "kind": "equals", "value": "Inter, sans-serif", "locator": "main" },
+        "fontSize": { "kind": "px", "value": 14, "locator": "main" },
+        "fontWeight": { "kind": "equals", "value": 600, "locator": "main" },
+        "lineHeight": { "kind": "px", "value": 20, "locator": "main" },
+        "borderWidth": { "kind": "px", "value": 1, "locator": "main" },
+        "borderColor": { "kind": "equals", "value": "#d9e1ea", "locator": "main" },
+        "borderRadius": { "kind": "px", "value": 8, "locator": "main" },
+        "boxShadow": { "kind": "equals", "value": "0 1px 2px rgba(0,0,0,0.2)", "locator": "main" },
+        "opacity": { "kind": "equals", "value": 1, "locator": "main" },
+        "visibility": { "kind": "equals", "value": "visible", "locator": "main" },
+        "assets": { "kind": "equals", "value": ["icon/chevron", "logo/mark"], "locator": "main img" },
+        "listItems": { "kind": "count", "min": 1, "max": 50, "locator": "getByTestId('list-item')" },
         "navigation": { "kind": "present", "value": false, "locator": "getByRole('navigation')" },
         "layout": { "kind": "equals", "value": "column", "locator": "list computed flex-direction" }
-      },
-      "tolerance": { "px": 8, "ratio": 0.02 }
+      }
     }
   ],
   "unbacked": [{ "uiBehaviorId": "UIB-3", "state": "ERROR", "reason": "No frame designs the error state.", "decisionId": "DEC-004", "decisionDigest": "sha256:…" }]
@@ -1471,10 +1485,70 @@ at every verification):
   changed context, contract or reason makes the decision stale.
 - A row's `figmaNodeId` is a COMPLETE frame, `figmaState` one of its `states`,
   and `viewport` its exact viewport.
-- `tolerance.px` is 0–16 and `tolerance.ratio` 0–0.1; a `px` fact passes when
-  `|observed − value| ≤ max(px, ratio × |value|)`. `count` is exact (`value`) or
-  a range (`min`, optional `max`); `equals` is JSON equality; `present` is a
-  boolean.
+- **`"version": 2` is the hardened contract.** `"version": 1` is legal only for
+  a record that had already pinned `matrices/visual-acceptance.json` before
+  version 2 existed; a newly authored v1 is refused. Under v2:
+  - **Coverage is the fixed taxonomy UNION every key of the authority frame's
+    `facts`; every row fact must also exist in that frame.** The taxonomy is `width`, `height`; `padding`, `gap`; `color`,
+    `backgroundColor`; `fontFamily`; `fontSize`; `fontWeight`; `lineHeight`;
+    `borderWidth`, `borderColor`, `borderRadius`; `boxShadow`; `opacity`,
+    `visibility`; at least one bounded `count`; and `assets` (a sorted array of
+    resolved icon/image identifiers). A missing group, or a dropped fact the
+    authority establishes, is `VISUAL_CONTRACT_COVERAGE` — so a one-fact row
+    cannot pass.
+  - **Tolerance is fixed at `{ px: 1, ratio: 0 }`.** Authoring a `tolerance` at
+    all is `VISUAL_TOLERANCE_FIXED`. (v1's 0–16 / 0–0.1 ceilings are unchanged
+    for the records already pinned under them.)
+  - **One normalization space** for the authority value, the contract value and
+    the runtime measurement: colours → lowercase hex (`#0B5FFF`, `rgb(11, 95,
+    255)` and `rgba(11,95,255,1)` are the same fact); lengths → px numbers
+    (`"16px"`, `"16"`, `16`), percentages kept as `N%`; `fontWeight` keyword →
+    numeric (`normal`→400, `bold`→700); `fontFamily` → lowercase, trimmed,
+    comma-joined. Anything else — `rem`, `em`, `vh`, `pt`, `ch`, `auto`,
+    `normal`, `calc()`, a named colour, `hsl()`, `currentColor`, an unresolved
+    `var()`, `lighter`/`bolder` — is `VISUAL_VALUE_UNSUPPORTED`, refused rather
+    than guessed at.
+  - **A `count` is bounded**: exact `value`, or both `min` and `max` with
+    `max >= min`. `min` alone is `VISUAL_COUNT_UNBOUNDED`.
+  - A row value that disagrees with the authority's own value is
+    `VISUAL_CONTRACT_DIVERGES`: the contract is derived from the pinned
+    authority, never authored beside it.
+- `count` is exact (`value`) or a closed range (`min`, `max`); `equals` is JSON
+  equality after normalization; `present` is a boolean. A `px` fact passes when
+  `|observed − value| ≤ max(tolerance.px, tolerance.ratio × |value|)`.
+
+**`figma-mcp` at v2 — structured provenance.** Each entry of a frame's `facts`
+is `{ "value": …, "provenance": { "kind", "reference", "nodeId", "selector" } }`,
+and the engine re-resolves the value out of the bytes whose hash it has just
+re-verified. `nodeId` must be the frame's own node, and the `reference` one of
+that frame's persisted sources; a mismatch or a reference that does not resolve
+is `VISUAL_PROVENANCE_DANGLING`.
+
+| `kind` | `selector` | resolves |
+| --- | --- | --- |
+| `metadata` | an XML attribute of the node's own tag (`"width"`), or `"assets"` for all named `vector` and `image` descendants | the persisted `get_metadata` output |
+| `variableDefs` | an RFC-6901 JSON pointer (`"/color~1primary"`) | the persisted `get_variable_defs` output |
+| `designContext` | a CSS property name (`"font-size"`) | the persisted `get_design_context` entry whose own `nodeId` is this node — **required at v2** |
+
+Precedence is enforced, so the weakest kind cannot be chosen for convenience:
+geometry (`width`, `height`, `x`, `y`) **must** use `metadata`; a value that is
+defined in the frame's `variableDefs` **must** be cited as that pointer;
+`designContext` is the fallback only. A `designContext` entry that declares the
+same property twice with different normalized values is
+`VISUAL_PROVENANCE_AMBIGUOUS` — resolved from exactly one declaration or not at
+all. Violations are `VISUAL_PROVENANCE_PRECEDENCE`.
+
+**`legacy-runtime` at v2 — derived, not authored.** The engine derives
+`frame.facts` from the frame's pinned `sources.measurements.values`; there is no
+provenance to author, because the capture file *is* the provenance. The capture
+must therefore record the full taxonomy — a missing key is a capture defect,
+refused at `ASSESS_TARGET` while the capture can still be retaken. A required
+state left `unbacked` while a **sibling state of the same behavior** was
+captured is `VISUAL_SIBLING_STATE_CAPTURED` unless that state's own frame
+records the `extraction.limitations` that stopped the capture: an operator
+decision waives a state the rig cannot reach, not one it did not try. (For
+`figma-mcp` the operator remains the only judge — the engine cannot know whether
+a design for the state exists at all.)
 
 A Figma-backed `origin: "TARGET"` UI-evidence row additionally carries
 `figmaNodeId`, a `screenshot`, and

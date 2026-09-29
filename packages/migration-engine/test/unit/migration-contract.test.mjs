@@ -9977,6 +9977,10 @@ const writeFigmaContext = async (
       hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
     };
   };
+  // Facts are resolved against the frame's *effective* node and box, so a test
+  // that binds a descendant does not have to restate the whole taxonomy.
+  const node = String(frame.nodeId ?? FIGMA_NODE).trim().replace("-", ":");
+  const box = frame.viewport ?? viewport;
   const written = {
     fileKey: "ABC123def",
     nodeId: FIGMA_NODE,
@@ -9993,31 +9997,154 @@ const writeFigmaContext = async (
       metadata: await persist(
         "metadata.xml",
         metadata ??
-          `<frame id="${FIGMA_NODE}" name="Sign in" x="0" y="0" width="${viewport.width}" height="${viewport.height}"><instance id="12:40" name="Button" width="120" height="36" /></frame>\n`,
+          `<frame id="${FIGMA_NODE}" name="Sign in" x="0" y="0" width="${viewport.width}" height="${viewport.height}"><instance id="12:40" name="Button" width="120" height="36" /><vector id="12:41" name="icon/chevron" width="24" height="24" /><vector id="12:42" name="logo/mark" width="32" height="32" /></frame>\n`,
       ),
       designContext: [
-        await persist(
-          "design-context.txt",
-          "font-family: Inter; font-size: 14px; line-height: 20px; padding: 16px; background: #0B5FFF; border-radius: 8px\n",
-        ),
+        {
+          ...(await persist("design-context.txt", FIGMA_DESIGN_CONTEXT)),
+          nodeId: node,
+        },
       ],
       variableDefs: await persist(
         "variable-defs.json",
-        '{"spacing/lg":"16"}\n',
+        `${JSON.stringify(FIGMA_VARIABLES)}\n`,
       ),
       screenshot: await persist("screenshot.png", "figma render bytes\n"),
     },
     ...frame,
+    facts: frame.facts ?? figmaFacts(box, node),
   };
   await writeJson(path.join(fixture.migrationRoot, file), {
-    version: 1,
+    version: 2,
     frames: [written],
   });
   return written;
 };
 
-const visualAcceptance = ({ viewport = FIGMA_VIEWPORT, row = {} } = {}) => ({
-  version: 1,
+// Format 18 / visual contract v2. The authority's own values, spelled the way
+// each source spells them: the design context in CSS, the variables as tokens,
+// the geometry only ever in the node's metadata box.
+const FIGMA_VARIABLES = {
+  "color/text": "#16202C",
+  "color/surface": "#0B5FFF",
+  "color/border": "#D9E1EA",
+  "spacing/lg": "16px",
+  "spacing/gap": "12px",
+  "radius/md": "8px",
+  primaryActions: 1,
+  navigation: false,
+  layout: "column",
+};
+const FIGMA_DESIGN_CONTEXT = [
+  "font-family: Inter, sans-serif; font-size: 14px; line-height: 20px;",
+  "font-weight: 600; border-width: 1px; box-shadow: 0 1px 2px rgba(0,0,0,0.2);",
+  "opacity: 1; visibility: visible; letter-spacing: 0.2px;",
+  // Figma restates the box in CSS too; precedence is what stops a fact from
+  // being read here instead of off the node's own metadata.
+  "width: 1280px; height: 720px; background-color: #0B5FFF;",
+].join("\n");
+
+/**
+ * One fact per taxonomy group, each through the strongest provenance kind that
+ * can carry it: geometry off the node's metadata box, tokens off the variable
+ * pointers, and only the rest out of the node-scoped design context.
+ */
+const figmaFacts = (viewport, node = FIGMA_NODE) => {
+  const dc = (selector, value) => ({
+    value,
+    provenance: {
+      kind: "designContext",
+      reference: "inventories/figma/12-34/design-context.txt",
+      nodeId: node,
+      selector,
+    },
+  });
+  const variable = (selector, value) => ({
+    value,
+    provenance: {
+      kind: "variableDefs",
+      reference: "inventories/figma/12-34/variable-defs.json",
+      nodeId: node,
+      selector,
+    },
+  });
+  const box = (selector, value) => ({
+    value,
+    provenance: {
+      kind: "metadata",
+      reference: "inventories/figma/12-34/metadata.xml",
+      nodeId: node,
+      selector,
+    },
+  });
+  return {
+    width: box("width", viewport.width),
+    height: box("height", viewport.height),
+    padding: variable("/spacing~1lg", "16px"),
+    gap: variable("/spacing~1gap", "12px"),
+    color: variable("/color~1text", "#16202C"),
+    backgroundColor: variable("/color~1surface", "#0B5FFF"),
+    borderColor: variable("/color~1border", "#D9E1EA"),
+    borderRadius: variable("/radius~1md", "8px"),
+    fontFamily: dc("font-family", "Inter, sans-serif"),
+    fontSize: dc("font-size", "14px"),
+    fontWeight: dc("font-weight", 600),
+    lineHeight: dc("line-height", "20px"),
+    borderWidth: dc("border-width", "1px"),
+    boxShadow: dc("box-shadow", "0 1px 2px rgba(0,0,0,0.2)"),
+    opacity: dc("opacity", 1),
+    visibility: dc("visibility", "visible"),
+    // An icon is a node in Figma, not a declaration, so it is collected off the
+    // frame's own descendants -- the strongest provenance there is.
+    assets: box("assets", ["logo/mark", "icon/chevron"]),
+    // Outside the fixed table: coverage is the table UNION what the frame
+    // establishes, so dropping this from the contract is refused too.
+    letterSpacing: dc("letter-spacing", "0.2px"),
+    primaryActions: variable("/primaryActions", 1),
+    navigation: variable("/navigation", false),
+    layout: variable("/layout", "column"),
+  };
+};
+
+/** The taxonomy as one contract row's `expect`, plus the record's own facts. */
+const taxonomyExpect = (viewport) => ({
+  width: { kind: "px", value: viewport.width, locator: "main" },
+  height: { kind: "px", value: viewport.height, locator: "main" },
+  padding: { kind: "px", value: 16, locator: "main" },
+  gap: { kind: "px", value: 12, locator: "main" },
+  color: { kind: "equals", value: "#16202c", locator: "main" },
+  backgroundColor: { kind: "equals", value: "rgb(11, 95, 255)", locator: "main" },
+  borderColor: { kind: "equals", value: "#d9e1ea", locator: "main" },
+  borderRadius: { kind: "px", value: 8, locator: "main" },
+  borderWidth: { kind: "px", value: 1, locator: "main" },
+  fontFamily: { kind: "equals", value: "Inter, sans-serif", locator: "main" },
+  fontSize: { kind: "px", value: 14, locator: "main" },
+  fontWeight: { kind: "equals", value: 600, locator: "main" },
+  lineHeight: { kind: "px", value: 20, locator: "main" },
+  boxShadow: { kind: "equals", value: "0 1px 2px rgba(0,0,0,0.2)", locator: "main" },
+  opacity: { kind: "equals", value: 1, locator: "main" },
+  visibility: { kind: "equals", value: "visible", locator: "main" },
+  assets: { kind: "equals", value: ["logo/mark", "icon/chevron"], locator: "main img" },
+  letterSpacing: { kind: "equals", value: "0.2px", locator: "main" },
+  primaryActions: {
+    kind: "count",
+    value: 1,
+    locator: "getByRole('button', { name: 'Sign in' })",
+  },
+  navigation: {
+    kind: "present",
+    value: false,
+    locator: "getByRole('navigation')",
+  },
+  layout: {
+    kind: "equals",
+    value: "column",
+    locator: "form computed flex-direction",
+  },
+});
+
+const visualAcceptance = ({ viewport = FIGMA_VIEWPORT, row = {}, ...rest } = {}) => ({
+  version: 2,
   rows: [
     {
       id: "VIS-1",
@@ -10026,33 +10153,38 @@ const visualAcceptance = ({ viewport = FIGMA_VIEWPORT, row = {} } = {}) => ({
       figmaNodeId: FIGMA_NODE,
       figmaState: "default",
       viewport,
-      expect: {
-        contentWidth: { kind: "px", value: viewport.width, locator: "main" },
-        primaryActions: {
-          kind: "count",
-          value: 1,
-          locator: "getByRole('button', { name: 'Sign in' })",
-        },
-        navigation: {
-          kind: "present",
-          value: false,
-          locator: "getByRole('navigation')",
-        },
-        layout: {
-          kind: "equals",
-          value: "column",
-          locator: "form computed flex-direction",
-        },
-      },
-      tolerance: { px: 4, ratio: 0.01 },
+      expect: taxonomyExpect(viewport),
       ...row,
     },
   ],
   unbacked: [],
+  ...rest,
 });
 
+/**
+ * The runtime measurement of a perfect implementation. Deliberately spelled the
+ * way a browser spells it -- `rgb()`, `"14px"`, `"600"` -- so the suite proves
+ * the normalized space, not a string match against the design's own spelling.
+ */
 const MEASURED = {
-  contentWidth: FIGMA_VIEWPORT.width,
+  width: FIGMA_VIEWPORT.width,
+  height: FIGMA_VIEWPORT.height,
+  padding: "16px",
+  gap: "12px",
+  color: "rgb(22, 32, 44)",
+  backgroundColor: "rgb(11, 95, 255)",
+  borderColor: "rgb(217, 225, 234)",
+  borderRadius: "8px",
+  borderWidth: "1px",
+  fontFamily: '"Inter", sans-serif',
+  fontSize: "14px",
+  fontWeight: "600",
+  lineHeight: "20px",
+  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+  opacity: "1",
+  visibility: "visible",
+  assets: ["icon/chevron", "logo/mark"],
+  letterSpacing: "0.2px",
   primaryActions: 1,
   navigation: false,
   layout: "column",
@@ -10426,13 +10558,13 @@ test("figma-mcp: ASSESS_TARGET refuses a missing or unusable figma-context", asy
   const cases = [
     ["missing", null],
     ["not an object", []],
-    ["no frames", { version: 1 }],
-    ["empty frames", { version: 1, frames: [] }],
-    ["frame without a fileKey", { version: 1, frames: [{ nodeId: "12:34" }] }],
-    ["blank fileKey", { version: 1, frames: [{ fileKey: "  " }] }],
+    ["no frames", { version: 2 }],
+    ["empty frames", { version: 2, frames: [] }],
+    ["frame without a fileKey", { version: 2, frames: [{ nodeId: "12:34" }] }],
+    ["blank fileKey", { version: 2, frames: [{ fileKey: "  " }] }],
     [
       "fileKey outside figmaSources",
-      { version: 1, frames: [{ fileKey: "NOTMINE" }] },
+      { version: 2, frames: [{ fileKey: "NOTMINE" }] },
     ],
   ];
   for (const [label, context] of cases) {
@@ -10823,7 +10955,7 @@ const writeLegacyContext = async (fixture, { frame = {}, sources = {} } = {}) =>
     ...frame,
   };
   await writeJson(path.join(fixture.migrationRoot, LEGACY_CONTEXT_FILE), {
-    version: 1,
+    version: 2,
     frames: [written],
   });
   return written;
@@ -11100,12 +11232,12 @@ test("legacy-17: the engine, not the authored result, decides a legacy-backed st
     // compareVisualFact path figma-mcp uses.
     await authorEvidence(fixture, "slice-a", {
       mutate: await legacyEvidence(fixture, {
-        values: { ...MEASURED, contentWidth: 1100 },
+        values: { ...MEASURED, width: 1100 },
       }),
     });
     await assert.rejects(
       advance(fixture, { slice: "slice-a" }),
-      /VISUAL_ACCEPTANCE_FAIL: .*contentWidth expected 1280px/,
+      /VISUAL_ACCEPTANCE_FAIL: .*width expected 1280px ±1, observed 1100/,
     );
     // P5: TARGET evidence may not declare the authority's role.
     await authorEvidence(fixture, "slice-a", {
@@ -11209,7 +11341,7 @@ test("visual-17: a frame whose node is not a recorded Figma link is refused", as
     await figmaAtAssessTarget(fixture);
     await writeFigmaContext(fixture, {
       frame: { nodeId: "99:99" },
-      metadata: `<frame id="99:99" width="1280" height="720"></frame>\n`,
+      metadata: `<frame id="99:99" width="1280" height="720"><vector id="99:98" name="icon/chevron" /><vector id="99:97" name="logo/mark" /></frame>\n`,
     });
     await rejectsAt(
       fixture,
@@ -11265,7 +11397,7 @@ const writeDescendantContext = async (
   return writeFigmaContext(fixture, {
     file,
     viewport: MOBILE_VIEWPORT,
-    metadata: `<frame id="${nodeId}" name="${name}" x="0" y="0" width="360" height="800"><text id="12:51" name="Title" width="200" height="24" /></frame>\n`,
+    metadata: `<frame id="${nodeId}" name="${name}" x="0" y="0" width="360" height="800"><text id="12:51" name="Title" width="200" height="24" /><vector id="12:52" name="icon/chevron" width="24" height="24" /><vector id="12:53" name="logo/mark" width="32" height="32" /></frame>\n`,
     frame: {
       nodeId,
       name,
@@ -11461,7 +11593,7 @@ test("figma-17: a whole-file link still authorizes any node, and a node link is 
     });
     await writeFigmaContext(fixture, {
       frame: { nodeId: "99:99" },
-      metadata: `<frame id="99:99" width="1280" height="720"></frame>\n`,
+      metadata: `<frame id="99:99" width="1280" height="720"><vector id="99:98" name="icon/chevron" /><vector id="99:97" name="logo/mark" /></frame>\n`,
     });
     await advance(fixture);
     assert.ok(await figmaPin(fixture));
@@ -11544,7 +11676,7 @@ test("figma-17: a frame named 'mobile' binds nothing; only an explicit row binds
 // --- Format 17: `unbacked` is an operator decision, never an agent waiver ----
 
 const unbackedContract = (entry = {}, extra = {}) => ({
-  version: 1,
+  version: 2,
   rows: [],
   unbacked: [
     {
@@ -11629,7 +11761,7 @@ test("unbacked-17: explicit rows bind DEFAULT and MOBILE to Figma variants; a 'n
     };
     // "narrow layout" is never read as MOBILE: the state stops at the operator.
     await writeVisualAcceptance(fixture, {
-      version: 1,
+      version: 2,
       rows: [defaultRow],
       unbacked: [mobileUnbacked],
     });
@@ -11644,7 +11776,7 @@ test("unbacked-17: explicit rows bind DEFAULT and MOBILE to Figma variants; a 'n
       figmaState: "narrow layout",
     };
     await writeVisualAcceptance(fixture, {
-      version: 1,
+      version: 2,
       rows: [defaultRow, mobileRow],
       unbacked: [mobileUnbacked],
     });
@@ -11653,7 +11785,7 @@ test("unbacked-17: explicit rows bind DEFAULT and MOBILE to Figma variants; a 'n
       /row VIS-2 explicitly binds it to Figma node '12:34' state 'narrow layout'/,
     );
     await writeVisualAcceptance(fixture, {
-      version: 1,
+      version: 2,
       rows: [defaultRow, mobileRow],
       unbacked: [],
     });
@@ -11781,6 +11913,162 @@ test("unbacked-17: DEGRADED evidence is never absence of design; it needs an ope
   }
 });
 
+// --- Slice B: structured Figma provenance, version 2 -------------------------
+//
+// Every fact is re-resolved by the engine out of bytes whose hash it has just
+// re-verified, so the authored value is a claim *about* pinned evidence rather
+// than the evidence itself.
+
+test("v2 figma: all three provenance kinds resolve, and each way of faking one is refused", async () => {
+  const base = "inventories/figma/12-34";
+  const facts = figmaFacts(FIGMA_VIEWPORT);
+  const bend = (name, provenance, value) => ({
+    facts: {
+      ...facts,
+      [name]: {
+        value: value ?? facts[name].value,
+        provenance: { ...facts[name].provenance, ...provenance },
+      },
+    },
+  });
+  const cases = [
+    // Node binding: a selector aimed at another node of the same file is not
+    // this frame's value, however real the other node is.
+    [
+      "metadata read from a different node",
+      bend("width", { nodeId: "12:40" }),
+      /facts\.width\.provenance\.nodeId '12:40' is not this frame's node '12:34'/,
+    ],
+    [
+      "metadata selector the node does not carry",
+      bend("width", { selector: "fill" }),
+      /VISUAL_PROVENANCE_DANGLING: .*no 'fill' attribute/s,
+    ],
+    [
+      "dangling variableDefs pointer",
+      bend("padding", { selector: "/spacing~1xl" }),
+      /VISUAL_PROVENANCE_DANGLING: .*pointer '\/spacing~1xl' does not resolve/s,
+    ],
+    [
+      "designContext property the entry never declares",
+      bend("fontSize", { selector: "letter-height" }),
+      /VISUAL_PROVENANCE_DANGLING: .*declares no 'letter-height'/s,
+    ],
+    [
+      "reference outside the frame's own persisted sources",
+      bend("fontSize", { reference: `${base}/variable-defs.json` }),
+      /is not one of this frame's persisted designContext entries/,
+    ],
+    [
+      "metadata reference pointing at the design context",
+      bend("width", { reference: `${base}/design-context.txt` }),
+      /is not this frame's persisted metadata/,
+    ],
+    // Precedence: geometry is the node's own box, never a CSS restatement.
+    [
+      "geometry downgraded to designContext",
+      bend("width", { kind: "designContext", reference: `${base}/design-context.txt`, selector: "width" }),
+      /VISUAL_PROVENANCE_PRECEDENCE: .*Geometry is read from the node's own box/s,
+    ],
+    // Precedence: a token stays cited as a token, or it stops tracking it.
+    [
+      "a variable-defined colour copied out of designContext",
+      bend("backgroundColor", { kind: "designContext", reference: `${base}/design-context.txt`, selector: "background-color" }),
+      /VISUAL_PROVENANCE_PRECEDENCE: .*Cite the variableDefs pointer/s,
+    ],
+    [
+      "an unknown provenance kind",
+      bend("fontSize", { kind: "screenshot" }),
+      /provenance\.kind must be one of metadata, variableDefs, designContext/,
+    ],
+    // The authored value is checked against what the bytes actually say.
+    [
+      "a value its own provenance does not resolve to",
+      bend("fontSize", {}, "18px"),
+      /facts\.fontSize\.value "18px" normalizes to 18, but its own designContext provenance resolves to 14/,
+    ],
+    [
+      "a taxonomy fact simply left out",
+      { facts: Object.fromEntries(Object.entries(facts).filter(([name]) => name !== "opacity")) },
+      /facts records no opacity; a node the contract derives from must establish the full visual taxonomy/,
+    ],
+  ];
+  for (const [label, frame, pattern] of cases) {
+    const fixture = await createFixture();
+    try {
+      await figmaAtAssessTarget(fixture);
+      await writeFigmaContext(fixture, { frame });
+      await rejectsAt(fixture, pattern, undefined);
+      assert.equal(await figmaPin(fixture), undefined, label);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("v2 figma: a designContext entry must name the node it was read for, unambiguously", async () => {
+  const fixture = await createFixture();
+  try {
+    await figmaAtAssessTarget(fixture);
+    const frame = await writeFigmaContext(fixture);
+    // No nodeId: an unbound CSS declaration is "somewhere in the design it
+    // says 14px", which binds nothing to this node.
+    await writeFigmaContext(fixture, {
+      frame: {
+        sources: {
+          ...frame.sources,
+          designContext: [{ ...frame.sources.designContext[0], nodeId: undefined }],
+        },
+      },
+    });
+    await rejectsAt(fixture, /sources\.designContext\[\]\.nodeId is required/);
+    // Read for a different node: node-scoped means node-scoped.
+    await writeFigmaContext(fixture, {
+      frame: {
+        sources: {
+          ...frame.sources,
+          designContext: [{ ...frame.sources.designContext[0], nodeId: "12:40" }],
+        },
+      },
+    });
+    await rejectsAt(fixture, /was read for node '12:40', not '12:34'/);
+    assert.equal(await figmaPin(fixture), undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("v2 figma: a conflicting designContext declaration is ambiguous, never resolved by order", async () => {
+  const fixture = await createFixture();
+  try {
+    await figmaAtAssessTarget(fixture);
+    const frame = await writeFigmaContext(fixture);
+    const reference = frame.sources.designContext[0].reference;
+    const bytes = `${FIGMA_DESIGN_CONTEXT}\nfont-size: 18px;\n`;
+    await writeFigmaContext(fixture, {
+      frame: {
+        sources: {
+          ...frame.sources,
+          designContext: [
+            {
+              reference,
+              nodeId: FIGMA_NODE,
+              hash: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+            },
+          ],
+        },
+      },
+    });
+    await writeFile(path.join(fixture.migrationRoot, reference), bytes);
+    await rejectsAt(
+      fixture,
+      /VISUAL_PROVENANCE_AMBIGUOUS: .*resolves 'font-size' to 2 different values/s,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("visual-17: a provenance-only stub or incomplete Figma evidence is refused", async () => {
   const cases = [
     [
@@ -11789,7 +12077,7 @@ test("visual-17: a provenance-only stub or incomplete Figma evidence is refused"
         writeJson(
           path.join(fixture.migrationRoot, "inventories/figma-context.json"),
           {
-            version: 1,
+            version: 2,
             frames: [{ fileKey: "ABC123def", nodeId: FIGMA_NODE }],
           },
         ),
@@ -11895,14 +12183,100 @@ test("visual-17: the contract covers every required state and binds a complete f
         visualAcceptance({ row: { figmaState: "hover" } }),
         /figmaState 'hover' is not one of node '12:34' states/,
       ],
+      // v2 fixes the tolerance, so there is no number left to argue about:
+      // authoring one at all is refused rather than capped at a ceiling.
       [
         visualAcceptance({ row: { tolerance: { px: 200, ratio: 0.01 } } }),
-        /tolerance\.px must be an explicit number between 0 and 16/,
+        /VISUAL_TOLERANCE_FIXED: .*tolerance is authored.*fixed ±1px/s,
       ],
-      [visualAcceptance({ row: { tolerance: undefined } }), /tolerance/],
+      [
+        visualAcceptance({ row: { tolerance: { px: 0, ratio: 0 } } }),
+        /VISUAL_TOLERANCE_FIXED/,
+      ],
       [
         visualAcceptance({ row: { expect: {} } }),
         /must declare at least one visual fact/,
+      ],
+      // A one-fact contract is the thing the taxonomy exists to forbid.
+      [
+        visualAcceptance({
+          row: {
+            expect: {
+              width: { kind: "px", value: FIGMA_VIEWPORT.width, locator: "main" },
+            },
+          },
+        }),
+        /VISUAL_CONTRACT_COVERAGE: .*required taxonomy group\(s\) .*assets/s,
+      ],
+      [
+        visualAcceptance({
+          row: {
+            expect: Object.fromEntries(
+              Object.entries(taxonomyExpect(FIGMA_VIEWPORT)).filter(
+                ([name]) => name !== "boxShadow",
+              ),
+            ),
+          },
+        }),
+        /VISUAL_CONTRACT_COVERAGE: .*group\(s\) shadow/s,
+      ],
+      // A fact the authority frame establishes cannot be dropped from the
+      // contract derived from it -- coverage is the table UNION frame.facts.
+      [
+        visualAcceptance({
+          row: {
+            expect: Object.fromEntries(
+              Object.entries(taxonomyExpect(FIGMA_VIEWPORT)).filter(
+                ([name]) => name !== "letterSpacing",
+              ),
+            ),
+          },
+        }),
+        /VISUAL_CONTRACT_COVERAGE: .*omits letterSpacing, which frame '12:34' establishes/s,
+      ],
+      // A count is an exact number or a closed range; `min: 1` with no max
+      // admits 1 and 9000 alike.
+      [
+        visualAcceptance({
+          row: {
+            expect: {
+              ...taxonomyExpect(FIGMA_VIEWPORT),
+              primaryActions: { kind: "count", min: 1, locator: "button" },
+            },
+          },
+        }),
+        /VISUAL_COUNT_UNBOUNDED: .*primaryActions declares \{kind: count, min: 1\} with no max/s,
+      ],
+      // The contract is derived from the authority, never authored beside it.
+      [
+        visualAcceptance({
+          row: {
+            expect: {
+              ...taxonomyExpect(FIGMA_VIEWPORT),
+              backgroundColor: { kind: "equals", value: "#ff0000", locator: "main" },
+            },
+          },
+        }),
+        /VISUAL_CONTRACT_DIVERGES: .*expects "#ff0000".*establishes "#0b5fff"/s,
+      ],
+      // Nothing normalizable, nothing asserted: `rem` depends on a root font
+      // size the contract does not pin.
+      [
+        visualAcceptance({
+          row: {
+            expect: {
+              ...taxonomyExpect(FIGMA_VIEWPORT),
+              fontSize: { kind: "px", value: "0.875rem", locator: "main" },
+            },
+          },
+        }),
+        /VISUAL_VALUE_UNSUPPORTED: fontSize value "0\.875rem"/,
+      ],
+      // v1 is compatibility for records that already pinned it, never a
+      // certification path a new record may choose.
+      [
+        { ...visualAcceptance(), version: 1 },
+        /VISUAL_CONTRACT_VERSION: matrices\/visual-acceptance\.json declares version 1/,
       ],
       // An unbounded count starting at 0 holds for every measurement, so it
       // would report PASS without ever comparing anything to the design.
@@ -12023,12 +12397,23 @@ test("visual-17: the engine owns the visual verdict -- an authored PASS over wro
     // visually wrong: the content column is materially narrower than the frame.
     await authorEvidence(fixture, "slice-a", {
       mutate: await figmaEvidence(fixture, {
-        values: { ...MEASURED, contentWidth: 1100 },
+        values: { ...MEASURED, width: 1100 },
       }),
     });
     await rejectsAt(
       fixture,
-      /VISUAL_ACCEPTANCE_FAIL: .*contentWidth expected 1280px ±12\.8, observed 1100/,
+      /VISUAL_ACCEPTANCE_FAIL: .*width expected 1280px ±1, observed 1100/,
+      { slice: "slice-a" },
+    );
+    // Two pixels is a divergence at v2's fixed tolerance, not variance.
+    await authorEvidence(fixture, "slice-a", {
+      mutate: await figmaEvidence(fixture, {
+        values: { ...MEASURED, width: FIGMA_VIEWPORT.width - 2 },
+      }),
+    });
+    await rejectsAt(
+      fixture,
+      /VISUAL_ACCEPTANCE_FAIL: .*width expected 1280px ±1, observed 1278/,
       { slice: "slice-a" },
     );
     // A fact the runtime never measured is not a pass.
@@ -12049,8 +12434,14 @@ test("visual-17: harmless rendering variance within tolerance verifies", async (
     await figmaSliceAwaitingVerify(fixture);
     await authorEvidence(fixture, "slice-a", {
       mutate: await figmaEvidence(fixture, {
-        // Subpixel/hinting drift and a timestamp the contract does not name.
-        values: { ...MEASURED, contentWidth: 1287.5, renderedAt: "12:04:59" },
+        // Subpixel/hinting drift inside the fixed ±1px, and a timestamp the
+        // contract does not name.
+        values: {
+          ...MEASURED,
+          width: FIGMA_VIEWPORT.width - 0.5,
+          borderRadius: "8.25px",
+          renderedAt: "12:04:59",
+        },
       }),
     });
     await advance(fixture, { slice: "slice-a" });
@@ -12066,50 +12457,23 @@ test("visual-17: synthetic narrow-viewport regression -- a 360px mobile frame re
   try {
     await figmaSliceAwaitingVerify(fixture, {
       viewport: mobile,
-      contract: visualAcceptance({
-        viewport: mobile,
-        row: {
-          expect: {
-            contentWidth: { kind: "px", value: 360, locator: "main" },
-            listItems: {
-              kind: "count",
-              value: 10,
-              locator: "getByTestId('list-item')",
-            },
-            itemWidth: {
-              kind: "px",
-              value: 344,
-              locator: "getByTestId('list-item').first()",
-            },
-            navigation: {
-              kind: "present",
-              value: false,
-              locator: "getByRole('navigation')",
-            },
-          },
-          tolerance: { px: 8, ratio: 0.02 },
-        },
-      }),
+      contract: visualAcceptance({ viewport: mobile }),
     });
-    // Every structural assertion of the old contract holds: ten cards render.
+    // The bounded control count still holds; geometry and navigation diverge.
     await authorEvidence(fixture, "slice-a", {
       mutate: await figmaEvidence(fixture, {
         viewport: mobile,
         values: {
-          contentWidth: 244,
-          listItems: 10,
-          itemWidth: 228,
+          ...MEASURED,
+          width: 244,
+          height: mobile.height,
           navigation: true,
         },
       }),
     });
     await assert.rejects(advance(fixture, { slice: "slice-a" }), (error) => {
       assert.match(error.message, /VISUAL_ACCEPTANCE_FAIL/);
-      assert.match(
-        error.message,
-        /contentWidth expected 360px ±8, observed 244/,
-      );
-      assert.match(error.message, /itemWidth expected 344px ±8, observed 228/);
+      assert.match(error.message, /width expected 360px ±1, observed 244/);
       assert.match(
         error.message,
         /navigation expected absent, observed present/,
@@ -12487,10 +12851,7 @@ test("adopt-17: adoption fails closed on absent, incomplete, or degraded evidenc
       /confirmation is missing or expired/,
     );
     // The challenge binds the exact evidence bytes the operator was shown.
-    await writeVisualAcceptance(
-      fixture,
-      visualAcceptance({ row: { tolerance: { px: 16, ratio: 0.1 } } }),
-    );
+    await writeVisualAcceptance(fixture, visualAcceptance({ revision: 2 }));
     await assert.rejects(
       adopt(fixture, preview),
       /confirmation is missing or expired/,
@@ -12778,12 +13139,12 @@ test("adopt-17: the mandatory increment requeues the adopted slice, which reveri
     );
     await authorEvidence(fixture, "slice-a", {
       mutate: await figmaEvidence(fixture, {
-        values: { ...MEASURED, contentWidth: 900 },
+        values: { ...MEASURED, width: 900 },
       }),
     });
     await assert.rejects(
       advance(fixture, { slice: "slice-a" }),
-      /contentWidth expected 1280px/,
+      /width expected 1280px/,
     );
     await authorEvidence(fixture, "slice-a", {
       mutate: await figmaEvidence(fixture),

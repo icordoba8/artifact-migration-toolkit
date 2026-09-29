@@ -58,6 +58,22 @@ import {
   upgradeProjection,
 } from "./format-upgrade.mjs";
 import {
+  FIGMA_PROVENANCE_KINDS,
+  FIXED_VISUAL_TOLERANCE,
+  HARDENED_VISUAL_VERSION,
+  REQUIRED_FACT_KINDS,
+  REQUIRED_FACT_NAMES,
+  assertProvenancePrecedence,
+  missingRequiredGroups,
+  normalizeVisualValue,
+  resolveDesignContextFact,
+  resolveMetadataAssets,
+  resolveMetadataFact,
+  resolveVariableDefsFact,
+  variableValueSet,
+  xmlAttribute,
+} from "./visual-evidence.mjs";
+import {
   activeToolkitIdentity,
   autoAdoptableToolkitTransition,
   digestToolkitIdentity,
@@ -881,6 +897,28 @@ const TARGET_EVIDENCE_ROOT = "evidence/";
  */
 export const LEGACY_AUTHORITY_ROLE = "LEGACY_AUTHORITY";
 export const TARGET_VERIFICATION_ROLE = "TARGET_VERIFICATION";
+
+/**
+ * The `version: 2` discriminator, asked of one visual artifact at a time.
+ *
+ * The artifact declares its own version, because the rules it is held to must
+ * not change underneath it: pinning happens after validation, so a state-based
+ * answer would say "hardened" at the step that authors the file and "not
+ * hardened" at every later re-read of the same bytes.
+ *
+ * `version: 1` is therefore legal only where it is already history -- a record
+ * that pinned this artifact before v2 existed keeps passing exactly as it did.
+ * Nothing newly authored may choose it: v1 is compatibility, never a
+ * certification path.
+ */
+const hardenedVisual = (state, relative, document, label) => {
+  const version = document?.version;
+  if (version === HARDENED_VISUAL_VERSION) return true;
+  if (version === 1 && state?.artifactHashes?.[relative]) return false;
+  throw new Error(
+    `VISUAL_CONTRACT_VERSION: ${label} declares version ${JSON.stringify(version)}. Author it at version ${HARDENED_VISUAL_VERSION}: the hardened visual contract covers the full visual taxonomy, resolves every fact from the pinned authority, and compares at a fixed ±${FIXED_VISUAL_TOLERANCE.px}px. Version 1 remains readable only for records that had already pinned it before version ${HARDENED_VISUAL_VERSION} existed.`,
+  );
+};
 
 /**
  * The one adapter table that makes the format-17 acceptance pipeline pluggable.
@@ -7970,12 +8008,6 @@ const FIGMA_SOURCE_KINDS = [
 const figmaNodeKey = (value) =>
   typeof value === "string" ? value.trim().replace("-", ":") : "";
 
-const XML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-const xmlAttribute = (tag, name) => {
-  const raw = tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
-  return raw?.replace(/&(amp|lt|gt|quot|apos);/g, (_m, entity) => XML_ENTITIES[entity]);
-};
-
 /**
  * The node ids from the root of a persisted `get_metadata` output down to
  * `nodeId`, or null when `nodeId` is not nested under that root. Read off the
@@ -8111,13 +8143,13 @@ export const validateFigmaContext = async (
 ) => {
   const strict = usesVisualAcceptance(state);
   const fail = (problem) => {
-    throw new Error(
+    throw Object.assign(new Error(
       `${contextFile} ${problem}. This migration records designSource: figma-mcp, so ASSESS_TARGET cannot close without it: read the figmaSources recorded in state.json through the Figma MCP and author ${FIGMA_CONTEXT_FILE} as a JSON object with a non-empty "frames" array whose every entry names the "fileKey" it was read from.${
         strict
           ? ` Format ${VISUAL_ACCEPTANCE_FORMAT} also requires every frame's nodeId, name, type, viewport, states, extraction {retrievedAt, fidelity, limitations}, and sources {metadata, designContext[], variableDefs, screenshot}: the verbatim Figma MCP outputs persisted inside the migration record, each as {reference, hash}.`
           : ""
       }`,
-    );
+    ), { visualContextFail: true });
   };
   const filePath = path.join(root, contextFile);
   if (!(await fileExists(filePath))) fail("does not exist");
@@ -8131,6 +8163,19 @@ export const validateFigmaContext = async (
   if (!Array.isArray(context.frames) || context.frames.length === 0) {
     fail('must record a non-empty "frames" array');
   }
+  // The contract derived from this authority is hardened, so the authority it
+  // is derived from must be: a v2 contract over a v1 context would assert
+  // taxonomy facts nothing resolved.
+  const hardened =
+    strict &&
+    hardenedVisual(
+      state,
+      // During adoption the fresh file is authored beside the pinned one, so
+      // the pin that makes v1 legal is the pin of the file being replaced.
+      contextFile === FIGMA_CONTEXT_ADOPTION_FILE ? FIGMA_CONTEXT_FILE : contextFile,
+      context,
+      contextFile,
+    );
   const recorded = new Set(
     (state.figmaSources ?? []).map((source) => source.fileKey),
   );
@@ -8273,6 +8318,7 @@ export const validateFigmaContext = async (
       );
     }
     const sources = isPlainObject(frame.sources) ? frame.sources : {};
+    const persisted = { designContext: [] };
     for (const kind of FIGMA_SOURCE_KINDS) {
       const entries =
         kind === "designContext" ? sources[kind] : sources[kind] && [sources[kind]];
@@ -8280,7 +8326,20 @@ export const validateFigmaContext = async (
         fail(`${at}.sources.${kind} must persist the raw Figma MCP output`);
       }
       for (const entry of entries) {
-        await verifyPersisted(entry, `${at}.sources.${kind}`);
+        const absolute = await verifyPersisted(entry, `${at}.sources.${kind}`);
+        if (kind === "designContext") {
+          // v2: an entry that does not say which node it describes cannot bind
+          // a fact to a node, and an unbound CSS declaration is exactly the
+          // "somewhere in the design it says 16px" claim this contract refuses.
+          if (hardened && figmaNodeKey(entry.nodeId) === "") {
+            fail(
+              `${at}.sources.designContext[].nodeId is required: every persisted design context entry must name the node it was read for`,
+            );
+          }
+          persisted.designContext.push({ entry, absolute });
+        } else {
+          persisted[kind] = { entry, absolute };
+        }
       }
     }
     // The viewport is read off the persisted node, never taken on trust.
@@ -8309,11 +8368,143 @@ export const validateFigmaContext = async (
         `${at}.ancestry.metadata describes node '${nodeId}' at a size other than its viewport ${viewport.width}x${viewport.height}`,
       );
     }
+    const facts = hardened
+      ? await resolveFigmaFacts({ frame, nodeId, at, fail, metadata, persisted })
+      : {};
     // `key` is the authority-neutral frame identity every shared reader uses;
     // `nodeId` stays exactly what it was for every Figma-only reader.
-    frames.set(nodeId, { ...frame, nodeId, key: nodeId });
+    frames.set(nodeId, { ...frame, nodeId, key: nodeId, facts });
   }
   return frames;
+};
+
+/**
+ * v2, figma-mcp: every authored fact re-resolved from the bytes whose hash this
+ * validator has just re-verified, and refused when the authored value is not
+ * what those bytes say. The frame declares `{value, provenance {kind,
+ * reference, nodeId, selector}}`; the engine reads the value back out and
+ * compares in the one normalized space, so the authored number is a claim about
+ * pinned evidence rather than the evidence itself.
+ *
+ * `legacy-runtime` needs none of this: its facts are measured, not transcribed,
+ * so the capture file *is* the provenance.
+ */
+const resolveFigmaFacts = async ({ frame, nodeId, at, fail, metadata, persisted }) => {
+  const authored = frame.facts;
+  if (!isPlainObject(authored) || Object.keys(authored).length === 0) {
+    fail(
+      `${at}.facts must record the visual facts this node establishes, each as {value, provenance {kind, reference, nodeId, selector}} resolvable from the persisted evidence (${REQUIRED_FACT_NAMES.join(", ")} plus whatever else this node establishes)`,
+    );
+  }
+  let variableDefs;
+  try {
+    variableDefs = JSON.parse(await readFile(persisted.variableDefs.absolute, "utf8"));
+  } catch (error) {
+    fail(`${at}.sources.variableDefs is not JSON: ${error.message}`);
+  }
+  const designContextText = new Map();
+  for (const { entry, absolute } of persisted.designContext) {
+    designContextText.set(entry.reference, {
+      nodeId: figmaNodeKey(entry.nodeId),
+      text: await readFile(absolute, "utf8"),
+    });
+  }
+  const facts = {};
+  for (const [name, fact] of Object.entries(authored)) {
+    const label = `${at}.facts.${name}`;
+    if (!isPlainObject(fact)) fail(`${label} must be a JSON object`);
+    const provenance = fact.provenance;
+    if (!isPlainObject(provenance) || !FIGMA_PROVENANCE_KINDS.includes(provenance.kind)) {
+      fail(
+        `${label}.provenance.kind must be one of ${FIGMA_PROVENANCE_KINDS.join(", ")}`,
+      );
+    }
+    // Node binding, checked before anything is read: a fact of *this* frame is
+    // resolved against *this* node, so a selector aimed elsewhere in the same
+    // file cannot be presented as this node's value.
+    if (figmaNodeKey(provenance.nodeId) !== nodeId) {
+      fail(
+        `${label}.provenance.nodeId '${provenance.nodeId}' is not this frame's node '${nodeId}'`,
+      );
+    }
+    if (typeof provenance.selector !== "string" || !provenance.selector.trim()) {
+      fail(`${label}.provenance.selector is required`);
+    }
+    let resolved;
+    try {
+      if (provenance.kind === "metadata") {
+        if (provenance.reference !== persisted.metadata.entry.reference) {
+          fail(
+            `${label}.provenance.reference '${provenance.reference}' is not this frame's persisted metadata ('${persisted.metadata.entry.reference}')`,
+          );
+        }
+        resolved = normalizeVisualValue(
+          name,
+          name === "assets"
+            ? resolveMetadataAssets(metadata, nodeId, provenance.selector.trim(), label)
+            : resolveMetadataFact(metadata, nodeId, provenance.selector.trim(), label),
+        );
+      } else if (provenance.kind === "variableDefs") {
+        if (provenance.reference !== persisted.variableDefs.entry.reference) {
+          fail(
+            `${label}.provenance.reference '${provenance.reference}' is not this frame's persisted variableDefs ('${persisted.variableDefs.entry.reference}')`,
+          );
+        }
+        resolved = normalizeVisualValue(
+          name,
+          resolveVariableDefsFact(variableDefs, provenance.selector.trim(), label),
+        );
+      } else {
+        const entry = designContextText.get(provenance.reference);
+        if (!entry) {
+          fail(
+            `${label}.provenance.reference '${provenance.reference}' is not one of this frame's persisted designContext entries`,
+          );
+        }
+        if (entry.nodeId !== nodeId) {
+          fail(
+            `${label}.provenance.reference '${provenance.reference}' was read for node '${entry.nodeId}', not '${nodeId}'`,
+          );
+        }
+        resolved = resolveDesignContextFact(
+          entry.text,
+          provenance.selector.trim(),
+          name,
+          label,
+        );
+      }
+      assertProvenancePrecedence({
+        property: name,
+        kind: provenance.kind,
+        value: resolved,
+        variableValues:
+          provenance.kind === "designContext"
+            ? variableValueSet(variableDefs, name)
+            : null,
+        label,
+      });
+      const declared = normalizeVisualValue(name, fact.value);
+      if (JSON.stringify(declared) !== JSON.stringify(resolved)) {
+        fail(
+          `${label}.value ${JSON.stringify(fact.value)} normalizes to ${JSON.stringify(declared)}, but its own ${provenance.kind} provenance resolves to ${JSON.stringify(resolved)}`,
+        );
+      }
+    } catch (error) {
+      // A refusal raised by `fail` already carries the context-file preamble;
+      // a resolver's own refusal is re-thrown through it, so every message in
+      // this validator names the file the operator has to fix.
+      if (error.visualContextFail) throw error;
+      fail(error.message);
+    }
+    facts[name] = { value: resolved, provenance };
+  }
+  const uncovered = REQUIRED_FACT_NAMES.filter((name) => facts[name] === undefined);
+  if (uncovered.length > 0) {
+    fail(
+      `${at}.facts records no ${uncovered.join(", ")}; a node the contract derives from must establish the full visual taxonomy (${REQUIRED_FACT_NAMES.join(", ")})`,
+    );
+  }
+  return facts;
 };
 
 /**
@@ -8351,6 +8542,7 @@ export const validateLegacyRuntimeContext = async (
   if (!Array.isArray(context.frames) || context.frames.length === 0) {
     fail('must record a non-empty "frames" array');
   }
+  const hardened = hardenedVisual(state, contextFile, context, contextFile);
   const inventory =
     legacy ??
     JSON.parse(
@@ -8499,6 +8691,37 @@ export const validateLegacyRuntimeContext = async (
         `${at}.sources.measurements was captured at viewport ${measurements.viewport?.width}x${measurements.viewport?.height}, the frame declares ${viewport.width}x${viewport.height}`,
       );
     }
+    // v2: the frame's facts are *derived* here, from the pinned capture, and
+    // never authored. There is no provenance to check because there is no
+    // authoring step to distrust -- the measurement file is the provenance.
+    // A taxonomy key the capture did not record is a capture defect, refused at
+    // ASSESS_TARGET while the capture can still be retaken, rather than
+    // discovered at BUILD_BASELINE against an immutable pin. This is also what
+    // keeps coverage bounded: the file carries the taxonomy, not a full
+    // computed-style dump.
+    const missing = hardened
+      ? REQUIRED_FACT_NAMES.filter((name) => measurements.values[name] === undefined)
+      : [];
+    if (missing.length > 0) {
+      fail(
+        `${at}.sources.measurements records no ${missing.join(", ")}; the pinned authority capture must measure the full visual taxonomy (${REQUIRED_FACT_NAMES.join(", ")}) because the visual contract is derived from it and cannot assert what was never captured`,
+      );
+    }
+    if (hardened && !Object.entries(measurements.values).some(
+      ([name, value]) => REQUIRED_FACT_KINDS[name] === undefined && Number.isInteger(value) && value >= 0,
+    )) {
+      fail(`${at}.sources.measurements has no non-negative integer structure count outside the named taxonomy facts`);
+    }
+    const facts = {};
+    if (hardened) {
+      for (const [name, raw] of Object.entries(measurements.values)) {
+        try {
+          facts[name] = { value: normalizeVisualValue(name, raw) };
+        } catch (error) {
+          fail(`${at}.sources.measurements ${error.message}`);
+        }
+      }
+    }
     let snapshot;
     try {
       snapshot = JSON.parse(await readFile(read.snapshot, "utf8"));
@@ -8516,7 +8739,7 @@ export const validateLegacyRuntimeContext = async (
         `${at}.sources.snapshot.observation.controls must observe at least one control`,
       );
     }
-    frames.set(key, { ...frame, key, name: key, measurements });
+    frames.set(key, { ...frame, key, name: key, measurements, facts });
   }
   return frames;
 };
@@ -8564,6 +8787,13 @@ export const validateVisualAcceptance = async (
   );
   const rows = assertArray(matrix.rows, "Visual acceptance rows");
   assertUniqueIds(rows, "Visual acceptance rows");
+  const hardened = hardenedVisual(
+    state,
+    VISUAL_ACCEPTANCE_FILE,
+    matrix,
+    VISUAL_ACCEPTANCE_FILE,
+  );
+  const normalized = new Map();
   const behaviors = new Map(
     (legacy.uiBehaviors ?? []).map((uiBehavior) => [uiBehavior.id, uiBehavior]),
   );
@@ -8608,18 +8838,28 @@ export const validateVisualAcceptance = async (
         `${label}.viewport must be node '${frame.key}' viewport ${frame.viewport.width}x${frame.viewport.height}.`,
       );
     }
-    const tolerance = assertPlainObject(row.tolerance, `${label}.tolerance`);
-    for (const [key, ceiling] of [
-      ["px", MAX_TOLERANCE_PX],
-      ["ratio", MAX_TOLERANCE_RATIO],
-    ]) {
-      if (
-        typeof tolerance[key] !== "number" ||
-        !(tolerance[key] >= 0 && tolerance[key] <= ceiling)
-      ) {
+    if (hardened) {
+      // Fixed, not defaulted: at v2 there is no number to argue about, so
+      // authoring one is refused outright rather than capped.
+      if (row.tolerance !== undefined) {
         throw new Error(
-          `${label}.tolerance.${key} must be an explicit number between 0 and ${ceiling}.`,
+          `VISUAL_TOLERANCE_FIXED: ${label}.tolerance is authored. Version ${HARDENED_VISUAL_VERSION} compares at a fixed ±${FIXED_VISUAL_TOLERANCE.px}px with no ratio allowance, and a per-row tolerance is a waiver with a number in it. Remove it.`,
         );
+      }
+    } else {
+      const tolerance = assertPlainObject(row.tolerance, `${label}.tolerance`);
+      for (const [key, ceiling] of [
+        ["px", MAX_TOLERANCE_PX],
+        ["ratio", MAX_TOLERANCE_RATIO],
+      ]) {
+        if (
+          typeof tolerance[key] !== "number" ||
+          !(tolerance[key] >= 0 && tolerance[key] <= ceiling)
+        ) {
+          throw new Error(
+            `${label}.tolerance.${key} must be an explicit number between 0 and ${ceiling}.`,
+          );
+        }
       }
     }
     const expect = assertPlainObject(row.expect, `${label}.expect`);
@@ -8631,7 +8871,13 @@ export const validateVisualAcceptance = async (
       assertPlainObject(fact, at);
       assertNonEmpty(fact.locator, `${at}.locator`);
       const valid =
-        (fact.kind === "px" && Number.isFinite(fact.value)) ||
+        // v2 lets a `px` fact carry a length *spelling* -- "16px", "50%" --
+        // because normalization, not the shape check, is what decides whether
+        // a unit is supported. A `rem` therefore refuses with the reason it
+        // refuses for, instead of as a malformed fact.
+        (fact.kind === "px" &&
+          (Number.isFinite(fact.value) ||
+            (hardened && typeof fact.value === "string"))) ||
         (fact.kind === "count" &&
           (Number.isInteger(fact.value) ||
             (Number.isInteger(fact.min) &&
@@ -8657,6 +8903,87 @@ export const validateVisualAcceptance = async (
           `${at} is unfalsifiable: {kind: count, min: ${fact.min}} with no max accepts every measurement. Give it a max, or a min of at least 1.`,
         );
       }
+      // v2 closes the remaining half of that hole: `min: 1` with no max still
+      // admits 1 and 9000 alike. A count is an exact number or a closed range.
+      if (
+        hardened &&
+        fact.kind === "count" &&
+        fact.value === undefined &&
+        fact.max === undefined
+      ) {
+        throw new Error(
+          `VISUAL_COUNT_UNBOUNDED: ${at} declares {kind: count, min: ${fact.min}} with no max, which accepts every count at or above ${fact.min}. Version ${HARDENED_VISUAL_VERSION} requires an exact value, or both min and max.`,
+        );
+      }
+      if (hardened && REQUIRED_FACT_KINDS[name] !== undefined && fact.kind !== REQUIRED_FACT_KINDS[name]) {
+        throw new Error(
+          `${at} declares kind '${fact.kind}'; the taxonomy fixes '${name}' at kind '${REQUIRED_FACT_KINDS[name]}'.`,
+        );
+      }
+    }
+    if (hardened) {
+      // Coverage: the fixed taxonomy UNION every fact the authority frame
+      // established. The union half costs nothing -- those facts already exist
+      // -- and the table half is what makes a one-fact PASS unauthorable.
+      const groups = missingRequiredGroups(expect);
+      if (groups.length > 0) {
+        throw new Error(
+          `VISUAL_CONTRACT_COVERAGE: ${label}.expect covers none of the required taxonomy group(s) ${groups.join(", ")}. A version ${HARDENED_VISUAL_VERSION} row asserts geometry, spacing, colour, typography, border, shadow, visibility, a bounded structural count and the visible assets; a row that asserts only what happens to match is not a contract.`,
+        );
+      }
+      const authoritative = frame.facts ?? {};
+      const unbackedFacts = Object.keys(expect).filter(
+        (name) => authoritative[name] === undefined,
+      );
+      if (unbackedFacts.length > 0) {
+        throw new Error(
+          `VISUAL_CONTRACT_PROVENANCE: ${label}.expect asserts ${unbackedFacts.join(", ")}, which frame '${frame.key}' does not establish. Every version ${HARDENED_VISUAL_VERSION} fact must come from the pinned authority.`,
+        );
+      }
+      const omitted = Object.keys(authoritative).filter(
+        (name) => expect[name] === undefined,
+      );
+      if (omitted.length > 0) {
+        throw new Error(
+          `VISUAL_CONTRACT_COVERAGE: ${label}.expect omits ${omitted.join(", ")}, which frame '${frame.key}' establishes. A fact the authority carries cannot be dropped from the contract derived from it.`,
+        );
+      }
+      // The contract value is checked against the authority value in the one
+      // normalized space, which is what makes a Figma `#0B5FFF` and a browser
+      // `rgb(11, 95, 255)` the same assertion rather than two.
+      const expected = {};
+      for (const [name, fact] of Object.entries(expect)) {
+        const at = `${label}.expect.${name}`;
+        let value;
+        try {
+          value = normalizeVisualValue(name, fact.value ?? fact.min);
+        } catch (error) {
+          throw new Error(`${at} ${error.message}`);
+        }
+        const authority = authoritative[name];
+        const authorityCount = authority.value;
+        const disagrees = fact.kind === "count" && fact.value === undefined
+          ? !Number.isInteger(authorityCount) || authorityCount < fact.min || authorityCount > fact.max
+          : JSON.stringify(authorityCount) !== JSON.stringify(value);
+        if (disagrees) {
+          throw new Error(
+            `VISUAL_CONTRACT_DIVERGES: ${at} expects ${JSON.stringify(value)}, but frame '${frame.key}' establishes ${JSON.stringify(authority.value)}. The contract is derived from the pinned authority, never authored beside it.`,
+          );
+        }
+        // `normalized` carries the fact's own property name, so the runtime
+        // measurement is put in the same space by the one shared function at
+        // comparison time -- in both engines, through one `compareVisualFact`.
+        expected[name] =
+          fact.value === undefined
+            ? { ...fact, normalized: name }
+            : { ...fact, value, normalized: name };
+      }
+      normalized.set(row.id, {
+        ...row,
+        expect: expected,
+        tolerance: FIXED_VISUAL_TOLERANCE,
+        version: HARDENED_VISUAL_VERSION,
+      });
     }
   }
   for (const [index, item] of assertArray(
@@ -8673,6 +9000,25 @@ export const validateVisualAcceptance = async (
     }
     claim(item, label);
     assertNonEmpty(item.reason, `${label}.reason`);
+    // v2, legacy-runtime only. "We captured one of six states and waived the
+    // rest" is the shape this closes: if a sibling state of the same behavior
+    // was captured, the capture rig demonstrably reaches this behavior, so the
+    // only honest reason to leave a sibling unbacked is a recorded extraction
+    // limitation on that state's own frame. figma-mcp is deliberately exempt --
+    // the engine cannot know whether a design for the state exists at all, so
+    // the operator stays the only judge there.
+    if (hardened && authority.contextFile === LEGACY_RUNTIME_CONTEXT_FILE) {
+      const captured = [...frames.values()].filter(
+        (frame) =>
+          frame.uiBehaviorId === item.uiBehaviorId && frame.state !== item.state,
+      );
+      const own = frames.get(`${item.uiBehaviorId}::${item.state}`);
+      if (captured.length > 0 && !(own?.extraction?.limitations?.length > 0)) {
+        throw new Error(
+          `VISUAL_SIBLING_STATE_CAPTURED: ${label} leaves '${item.uiBehaviorId}' state '${item.state}' unbacked, but state(s) ${captured.map((frame) => `'${frame.state}'`).join(", ")} of the same behavior were captured from the running legacy app. Capture this state too, or record its frame in ${LEGACY_RUNTIME_CONTEXT_FILE} with the extraction.limitations that stopped the capture. An operator decision waives a state the rig cannot reach, not one it did not try.`,
+        );
+      }
+    }
     const { candidate } = visualUnbackedCandidate({
       state,
       frames,
@@ -8701,14 +9047,31 @@ export const validateVisualAcceptance = async (
       }
     }
   }
-  return rows;
+  // v2 rows are returned normalized and with the fixed tolerance already
+  // attached, so every comparison site -- both engines -- gets the hardened
+  // semantics without knowing the version exists.
+  return rows.map((row) => normalized.get(row.id) ?? row);
 };
 
 /** One expected fact against one runtime value; null when it holds. */
 export const compareVisualFact = (fact, actual, tolerance) => {
   if (actual === undefined) return "was not measured";
+  if (fact.normalized) {
+    try {
+      actual = normalizeVisualValue(fact.normalized, actual);
+    } catch (error) {
+      return `was measured as ${JSON.stringify(actual)}, which ${error.message.replace(/^VISUAL_VALUE_UNSUPPORTED: .*? value .*? /, "")}`;
+    }
+  }
   const observed = JSON.stringify(actual);
   if (fact.kind === "px") {
+    // A percentage never became a number, so it is compared as the literal it
+    // is; mixing the two would be the silent coercion normalization forbids.
+    if (typeof fact.value === "string" || typeof actual === "string") {
+      return JSON.stringify(fact.value) === observed
+        ? null
+        : `expected ${JSON.stringify(fact.value)}, observed ${observed}`;
+    }
     const allowed = Math.max(tolerance.px, tolerance.ratio * Math.abs(fact.value));
     return Number.isFinite(actual) && Math.abs(actual - fact.value) <= allowed
       ? null
