@@ -144,7 +144,11 @@ const readOrNull = async (file) =>
  *   installation paths, so a suite that only ever tests unquoted ones proves
  *   the easy half.
  */
-export const createUnstampedRecord = async ({ prefix = "amt-consumer-" } = {}) => {
+export const createUnstampedRecord = async ({
+  prefix = "amt-consumer-",
+  designSource,
+  figma,
+} = {}) => {
   const root = await mkdtemp(path.join(os.tmpdir(), prefix));
   const legacyRoot = path.join(root, "legacy");
   const targetRoot = path.join(root, "target");
@@ -189,6 +193,8 @@ export const createUnstampedRecord = async ({ prefix = "amt-consumer-" } = {}) =
     ...resolution,
     moduleName: "auth",
     openSpecProposal: SPEC,
+    designSource,
+    figma,
   });
   assertExecutionConfirmation(preview, preview.confirmationId);
   await bootstrapMigration({
@@ -197,6 +203,8 @@ export const createUnstampedRecord = async ({ prefix = "amt-consumer-" } = {}) =
     openSpecProposal: preview.openSpecProposal,
     registryBinding: preview.registryBinding,
     boundInputs: preview.boundInputs,
+    designSource,
+    figma,
   });
 
   const recordRoot = path.join(targetRoot, ".agents/knowledge/migrations/modules/auth");
@@ -216,6 +224,7 @@ export const createUnstampedRecord = async ({ prefix = "amt-consumer-" } = {}) =
 
   return {
     root,
+    legacyRoot,
     targetRoot,
     registryPath,
     recordRoot,
