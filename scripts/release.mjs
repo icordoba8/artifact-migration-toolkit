@@ -334,23 +334,31 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
   const identityFile = path.join(stagingRoot, "packages/migration-engine/build-identity.json");
   await writeFile(identityFile, `${JSON.stringify(identity, null, 2)}\n`, "utf8");
 
-  // The one runtime dependency, dereferenced because pnpm's store link is
-  // checkout-relative. Package-manager launch shims are build-machine output,
-  // not runtime input, and are deliberately excluded at every depth.
-  const dependencyTarget = path.join(
-    stagingRoot,
-    "packages/migration-engine/node_modules/ts-discovery-compiler",
+  // Every declared runtime dependency, dereferenced because pnpm's store link
+  // is checkout-relative. Package-manager launch shims are build-machine
+  // output, not runtime input, and are deliberately excluded at every depth.
+  // Read from the manifest rather than named here, so adding a dependency
+  // cannot ship a bundle that fails to resolve it at runtime.
+  const dependencies = Object.keys(
+    (await readJson(path.join(root, "packages/migration-engine/package.json"))).dependencies ?? {},
   );
-  await mkdir(path.dirname(dependencyTarget), { recursive: true });
-  await cp(
-    path.join(root, "packages/migration-engine/node_modules/ts-discovery-compiler"),
-    dependencyTarget,
-    {
-      recursive: true,
-      dereference: true,
-      filter: (source) => !source.split(path.sep).includes(".bin"),
-    },
-  );
+  for (const dependency of dependencies) {
+    const dependencyTarget = path.join(
+      stagingRoot,
+      "packages/migration-engine/node_modules",
+      dependency,
+    );
+    await mkdir(path.dirname(dependencyTarget), { recursive: true });
+    await cp(
+      path.join(root, "packages/migration-engine/node_modules", dependency),
+      dependencyTarget,
+      {
+        recursive: true,
+        dereference: true,
+        filter: (source) => !source.split(path.sep).includes(".bin"),
+      },
+    );
+  }
 
   const staged = {};
   for (const relative of [...payload, "packages/migration-engine/build-identity.json",

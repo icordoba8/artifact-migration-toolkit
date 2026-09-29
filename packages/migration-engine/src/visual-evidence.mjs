@@ -18,10 +18,12 @@
  * takes bytes and returns values or throws. The verdict stays in the engines.
  */
 
-import pixelmatch from "pixelmatch";
-import { PNG } from "pngjs";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 
 export const decodePng = (bytes) => {
+  const { PNG } = require("pngjs");
   try {
     return PNG.sync.read(bytes);
   } catch (error) {
@@ -86,7 +88,7 @@ export const perceptualDelta = (authority, target, compare) => {
     }
     return data;
   };
-  const diffPixels = pixelmatch(flatten(authority), flatten(target), null, width, height, { includeAA: false });
+  const diffPixels = require("pixelmatch").default(flatten(authority), flatten(target), null, width, height, { includeAA: false });
   return { diffPixels, diffRatio: diffPixels / (width * height) };
 };
 
