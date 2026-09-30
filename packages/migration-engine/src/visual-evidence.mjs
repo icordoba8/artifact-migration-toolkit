@@ -4,7 +4,7 @@
  * second copy of any rule here is the one thing that would let the module and
  * artifact pipelines drift apart, so there is exactly one.
  *
- * Four responsibilities and nothing else:
+ * Five responsibilities and nothing else:
  *   1. `REQUIRED_FACTS` -- the fixed taxonomy a v2 contract must cover, so a
  *      one-fact PASS is not expressible.
  *   2. `normalizeVisualValue` -- the single space the authority value, the
@@ -13,11 +13,13 @@
  *   3. The three Figma provenance resolvers, each reading a value back out of
  *      bytes the engine has already re-hashed.
  *   4. PNG decode, box resampling, pixel counts and control multiset deltas.
+ *   5. Captured structured Plugin API nodes, their facts, assets and provenance.
  *
  * Nothing here decides PASS or FAIL and nothing here reads the filesystem: it
  * takes bytes and returns values or throws. The verdict stays in the engines.
  */
 
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -197,7 +199,7 @@ const refuse = (property, raw, why) => {
   );
 };
 
-const COLOR_FACTS = new Set(["color", "backgroundColor", "borderColor"]);
+const COLOR_FACTS = new Set(["color", "backgroundColor", "borderColor", "fill"]);
 const LENGTH_FACTS = new Set([
   "width",
   "height",
@@ -207,6 +209,11 @@ const LENGTH_FACTS = new Set([
   "lineHeight",
   "borderWidth",
   "borderRadius",
+  "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "rowGap", "columnGap",
+  "borderTopLeftRadius", "borderTopRightRadius",
+  "borderBottomRightRadius", "borderBottomLeftRadius",
+  "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
   "x",
   "y",
 ]);
@@ -360,7 +367,7 @@ export const xmlAttribute = (tag, name) => {
 
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** The three ways a Figma fact may be traced back to pinned bytes. */
+/** The three classic ways a Figma fact may be traced back to pinned bytes. */
 export const FIGMA_PROVENANCE_KINDS = Object.freeze([
   "metadata",
   "variableDefs",
@@ -547,4 +554,281 @@ export const variableValueSet = (document, property) => {
   };
   walk(document);
   return values;
+};
+
+// --- Structured Plugin API evidence -----------------------------------------
+
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+/** Hash the exact returned bytes; JSON key reordering is not silently erased. */
+export const structuredDigest = (bytes) => {
+  if (typeof bytes !== "string" && !Buffer.isBuffer(bytes) && !(bytes instanceof Uint8Array)) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: digest input must be bytes or a string");
+  }
+  return sha256(bytes);
+};
+
+const readStructuredNode = (record) => {
+  if (typeof record?.rawSnapshot !== "string") {
+    throw new Error("VISUAL_STRUCTURED_INVALID: rawSnapshot must be the verbatim JSON string");
+  }
+  let node;
+  try {
+    node = JSON.parse(record.rawSnapshot);
+  } catch {
+    throw new Error("VISUAL_STRUCTURED_INVALID: rawSnapshot is not JSON");
+  }
+  if (record.digest !== undefined && record.digest !== structuredDigest(record.rawSnapshot)) {
+    throw new Error("VISUAL_STRUCTURED_TAMPERED: rawSnapshot digest changed");
+  }
+  if (!node || Array.isArray(node) || typeof node !== "object" ||
+      (node.id === undefined && node.nodeId === undefined) ||
+      (node.id !== undefined && node.id !== record.nodeId) ||
+      (node.nodeId !== undefined && node.nodeId !== record.nodeId)) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: snapshot node identity does not match nodeId");
+  }
+  return node;
+};
+
+const freezeEvidence = (value, seen = new WeakSet()) => {
+  if (value && typeof value === "object" && !seen.has(value)) {
+    seen.add(value);
+    for (const child of Object.values(value)) freezeEvidence(child, seen);
+    Object.freeze(value);
+  }
+  return value;
+};
+
+/** Capture a node without rewriting its response bytes or inventing missing keys. */
+export const captureStructuredNode = ({ nodeId, rawSnapshot, capture }) => {
+  if (typeof nodeId !== "string" || !nodeId || capture?.tool !== "use_figma" ||
+      typeof capture.operation !== "string" || !capture.operation ||
+      typeof capture.timestamp !== "string" || !capture.timestamp) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: nodeId, use_figma operation and capture timestamp are required");
+  }
+  const record = { nodeId, rawSnapshot, source: "STRUCTURED_NODE" };
+  const node = readStructuredNode(record);
+  if (node.children !== undefined && !Array.isArray(node.children)) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: children must be an array");
+  }
+  const childIds = node.childIds ?? node.children?.map((child) => child.id ?? child.nodeId);
+  if (childIds !== undefined && (!Array.isArray(childIds) || childIds.some((id) => typeof id !== "string" || !id))) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: childIds must contain node IDs");
+  }
+  const parentId = node.parentId ?? node.parent?.id;
+  if (parentId !== undefined && (typeof parentId !== "string" || !parentId)) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: parentId must be a node ID");
+  }
+  return freezeEvidence({
+    ...record,
+    digest: structuredDigest(rawSnapshot),
+    capture: structuredClone(capture),
+    ...(parentId === undefined ? {} : { parentId }),
+    ...(childIds === undefined ? {} : { childIds: [...childIds] }),
+    propertyKeys: Object.keys(node).sort(),
+  });
+};
+
+/** Stable digest for the set of captured node artifacts, independent of arrival order. */
+export const structuredEvidenceDigest = (records) => {
+  const entries = records.map((record) => {
+    readStructuredNode(record);
+    return [record.nodeId, structuredDigest(record.rawSnapshot)];
+  });
+  if (new Set(entries.map(([id]) => id)).size !== entries.length) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: duplicate nodeId in evidence set");
+  }
+  entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  return structuredDigest(JSON.stringify(entries));
+};
+
+const paintColor = (paint) => {
+  if (typeof paint === "string") return paint;
+  if (paint?.type !== "SOLID" || paint.visible === false) return undefined;
+  const color = paint.color;
+  if (typeof color === "string") return color;
+  if (color && [color.r, color.g, color.b].every((value) => typeof value === "number" && value >= 0 && value <= 1)) {
+    const alpha = (color.a ?? 1) * (paint.opacity ?? 1);
+    if (!(alpha >= 0 && alpha <= 1)) throw new Error("VISUAL_STRUCTURED_INVALID: invalid paint opacity");
+    return `#${[color.r, color.g, color.b, alpha].slice(0, alpha === 1 ? 3 : 4)
+      .map((value) => Math.round(value * 255).toString(16).padStart(2, "0")).join("")}`;
+  }
+  return undefined;
+};
+
+/** Facts always cite the owning node and the exact returned property path. */
+export const extractStructuredFacts = (record) => {
+  if (typeof record?.digest !== "string") {
+    throw new Error("VISUAL_STRUCTURED_INVALID: captured snapshot digest is required");
+  }
+  const node = readStructuredNode(record);
+  const facts = [];
+  const add = (property, rawProperty, rawValue, normalized = rawValue) => {
+    const binding = node.boundVariables?.[rawProperty]?.id;
+    facts.push({ nodeId: record.nodeId, property, value: normalizeVisualValue(property, normalized),
+      source: "STRUCTURED_NODE", rawProperty, rawValue, snapshotDigest: record.digest,
+      ...(binding === undefined ? {} : { bindingId: binding }) });
+  };
+  const direct = ["width", "height", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "rowGap", "columnGap", "fontSize", "fontWeight", "opacity", "type", "isAsset"];
+  for (const key of direct) if (Object.hasOwn(node, key)) add(key, key, node[key]);
+  if (Object.hasOwn(node, "itemSpacing")) add("gap", "itemSpacing", node.itemSpacing);
+  if (Object.hasOwn(node, "fontFamily")) add("fontFamily", "fontFamily", node.fontFamily);
+  if (Object.hasOwn(node, "fontStyle")) add("fontStyle", "fontStyle", node.fontStyle);
+  if (node.fontName && Object.hasOwn(node, "fontName")) {
+    if (Object.hasOwn(node.fontName, "family")) add("fontFamily", "fontName.family", node.fontName.family);
+    if (Object.hasOwn(node.fontName, "style")) add("fontStyle", "fontName.style", node.fontName.style);
+  }
+  for (const axis of ["fontVariationAxes", "fontVariations"]) {
+    if (node[axis] && Object.hasOwn(node[axis], "wght")) add("fontWeight", `${axis}.wght`, node[axis].wght);
+  }
+  if (Object.hasOwn(node, "lineHeight")) {
+    const height = node.lineHeight;
+    if (typeof height !== "object" || height === null) add("lineHeight", "lineHeight", height);
+    else if (height.unit === "PIXELS" && Object.hasOwn(height, "value")) add("lineHeight", "lineHeight.value", height, height.value);
+  }
+  const radii = { topLeftRadius: "borderTopLeftRadius", topRightRadius: "borderTopRightRadius",
+    bottomRightRadius: "borderBottomRightRadius", bottomLeftRadius: "borderBottomLeftRadius" };
+  for (const [raw, property] of Object.entries(radii)) if (Object.hasOwn(node, raw)) add(property, raw, node[raw]);
+  if (node.individualStrokeWeights && typeof node.individualStrokeWeights === "object" &&
+      Array.isArray(node.strokes) && node.strokes.some((stroke) => stroke.visible !== false)) {
+    for (const [side, weight] of Object.entries(node.individualStrokeWeights)) {
+      if (["top", "right", "bottom", "left"].includes(side)) {
+        add(`border${side[0].toUpperCase()}${side.slice(1)}Width`, `individualStrokeWeights.${side}`, weight);
+      }
+    }
+  }
+  if (Object.hasOwn(node, "visible")) {
+    if (typeof node.visible !== "boolean") throw new Error("VISUAL_STRUCTURED_INVALID: visible must be boolean");
+    add("visibility", "visible", node.visible, node.visible ? "visible" : "hidden");
+  }
+  if (Object.hasOwn(node, "parentId")) add("parentId", "parentId", node.parentId);
+  else if (node.parent?.id) add("parentId", "parent.id", node.parent.id);
+  if (Object.hasOwn(node, "childIds")) add("childIds", "childIds", node.childIds);
+  else if (Object.hasOwn(node, "children")) add("childIds", "children", node.children,
+    node.children.map((child) => child.id ?? child.nodeId));
+  const paints = Object.hasOwn(node, "fills") ? node.fills : Object.hasOwn(node, "fill") ? [node.fill] : undefined;
+  if (paints !== undefined) {
+    if (!Array.isArray(paints)) throw new Error("VISUAL_STRUCTURED_INVALID: fills must be an array");
+    for (const paint of paints) {
+      const color = paintColor(paint);
+      if (color !== undefined) add("fill", Object.hasOwn(node, "fills") ? "fills" : "fill", paint, color);
+    }
+  }
+  if (Object.hasOwn(node, "strokes")) {
+    if (!Array.isArray(node.strokes)) throw new Error("VISUAL_STRUCTURED_INVALID: strokes must be an array");
+    const applied = node.strokes.filter((stroke) => stroke.visible !== false);
+    if (!applied.length) add("stroke", "strokes", node.strokes, "none");
+    else {
+      add("strokes", "strokes", node.strokes, applied);
+      if (Object.hasOwn(node, "strokeWeight")) add("borderWidth", "strokeWeight", node.strokeWeight);
+      for (const stroke of applied) {
+        const color = paintColor(stroke);
+        if (color !== undefined) add("borderColor", "strokes", stroke, color);
+      }
+    }
+  }
+  if (Object.hasOwn(node, "effects")) {
+    if (!Array.isArray(node.effects)) throw new Error("VISUAL_STRUCTURED_INVALID: effects must be an array");
+    const applied = node.effects.filter((effect) => effect.visible !== false);
+    if (!applied.length) {
+      add("effects", "effects", node.effects, []);
+      add("boxShadow", "effects", node.effects, "none");
+    }
+    else add("effects", "effects", node.effects, applied);
+  }
+  return facts;
+};
+
+const CONTAINER_TEXT_TYPES = new Set(["FRAME", "GROUP", "COMPONENT", "INSTANCE", "SECTION", "PAGE", "TEXT"]);
+
+/** One asset retrieval's identity; omit retrieval fields until they are actually returned. */
+export const structuredAssetIdentity = (record, retrieval = {}) => {
+  if (typeof record?.digest !== "string") {
+    throw new Error("VISUAL_STRUCTURED_INVALID: captured snapshot digest is required");
+  }
+  const node = readStructuredNode(record);
+  const isAsset = node.isAsset === true ||
+    ((node.parentId ?? node.parent?.id) !== undefined && node.visible === true &&
+      typeof node.type === "string" && !CONTAINER_TEXT_TYPES.has(node.type));
+  if (!isAsset) return undefined;
+  if (typeof node.type !== "string" || !node.type) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: asset node type is required");
+  }
+  const identity = { nodeId: record.nodeId, type: node.type,
+    ...(Object.hasOwn(node, "isAsset") ? { isAsset: node.isAsset } : {}) };
+  const exportKind = retrieval.exportKind ?? node.exportKind;
+  const mimeType = retrieval.mimeType ?? node.mimeType;
+  if (exportKind !== undefined) identity.exportKind = exportKind;
+  if (mimeType !== undefined) identity.mimeType = mimeType;
+  if (retrieval.content !== undefined) identity.contentDigest = structuredDigest(retrieval.content);
+  return identity;
+};
+
+export const STRUCTURED_PROVENANCE_RANKS = Object.freeze({
+  STRUCTURED_NODE: 1, VARIABLE_BINDING: 2, METADATA: 3,
+  DESIGN_CONTEXT_LITERAL: 4, PERCEPTUAL: 5,
+});
+
+const METADATA_PROPERTIES = new Set([...GEOMETRY_FACTS, "parentId", "childIds"]);
+const LITERAL_PREFIXES = Object.freeze({
+  gap: ["gap"], rowGap: ["gap-y"], columnGap: ["gap-x"],
+  paddingTop: ["pt", "py"], paddingRight: ["pr", "px"],
+  paddingBottom: ["pb", "py"], paddingLeft: ["pl", "px"],
+  fill: ["bg", "text"], fontSize: ["text"], lineHeight: ["leading"],
+  opacity: ["opacity"],
+});
+
+const isCitedLiteral = (item, property) => {
+  const match = /^([a-z-]+)-\[([^\]]+)\]$/i.exec(item.rawProperty ?? "");
+  if (!match || !LITERAL_PREFIXES[property]?.includes(match[1])) return false;
+  try {
+    return JSON.stringify(normalizeVisualValue(property, match[2])) ===
+      JSON.stringify(normalizeVisualValue(property, item.value));
+  } catch (error) {
+    if (error instanceof VisualValueError) return false;
+    throw error;
+  }
+};
+
+/** Resolve one node-owned fact. Variable bindings annotate the value; defaults never certify. */
+export const resolveVisualProvenance = (evidence, nodeId, property) => {
+  const matches = evidence.filter((item) => item.nodeId === nodeId && item.property === property);
+  if (matches.some((item) => item.source === "STRUCTURED_NODE" &&
+      !/^[0-9a-f]{64}$/.test(item.snapshotDigest ?? ""))) {
+    throw new Error(`VISUAL_FACT_UNBACKED: ${nodeId}.${property} has no captured structured snapshot digest`);
+  }
+  const support = matches.filter((item) => Object.hasOwn(STRUCTURED_PROVENANCE_RANKS, item.source) &&
+    item.source !== "VARIABLE_BINDING" &&
+    (item.source !== "METADATA" || METADATA_PROPERTIES.has(property)) &&
+    (item.source !== "DESIGN_CONTEXT_LITERAL" || isCitedLiteral(item, property)));
+  if (!support.some((item) => item.source !== "PERCEPTUAL")) return undefined;
+  const values = new Map();
+  for (const item of support) {
+    const value = normalizeVisualValue(property, item.value);
+    const key = JSON.stringify(value);
+    const rank = STRUCTURED_PROVENANCE_RANKS[item.source];
+    const atRank = values.get(rank) ?? new Map();
+    atRank.set(key, [...(atRank.get(key) ?? []), item]);
+    values.set(rank, atRank);
+  }
+  for (const atRank of values.values()) if (atRank.size > 1) {
+    throw new Error(`VISUAL_PROVENANCE_AMBIGUOUS: ${nodeId}.${property} has multiple values at one rank`);
+  }
+  if (new Set([...values.values()].map((atRank) => [...atRank.keys()][0])).size > 1) {
+    throw new Error(`VISUAL_PROVENANCE_CONFLICT: ${nodeId}.${property} differs across ranks`);
+  }
+  const rank = Math.min(...values.keys());
+  const [valueKey, strongest] = [...values.get(rank)][0];
+  const structured = support.filter((item) => item.source === "STRUCTURED_NODE");
+  const bindings = matches.filter((item) => item.source === "VARIABLE_BINDING" &&
+    structured.some((fact) => fact.bindingId === item.tokenId));
+  const tokenIds = bindings.map((item) => item.tokenId);
+  if (bindings.some((item) => !item.tokenId || (item.value !== undefined &&
+      JSON.stringify(normalizeVisualValue(property, item.value)) !== valueKey))) {
+    throw new Error(`VISUAL_PROVENANCE_CONFLICT: ${nodeId}.${property} variable binding disagrees or has no token`);
+  }
+  return { nodeId, property, value: JSON.parse(valueKey), support: strongest[0],
+    corroborating: support.filter((item) => STRUCTURED_PROVENANCE_RANKS[item.source] > rank),
+    ...(tokenIds.length ? { tokenIds: [...new Set(tokenIds)].sort() } : {}) };
 };
