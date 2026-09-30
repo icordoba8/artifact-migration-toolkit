@@ -35,6 +35,7 @@ import {
   previewAdvance,
   advanceMigration,
   previewMigrationExecution,
+  renderProgress,
   resolveLegacySources,
   resolveRegistryPath,
   stepsFor,
@@ -1511,4 +1512,91 @@ test("run and discover accept repeatable --legacy and --adopt-target", () => {
     () => parseDiscoverArguments(["auth", "--scan", "--legacy", "other"]),
     /--scan is read-only/,
   );
+});
+
+// --- a blocked iteration reports the block, in both forms -------------------
+
+/** The cheapest real block: the legacy tree moves under a pinned record. */
+const driftLegacy = async (fixture) => {
+  await writeFile(path.join(fixture.legacyRoot, "auth/marker.txt"), "drifted\n");
+  await execFileAsync("git", ["add", "-A"], { cwd: fixture.root });
+  await execFileAsync(
+    "git",
+    ["-c", "user.name=Run Test", "-c", "user.email=run@example.test",
+      "commit", "-q", "-m", "legacy drift"],
+    { cwd: fixture.root },
+  );
+};
+
+test("a blocked run renders the block at its checkpoint and offers no next step", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture);
+    await authorDiscoverLegacy(fixture);
+    const active = await capture(fixture, () =>
+      runMigration(["auth", "--mode", "auto", "--json"]));
+    // A. the happy path is untouched: active checkpoint, executable next step.
+    assert.equal(active.result.outcome, "CONTINUE");
+    assert.match(active.result.progressChecklist, /^\[x\] 2\/9 DISCOVER_LEGACY$/m);
+    assert.match(active.result.progressChecklist, /^\[>\] 3\/9 DISCOVERY_COMPLETENESS$/m);
+    assert.match(active.result.progressChecklist, /^next: DISCOVERY_COMPLETENESS$/m);
+    assert.doesNotMatch(active.result.progressChecklist, /^stop reason:/m);
+    assert.equal(
+      active.result.progress.nextWork.command,
+      "/start-migration auth",
+    );
+
+    await driftLegacy(fixture);
+    const before = await state(fixture);
+    const events = await historyEvents(fixture);
+    const blocked = await capture(fixture, () =>
+      runMigration(["auth", "--mode", "auto", "--json"]));
+
+    // B. the human form names the block where it happened.
+    assert.equal(blocked.result.outcome, "BLOCKED");
+    const checklist = blocked.result.progressChecklist;
+    assert.match(checklist, /^\[x\] 1\/9 RESOLVE$/m);
+    assert.match(checklist, /^\[!\] 3\/9 DISCOVERY_COMPLETENESS$/m);
+    assert.doesNotMatch(checklist, /^\[>\]/m);
+    assert.match(checklist, /^\[ \] 4\/9 ASSESS_TARGET$/m);
+    assert.match(checklist, /^stop reason: BLOCKED$/m);
+    assert.match(checklist, /^blocker: Legacy revision changed from /m);
+    assert.match(checklist, /^next: none until the blocker is cleared$/m);
+    assert.doesNotMatch(checklist, /^next: DISCOVERY_COMPLETENESS$/m);
+    assert.equal(
+      directiveOf(blocked.stdout),
+      "loop: STOP reason=BLOCKED",
+    );
+
+    // C. the structured form says the same thing, from the same computation.
+    const progress = blocked.result.progress;
+    assert.notEqual(progress, null);
+    assert.equal(progress.stopReason, "BLOCKED");
+    assert.match(progress.blocker, /^Legacy revision changed from /);
+    assert.equal(
+      progress.checkpoints.find((row) => row.name === "DISCOVERY_COMPLETENESS")
+        .state,
+      "BLOCKED",
+    );
+    assert.deepEqual(
+      progress.checkpoints.filter((row) => row.state === "COMPLETED")
+        .map((row) => row.name),
+      ["RESOLVE", "DISCOVER_LEGACY"],
+    );
+    // No executable command while the blocker stands -- but the resume
+    // information the operator needs to clear it survives.
+    assert.equal(progress.nextWork.command, null);
+    assert.equal(progress.nextWork.checkpoint, "DISCOVERY_COMPLETENESS");
+    assert.equal(typeof progress.nextWork.action, "string");
+    // JSON and text are one projection: the text is rendered from this object.
+    assert.equal(renderProgress(progress), checklist);
+
+    // D. a refusal is not a transition.
+    const after = await state(fixture);
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.currentStep, before.currentStep);
+    assert.equal(await historyEvents(fixture), events);
+  } finally {
+    await fixture.cleanup();
+  }
 });

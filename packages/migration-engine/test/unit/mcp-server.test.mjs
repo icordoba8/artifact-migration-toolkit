@@ -685,11 +685,33 @@ for (const [label, prepare, expected] of [
         (await state(viaMcp)).revision,
         (await state(viaCli)).revision,
       );
+      // Every outcome projects progress, and the text form is rendered from
+      // that same object -- so MCP and the CLI cannot describe one record
+      // differently, on a stop least of all.
+      assert.ok(mcp.progress, mcp.log);
+      assert.equal(mcp.progressChecklist, renderProgress(mcp.progress));
       if (before) {
         assert.match(mcp.log, /--refresh --confirm-mismatch/);
         assert.match(cli.log, /--refresh --confirm-mismatch/);
         assert.deepEqual(await snapshot(viaMcp.migrationRoot), before[0]);
         assert.deepEqual(await snapshot(viaCli.migrationRoot), before[1]);
+        // The block renders at the checkpoint it happened on, with no
+        // executable command offered while it stands.
+        assert.equal(mcp.progress.stopReason, "BLOCKED");
+        assert.match(mcp.progress.blocker, /Legacy revision changed from /);
+        assert.equal(mcp.progress.nextWork.command, null);
+        assert.match(mcp.progressChecklist, /^\[!\] \d\/\d \w+$/m);
+        assert.doesNotMatch(mcp.progressChecklist, /^\[>\]/m);
+        assert.match(
+          mcp.progressChecklist,
+          /^next: none until the blocker is cleared$/m,
+        );
+        // The CLI relays the same block. The two fixtures are separate Git
+        // repositories, so the blocker quotes different revisions; the markers
+        // and the refusal to name a runnable next step are the parity.
+        assert.match(cli.log, /^\[!\] \d\/\d \w+$/m);
+        assert.doesNotMatch(cli.log, /^\[>\]/m);
+        assert.match(cli.log, /^next: none until the blocker is cleared$/m);
       }
     } finally {
       await viaMcp.cleanup();

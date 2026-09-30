@@ -10627,6 +10627,7 @@ export const previewMigrationExecution = async ({
       registryBinding,
       boundInputs,
       // Bootstrap has no persisted state to describe; the CLI skips printing.
+      progress: null,
       progressChecklist: null,
       confirmationId:
         blockers.length === 0
@@ -10744,17 +10745,18 @@ export const previewMigrationExecution = async ({
       ...bindingFields,
       formatUpgrade,
     };
+    const upgradeProgress = migrationProgress(state, {
+      mode: mode ?? DEFAULT_MODE,
+      outcome: "FORMAT_UPGRADE",
+      reason: formatUpgrade.nextAction,
+      formatUpgrade,
+    });
     return {
       ...upgradePreview,
       registryBinding,
       boundInputs,
-      progressChecklist: renderProgressChecklist(
-        state,
-        mode ?? DEFAULT_MODE,
-        "FORMAT_UPGRADE",
-        formatUpgrade.nextAction,
-        formatUpgrade,
-      ),
+      progress: upgradeProgress,
+      progressChecklist: renderProgress(upgradeProgress),
       // Bound to the upgrade's own digest as well as the state bytes, so a
       // candidate rewritten between preview and commit invalidates the
       // confirmation exactly as a moved checkpoint does.
@@ -11105,11 +11107,16 @@ export const previewMigrationExecution = async ({
     // bytes of the evidence that authorizes invalidating a COMPLETE record.
     ...(reopenCompleteBinding ? { reopenComplete: reopenCompleteBinding } : {}),
   };
+  const progress = previewProgress(state, mode, blockers);
   return {
     ...preview,
     registryBinding,
     boundInputs,
-    progressChecklist: renderProgressChecklist(state, mode ?? DEFAULT_MODE),
+    // Both forms, from one computation: the text the CLI relays and the
+    // structured projection `runMigration` reports when a blocked preflight
+    // stops the iteration before any record was read.
+    progress,
+    progressChecklist: renderProgress(progress),
     confirmationId:
       blockers.length === 0
         ? confirmationIdFor({
@@ -14975,14 +14982,17 @@ export const previewAdvance = async ({
           prerequisite.outcome === "BLOCKED" ? [prerequisite.reason] : [],
         requiresConfirmation: false,
         confirmationId: null,
+        progress,
         progressChecklist: renderProgress(progress),
       };
     }
   }
+  const advanceProgress = previewProgress(state, mode, blockers);
   return {
     ...snapshot,
     statePath: context.statePath,
-    progressChecklist: renderProgressChecklist(state, mode ?? DEFAULT_MODE),
+    progress: advanceProgress,
+    progressChecklist: renderProgress(advanceProgress),
     requiresConfirmation: blockers.length === 0,
     confirmationId: blockers.length === 0 ? confirmationIdFor(snapshot) : null,
   };
@@ -15123,25 +15133,35 @@ export const migrationProgress = (
     formatUpgrade,
     blocker: stopped ? (reason ?? null) : null,
     stopReason: stopped ? (outcome ?? state.status) : null,
+    // Where the migration resumes, and -- unless it is stopped -- the command
+    // that resumes it. A stop keeps the checkpoint, slice, action and artifact,
+    // because an operator clearing a blocker still needs to know where they
+    // are; it drops `command`, because there is nothing to run until the
+    // blocker is cleared and a command field reads as permission to run it.
+    // Same rule the text form states as `next: none until the blocker is
+    // cleared`, from this one projection.
     nextWork: complete
       ? null
-      : nextWorkKind === "RUN_ARTIFACT"
-        ? {
-            kind: nextWorkKind,
-            checkpoint: state.currentStep,
-            slice: state.activeSlice ?? null,
-            action: "Run the delegated artifact prerequisite.",
-            artifact: artifactMigration?.artifactId ?? null,
-            command: artifactMigration?.command ?? null,
-            artifactMigration,
-          }
-        : {
-            checkpoint: state.currentStep,
-            slice: state.activeSlice ?? null,
-            action: state.nextAction ?? null,
-            artifact: activeArtifact(state),
-            command: state.nextCommand ?? null,
-          },
+      : {
+          ...(nextWorkKind === "RUN_ARTIFACT"
+            ? {
+                kind: nextWorkKind,
+                checkpoint: state.currentStep,
+                slice: state.activeSlice ?? null,
+                action: "Run the delegated artifact prerequisite.",
+                artifact: artifactMigration?.artifactId ?? null,
+                command: artifactMigration?.command ?? null,
+                artifactMigration,
+              }
+            : {
+                checkpoint: state.currentStep,
+                slice: state.activeSlice ?? null,
+                action: state.nextAction ?? null,
+                artifact: activeArtifact(state),
+                command: state.nextCommand ?? null,
+              }),
+          ...(stopped ? { command: null } : {}),
+        },
   };
 };
 
@@ -15247,7 +15267,16 @@ export const renderProgress = (progress) => {
     lines.push(`stop reason: ${progress.stopReason}`);
     if (progress.blocker) lines.push(`blocker: ${progress.blocker}`);
   }
-  if (progress.nextWork) lines.push(`next: ${progress.nextWork.checkpoint}`);
+  // A stop has no executable next step. Naming the checkpoint here read as
+  // work the operator could start, directly under a `[!]` row saying they
+  // could not -- the one line in the block that contradicted the rest of it.
+  if (progress.nextWork) {
+    lines.push(
+      progress.stopReason
+        ? "next: none until the blocker is cleared"
+        : `next: ${progress.nextWork.checkpoint}`,
+    );
+  }
   return `${lines.join("\n")}\n`;
 };
 
@@ -15262,6 +15291,19 @@ export const renderProgressChecklist = (
   renderProgress(
     migrationProgress(state, { mode, outcome, reason, formatUpgrade }),
   );
+
+/**
+ * The projection a *preview* reports. A preview runs no iteration, so the only
+ * outcome it can carry is its own refusal: blockers present means this
+ * invocation stops, and the block renders at the checkpoint it happened on
+ * rather than as an active row the operator could act on.
+ */
+const previewProgress = (state, mode, blockers) =>
+  migrationProgress(state, {
+    mode: mode ?? DEFAULT_MODE,
+    outcome: blockers.length > 0 ? "BLOCKED" : null,
+    reason: blockers.length > 0 ? blockers.join("; ") : null,
+  });
 
 export const advanceMigration = async ({
   registryPath,

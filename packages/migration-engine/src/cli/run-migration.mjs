@@ -266,6 +266,11 @@ export const runMigration = async (
   // simply reports no progress rather than inventing one.
   const decisionReferences = [];
   let latestState = null;
+  // The preflight preview's own projection, already computed against the same
+  // record by the same function. A blocked preflight returns no result, so
+  // without this the one outcome the operator most needs progress for was the
+  // one that reported none.
+  let latestPreview = null;
   let nextWork = null;
   const finish = (outcome, extra = {}) => {
     const progress = latestState
@@ -276,7 +281,7 @@ export const runMigration = async (
           nextWorkKind: nextWork?.kind ?? null,
           artifactMigration: nextWork?.artifactMigration ?? null,
         })
-      : null;
+      : (latestPreview?.progress ?? null);
     const result = {
       outcome,
       request: null,
@@ -309,6 +314,7 @@ export const runMigration = async (
       stdout,
     });
     latestState = discovered.result?.state ?? latestState;
+    latestPreview = discovered.preview ?? latestPreview;
 
     // 2. Stop unless the record is ready to move. `nextOutcome` answers
     //    blocked, awaiting confirmation, and already-complete in one call --
