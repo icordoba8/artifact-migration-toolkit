@@ -5,8 +5,8 @@
  *
  * Four commands, one hash:
  *
- *   --check   releasability gate: clean protected tree, versions agree, the
- *             generated provider trees are current. Writes nothing.
+ *   --check   releasability gate: clean tree, versions and committed skill
+ *             stamps agree, published version identity is not reused. Writes nothing.
  *   --build   stage `dist/<name>-<version>/` from the *committed* tree, inject
  *             `build-identity.json`, render the provider manifests' release
  *             placeholders, and write `release-manifest.json` + `SHA256SUMS`.
@@ -164,6 +164,7 @@ export const recordRelease = async (version, {
   root = repositoryRoot,
   resolve = resolveRelease,
   download = downloadAsset,
+  runTar = execFileAsync,
 } = {}) => {
   if (!exactVersion(version)) throw new Error("release:record requires one exact X.Y.Z version");
   const resolved = await resolve(version);
@@ -177,7 +178,7 @@ export const recordRelease = async (version, {
     await verifyDownloadedAsset(archive, resolved.asset.digest);
 
     const tarOptions = { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 };
-    const { stdout: listing } = await execFileAsync("tar", ["-tzf", archive], tarOptions);
+    const { stdout: listing } = await runTar("tar", ["-tzf", archive], tarOptions);
     const entries = listing.trimEnd().split(/\r?\n/);
     if (entries.some((entry) => {
       const name = entry.replace(/\/$/, "");
@@ -188,12 +189,12 @@ export const recordRelease = async (version, {
     if (entries.filter((entry) => entry === member).length !== 1) {
       throw new Error("Release archive must contain exactly one release-manifest.json member");
     }
-    const { stdout: details } = await execFileAsync("tar", ["-tvzf", archive, "--", member], tarOptions);
+    const { stdout: details } = await runTar("tar", ["-tvzf", archive, "--", member], tarOptions);
     const types = details.trimEnd().split(/\r?\n/);
     if (types.length !== 1 || !types[0].startsWith("-") || !types[0].endsWith(` ${member}`)) {
       throw new Error("Release manifest must be one regular file");
     }
-    const { stdout } = await execFileAsync("tar", ["-xOzf", archive, "--", member], tarOptions);
+    const { stdout } = await runTar("tar", ["-xOzf", archive, "--", member], tarOptions);
     const { toolkit } = JSON.parse(stdout);
     if (toolkit?.version !== version || toolkit?.name !== TOOLKIT_NAME ||
         toolkit?.commit !== resolved.commit || !validContentHash(toolkit?.contentHash)) {

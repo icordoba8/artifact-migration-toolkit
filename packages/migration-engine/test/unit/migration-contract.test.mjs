@@ -17507,27 +17507,16 @@ test("R3-1: the installed toolkit reopens a COMPLETE record under --mode auto wi
     const claim = await assertClaimNotLive(fixture, "slice-a");
     const evidence = await postFinalizationEvidence(fixture);
 
-    const { buildRelease, buildReleaseArchive, payloadPaths } = await import(
+    const { buildRelease, buildReleaseArchive } = await import(
       "../../../../scripts/release.mjs"
     );
+    const { candidateReleaseRoot } = await import("../support/candidate-release-root.mjs");
     // The real skill file, not a copy of its logic.
     const { ensureRuntime, verifyDownloadedAsset } = await import(
       "../../../../skills/start-migration/scripts/runtime.mjs"
     );
     // A candidate fixture has its own unregistered version, never published v1.3.0.
-    const releaseRoot = path.join(fixture.root, "candidate");
-    for (const relative of await payloadPaths(repositoryRoot)) {
-      const destination = path.join(releaseRoot, relative);
-      await mkdir(path.dirname(destination), { recursive: true });
-      await cp(path.join(repositoryRoot, relative), destination);
-      if (["package.json", "packages/migration-engine/package.json"].includes(relative) ||
-          path.basename(relative) === "release-identity.json") {
-        await writeJson(destination, { ...(await readJson(destination)), version: "0.0.1" });
-      }
-    }
-    await writeJson(path.join(releaseRoot, "released-versions.json"), []);
-    await symlink(path.join(repositoryRoot, "packages/migration-engine/node_modules"),
-      path.join(releaseRoot, "packages/migration-engine/node_modules"), "junction");
+    const releaseRoot = await candidateReleaseRoot(fixture.root);
     const built = await buildRelease({ root: releaseRoot, force: true });
     const asset = await buildReleaseArchive(built);
     const runtime = await ensureRuntime(

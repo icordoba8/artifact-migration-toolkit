@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { buildRelease, contentHashOf, payloadPaths, recordRelease, releaseCheck, repositoryRoot } from "../scripts/release.mjs";
 import { resolveRelease } from "../scripts/runtime-bootstrap.mjs";
-import { linkEngineDependencies } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
+import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
 const execFileAsync = promisify(execFile);
 const hash = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -67,21 +67,7 @@ const transport = (bytes, options = {}) => {
 };
 
 // Only payload bytes are copied; the live published registry is never a fixture.
-const candidate = async (t) => {
-  const root = await scratch(t);
-  for (const relative of await payloadPaths()) {
-    const destination = path.join(root, relative);
-    await mkdir(path.dirname(destination), { recursive: true });
-    await cp(path.join(repositoryRoot, relative), destination);
-    if (["package.json", "packages/migration-engine/package.json"].includes(relative) ||
-        path.basename(relative) === "release-identity.json") {
-      const value = JSON.parse(await readFile(destination, "utf8"));
-      await writeFile(destination, json({ ...value, version: toolkit.version }));
-    }
-  }
-  await linkEngineDependencies(root);
-  return root;
-};
+const candidate = async (t) => candidateReleaseRoot(await scratch(t), { version: toolkit.version });
 
 test("established payload identity is read-only, outside contentHash, and cannot be forced", async (t) => {
   const root = await candidate(t);
@@ -173,25 +159,21 @@ test("digest verification precedes every tar call; tar failures clean scratch wi
   const registry = path.join(root, "released-versions.json");
   await writeFile(registry, "[]\n");
   const before = await readFile(registry);
-  const marker = path.join(root, "tar-called");
-  const tar = path.join(root, "tar");
-  await writeFile(tar, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'called'); process.exit(1);\n`);
-  await chmod(tar, 0o755);
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${root}${path.delimiter}${oldPath}`;
-  try {
-    const badDigest = transport(Buffer.from("not tar"), { digest: toolkit.contentHash });
-    await assert.rejects(recordRelease(toolkit.version, { root, ...badDigest }), /digest mismatch/);
-    await assert.rejects(stat(marker), { code: "ENOENT" });
-    await badDigest.cleaned();
-    const tarFailure = transport(archiveOf([manifestEntry()]));
-    await assert.rejects(recordRelease(toolkit.version, { root, ...tarFailure }), /Command failed/);
-    assert.equal(await readFile(marker, "utf8"), "called");
-    await tarFailure.cleaned();
-    assert.deepEqual(await readFile(registry), before);
-  } finally {
-    process.env.PATH = oldPath;
-  }
+  let tarCalls = 0;
+  const runTar = async (command) => {
+    assert.equal(command, "tar");
+    tarCalls++;
+    throw new Error("tar failed");
+  };
+  const badDigest = transport(Buffer.from("not tar"), { digest: toolkit.contentHash });
+  await assert.rejects(recordRelease(toolkit.version, { root, ...badDigest, runTar }), /digest mismatch/);
+  assert.equal(tarCalls, 0);
+  await badDigest.cleaned();
+  const tarFailure = transport(archiveOf([manifestEntry()]));
+  await assert.rejects(recordRelease(toolkit.version, { root, ...tarFailure, runTar }), /tar failed/);
+  assert.equal(tarCalls, 1);
+  await tarFailure.cleaned();
+  assert.deepEqual(await readFile(registry), before);
 });
 
 test("the public resolver rejects nonpublication evidence before download or registry write", async (t) => {

@@ -20,7 +20,6 @@ import {
   readFile,
   readdir,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -28,6 +27,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { linkPackageDependencies } from "../support/dependency-links.mjs";
 
 import {
   engineArgv,
@@ -296,8 +296,8 @@ const CONSUMER_REGISTRY = ".agents/knowledge/migrations/registry.json";
  * An engine installed at one of the layouts above, plus a consumer repository
  * that owns a registry, a persisted binding, and its own migration state.
  *
- * `node_modules` is symlinked rather than copied so the pinned parser resolves
- * without a second install, which is what a real toolkit checkout has.
+ * Declared dependencies are linked to their resolved store directories so the
+ * pinned parser resolves without a second install on either platform.
  */
 const externalInstall = async (
   layout = "ancestor",
@@ -366,10 +366,7 @@ const externalInstall = async (
       !source.split(path.sep).includes("node_modules") &&
       !source.split(path.sep).includes("test"),
   });
-  const installed = path.join(enginePackage, "node_modules");
-  if (await exists(installed)) {
-    await symlink(installed, path.join(installedPackage, "node_modules"));
-  }
+  await linkPackageDependencies(engineRoot, PACKAGE_DIR, "packages/migration-engine");
   // The directory holding the install owns a package.json of its own, which is
   // what turns the shared shape into a wrong answer: it is readable, so shape
   // plus readability "proves" a legacy in-repo install that does not exist.
@@ -753,7 +750,7 @@ test("R-1 proof: --doctor from an external engine reports the consumer, not its 
     const parser = report.checks.find(
       (check) => check.name === "discovery-parser",
     );
-    // Whether the pinned parser resolves through the symlink or not, the
+    // Whether the pinned parser resolves through the linked dependency or not, the
     // remediation must describe the engine that is actually installed.
     if (parser.status === "BLOCKED") {
       assert.ok(

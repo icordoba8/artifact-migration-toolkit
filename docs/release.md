@@ -8,13 +8,20 @@ Release identity (`scripts/release.mjs`, `build-identity.json`,
 `release-manifest.json`) and toolkit-identity stamping landed in Phase 3; see
 *Toolkit identity* below.
 
+The CI and release boundary is defined in [CI and Release Architecture](ci-release-hardening.md).
+Do not start release preparation from a known-red commit. The exact candidate
+SHA must have successful `ci / toolkit (ubuntu-latest)` and
+`ci / toolkit (windows-latest)` checks before running release commands. GitHub
+required checks must enforce this before merge; local `release:check` cannot
+query or substitute for those checks.
+
 ## The three runners
 
 | Runner | Command | Owns |
 | --- | --- | --- |
-| `node --test` | `pnpm engine:test` | the 15 engine suites under `packages/migration-engine/test/{unit,integration,external}` |
-| `node --test` | `pnpm providers:test` | `test/providers-sync.test.mjs` and `test/provider-installation.test.mjs` — projection and installed acceptance |
-| vitest | `pnpm engine:test:ts` | the two TypeScript artifact filesystem/recovery specs under `test/integration/artifact` |
+| `node --test` | `pnpm engine:test` | the explicitly named engine suites under `packages/migration-engine/test/{unit,integration,external}` |
+| `node --test` | `pnpm providers:test` | the explicitly named provider, release, portability and installed acceptance suites under `test/` |
+| vitest | `pnpm engine:test:ts` | the TypeScript artifact filesystem/recovery specs under `packages/migration-engine/test/integration/artifact` |
 
 `pnpm test` runs all three. The `node:test` suites drive real file locking,
 atomic renames, `git ls-files` and child processes, which a jsdom environment
@@ -34,25 +41,22 @@ See [Phase 4 acceptance](phase-4-acceptance.md) for the matrix and limitations.
 
 ## Release acceptance gate
 
-A change under `skills/**` or `packages/migration-engine/**` is releasable only
-when **all** of the following hold.
+Development CI proves dependency installation, provider projection, provider
+and engine tests, TypeScript tests, and installed behavior on **both** Ubuntu
+and Windows for the same commit. If `MIGRATION_FORMAT_VERSION` or the approval
+boundary changed, their owning tests remain part of that CI evidence. A skill
+change must include generated provider trees and `skills-lock.json` in that
+candidate commit.
 
-1. `pnpm install --frozen-lockfile` succeeds from a clean checkout.
-2. `pnpm engine:test` — passes on `ubuntu-latest` **and** `windows-latest`.
-   Both platforms are required: the engine drives real file locking and
-   `module-lock.mjs` documents that Windows has no `flock`, so they are
-   different systems under test, not the same one twice.
-3. `pnpm engine:test:ts` — passes.
-4. `pnpm providers:check` — all four provider trees and the ownership manifest
-   regenerate byte-identically, on `ubuntu-latest` **and** `windows-latest`.
-5. `pnpm providers:test` — provider projection, ownership-safe pruning, the
-   no-engine-in-a-provider-tree boundary, and the canonical skill hashes.
-6. Every regression in the release matrix has a passing owning test.
-7. If `MIGRATION_FORMAT_VERSION` changed — see *Format bump* below.
-8. If the operator-approval boundary changed — see *Approval boundary* below.
-9. A change under `skills/**` is not releasable until `pnpm providers:sync` and
-   `pnpm skills:lock` have been re-run and their output committed. The generated
-   trees and the lock are part of the change, not a follow-up.
+After the candidate SHA is green, prepare the release version and generated
+stamps as a new commit, then require both CI checks on that **exact new SHA**.
+The previous commit's green checks do not transfer to the version commit.
+For the green release SHA, run `pnpm release:check`, `pnpm release:build`,
+`pnpm release:verify <staged-dir>`, and one installed smoke against the staged
+bundle. These prove clean identity and packaging. Do not rerun the entire
+development matrix locally for the same SHA; CI already ran it. Publish only
+after the packaging checks pass, then run `pnpm release:record <version>` from
+the published asset.
 
 ## Format bump
 
@@ -197,8 +201,9 @@ renders the four provider-manifest placeholders, and writes
 stable GitHub Release whose immutable flag is enabled; the first-use bootstrap
 refuses mutable releases and assets without GitHub's SHA-256 digest.
 `pnpm release:verify <dir>` re-hashes
-a staged bundle against its own manifest. `pnpm release:check` is the gate: a
-clean protected tree, agreeing versions, fully committed payload.
+a staged bundle against its own manifest. `pnpm release:check` is the local
+identity gate: a clean tree, agreeing versions, fully committed payload. The
+required GitHub checks are separate evidence for that exact SHA.
 
 The content hash is **acyclic**. Inputs: canonical skills, engine payload,
 lockfile, and the committed provider payload with its placeholders *unrendered*.

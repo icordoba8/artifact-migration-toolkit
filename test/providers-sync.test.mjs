@@ -733,58 +733,73 @@ test("fails before writing when an output path is an existing directory", async 
   assert.equal(await pathExists(root, "providers/claude/.mcp.json"), false);
 });
 
-// --- negative: symlinks and permissions (POSIX) ------------------------------
+// --- negative: symlinks, junctions and permissions ---------------------------
 
-const posixTest = process.platform === "win32" ? test.skip : test;
+const fileSymlink = async (t, target, link) => {
+  try {
+    await symlink(target, link);
+    return true;
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+      t.skip("Windows runner cannot create file symlinks");
+      return false;
+    }
+    throw error;
+  }
+};
 
-posixTest("rejects direct, nested and directory canonical symlinks", async () => {
+test("rejects direct and nested canonical file symlinks", async (t) => {
   const direct = await createFixture();
   await rm(path.join(direct, "skills/start-migration/references/contract.md"));
-  await symlink(
+  if (!await fileSymlink(t,
     path.join(direct, "unrelated/repository-file.txt"),
     path.join(direct, "skills/start-migration/references/contract.md"),
-  );
+  )) return;
   await expectFailureWithoutWrites(
     direct,
     /Canonical sources cannot be symlinks: skills\/start-migration\/references\/contract\.md/,
   );
 
   const nested = await createFixture();
-  await symlink(
+  if (!await fileSymlink(t,
     path.join(nested, "unrelated/repository-file.txt"),
     path.join(nested, "skills/start-migration/references/linked.md"),
-  );
+  )) return;
   await expectFailureWithoutWrites(
     nested,
     /Canonical sources cannot be symlinks: skills\/start-migration\/references\/linked\.md/,
   );
+});
 
+test("rejects a canonical directory junction", async () => {
   const directory = await createFixture();
   await rename(path.join(directory, "skills"), path.join(directory, "real-skills"));
-  await symlink(path.join(directory, "real-skills"), path.join(directory, "skills"));
+  await symlink(path.join(directory, "real-skills"), path.join(directory, "skills"), "junction");
   await expectFailureWithoutWrites(
     directory,
     /Canonical sources cannot be symlinks: skills/,
   );
 });
 
-posixTest("rejects an output symlink and an output parent symlink without following either", async () => {
+test("rejects an output file symlink without following it", async (t) => {
   const output = await createFixture();
   await mkdir(path.join(output, "providers/claude"), { recursive: true });
-  await symlink(
+  if (!await fileSymlink(t,
     path.join(output, "unrelated/repository-file.txt"),
     path.join(output, "providers/claude/.mcp.json"),
-  );
+  )) return;
   await assert.rejects(
     runProvidersSync({ root: output }),
     /Generated file path is a symlink: providers\/claude\/\.mcp\.json/,
   );
   assert.equal(await readText(output, "unrelated/repository-file.txt"), "keep me\n");
+});
 
+test("rejects an output parent junction without following it", async () => {
   const parent = await createFixture();
   await mkdir(path.join(parent, "outside"), { recursive: true });
   await mkdir(path.join(parent, "providers/codex"), { recursive: true });
-  await symlink(path.join(parent, "outside"), path.join(parent, "providers/codex/prompts"));
+  await symlink(path.join(parent, "outside"), path.join(parent, "providers/codex/prompts"), "junction");
   await assert.rejects(
     runProvidersSync({ root: parent }),
     /Generated file path is a symlink: providers\/codex\/prompts\/start-migration\.md/,
@@ -792,12 +807,12 @@ posixTest("rejects an output symlink and an output parent symlink without follow
   assert.deepEqual(await readdir(path.join(parent, "outside")), []);
 });
 
-posixTest("rejects a stale manifest path through a symlink without deleting its target", async () => {
+test("rejects a stale manifest path through a junction without deleting its target", async () => {
   const root = await createFixture();
   await runProvidersSync({ root });
   await mkdir(path.join(root, "outside"));
   await writeText(root, "outside/stale.md", "keep me\n");
-  await symlink(path.join(root, "outside"), path.join(root, "providers/legacy"));
+  await symlink(path.join(root, "outside"), path.join(root, "providers/legacy"), "junction");
   await writeText(
     root,
     manifestPath,
@@ -819,13 +834,13 @@ posixTest("rejects a stale manifest path through a symlink without deleting its 
  * fixed-name file therefore survives untouched, and no staging file is left
  * behind for a later run to follow.
  */
-posixTest("leaves no staging residue and does not write through a planted fixed-name path", async () => {
+test("leaves no staging residue and does not write through a planted fixed-name path", async (t) => {
   const root = await createFixture();
   const sentinel = path.join(root, "outside-sentinel.txt");
   await writeFile(sentinel, "keep sentinel\n");
   await mkdir(path.join(root, "providers/claude"), { recursive: true });
   const planted = "providers/claude/.providers-sync.tmp";
-  await symlink(sentinel, path.join(root, planted));
+  if (!await fileSymlink(t, sentinel, path.join(root, planted))) return;
 
   await runProvidersSync({ root });
 

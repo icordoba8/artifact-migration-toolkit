@@ -19,6 +19,7 @@ import { adapter, digest } from '../providers/install-support.mjs';
 import { ensureRuntime, verifyDownloadedAsset } from '../scripts/runtime-bootstrap.mjs';
 import { buildRelease } from '../scripts/release.mjs';
 import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
+import { replaceSerializedPath } from '../packages/migration-engine/test/support/serialized-path.mjs';
 
 const execFileAsync = promisify(execFile);
 const scratch = await mkdtemp(path.join(os.tmpdir(), 'provider runtime matrix '));
@@ -343,11 +344,12 @@ for (const provider of NAMES) {
         } else if (kind === 'extra') changed.unowned = true;
         else changed.command = 'foreign';
       } else {
-        changed = kind === 'path' ? oldEntry.replace(old.release, '/foreign')
+        changed = kind === 'path' ? replaceSerializedPath(oldEntry, old.release, '/foreign')
           : kind === 'args' ? oldEntry.replace(/(args = \[[^\n]*)(\]\n)/, '$1, "--changed"$2')
             : kind === 'extra' ? oldEntry.replace(OWNED_BLOCK, match => match.replace('# END', 'extra = true\n# END'))
               : oldEntry.replace(/command = "[^"]*"/, 'command = "foreign"');
       }
+      assert.notEqual(changed, oldEntry, `${provider}/${kind}: tamper did not change the registration`);
       await writeRegistration(changed);
       const before = await readConfig(root, provider);
       await assert.rejects(ensureRuntime({ provider, root, store }, OFFLINE), /modified|conflict/i, `${provider}/${kind}`);

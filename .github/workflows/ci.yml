@@ -64,11 +64,3 @@ jobs:
 
       - name: Run the TypeScript artifact suites
         run: pnpm engine:test:ts
-
-      # Release identity: the payload hashes, the versions agree, and the tree
-      # is clean. A dirty or partially committed tree cannot produce an identity
-      # whose commit SHA names the tree that was hashed, so this must fail the
-      # build rather than warn. `engine:test` already builds and verifies a
-      # staged bundle; this is the gate that says the bundle is *releasable*.
-      - name: Verify release identity
-        run: pnpm release:check

@@ -18,11 +18,12 @@
 // `release.mjs` names them. Upgrade path: none needed while `payloadPaths`
 // stays the one definition of what a payload is.
 
-import { cp, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { payloadPaths } from "../../../../scripts/release.mjs";
+import { linkPackageDependencies } from "./dependency-links.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 
@@ -44,21 +45,6 @@ const CANDIDATE_VERSION = "0.0.1";
  * copies. Ceiling: a suite that needed to *execute* from such a root would want
  * the transitive tree; none does.
  */
-export const linkEngineDependencies = async (root) => {
-  const modules = path.join(root, "packages/migration-engine/node_modules");
-  await mkdir(modules, { recursive: true });
-  const { dependencies = {} } = JSON.parse(
-    await readFile(path.join(repositoryRoot, "packages/migration-engine/package.json"), "utf8"),
-  );
-  for (const dependency of Object.keys(dependencies)) {
-    await symlink(
-      await realpath(path.join(repositoryRoot, "packages/migration-engine/node_modules", dependency)),
-      path.join(modules, dependency),
-      "junction",
-    );
-  }
-};
-
 const declaresVersion = (relative) =>
   ["package.json", "packages/migration-engine/package.json"].includes(relative) ||
   path.basename(relative) === "release-identity.json";
@@ -87,6 +73,6 @@ export const candidateReleaseRoot = async (parent, { version = CANDIDATE_VERSION
     }
   }
   await writeFile(path.join(root, "released-versions.json"), "[]\n");
-  await linkEngineDependencies(root);
+  await linkPackageDependencies(root, "packages/migration-engine");
   return root;
 };

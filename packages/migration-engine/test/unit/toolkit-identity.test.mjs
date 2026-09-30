@@ -51,7 +51,8 @@ import {
   WORKFLOW_VERSION,
 } from "../../src/resumable-migration.mjs";
 import { ARTIFACT_FORMAT_VERSION } from "../../src/artifact/artifact-migration.mjs";
-import { buildRelease, payloadPaths, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
+import { buildRelease, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
+import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -322,23 +323,7 @@ after(async () => {
   if (fixtureRootPromise) await rm(await fixtureRootPromise, { recursive: true, force: true });
 });
 const releaseFixtureRoot = () => {
-  fixtureRootPromise ??= (async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "amt-identity-release-"));
-    for (const relative of await payloadPaths(repositoryRoot)) {
-      const destination = path.join(root, relative);
-      await mkdir(path.dirname(destination), { recursive: true });
-      await cp(path.join(repositoryRoot, relative), destination);
-      if (["package.json", "packages/migration-engine/package.json"].includes(relative) ||
-          path.basename(relative) === "release-identity.json") {
-        const manifest = JSON.parse(await readFile(destination, "utf8"));
-        await writeFile(destination, `${JSON.stringify({ ...manifest, version: "0.0.1" }, null, 2)}\n`);
-      }
-    }
-    await writeFile(path.join(root, "released-versions.json"), "[]\n");
-    await symlink(path.join(repositoryRoot, "packages/migration-engine/node_modules"),
-      path.join(root, "packages/migration-engine/node_modules"), "junction");
-    return root;
-  })();
+  fixtureRootPromise ??= candidateReleaseRoot(os.tmpdir());
   return fixtureRootPromise;
 };
 

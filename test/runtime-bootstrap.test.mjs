@@ -130,7 +130,9 @@ test('a pre-v1.1.0 runtime whose doctor only wants a knowledge root it can still
   await assert.rejects(stat(legacy.knowledgeRoot), { code: 'ENOENT' });
 });
 
-test('the legacy knowledge-root allowance stops at the exact compatible case', async () => {
+// chmod cannot make a directory unwritable on Windows, and root can bypass it.
+const posixPermissionTest = process.platform === 'win32' || process.getuid?.() === 0 ? test.skip : test;
+posixPermissionTest('the legacy knowledge-root allowance distinguishes POSIX permission failures', async () => {
   // No writable ancestor: this release's own probe fails too, so it stays blocked.
   const sealed = await legacyConsumer('sealed legacy');
   await chmod(sealed.root, 0o555);
@@ -149,7 +151,9 @@ test('the legacy knowledge-root allowance stops at the exact compatible case', a
   } finally {
     await chmod(unwritable.knowledgeRoot, 0o755);
   }
+});
 
+test('the legacy knowledge-root allowance does not hide other blockers', async () => {
   const other = await legacyConsumer('other blockers legacy');
   await withBlockers(['git: git --version failed'], async () => {
     // Alongside the legacy one, and on its own: either way the runtime is unusable.
