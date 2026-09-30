@@ -123,10 +123,14 @@ const frameFor = (hashes, overrides = {}) => ({
   capture: {
     role: LEGACY_AUTHORITY_ROLE,
     mode: "element",
+    rootLocator: "getByRole('main')",
     deviceScaleFactor: 1,
     colorScheme: "light",
     reducedMotion: "reduce",
+    matte: "#ffffff",
     compare: { width: 1180, height: 640 },
+    imageWidth: 1180,
+    imageHeight: 640,
   },
   extraction: {
     retrievedAt: "2026-09-29T10:00:00.000Z",

@@ -817,15 +817,19 @@ test("migrate-artifact skill and all four provider examples use executable Ponyt
   const skill = await readFile(path.join(repositoryRoot, "skills/migrate-artifact/SKILL.md"), "utf8");
   const reference = await readFile(path.join(repositoryRoot, "docs/command-reference.md"), "utf8");
   assert.match(skill, /--ponytail full\|full-audit/);
+  assert.match(reference, /Append the arguments from the tables to the slash command/);
+  assert.match(reference, /In Codex, state them in the chat instruction/);
+  for (const value of ["full", "full-audit"]) {
+    assert.ok(reference.includes(`/migrate-artifact src/shared/button.ts --ponytail ${value}`),
+      `the command reference documents artifact ${value}`);
+    assert.equal(parseArtifactArguments(["src/shared/button.ts", "--ponytail", value]).ponytail, value);
+  }
   for (const provider of ["Claude Code", "Codex", "OpenCode", "GitHub Copilot"]) {
-    const section = reference.split(`## ${provider}\n`)[1]?.split(/^## /m)[0];
-    assert.ok(section, `${provider} documentation exists`);
-    for (const value of ["full", "full-audit"]) {
-      assert.ok(section.includes(`migrate-artifact skill for src/shared/button.ts with --ponytail ${value}`) ||
-        section.includes(`/migrate-artifact src/shared/button.ts --ponytail ${value}`),
-      `${provider} documents artifact ${value}`);
-      assert.equal(parseArtifactArguments(["src/shared/button.ts", "--ponytail", value]).ponytail, value);
-    }
+    const row = reference.split("\n").find((line) => line.startsWith(`| ${provider} |`));
+    assert.ok(row, `${provider} documentation exists`);
+    const invocation = row.split("|")[2]?.replaceAll("`", "").trim();
+    assert.ok(invocation?.includes("migrate-artifact") && invocation.includes("src/shared/button.ts"),
+      `${provider} documents the artifact invocation`);
   }
 });
 

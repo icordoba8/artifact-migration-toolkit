@@ -28,6 +28,7 @@ import {
   structuredDigest,
   structuredEvidenceDigest,
   structuredAssetIdentity,
+  extractNodeLiterals,
   resolveVisualProvenance,
   deriveStructuredAuthority,
   validateStructuredContract,
@@ -666,9 +667,9 @@ const cardFact = (property) =>
 
 const synthetic = (properties) => captureStructuredNode({ nodeId: "8:40", capture: cardCapture,
   rawSnapshot: JSON.stringify({ id: "8:40", type: "FRAME", ...properties }) });
-const authorityOf = (record) => deriveStructuredAuthority({ records: [record], rootId: "8:40",
+const authorityOf = (record, options = {}) => deriveStructuredAuthority({ records: [record], rootId: "8:40",
   ancestry: () => ["8:40"], assets: [], screenshotDigest: structuredDigest(Buffer.from("png")),
-  capture: { requested: { width: 320, height: 96, maxDimension: 320 } } });
+  capture: { requested: { width: 320, height: 96, maxDimension: 320 } }, ...options });
 const dimension = (record, name) => {
   const { profile, unresolved } = structuredCapabilityProfile(authorityOf(record).nodes);
   return { state: profile["8:40"][name],
@@ -770,6 +771,46 @@ test("effect absence is unchanged and still satisfies FRAME.effects", () => {
   const invisible = synthetic({ effects: [{ type: "DROP_SHADOW", visible: false, radius: 8,
     color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 4 } }] });
   assert.deepEqual(extractStructuredFacts(invisible).find((item) => item.property === "boxShadow").value, []);
+});
+
+test("structured fills certify one solid and fail closed on mixed applied paints", () => {
+  const solid = { type: "SOLID", color: "#123456" };
+  const gradient = { type: "GRADIENT_LINEAR", gradientStops: [] };
+  const image = { type: "IMAGE", imageHash: "image-1" };
+  assert.equal(extractStructuredFacts(synthetic({ fills: [solid] })).find((item) => item.property === "fill")?.value,
+    "#123456");
+  assert.equal(dimension(synthetic({ fills: [solid] }), "fill").state, "PARTIALLY_PROVEN");
+  assert.equal(extractStructuredFacts(synthetic({ fills: [] })).find((item) => item.property === "fill"), undefined);
+  assert.equal(dimension(synthetic({ fills: [] }), "fill").state, "NOT_PROVABLE");
+  for (const [paints, reason] of [
+    [[solid, gradient], "VISUAL_FILL_UNSUPPORTED: multiple applied paints"],
+    [[solid, image], "VISUAL_FILL_UNSUPPORTED: multiple applied paints"],
+    [[gradient, image], "VISUAL_FILL_UNSUPPORTED: multiple applied paints"],
+    [[gradient], "VISUAL_FILL_UNSUPPORTED: GRADIENT_LINEAR"],
+    [[image], "VISUAL_FILL_UNSUPPORTED: IMAGE"],
+  ]) {
+    const record = synthetic({ fills: paints });
+    assert.equal(extractStructuredFacts(record).find((item) => item.property === "fill"), undefined);
+    const authority = authorityOf(record);
+    assert.equal(authority.nodes["8:40"].facts.fill, undefined);
+    assert.deepEqual(dimension(record, "fill"), { state: "NOT_PROVABLE", reason });
+    assert.equal(structuredCapabilityProfile(authority.nodes, true).profile["8:40"].fill, "NOT_PROVABLE");
+  }
+});
+
+test("unsupported structured fill cannot be replaced by a weaker design-context literal", () => {
+  const record = synthetic({ fills: [{ type: "SOLID", color: "#123456" }, { type: "IMAGE" }] });
+  const literalFacts = extractNodeLiterals('<div data-node-id="8:40" className="bg-[#123456]" />', "8:40");
+  assert.equal(literalFacts[0].property, "fill");
+  assert.equal(authorityOf(synthetic({}), { literalFacts }).nodes["8:40"].facts.fill.value, "#123456");
+  const authority = authorityOf(record, { literalFacts });
+  assert.equal(authority.nodes["8:40"].facts.fill, undefined);
+  assert.deepEqual(structuredCapabilityProfile(authority.nodes).unresolved.find((item) => item.dimension === "fill"),
+    { nodeId: "8:40", dimension: "fill", missing: ["fill"],
+      reason: "VISUAL_FILL_UNSUPPORTED: multiple applied paints" });
+  assert.throws(() => validateStructuredContract(authority.nodes, { "8:40": {
+    targetLocator: "[data-node-id='8:40']", facts: { fill: { kind: "equals", value: "#123456" } } } }),
+  /VISUAL_FACT_UNBACKED: 8:40\.fill/);
 });
 
 test("an unsupported stroke or effect shape is NOT_PROVABLE with its own reason, never a fact", () => {

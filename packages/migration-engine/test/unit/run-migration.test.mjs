@@ -731,7 +731,7 @@ test("run accepts --design-source and repeatable --figma without consuming them"
   );
   assert.throws(
     () => parseRunArguments(["auth", "--design-source", "sketch"]),
-    /--design-source accepts target-system or figma-mcp\./,
+    /--design-source accepts target-system or figma-mcp or legacy-runtime\./,
   );
 });
 

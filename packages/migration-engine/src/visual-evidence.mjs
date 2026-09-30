@@ -843,6 +843,20 @@ const paintColor = (paint) => {
   return rgbaHex(paint.color, paint.opacity ?? 1);
 };
 
+const figmaFill = (node) => {
+  const rawProperty = Object.hasOwn(node, "fills") ? "fills" : "fill";
+  if (!Object.hasOwn(node, rawProperty)) return {};
+  const paints = rawProperty === "fills" ? node.fills : [node.fill];
+  if (!Array.isArray(paints)) throw new Error("VISUAL_STRUCTURED_INVALID: fills must be an array");
+  const applied = paints.filter((paint) => paint?.visible !== false);
+  if (applied.length > 1) return { unsupported: "VISUAL_FILL_UNSUPPORTED: multiple applied paints" };
+  if (!applied.length) return {};
+  const value = paintColor(applied[0]);
+  return value === undefined
+    ? { unsupported: `VISUAL_FILL_UNSUPPORTED: ${applied[0]?.type ?? "unknown paint"}` }
+    : { value, paint: applied[0], rawProperty };
+};
+
 /**
  * §7.19. The node's structured stroke properties as the one normalized record,
  * or the named reason no record exists. An unsupported shape yields neither a
@@ -955,14 +969,8 @@ export const extractStructuredFacts = (record) => {
   if (Object.hasOwn(node, "childIds")) add("childIds", "childIds", node.childIds);
   else if (Object.hasOwn(node, "children")) add("childIds", "children", node.children,
     node.children.map((child) => child.id ?? child.nodeId));
-  const paints = Object.hasOwn(node, "fills") ? node.fills : Object.hasOwn(node, "fill") ? [node.fill] : undefined;
-  if (paints !== undefined) {
-    if (!Array.isArray(paints)) throw new Error("VISUAL_STRUCTURED_INVALID: fills must be an array");
-    for (const paint of paints) {
-      const color = paintColor(paint);
-      if (color !== undefined) add("fill", Object.hasOwn(node, "fills") ? "fills" : "fill", paint, color);
-    }
-  }
+  const fill = figmaFill(node);
+  if (fill.value !== undefined) add("fill", fill.rawProperty, fill.paint, fill.value);
   if (Object.hasOwn(node, "strokes")) {
     if (!Array.isArray(node.strokes)) throw new Error("VISUAL_STRUCTURED_INVALID: strokes must be an array");
     const applied = node.strokes.filter((stroke) => stroke.visible !== false);
@@ -1137,9 +1145,13 @@ export const deriveStructuredAuthority = ({ records, rootId, ancestry, metadataF
         throw new Error(`VISUAL_HIERARCHY_MISMATCH: structured child ${childId} is absent or misparented`);
       }
     }
+    const rawNode = JSON.parse(record.rawSnapshot);
+    const fill = figmaFill(rawNode);
     const extracted = [...extractStructuredFacts(record),
       ...metadataFacts.filter((fact) => fact.nodeId === record.nodeId),
-      ...literalFacts.filter((fact) => fact.nodeId === record.nodeId)];
+      ...literalFacts.filter((fact) => fact.nodeId === record.nodeId &&
+        !(fact.property === "fill" &&
+          (Object.hasOwn(rawNode, "fills") || Object.hasOwn(rawNode, "fill")) && fill.value === undefined))];
     const facts = {};
     for (const property of new Set(extracted.map((fact) => fact.property))) {
       const resolved = resolveVisualProvenance(extracted, record.nodeId, property);
@@ -1149,11 +1161,11 @@ export const deriveStructuredAuthority = ({ records, rootId, ancestry, metadataF
         snapshotDigest: resolved.support.snapshotDigest ?? null });
       if (!STRUCTURAL_PROPERTIES.has(property)) facts[property] = resolved;
     }
-    const rawNode = JSON.parse(record.rawSnapshot);
     // A shape neither domain can represent leaves its dimension unprovable
     // *with its reason*, so FIGMA_CAPABILITY_INCOMPLETE says why rather than
     // just which key is missing.
     const unsupported = Object.fromEntries([
+      ["fill", fill.unsupported],
       ["stroke", Array.isArray(rawNode.strokes) ? figmaStroke(rawNode).unsupported : undefined],
       ["effects", Array.isArray(rawNode.effects) ? figmaShadows(rawNode).unsupported : undefined],
     ].filter(([, reason]) => reason !== undefined));
