@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 
@@ -33,7 +34,11 @@ import {
   compareStructuredTarget,
   structuredCapabilityProfile,
   assertStructuredCaptureScale,
+  figmaStroke,
+  figmaShadows,
+  strokeFromComputedStyle,
 } from "../../src/visual-evidence.mjs";
+import { compareVisualFact } from "../../src/resumable-migration.mjs";
 import { structuredNodes } from "../support/structured-figma-fixture.mjs";
 
 const raster = (scale = 1, shift = 0, alpha = 255) => {
@@ -179,10 +184,13 @@ test("normalize: the remaining taxonomy kinds", () => {
   refuses("opacity", "1.5");
   assert.equal(normalizeVisualValue("visibility", "Visible"), "visible");
   refuses("visibility", "shown");
-  assert.equal(
+  // §7.20: a box-shadow is components, never text -- so the browser's
+  // serialization and Figma's effect array land on the same records.
+  assert.deepEqual(
     normalizeVisualValue("boxShadow", "0 1px  2px   rgba(0,0,0,0.2)"),
-    "0 1px 2px rgba(0,0,0,0.2)",
+    [{ inset: false, offsetX: 0, offsetY: 1, blur: 2, spread: 0, color: "#00000033" }],
   );
+  assert.deepEqual(normalizeVisualValue("boxShadow", "none"), []);
   // Paint order does not matter, but duplicate visible assets still count.
   assert.deepEqual(
     normalizeVisualValue("assets", ["icon-b", " icon-a ", "icon-b"]),
@@ -477,8 +485,8 @@ test("structured typography has the text node and numeric weight axis as its sou
 test("empty structured strokes and effects prove absence; missing keys prove nothing", () => {
   assert.equal(fact("7:20", "stroke")?.value, "none");
   assert.deepEqual(fact("7:20", "stroke")?.rawValue, []);
-  assert.equal(fact("7:20", "boxShadow")?.value, "none");
-  assert.deepEqual(fact("7:20", "effects")?.value, []);
+  assert.deepEqual(fact("7:20", "boxShadow")?.value, []);
+  assert.equal(fact("7:20", "effects"), undefined, "the raw effect array is no longer a certified fact");
   assert.deepEqual(fact("7:20", "boxShadow")?.rawValue, []);
   assert.equal(fact("7:20", "borderWidth"), undefined);
   assert.equal(fact("7:21", "stroke"), undefined);
@@ -517,9 +525,9 @@ test("structured assets retain node identity and deterministic content digest", 
 test("explicit gaps, applied strokes, directional weights and effects stay structured", () => {
   const node = captureStructuredNode({ nodeId: "7:20", capture, rawSnapshot: JSON.stringify({
     id: "7:20", rowGap: 3, columnGap: 5,
-    strokes: [{ type: "SOLID", color: "#112233" }], strokeWeight: 2,
+    strokes: [{ type: "SOLID", color: "#112233" }], strokeWeight: 2, strokeAlign: "INSIDE",
     individualStrokeWeights: { top: 1, right: 2, bottom: 3, left: 4 },
-    effects: [{ type: "DROP_SHADOW", visible: true, radius: 4 }],
+    effects: [{ type: "DROP_SHADOW", visible: true, radius: 4, color: { r: 0, g: 0, b: 0, a: 0.2 } }],
   }) });
   const values = extractStructuredFacts(node);
   const get = (property) => values.find((item) => item.property === property)?.value;
@@ -530,8 +538,11 @@ test("explicit gaps, applied strokes, directional weights and effects stay struc
   assert.equal(get("borderColor"), "#112233");
   assert.deepEqual(["Top", "Right", "Bottom", "Left"].map((side) => get(`border${side}Width`)),
     [1, 2, 3, 4]);
-  assert.equal(get("effects")[0].type, "DROP_SHADOW");
-  assert.equal(get("boxShadow"), undefined);
+  assert.deepEqual(get("stroke"), { applied: true, color: "#112233", style: "solid", align: "inside",
+    widths: { top: 1, right: 2, bottom: 3, left: 4 } });
+  assert.equal(get("effects"), undefined);
+  assert.deepEqual(get("boxShadow"),
+    [{ inset: false, offsetX: 0, offsetY: 0, blur: 4, spread: 0, color: "#00000033" }]);
   const rgbaPaint = captureStructuredNode({ nodeId: "7:21", capture, rawSnapshot: JSON.stringify({
     id: "7:21", fills: [{ type: "SOLID", color: { r: 181 / 255, g: 86 / 255, b: 42 / 255 } }],
   }) });
@@ -600,7 +611,8 @@ test("structured node contract derives all owned facts and compares each target 
   assert.equal(authority.nodes["7:20"].facts.paddingRight.value, 12);
   assert.equal(authority.nodes["7:22"].facts.fontWeight.value, 500);
   assert.equal(authority.nodes["7:20"].facts.stroke.value, "none");
-  assert.deepEqual(authority.nodes["7:20"].facts.effects.value, []);
+  assert.deepEqual(authority.nodes["7:20"].facts.boxShadow.value, []);
+  assert.equal(authority.nodes["7:20"].facts.effects, undefined);
   assert.deepEqual(authority.nodes["7:20"].facts.assets.value, ["7:21"]);
   assert.deepEqual(structuredCapabilityProfile(authority.nodes).unresolved, []);
   const contract = Object.fromEntries(Object.entries(authority.nodes).map(([id, node]) =>
@@ -636,4 +648,200 @@ test("structured capture accepts only exact integer scale", () => {
   assert.equal(assertStructuredCaptureScale(capture(2400, 1800), frameBox), 2);
   assert.throws(() => assertStructuredCaptureScale(capture(1170, 878), frameBox),
     /VISUAL_CAPTURE_DOWNSCALED/);
+});
+
+// --- §7.19 / §7.20: normalized stroke and shadow, synthetic card frame -----
+
+// A synthetic FRAME snapshot in the Plugin API's property shape.
+// `individualStrokeWeights` is absent, as on a frame with uniform strokes.
+const CARD_SNAPSHOT = readFileSync(
+  new URL("../support/structured-figma-card.json", import.meta.url), "utf8",
+).trim();
+const cardCapture = { tool: "use_figma", operation: "inspect_nodes", parameters: {
+  fileKey: "SyntheticDesignFile123", nodeIds: ["8:40"],
+}, timestamp: "2026-07-01T00:00:00.000Z" };
+const cardRecord = captureStructuredNode({ nodeId: "8:40", rawSnapshot: CARD_SNAPSHOT, capture: cardCapture });
+const cardFact = (property) =>
+  extractStructuredFacts(cardRecord).find((item) => item.property === property);
+
+const synthetic = (properties) => captureStructuredNode({ nodeId: "8:40", capture: cardCapture,
+  rawSnapshot: JSON.stringify({ id: "8:40", type: "FRAME", ...properties }) });
+const authorityOf = (record) => deriveStructuredAuthority({ records: [record], rootId: "8:40",
+  ancestry: () => ["8:40"], assets: [], screenshotDigest: structuredDigest(Buffer.from("png")),
+  capture: { requested: { width: 320, height: 96, maxDimension: 320 } } });
+const dimension = (record, name) => {
+  const { profile, unresolved } = structuredCapabilityProfile(authorityOf(record).nodes);
+  return { state: profile["8:40"][name],
+    reason: unresolved.find((item) => item.dimension === name)?.reason };
+};
+
+/** The browser's computed style for `border: 1px solid #d4cfc6` + border-box. */
+const borderStyles = (overrides = {}) => ({
+  borderTopStyle: "solid", borderRightStyle: "solid", borderBottomStyle: "solid", borderLeftStyle: "solid",
+  borderTopWidth: "1px", borderRightWidth: "1px", borderBottomWidth: "1px", borderLeftWidth: "1px",
+  borderTopColor: "rgb(212, 207, 198)", borderRightColor: "rgb(212, 207, 198)",
+  borderBottomColor: "rgb(212, 207, 198)", borderLeftColor: "rgb(212, 207, 198)",
+  outlineStyle: "none", outlineWidth: "0px", boxSizing: "border-box", ...overrides,
+});
+
+const CARD_STROKE = { applied: true, color: "#d4cfc6", width: 1, style: "solid", align: "inside" };
+const CARD_SHADOW = [{ inset: false, offsetX: 0, offsetY: 2, blur: 6, spread: 0, color: "#1c191714" }];
+
+test("the card frame derives one browser-comparable stroke record from its structured paint", () => {
+  assert.deepEqual(cardFact("stroke").value, CARD_STROKE);
+  assert.equal(cardFact("stroke").rawProperty, "strokes");
+  assert.equal(cardFact("stroke").source, "STRUCTURED_NODE");
+  assert.equal(cardFact("strokes"), undefined, "the raw paint array is no longer a certified fact");
+  // The retained scalars are unchanged by §7.19.
+  assert.equal(cardFact("borderWidth").value, 1);
+  assert.equal(cardFact("borderColor").value, "#d4cfc6");
+  // The browser reaches the identical record from its own measurement.
+  assert.deepEqual(normalizeVisualValue("stroke", borderStyles()), CARD_STROKE);
+  assert.deepEqual(strokeFromComputedStyle(borderStyles()), CARD_STROKE);
+  assert.equal(dimension(cardRecord, "stroke").state, "PARTIALLY_PROVEN");
+});
+
+test("the card frame derives one browser-comparable box-shadow list from its structured effect", () => {
+  assert.deepEqual(cardFact("boxShadow").value, CARD_SHADOW);
+  assert.equal(cardFact("boxShadow").rawProperty, "effects");
+  assert.equal(cardFact("effects"), undefined);
+  // Chromium serializes the same shadow colour-first; both sides quantize the
+  // 0.08 alpha to the same two hex digits.
+  assert.deepEqual(normalizeVisualValue("boxShadow", "rgba(28, 25, 23, 0.08) 0px 2px 6px 0px"), CARD_SHADOW);
+  assert.deepEqual(normalizeVisualValue("boxShadow", "0 2px 6px rgba(28,25,23,0.08)"), CARD_SHADOW);
+  assert.equal(dimension(cardRecord, "effects").state, "PARTIALLY_PROVEN");
+});
+
+test("the card frame compares clean against a matching target and diverges on every real difference", () => {
+  const authority = authorityOf(cardRecord);
+  const expect = Object.fromEntries(Object.entries(authority.nodes["8:40"].facts)
+    .map(([name, fact]) => [name, { kind: "equals", value: fact.value }]));
+  const contract = validateStructuredContract(authority.nodes,
+    { "8:40": { targetLocator: "[data-node-id='8:40']", facts: expect } });
+  const measure = (overrides = {}) => ({ nodes: { "8:40": { targetLocator: "[data-node-id='8:40']",
+    values: { ...Object.fromEntries(Object.entries(expect).map(([name, fact]) => [name, fact.value])),
+      stroke: borderStyles(), boxShadow: "rgba(28, 25, 23, 0.08) 0px 2px 6px 0px", ...overrides } } } });
+  const compare = (overrides) =>
+    compareStructuredTarget(contract, measure(overrides), compareVisualFact, FIXED_VISUAL_TOLERANCE);
+  assert.deepEqual(compare(), []);
+  // Each divergence the plan names, measured from the browser side only.
+  for (const [label, overrides] of Object.entries({
+    width: { stroke: borderStyles({ borderTopWidth: "3px", borderRightWidth: "3px",
+      borderBottomWidth: "3px", borderLeftWidth: "3px" }) },
+    color: { stroke: borderStyles({ borderTopColor: "rgb(120, 113, 108)" }) },
+    outline: { stroke: { outlineStyle: "solid", outlineWidth: "1px", outlineOffset: "0px",
+      outlineColor: "rgb(212, 207, 198)", boxSizing: "border-box" } },
+    contentBox: { stroke: borderStyles({ boxSizing: "content-box" }) },
+    absent: { stroke: borderStyles({ borderTopStyle: "none", borderRightStyle: "none",
+      borderBottomStyle: "none", borderLeftStyle: "none" }) },
+    shadowBlur: { boxShadow: "rgba(28, 25, 23, 0.08) 0px 2px 7px 0px" },
+    shadowAlpha: { boxShadow: "rgba(28, 25, 23, 0.16) 0px 2px 6px 0px" },
+    shadowAbsent: { boxShadow: "none" },
+  })) {
+    assert.equal(compare(overrides).length, 1, `${label} diverges`);
+  }
+  // §7.19 compares every width as `px` at the run's fixed tolerance, so a 2px
+  // border against a 1px stroke is *within* ±1px and does not diverge. Only
+  // the per-side shape changes: uniform `width` becomes per-side `widths`.
+  assert.deepEqual(compare({ stroke: borderStyles({ borderTopWidth: "2px",
+    borderRightWidth: "2px", borderBottomWidth: "2px", borderLeftWidth: "2px" }) }), []);
+  assert.match(compare({ stroke: borderStyles({ borderTopWidth: "2px" }) })[0],
+    /stroke fields.*"width".*widths\.bottom/s);
+});
+
+test("stroke absence is unchanged and still satisfies FRAME.stroke", () => {
+  assert.equal(fact("7:20", "stroke").value, "none");
+  assert.deepEqual(fact("7:20", "stroke").rawValue, []);
+  assert.equal(fact("7:20", "borderWidth"), undefined);
+  assert.equal(dimension(synthetic({ strokes: [] }), "stroke").state, "PARTIALLY_PROVEN");
+  // §7.8 guard 2: a weight without a paint still proves "none", never a width.
+  const weighted = extractStructuredFacts(synthetic({ strokes: [], strokeWeight: 2 }));
+  assert.equal(weighted.find((item) => item.property === "stroke").value, "none");
+  assert.equal(weighted.find((item) => item.property === "borderWidth"), undefined);
+  assert.equal(normalizeVisualValue("stroke", "none"), "none");
+  assert.equal(normalizeVisualValue("stroke", { borderTopStyle: "none", outlineStyle: "none" }), "none");
+});
+
+test("effect absence is unchanged and still satisfies FRAME.effects", () => {
+  assert.deepEqual(fact("7:20", "boxShadow").value, []);
+  assert.equal(dimension(synthetic({ effects: [] }), "effects").state, "PARTIALLY_PROVEN");
+  assert.deepEqual(normalizeVisualValue("boxShadow", []), []);
+  // An invisible effect is not an applied effect; it is dropped, not certified.
+  const invisible = synthetic({ effects: [{ type: "DROP_SHADOW", visible: false, radius: 8,
+    color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 4 } }] });
+  assert.deepEqual(extractStructuredFacts(invisible).find((item) => item.property === "boxShadow").value, []);
+});
+
+test("an unsupported stroke or effect shape is NOT_PROVABLE with its own reason, never a fact", () => {
+  const cases = {
+    "VISUAL_STROKE_UNSUPPORTED: paint": { strokes: [{ type: "GRADIENT_LINEAR", visible: true }],
+      strokeWeight: 1, strokeAlign: "INSIDE" },
+    "VISUAL_STROKE_UNSUPPORTED: multiple": { strokeAlign: "INSIDE", strokeWeight: 1,
+      strokes: [{ type: "SOLID", color: "#d4cfc6" }, { type: "SOLID", color: "#1c1917" }] },
+    "VISUAL_STROKE_UNSUPPORTED: align-center": { strokes: [{ type: "SOLID", color: "#d4cfc6" }],
+      strokeWeight: 1, strokeAlign: "CENTER" },
+    "VISUAL_STROKE_UNSUPPORTED: dash": { strokes: [{ type: "SOLID", color: "#d4cfc6" }],
+      strokeWeight: 1, strokeAlign: "INSIDE", dashPattern: [4, 2, 1] },
+  };
+  for (const [reason, properties] of Object.entries(cases)) {
+    const record = synthetic(properties);
+    assert.equal(extractStructuredFacts(record).find((item) => item.property === "stroke"), undefined, reason);
+    assert.deepEqual(dimension(record, "stroke"), { state: "NOT_PROVABLE", reason });
+    // A contract claiming the dimension anyway is refused, not defaulted.
+    assert.throws(() => validateStructuredContract(authorityOf(record).nodes, { "8:40": {
+      targetLocator: "[data-node-id='8:40']", facts: { stroke: { kind: "equals", value: "none" } } } }),
+      /VISUAL_FACT_UNBACKED: 8:40\.stroke/);
+  }
+  const shadow = { color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 1 }, radius: 3 };
+  for (const [reason, effects] of Object.entries({
+    "VISUAL_EFFECT_UNSUPPORTED: LAYER_BLUR": [{ type: "LAYER_BLUR", visible: true, radius: 4 }],
+    "VISUAL_EFFECT_UNSUPPORTED: order-unproven": [{ type: "DROP_SHADOW", ...shadow },
+      { type: "INNER_SHADOW", ...shadow }],
+  })) {
+    const record = synthetic({ effects });
+    assert.equal(extractStructuredFacts(record).find((item) => item.property === "boxShadow"), undefined, reason);
+    assert.deepEqual(dimension(record, "effects"), { state: "NOT_PROVABLE", reason });
+  }
+});
+
+test("neither domain may satisfy the record with a shape the other cannot produce", () => {
+  // Raw Figma JSON as a target value is exactly what §7.19 forbids.
+  refuses("stroke", { type: "SOLID", color: { r: 1, g: 1, b: 1 } });
+  refuses("stroke", [{ type: "SOLID" }]);
+  refuses("stroke", { applied: true, color: "#d4cfc6", width: 1, style: "dotted", align: "inside" });
+  refuses("stroke", { applied: true, color: "#d4cfc6", width: 1, style: "solid", align: "center" });
+  refuses("stroke", { applied: true, color: "#d4cfc6", style: "solid", align: "inside" });
+  refuses("stroke", { applied: true, color: "#d4cfc6", width: 1, widths: { top: 1, right: 1, bottom: 1, left: 1 },
+    style: "solid", align: "inside" });
+  refuses("stroke", { ...CARD_STROKE, strokeAlign: "INSIDE" });
+  // Two CSS strokes, an offset outline and an unmeasured box-sizing are refused
+  // rather than mapped onto the nearest Figma token.
+  refuses("stroke", borderStyles({ outlineStyle: "solid", outlineWidth: "1px" }));
+  refuses("stroke", { outlineStyle: "solid", outlineWidth: "1px", outlineOffset: "2px",
+    outlineColor: "rgb(212, 207, 198)" });
+  refuses("stroke", borderStyles({ boxSizing: "" }));
+  refuses("stroke", borderStyles({ borderTopColor: "rgb(0, 0, 0)" }));
+  refuses("boxShadow", "0 2px 6px");
+  refuses("boxShadow", "currentColor 0 2px 6px");
+  refuses("boxShadow", [{ offsetX: 0, offsetY: 2, blur: 6, spread: 0, color: "#1c191714", radius: 6 }]);
+  assert.deepEqual(normalizeVisualValue("boxShadow", "inset 0 2px 6px rgba(28,25,23,0.08)"),
+    [{ ...CARD_SHADOW[0], inset: true }]);
+});
+
+test("the shared engine semantics are one function for both domains", () => {
+  // The Figma derivation and the browser recipe are the same normalizer, which
+  // is why an authority record and a measurement are the same assertion.
+  assert.deepEqual(figmaStroke(JSON.parse(CARD_SNAPSHOT)).value, CARD_STROKE);
+  assert.deepEqual(figmaShadows(JSON.parse(CARD_SNAPSHOT)).value, CARD_SHADOW);
+  assert.deepEqual(normalizeVisualValue("stroke", figmaStroke(JSON.parse(CARD_SNAPSHOT)).value),
+    normalizeVisualValue("stroke", borderStyles()));
+  assert.deepEqual(normalizeVisualValue("boxShadow", figmaShadows(JSON.parse(CARD_SNAPSHOT)).value),
+    normalizeVisualValue("boxShadow", "rgba(28, 25, 23, 0.08) 0px 2px 6px 0px"));
+});
+
+test("a node that returned no strokes/effects key proves neither a record nor an absence", () => {
+  assert.deepEqual(figmaStroke({ id: "8:40", strokeWeight: 1 }), {});
+  assert.deepEqual(figmaShadows({ id: "8:40" }), {});
+  assert.equal(fact("7:21", "stroke"), undefined);
+  assert.equal(fact("7:21", "boxShadow"), undefined);
 });

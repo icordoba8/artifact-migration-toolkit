@@ -1039,7 +1039,9 @@ comparison → PASS/FAIL.
   evidence at `"version": 2`: structured frames use `frame.nodes[nodeId] =
   {facts,targetLocator}` and each acceptance row uses `nodes[nodeId] =
   {targetLocator,expect}`. Include every source-established fact on its owning
-  node, directional padding and corners, explicit empty strokes/effects, and
+  node, directional padding and corners, the node's `stroke` record and
+  `boxShadow` component list (present or empty — never the raw Figma paint or
+  effect array), and
   nonempty asset ids for an asset-bearing subtree. The engine derives the
   complete set and refuses omission, unsupported values, or wrong-node claims.
   The classic fallback retains one row per required UI behavior state with
@@ -1068,7 +1070,10 @@ comparison → PASS/FAIL.
   observation file (`{ viewport, nodes: { [nodeId]: { targetLocator,
   parentNodeId?, values } } }` for structured frames, `{ viewport, values }`
   for classic frames), measured with
-  `getBoundingClientRect`/locator counts and computed styles). The engine
+  `getBoundingClientRect`/locator counts and computed styles). A `stroke` value
+  is the node's computed `border*`/`outline*`/`box-sizing` declaration and a
+  `boxShadow` value its computed `box-shadow` string; the engine normalizes
+  both sides into the same record, so never hand it Figma's own JSON. The engine
   compares `values` with the
   contract at the fixed ±1px and owns the verdict: an authored `result: "PASS"`
   over a divergence is refused as `VISUAL_ACCEPTANCE_FAIL` — fix and re-measure,

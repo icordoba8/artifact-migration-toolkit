@@ -275,6 +275,172 @@ const normalizeLength = (property, raw) => {
   );
 };
 
+// --- stroke and shadow: one record, derived independently by both domains ----
+
+const STROKE_SIDES = ["top", "right", "bottom", "left"];
+const STROKE_FIELDS = ["applied", "color", "width", "widths", "style", "align"];
+const SHADOW_FIELDS = ["inset", "offsetX", "offsetY", "blur", "spread", "color"];
+
+/** The closed record, in one key order, so two sides of it stringify alike. */
+const strokeRecord = ({ applied, color, width, widths, style, align }) => ({
+  applied, color,
+  ...(width === undefined ? {} : { width }),
+  ...(widths === undefined ? {} : { widths }),
+  style, align,
+});
+
+const shadowRecord = ({ inset, offsetX, offsetY, blur, spread, color }) =>
+  ({ inset, offsetX, offsetY, blur, spread, color });
+
+/**
+ * Uniform sides collapse to `width`; unequal sides become `widths`. One rule
+ * for both domains -- a per-side record on one side and a scalar on the other
+ * would be a divergence manufactured by the representation, not by the design.
+ */
+const collapseWidths = (widths) => {
+  const values = STROKE_SIDES.map((side) => widths[side]);
+  return values.every((value) => value === values[0])
+    ? { width: values[0] }
+    : { widths: Object.fromEntries(STROKE_SIDES.map((side, at) => [side, values[at]])) };
+};
+
+const strokeLength = (label, raw) => {
+  const value = normalizeLength(label, raw);
+  return typeof value === "number" ? value : refuse(label, raw, "is not a px length");
+};
+
+const strokeStyle = (raw, subject) => {
+  const text = String(raw).trim().toLowerCase();
+  return ["solid", "dashed"].includes(text)
+    ? text
+    : refuse("stroke", subject, `applies border-style ${JSON.stringify(text)}; only solid and dashed have a Figma stroke realization`);
+};
+
+/** Validate a record either domain produced, and close it over its own fields. */
+const strokeRecordFrom = (raw) => {
+  const extra = Object.keys(raw).filter((key) => !STROKE_FIELDS.includes(key));
+  if (extra.length) refuse("stroke", raw, `carries field(s) ${extra.join(", ")} outside the stroke record`);
+  if (raw.applied !== true) refuse("stroke", raw, "is a record without `applied: true`; an unapplied stroke is the string `none`");
+  const width = Object.hasOwn(raw, "width") ? strokeLength("stroke.width", raw.width) : undefined;
+  const widths = Object.hasOwn(raw, "widths")
+    ? Object.fromEntries(STROKE_SIDES.map((side) => [side, strokeLength(`stroke.widths.${side}`, raw.widths?.[side])]))
+    : undefined;
+  if ((width === undefined) === (widths === undefined)) {
+    refuse("stroke", raw, "must carry exactly one of `width` (uniform sides) or `widths` (unequal sides)");
+  }
+  const align = String(raw.align).trim().toLowerCase();
+  if (!["inside", "outside"].includes(align)) {
+    refuse("stroke", raw, "has no `inside`/`outside` alignment; CENTER has no CSS realization at all");
+  }
+  return strokeRecord({ applied: true, color: normalizeColor("borderColor", raw.color),
+    style: strokeStyle(raw.style, raw), align, width, widths });
+};
+
+/**
+ * The fixed browser recipe of §7.19. `align` is the one derived field: CSS has
+ * no stroke alignment, so a bordered `border-box` is `inside` and an outline at
+ * offset 0 -- or a `content-box` border -- is `outside`. Any third geometry is
+ * refused rather than mapped onto the nearest Figma token.
+ */
+export const strokeFromComputedStyle = (declaration) => {
+  const styles = Object.fromEntries(Object.entries(declaration).map(([key, value]) =>
+    [key.replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase()), value]));
+  if (!Object.keys(styles).some((key) => /^(border(Top|Right|Bottom|Left)(Style|Width|Color)|outline(Style|Width|Color|Offset)|boxSizing)$/.test(key))) {
+    // Without one measured property this is not a computed style at all -- a
+    // raw Figma paint object must not fall through to a proven `none`.
+    refuse("stroke", declaration, "declares no border, outline or box-sizing property to measure a stroke from");
+  }
+  const sideStyle = (side) => String(styles[`border${side}Style`] ?? "none").trim().toLowerCase();
+  const sideWidth = (side) => strokeLength(`border${side}Width`, styles[`border${side}Width`] ?? 0);
+  const sides = ["Top", "Right", "Bottom", "Left"];
+  const applied = sides.filter((side) => sideStyle(side) !== "none" && sideWidth(side) > 0);
+  const outlineWidth = strokeLength("outlineWidth", styles.outlineWidth ?? 0);
+  const outlined = String(styles.outlineStyle ?? "none").trim().toLowerCase() !== "none" && outlineWidth > 0;
+  if (!applied.length && !outlined) return "none";
+  if (applied.length && outlined) {
+    refuse("stroke", declaration, "applies both a border and an outline, which is two strokes where a Figma node carries one");
+  }
+  if (outlined) {
+    if (strokeLength("outlineOffset", styles.outlineOffset ?? 0) !== 0) {
+      refuse("stroke", declaration, "applies an outline-offset other than 0px, a geometry no strokeAlign describes");
+    }
+    return strokeRecord({ applied: true, color: normalizeColor("borderColor", styles.outlineColor),
+      width: outlineWidth, style: strokeStyle(styles.outlineStyle, declaration), align: "outside" });
+  }
+  const distinct = (values) => new Set(values.map((value) => JSON.stringify(value)));
+  if (distinct(applied.map(sideStyle)).size > 1) refuse("stroke", declaration, "mixes border styles across sides");
+  const colors = distinct(applied.map((side) => normalizeColor("borderColor", styles[`border${side}Color`])));
+  if (colors.size > 1) {
+    // ponytail: one Figma stroke carries one colour, so a per-side-coloured
+    // border diverges from every authority record anyway; §7.19's per-side
+    // record lands the first time a real node needs it.
+    refuse("stroke", declaration, "mixes border colours across sides; one Figma stroke carries one colour");
+  }
+  const boxSizing = String(styles.boxSizing ?? "").trim().toLowerCase();
+  if (!["border-box", "content-box"].includes(boxSizing)) {
+    refuse("stroke", declaration, "declares no border-box/content-box box-sizing, so the border's alignment is not measured");
+  }
+  return strokeRecord({ applied: true, color: JSON.parse([...colors][0]),
+    style: strokeStyle(sideStyle(applied[0]), declaration),
+    align: boxSizing === "border-box" ? "inside" : "outside",
+    ...collapseWidths(Object.fromEntries(STROKE_SIDES.map((side, at) => [side, sideWidth(sides[at])]))) });
+};
+
+/** Split on a separator the parentheses of `rgba(...)` do not enclose. */
+const splitTopLevel = (text, separator) => {
+  const parts = [];
+  let depth = 0;
+  let current = "";
+  for (const character of text) {
+    if (character === "(") depth++;
+    else if (character === ")") depth--;
+    else if (character === separator && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  return [...parts, current].map((part) => part.trim()).filter(Boolean);
+};
+
+/** One serialized CSS `box-shadow` into component records, in paint order. */
+const parseBoxShadow = (text) => {
+  const declaration = String(text).trim();
+  if (declaration.toLowerCase() === "none") return [];
+  return splitTopLevel(declaration, ",").map((component) => {
+    const tokens = splitTopLevel(component, " ");
+    const lengths = [];
+    const colors = [];
+    let inset = false;
+    for (const token of tokens) {
+      if (token.toLowerCase() === "inset") inset = true;
+      else if (/^[-+.\d]/.test(token)) lengths.push(token);
+      else colors.push(token);
+    }
+    if (lengths.length < 2 || lengths.length > 4 || colors.length !== 1) {
+      refuse("boxShadow", text, "is not `<color> <x> <y> [blur] [spread]` with exactly one colour per component (currentColor and named colours carry no fixed value here)");
+    }
+    const [offsetX, offsetY, blur, spread] = lengths;
+    return { inset, offsetX, offsetY, blur: blur ?? 0, spread: spread ?? 0, color: colors[0] };
+  });
+};
+
+const shadowComponentFrom = (raw) => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    refuse("boxShadow", raw, "has a component that is not a shadow record");
+  }
+  const extra = Object.keys(raw).filter((key) => !SHADOW_FIELDS.includes(key));
+  if (extra.length) refuse("boxShadow", raw, `has a component carrying field(s) ${extra.join(", ")} outside the shadow record`);
+  if (raw.inset !== undefined && typeof raw.inset !== "boolean") {
+    refuse("boxShadow", raw, "has a component whose `inset` is not a boolean");
+  }
+  return shadowRecord({ inset: raw.inset === true,
+    ...Object.fromEntries(["offsetX", "offsetY", "blur", "spread"].map((field) =>
+      [field, strokeLength(`boxShadow.${field}`, raw[field] ?? (["blur", "spread"].includes(field) ? 0 : undefined))])),
+    color: normalizeColor("borderColor", raw.color) });
+};
+
 /**
  * One value in the one comparison space, keyed by the fact's own name. Every
  * caller -- authority derivation, contract validation, runtime comparison --
@@ -320,9 +486,26 @@ export const normalizeVisualValue = (property, raw) => {
       ? text
       : refuse(property, raw, "is not `visible`, `hidden` or `collapse`");
   }
+  if (property === "stroke") {
+    if (typeof raw === "string") {
+      return raw.trim().toLowerCase() === "none"
+        ? "none"
+        : refuse(property, raw, "is not `none` or a normalized stroke record");
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return refuse(property, raw, "is not `none`, a stroke record or a computed style declaration");
+    }
+    // Both domains arrive here: Figma through `figmaStroke`, the browser as its
+    // own computed style. One record comes out either way, which is the whole
+    // point -- the target is never asked to reproduce Figma's paint JSON.
+    return Object.hasOwn(raw, "applied") ? strokeRecordFrom(raw) : strokeFromComputedStyle(raw);
+  }
   if (property === "boxShadow") {
-    const text = String(raw).trim().toLowerCase().replace(/\s+/g, " ");
-    return text.length > 0 ? text : refuse(property, raw, "is empty");
+    const list = typeof raw === "string" ? parseBoxShadow(raw) : raw;
+    if (!Array.isArray(list)) {
+      return refuse(property, raw, "is not a CSS box-shadow declaration or a list of shadow components");
+    }
+    return list.map((component) => shadowComponentFrom(component));
   }
   if (property === "assets") {
     // Sorted so two captures of the same screen are the same fact regardless of
@@ -642,18 +825,79 @@ export const structuredEvidenceDigest = (records) => {
   return structuredDigest(JSON.stringify(entries));
 };
 
+/** Figma's 0..1 channels at the 8-bit quantization both domains round to. */
+const rgbaHex = (color, opacity = 1) => {
+  if (typeof color === "string") return color;
+  if (!color || ![color.r, color.g, color.b].every((value) => typeof value === "number" && value >= 0 && value <= 1)) {
+    return undefined;
+  }
+  const alpha = (color.a ?? 1) * opacity;
+  if (!(alpha >= 0 && alpha <= 1)) throw new Error("VISUAL_STRUCTURED_INVALID: invalid paint opacity");
+  return `#${[color.r, color.g, color.b, alpha].slice(0, alpha === 1 ? 3 : 4)
+    .map((value) => Math.round(value * 255).toString(16).padStart(2, "0")).join("")}`;
+};
+
 const paintColor = (paint) => {
   if (typeof paint === "string") return paint;
   if (paint?.type !== "SOLID" || paint.visible === false) return undefined;
-  const color = paint.color;
-  if (typeof color === "string") return color;
-  if (color && [color.r, color.g, color.b].every((value) => typeof value === "number" && value >= 0 && value <= 1)) {
-    const alpha = (color.a ?? 1) * (paint.opacity ?? 1);
-    if (!(alpha >= 0 && alpha <= 1)) throw new Error("VISUAL_STRUCTURED_INVALID: invalid paint opacity");
-    return `#${[color.r, color.g, color.b, alpha].slice(0, alpha === 1 ? 3 : 4)
-      .map((value) => Math.round(value * 255).toString(16).padStart(2, "0")).join("")}`;
+  return rgbaHex(paint.color, paint.opacity ?? 1);
+};
+
+/**
+ * §7.19. The node's structured stroke properties as the one normalized record,
+ * or the named reason no record exists. An unsupported shape yields neither a
+ * fact nor a default: the dimension resolves NOT_PROVABLE with the reason.
+ */
+export const figmaStroke = (node) => {
+  // §7.8 guard 1: a node that never returned the key proves nothing at all --
+  // neither a record nor `none`, and not an unsupported shape either.
+  if (!Array.isArray(node.strokes)) return {};
+  const applied = node.strokes.filter((stroke) => stroke?.visible !== false);
+  if (!applied.length) return { value: "none" };
+  if (applied.length > 1) return { unsupported: "VISUAL_STROKE_UNSUPPORTED: multiple" };
+  const color = applied[0]?.type === "SOLID" ? paintColor(applied[0]) : undefined;
+  if (color === undefined) return { unsupported: "VISUAL_STROKE_UNSUPPORTED: paint" };
+  const align = { INSIDE: "inside", OUTSIDE: "outside" }[node.strokeAlign];
+  if (!align) {
+    return { unsupported: `VISUAL_STROKE_UNSUPPORTED: align${node.strokeAlign === "CENTER" ? "-center" : ""}` };
   }
-  return undefined;
+  const dashes = node.strokeDashes ?? node.dashPattern;
+  if (dashes !== undefined && (!Array.isArray(dashes) || ![0, 2].includes(dashes.length))) {
+    return { unsupported: "VISUAL_STROKE_UNSUPPORTED: dash" };
+  }
+  const individual = node.individualStrokeWeights;
+  const widths = individual && typeof individual === "object"
+    ? Object.fromEntries(STROKE_SIDES.map((side) => [side, individual[side]]))
+    : undefined;
+  if (widths ? STROKE_SIDES.some((side) => typeof widths[side] !== "number")
+    : typeof node.strokeWeight !== "number") {
+    return { unsupported: "VISUAL_STROKE_UNSUPPORTED: width" };
+  }
+  return { value: strokeRecord({ applied: true, color, align,
+    style: dashes?.length ? "dashed" : "solid",
+    ...(widths ? collapseWidths(widths) : { width: node.strokeWeight }) }) };
+};
+
+/**
+ * §7.20. The node's structured effects as the ordered box-shadow component
+ * list, or the named reason no list exists. `[]` is the proven absence; an
+ * unrepresentable effect is emphatically not the absence of one.
+ */
+export const figmaShadows = (node) => {
+  if (!Array.isArray(node.effects)) return {};
+  const applied = node.effects.filter((effect) => effect?.visible !== false);
+  if (!applied.length) return { value: [] };
+  const alien = applied.find((effect) => !["DROP_SHADOW", "INNER_SHADOW"].includes(effect?.type));
+  if (alien) return { unsupported: `VISUAL_EFFECT_UNSUPPORTED: ${alien?.type ?? "unknown"}` };
+  // Figma's array order and CSS's paint order have not been measured against
+  // each other on a real node, so a second effect is a named gap, not a sort.
+  if (applied.length > 1) return { unsupported: "VISUAL_EFFECT_UNSUPPORTED: order-unproven" };
+  const [effect] = applied;
+  const color = rgbaHex(effect.color);
+  if (color === undefined) return { unsupported: "VISUAL_EFFECT_UNSUPPORTED: color" };
+  return { value: [shadowRecord({ inset: effect.type === "INNER_SHADOW",
+    offsetX: effect.offset?.x ?? 0, offsetY: effect.offset?.y ?? 0,
+    blur: effect.radius ?? 0, spread: effect.spread ?? 0, color })] };
 };
 
 /** Facts always cite the owning node and the exact returned property path. */
@@ -721,24 +965,28 @@ export const extractStructuredFacts = (record) => {
   if (Object.hasOwn(node, "strokes")) {
     if (!Array.isArray(node.strokes)) throw new Error("VISUAL_STRUCTURED_INVALID: strokes must be an array");
     const applied = node.strokes.filter((stroke) => stroke.visible !== false);
-    if (!applied.length) add("stroke", "strokes", node.strokes, "none");
-    else {
-      add("strokes", "strokes", node.strokes, applied);
-      if (Object.hasOwn(node, "strokeWeight")) add("borderWidth", "strokeWeight", node.strokeWeight);
-      for (const stroke of applied) {
-        const color = paintColor(stroke);
-        if (color !== undefined) add("borderColor", "strokes", stroke, color);
+    // One `stroke` fact on both branches -- absence is the same byte-for-byte
+    // "none" it has always been, presence is the normalized record rather than
+    // the raw paint array only Figma could ever restate.
+    const { value } = figmaStroke(node);
+    // An unsupported stroke shape emits nothing at all -- not the record, and
+    // not the retained scalars either: two paints have two `borderColor`s, and
+    // resolving that as a conflict would abort the run that §7.19 keeps going.
+    if (value !== undefined) {
+      add("stroke", "strokes", node.strokes, value);
+      if (applied.length) {
+        if (Object.hasOwn(node, "strokeWeight")) add("borderWidth", "strokeWeight", node.strokeWeight);
+        for (const stroke of applied) {
+          const color = paintColor(stroke);
+          if (color !== undefined) add("borderColor", "strokes", stroke, color);
+        }
       }
     }
   }
   if (Object.hasOwn(node, "effects")) {
     if (!Array.isArray(node.effects)) throw new Error("VISUAL_STRUCTURED_INVALID: effects must be an array");
-    const applied = node.effects.filter((effect) => effect.visible !== false);
-    if (!applied.length) {
-      add("effects", "effects", node.effects, []);
-      add("boxShadow", "effects", node.effects, "none");
-    }
-    else add("effects", "effects", node.effects, applied);
+    const { value } = figmaShadows(node);
+    if (value !== undefined) add("boxShadow", "effects", node.effects, value);
   }
   return facts;
 };
@@ -901,8 +1149,16 @@ export const deriveStructuredAuthority = ({ records, rootId, ancestry, metadataF
       if (!STRUCTURAL_PROPERTIES.has(property)) facts[property] = resolved;
     }
     const rawNode = JSON.parse(record.rawSnapshot);
+    // A shape neither domain can represent leaves its dimension unprovable
+    // *with its reason*, so FIGMA_CAPABILITY_INCOMPLETE says why rather than
+    // just which key is missing.
+    const unsupported = Object.fromEntries([
+      ["stroke", Array.isArray(rawNode.strokes) ? figmaStroke(rawNode).unsupported : undefined],
+      ["effects", Array.isArray(rawNode.effects) ? figmaShadows(rawNode).unsupported : undefined],
+    ].filter(([, reason]) => reason !== undefined));
     nodes[record.nodeId] = { type: rawNode.type, isAsset: rawNode.isAsset, facts,
-      parentId: record.parentId, childIds: record.childIds };
+      parentId: record.parentId, childIds: record.childIds,
+      ...(Object.keys(unsupported).length ? { unsupported } : {}) };
   }
   const assetIds = [...new Set(assets.map((asset) => asset.nodeId))].sort();
   const requiredAssets = records.flatMap((record) => structuredAssetIdentity(record) ? [record.nodeId] : []).sort();
@@ -980,6 +1236,38 @@ export const validateStructuredContract = (authorityNodes, contractNodes, { requ
   return normalized;
 };
 
+/**
+ * §7.19's field-by-field comparison: `color`, `style`, `align` and `applied` as
+ * `equals`, `width` and every side of `widths` as `px` at the run's tolerance.
+ * A field one side carries and the other does not is a divergence -- a field's
+ * presence is itself evidence -- and `"none"` against a record is one too.
+ */
+const flattenStroke = (record) => record === "none" ? { applied: false } :
+  Object.fromEntries(Object.entries(record).flatMap(([field, value]) => field === "widths"
+    ? Object.entries(value).map(([side, width]) => [`widths.${side}`, width])
+    : [[field, value]]));
+
+const compareStrokeFact = (fact, actual, compareFact, tolerance) => {
+  if (actual === undefined) return "was not measured";
+  let observed;
+  try {
+    observed = flattenStroke(normalizeVisualValue("stroke", actual));
+  } catch (error) {
+    if (!(error instanceof VisualValueError)) throw error;
+    return `was measured as ${JSON.stringify(actual)}, which ${error.message.replace(/^VISUAL_VALUE_UNSUPPORTED: .*? value .*? /, "")}`;
+  }
+  const expected = flattenStroke(normalizeVisualValue("stroke", fact.value));
+  for (const field of new Set([...Object.keys(expected), ...Object.keys(observed)])) {
+    if (!Object.hasOwn(expected, field) || !Object.hasOwn(observed, field)) {
+      return `expected stroke fields ${JSON.stringify(Object.keys(expected).sort())}, observed ${JSON.stringify(Object.keys(observed).sort())}`;
+    }
+    const kind = field === "width" || field.startsWith("widths.") ? "px" : "equals";
+    const mismatch = compareFact({ kind, value: expected[field] }, observed[field], tolerance);
+    if (mismatch) return `stroke.${field} ${mismatch}`;
+  }
+  return null;
+};
+
 export const compareStructuredTarget = (contractNodes, observation, compareFact, tolerance) => {
   const failures = [];
   for (const [nodeId, contract] of Object.entries(contractNodes)) {
@@ -992,7 +1280,9 @@ export const compareStructuredTarget = (contractNodes, observation, compareFact,
       failures.push(`${nodeId} parentNodeId expected ${contract.parentId}`);
     }
     for (const [property, fact] of Object.entries(contract.expect)) {
-      const mismatch = compareFact({ ...fact, normalized: property }, measured.values[property], tolerance);
+      const mismatch = property === "stroke"
+        ? compareStrokeFact(fact, measured.values[property], compareFact, tolerance)
+        : compareFact({ ...fact, normalized: property }, measured.values[property], tolerance);
       if (mismatch) failures.push(`${nodeId}.${property} ${mismatch}`);
     }
   }
@@ -1001,7 +1291,7 @@ export const compareStructuredTarget = (contractNodes, observation, compareFact,
 
 const STRUCTURED_REQUIRED = Object.freeze({
   FRAME: { geometry: ["width", "height"], spacing: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "gap"],
-    fill: ["fill"], stroke: ["stroke"], effects: ["effects", "boxShadow"],
+    fill: ["fill"], stroke: ["stroke"], effects: ["boxShadow"],
     radius: ["borderTopLeftRadius", "borderTopRightRadius", "borderBottomRightRadius", "borderBottomLeftRadius"],
     opacity: ["opacity"], visibility: ["visibility"], hierarchy: ["childIds"], assets: ["assets"] },
   TEXT: { geometry: ["width", "height"], typography: ["fontFamily", "fontStyle", "fontWeight", "fontSize", "lineHeight"],
@@ -1021,7 +1311,10 @@ export const structuredCapabilityProfile = (nodes, targetMatched = false) => {
         property === "parentId" || property === "childIds" ? node[property] === undefined :
         property === "isAsset" ? node.isAsset !== true : !Object.hasOwn(node.facts, property));
       profile[nodeId][dimension] = missing.length ? "NOT_PROVABLE" : targetMatched ? "SEMANTICALLY_PROVEN" : "PARTIALLY_PROVEN";
-      if (missing.length) unresolved.push({ nodeId, dimension, missing });
+      if (missing.length) {
+        unresolved.push({ nodeId, dimension, missing,
+          ...(node.unsupported?.[dimension] ? { reason: node.unsupported[dimension] } : {}) });
+      }
     }
     profile[nodeId].tokenBinding = Object.values(node.facts).some((fact) => fact.tokenIds?.length)
       ? "PARTIALLY_PROVEN" : "NOT_PROVABLE";
