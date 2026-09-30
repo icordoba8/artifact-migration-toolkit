@@ -46,6 +46,7 @@ import {
   VISUAL_ACCEPTANCE_FILE,
   VISUAL_ACCEPTANCE_FORMAT,
 } from "../resumable-migration.mjs";
+import { compareStructuredTarget, structuredCapabilityProfile } from "../visual-evidence.mjs";
 import {
   approveWithOperator,
   artifactApprover,
@@ -3103,16 +3104,20 @@ const validateArtifactVisualEvidence = async (root, state, row, visualRow, label
   } catch (error) {
     fail(`references measurements that are not JSON (${error.message})`);
   }
-  if (!plainObject(observation, `${label}.measurements observation`) || !plainObject(observation.values, `${label}.measurements values`)) {
-    fail('references measurements without a "values" object');
+  if (!plainObject(observation, `${label}.measurements observation`) ||
+      !(visualRow.nodes ? plainObject(observation.nodes, `${label}.measurements nodes`) :
+        plainObject(observation.values, `${label}.measurements values`))) {
+    fail(`references measurements without a "${visualRow.nodes ? "nodes" : "values"}" object`);
   }
   if (`${observation.viewport?.width}x${observation.viewport?.height}` !== expectedViewport) {
     fail(`was measured by Playwright at viewport ${observation.viewport?.width}x${observation.viewport?.height}, the contract requires ${expectedViewport}`);
   }
-  const failures = Object.entries(visualRow.expect).flatMap(([name, fact]) => {
-    const miss = compareVisualFact(fact, observation.values[name], visualRow.tolerance);
-    return miss ? [`${name} ${miss}`] : [];
-  });
+  const failures = visualRow.nodes
+    ? compareStructuredTarget(visualRow.nodes, observation, compareVisualFact, visualRow.tolerance)
+    : Object.entries(visualRow.expect).flatMap(([name, fact]) => {
+      const miss = compareVisualFact(fact, observation.values[name], visualRow.tolerance);
+      return miss ? [`${name} ${miss}`] : [];
+    });
   if (failures.length > 0) fail(`diverges from the design: ${failures.join("; ")}`);
   if (visualRow.version !== 2) return null;
   const frame = visualRow.authorityFrame;
@@ -3124,7 +3129,7 @@ const validateArtifactVisualEvidence = async (root, state, row, visualRow, label
   if (targetProof && targetProof.proofFormat !== "playwright-ui-proof/v1") {
     throw new Error(`VISUAL_STRUCTURE_DIVERGENCE: ${label} TARGET snapshot is not playwright-ui-proof/v1`);
   }
-  return compareVisualEvidence({
+  const comparison = await compareVisualEvidence({
     visualRow,
     targetCapture: row.capture,
     authority: state.designSource,
@@ -3141,6 +3146,8 @@ const validateArtifactVisualEvidence = async (root, state, row, visualRow, label
     targetControls: targetProof?.observation?.controls,
     nativeRows,
   });
+  return visualRow.nodes ? { ...comparison,
+    capability: structuredCapabilityProfile(frame.structuredAuthority.nodes, true) } : comparison;
 };
 
 const validateVerification = async (root, state, capability) => {

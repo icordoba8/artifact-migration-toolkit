@@ -28,6 +28,11 @@ import {
   structuredEvidenceDigest,
   structuredAssetIdentity,
   resolveVisualProvenance,
+  deriveStructuredAuthority,
+  validateStructuredContract,
+  compareStructuredTarget,
+  structuredCapabilityProfile,
+  assertStructuredCaptureScale,
 } from "../../src/visual-evidence.mjs";
 import { structuredNodes } from "../support/structured-figma-fixture.mjs";
 
@@ -581,4 +586,54 @@ test("metadata is geometry/ancestry only and pixels cannot certify a semantic fa
     source: "METADATA" }], "7:20", "width");
   assert.equal(geometry.value, 84);
   assert.equal(geometry.support.source, "METADATA");
+});
+
+test("structured node contract derives all owned facts and compares each target locator", () => {
+  const records = Object.entries(structuredNodes).map(([nodeId, node]) =>
+    captureStructuredNode({ nodeId, rawSnapshot: JSON.stringify(node), capture }));
+  const derive = (overrides = {}) => deriveStructuredAuthority({ records, rootId: "7:20",
+    ancestry: (id) => id === "7:20" ? [id] : ["7:20", id],
+    assets: [structuredAssetIdentity(records[1], { exportKind: "SVG", mimeType: "image/svg+xml", content: Buffer.from("<svg/>") })],
+    screenshotDigest: structuredDigest(Buffer.from("png")), capture: { requested: { width: 84, height: 28, maxDimension: 84 } },
+    ...overrides });
+  const authority = derive();
+  assert.equal(authority.nodes["7:20"].facts.paddingRight.value, 12);
+  assert.equal(authority.nodes["7:22"].facts.fontWeight.value, 500);
+  assert.equal(authority.nodes["7:20"].facts.stroke.value, "none");
+  assert.deepEqual(authority.nodes["7:20"].facts.effects.value, []);
+  assert.deepEqual(authority.nodes["7:20"].facts.assets.value, ["7:21"]);
+  assert.deepEqual(structuredCapabilityProfile(authority.nodes).unresolved, []);
+  const contract = Object.fromEntries(Object.entries(authority.nodes).map(([id, node]) =>
+    [id, { targetLocator: id === "7:20" ? "[data-badge]" : `[data-node='${id}']`,
+      facts: Object.fromEntries(Object.entries(node.facts).map(([name, fact]) =>
+        [name, { kind: "equals", value: fact.value }])) }]));
+  const normalized = validateStructuredContract(authority.nodes, contract);
+  const observation = { nodes: Object.fromEntries(Object.entries(normalized).map(([id, node]) =>
+    [id, { targetLocator: node.targetLocator,
+      values: Object.fromEntries(Object.entries(node.expect).map(([name, fact]) => [name, fact.value])) }])) };
+  assert.deepEqual(compareStructuredTarget(normalized, observation, (fact, actual) =>
+    JSON.stringify(fact.value) === JSON.stringify(actual) ? null : "diverged", {}), []);
+  delete contract["7:22"].facts.fontWeight;
+  assert.throws(() => validateStructuredContract(authority.nodes, contract), /VISUAL_FACT_OMITTED/);
+  contract["7:22"].facts.fontWeight = { kind: "equals", value: 500 };
+  contract["7:20"].facts.fontWeight = { kind: "equals", value: 500 };
+  assert.throws(() => validateStructuredContract(authority.nodes, contract), /VISUAL_FACT_NODE_MISATTRIBUTED/);
+  delete contract["7:20"].facts.fontWeight;
+  contract["7:20"].facts.unsupported = { kind: "equals", value: 1 };
+  assert.throws(() => validateStructuredContract(authority.nodes, contract), /VISUAL_FACT_UNBACKED/);
+  assert.throws(() => derive({ assets: [] }), /VISUAL_ASSET_OMITTED/);
+  assert.throws(() => derive({ ancestry: (id) => [id] }), /VISUAL_HIERARCHY_MISMATCH/);
+  assert.equal(authority.authorityDigest, derive().authorityDigest);
+});
+
+test("structured capture accepts only exact integer scale", () => {
+  const frameBox = { width: 1200, height: 900 };
+  const capture = (imageWidth, imageHeight) => ({
+    requested: { ...frameBox, maxDimension: 1200 }, returned: { imageWidth, imageHeight },
+    imageWidth, imageHeight, frameBox, compare: frameBox,
+  });
+  assert.equal(assertStructuredCaptureScale(capture(1200, 900), frameBox), 1);
+  assert.equal(assertStructuredCaptureScale(capture(2400, 1800), frameBox), 2);
+  assert.throws(() => assertStructuredCaptureScale(capture(1170, 878), frameBox),
+    /VISUAL_CAPTURE_DOWNSCALED/);
 });

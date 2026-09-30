@@ -67,11 +67,20 @@ import {
   REQUIRED_FACT_KINDS,
   REQUIRED_FACT_NAMES,
   assertProvenancePrecedence,
+  assertStructuredCaptureScale,
+  captureStructuredNode,
+  compareStructuredTarget,
+  deriveStructuredAuthority,
+  extractNodeLiterals,
   missingRequiredGroups,
   normalizeVisualValue,
   resolveDesignContextFact,
   resolveMetadataAssets,
   resolveMetadataFact,
+  structuredAssetIdentity,
+  structuredDigest,
+  structuredCapabilityProfile,
+  validateStructuredContract,
   resolveVariableDefsFact,
   variableValueSet,
   xmlAttribute,
@@ -8238,7 +8247,7 @@ export const validateFigmaContext = async (
           ? path.resolve(root, entry.reference)
           : null;
       if (!absolute || !isWithin(root, absolute) || !(await fileExists(absolute))) {
-        fail(`${label} must reference a file persisted inside the migration record`);
+        fail(`${Array.isArray(frame.sources?.structuredNodes) ? "VISUAL_AUTHORITY_TAMPERED: " : ""}${label} must reference a file persisted inside the migration record`);
       }
       // P4: the authority is pinned at ASSESS_TARGET, before any slice exists,
       // so it can never legitimately cite the target's verification tree.
@@ -8253,7 +8262,7 @@ export const validateFigmaContext = async (
       // recorded spelling is left exactly as it was written.
       if (!(await fileIdentityMatches(entry.hash, absolute))) {
         fail(
-          `${label} '${entry.reference}' no longer matches its recorded hash; the persisted Figma evidence is stale`,
+          `${Array.isArray(frame.sources?.structuredNodes) ? "VISUAL_AUTHORITY_TAMPERED: " : ""}${label} '${entry.reference}' no longer matches its recorded hash; the persisted Figma evidence is stale`,
         );
       }
       return absolute;
@@ -8353,11 +8362,13 @@ export const validateFigmaContext = async (
       );
     }
     const sources = isPlainObject(frame.sources) ? frame.sources : {};
+    const structured = Array.isArray(sources.structuredNodes) && sources.structuredNodes.length > 0;
     const persisted = { designContext: [] };
     for (const kind of FIGMA_SOURCE_KINDS) {
       const entries =
         kind === "designContext" ? sources[kind] : sources[kind] && [sources[kind]];
       if (!Array.isArray(entries) || entries.length === 0) {
+        if (structured && ["designContext", "variableDefs"].includes(kind)) continue;
         fail(`${at}.sources.${kind} must persist the raw Figma MCP output`);
       }
       for (const entry of entries) {
@@ -8403,18 +8414,96 @@ export const validateFigmaContext = async (
         `${at}.ancestry.metadata describes node '${nodeId}' at a size other than its viewport ${viewport.width}x${viewport.height}`,
       );
     }
-    const facts = hardened
+    if (hardened && structured) {
+      try { assertVisualCaptureBlock(frame, frame.capture, at, false, true); }
+      catch (error) { fail(error.message); }
+    }
+    const structuredAuthority = hardened && structured
+      ? await resolveStructuredFigmaFrame({ frame, nodeId, at, fail, metadata, persisted, verifyPersisted })
+      : null;
+    const facts = hardened && !structured
       ? await resolveFigmaFacts({ frame, nodeId, at, fail, metadata, persisted })
       : {};
-    if (hardened) {
+    if (hardened && !structured) {
       try { assertVisualCaptureBlock(frame, frame.capture, at); }
       catch (error) { fail(error.message); }
     }
     // `key` is the authority-neutral frame identity every shared reader uses;
     // `nodeId` stays exactly what it was for every Figma-only reader.
-    frames.set(nodeId, { ...frame, nodeId, key: nodeId, facts });
+    frames.set(nodeId, { ...frame, nodeId, key: nodeId, facts,
+      ...(structuredAuthority ? { structuredAuthority, structured: true } : {}) });
   }
   return frames;
+};
+
+const resolveStructuredFigmaFrame = async ({ frame, nodeId, at, fail, metadata, persisted, verifyPersisted }) => {
+  try {
+    const records = [];
+    for (const entry of frame.sources.structuredNodes) {
+      if (!FIGMA_NODE_ID.test(figmaNodeKey(entry.nodeId))) fail(`${at}.sources.structuredNodes nodeId invalid`);
+      const absolute = await verifyPersisted(entry, `${at}.sources.structuredNodes.${entry.nodeId}`);
+      const rawSnapshot = await readFile(absolute, "utf8");
+      const record = captureStructuredNode({ nodeId: entry.nodeId, rawSnapshot, capture: entry.capture });
+      if (entry.digest !== record.digest) fail(`VISUAL_AUTHORITY_TAMPERED: ${entry.nodeId} digest differs`);
+      records.push(record);
+    }
+    const byId = new Map(records.map((record) => [record.nodeId, record]));
+    const assets = [];
+    for (const entry of frame.sources.assets ?? []) {
+      if (typeof entry.exportKind !== "string" || !entry.exportKind ||
+          typeof entry.mimeType !== "string" || !entry.mimeType) {
+        fail(`VISUAL_ASSET_OMITTED: ${entry.nodeId} requires official export kind and MIME type`);
+      }
+      const absolute = await verifyPersisted(entry, `${at}.sources.assets.${entry.nodeId}`);
+      const record = byId.get(entry.nodeId);
+      if (!record) fail(`VISUAL_ASSET_OMITTED: ${entry.nodeId} has no structured node`);
+      const identity = structuredAssetIdentity(record, {
+        exportKind: entry.exportKind, mimeType: entry.mimeType, content: await readFile(absolute),
+      });
+      if (!identity || entry.contentDigest !== identity.contentDigest) {
+        fail(`VISUAL_AUTHORITY_TAMPERED: asset ${entry.nodeId} identity or content digest differs`);
+      }
+      assets.push(identity);
+    }
+    const screenshot = await readFile(await verifyPersisted(frame.sources.screenshot, `${at}.sources.screenshot`));
+    const metadataFacts = records.flatMap((record) => {
+      const tag = metadata.match(new RegExp(`<[^>]*\\bid="${record.nodeId}"[^>]*>`))?.[0];
+      if (!tag) fail(`VISUAL_HIERARCHY_MISMATCH: metadata omits ${record.nodeId}`);
+      return ["x", "y", "width", "height"].flatMap((property) => {
+        const value = xmlAttribute(tag, property);
+        return value === undefined ? [] : [{ nodeId: record.nodeId, property, value,
+          source: "METADATA", rawProperty: property }];
+      });
+    });
+    const literalFacts = [];
+    const sourceDigests = { metadata: structuredDigest(metadata) };
+    for (const { entry, absolute } of persisted.designContext) {
+      const raw = await readFile(absolute, "utf8");
+      const digest = structuredDigest(raw);
+      sourceDigests[entry.reference] = digest;
+      if (byId.has(figmaNodeKey(entry.nodeId))) {
+        literalFacts.push(...extractNodeLiterals(raw, figmaNodeKey(entry.nodeId), digest));
+      }
+    }
+    if (persisted.variableDefs) {
+      sourceDigests.variableDefs = structuredDigest(await readFile(persisted.variableDefs.absolute));
+    }
+    const derived = deriveStructuredAuthority({ records, rootId: nodeId, assets,
+      ancestry: (id) => id === nodeId ? [nodeId] : figmaMetadataAncestry(metadata, id),
+      metadataFacts, literalFacts, sourceDigests,
+      screenshotDigest: structuredDigest(screenshot), capture: frame.capture });
+    if (frame.authority?.versionPinned !== false || frame.authority?.versionSource !== "none" ||
+        frame.authority?.authorityDigest !== derived.authorityDigest) {
+      fail(`VISUAL_AUTHORITY_TAMPERED: ${at}.authority differs from pinned evidence`);
+    }
+    const contract = validateStructuredContract(derived.nodes, frame.nodes, { requireProvenance: true });
+    const nodes = Object.fromEntries(Object.entries(derived.nodes).map(([id, node]) =>
+      [id, { ...node, targetLocator: contract[id].targetLocator }]));
+    return { ...derived, nodes, assets };
+  } catch (error) {
+    if (error.visualContextFail) throw error;
+    fail(error.message);
+  }
 };
 
 /**
@@ -8798,8 +8887,12 @@ export const PROVISIONAL_VISUAL_DIFF_THRESHOLDS = Object.freeze({
   "figma-mcp": 0.05,
 });
 
-const assertVisualCaptureBlock = (frame, capture, label, runtime = false) => {
+const assertVisualCaptureBlock = (frame, capture, label, runtime = false, structured = false) => {
   if (!isPlainObject(capture)) throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label}.capture is required`);
+  if (structured) {
+    assertStructuredCaptureScale(capture, frame.viewport);
+    return;
+  }
   if (capture.mode !== "element" || typeof frame.rootLocator !== "string" || !frame.rootLocator.trim()) {
     throw new Error(`VISUAL_CAPTURE_MISMATCH: ${label} requires an element capture scoped to the authority rootLocator`);
   }
@@ -8834,9 +8927,13 @@ export const compareVisualEvidence = async ({
 }) => {
   const frame = visualRow.authorityFrame;
   const sourceReference = frame.sources.screenshot.reference;
-  assertVisualCaptureBlock(frame, frame.capture, `${visualRow.id} authority`, authority === "legacy-runtime");
+  assertVisualCaptureBlock(frame, frame.capture, `${visualRow.id} authority`, authority === "legacy-runtime", !!frame.structured);
   assertVisualCaptureBlock(frame, targetCapture, `${visualRow.id} TARGET`, true);
-  for (const field of ["mode", "deviceScaleFactor", "colorScheme", "reducedMotion", "matte"]) {
+  // A structured authority is a design render, so the runtime-capture fields do
+  // not apply to it -- but the matte does: it is what both sides are flattened
+  // over, and letting the TARGET's declaration stand in for a missing authority
+  // matte would let the evidence choose its own comparison background.
+  for (const field of frame.structured ? ["matte"] : ["mode", "deviceScaleFactor", "colorScheme", "reducedMotion", "matte"]) {
     if (frame.capture[field] !== targetCapture[field]) {
       throw new Error(`VISUAL_CAPTURE_MISMATCH: ${visualRow.id}.capture.${field} differs between '${sourceReference}' and '${targetReference}'`);
     }
@@ -8868,6 +8965,8 @@ export const compareVisualEvidence = async ({
   }
   let structural = null;
   const extrasAuthorized = [];
+  if (frame.structured) structural = { hierarchy: "PASS", assets: "PASS",
+    nodeCount: Object.keys(frame.structuredAuthority.nodes).length };
   if (authority === "legacy-runtime") {
     const authorityControls = await readAuthorityControls();
     if (!Array.isArray(authorityControls) || !Array.isArray(targetControls) ||
@@ -8892,7 +8991,10 @@ export const compareVisualEvidence = async ({
       }
     }
   }
-  return { rowId: visualRow.id, authority, diffPixels, diffRatio, threshold, compare, structural, extrasAuthorized };
+  return { rowId: visualRow.id, authority, diffPixels, diffRatio, threshold,
+    margin: threshold - diffRatio, compare, structural, extrasAuthorized,
+    ...(frame.structured ? { authorityDigest: frame.structuredAuthority.authorityDigest,
+      capability: structuredCapabilityProfile(frame.structuredAuthority.nodes, true) } : {}) };
 };
 
 /**
@@ -8983,6 +9085,23 @@ export const validateVisualAcceptance = async (
       throw new Error(
         `${label}.viewport must be node '${frame.key}' viewport ${frame.viewport.width}x${frame.viewport.height}.`,
       );
+    }
+    if (frame.structured) {
+      const nodes = validateStructuredContract(frame.structuredAuthority.nodes, row.nodes);
+      for (const [nodeId, contract] of Object.entries(nodes)) {
+        if (contract.targetLocator !== frame.structuredAuthority.nodes[nodeId].targetLocator) {
+          throw new Error(`VISUAL_FACT_NODE_MISATTRIBUTED: ${nodeId} targetLocator differs from pinned frame contract`);
+        }
+      }
+      const capability = structuredCapabilityProfile(frame.structuredAuthority.nodes);
+      if (capability.unresolved.length) {
+        throw new Error(`FIGMA_CAPABILITY_INCOMPLETE: ${JSON.stringify(capability.unresolved)}`);
+      }
+      const boundNodes = Object.fromEntries(Object.entries(nodes).map(([id, node]) =>
+        [id, { ...node, parentId: frame.structuredAuthority.nodes[id].parentId }]));
+      normalized.set(row.id, { ...row, nodes: boundNodes, tolerance: FIXED_VISUAL_TOLERANCE,
+        version: HARDENED_VISUAL_VERSION, authorityFrame: frame, capability });
+      continue;
     }
     if (hardened) {
       // Fixed, not defaulted: at v2 there is no number to argue about, so
@@ -9291,8 +9410,9 @@ const assertVisualAcceptance = async ({
   } catch (error) {
     refuse(`references measurements that are not JSON (${error.message})`);
   }
-  if (!isPlainObject(observation) || !isPlainObject(observation.values)) {
-    refuse('references measurements without a "values" object');
+  if (!isPlainObject(observation) ||
+      !(visualRow.nodes ? isPlainObject(observation.nodes) : isPlainObject(observation.values))) {
+    refuse(`references measurements without a "${visualRow.nodes ? "nodes" : "values"}" object`);
   }
   if (
     `${observation.viewport?.width}x${observation.viewport?.height}` !==
@@ -9302,14 +9422,12 @@ const assertVisualAcceptance = async ({
       `was measured by the runtime at viewport ${observation.viewport?.width}x${observation.viewport?.height}, the contract requires ${expectedViewport}`,
     );
   }
-  const failures = Object.entries(visualRow.expect).flatMap(([name, fact]) => {
-    const miss = compareVisualFact(
-      fact,
-      observation.values[name],
-      visualRow.tolerance,
-    );
-    return miss ? [`${name} ${miss}`] : [];
-  });
+  const failures = visualRow.nodes
+    ? compareStructuredTarget(visualRow.nodes, observation, compareVisualFact, visualRow.tolerance)
+    : Object.entries(visualRow.expect).flatMap(([name, fact]) => {
+      const miss = compareVisualFact(fact, observation.values[name], visualRow.tolerance);
+      return miss ? [`${name} ${miss}`] : [];
+    });
   if (failures.length > 0) {
     refuse(`diverges from the design: ${failures.join("; ")}`);
   }

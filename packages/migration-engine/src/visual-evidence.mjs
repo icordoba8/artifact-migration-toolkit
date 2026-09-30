@@ -678,6 +678,9 @@ export const extractStructuredFacts = (record) => {
   if (node.fontName && Object.hasOwn(node, "fontName")) {
     if (Object.hasOwn(node.fontName, "family")) add("fontFamily", "fontName.family", node.fontName.family);
     if (Object.hasOwn(node.fontName, "style")) add("fontStyle", "fontName.style", node.fontName.style);
+    if (Object.hasOwn(node.fontName.variationSettings ?? {}, "wght")) {
+      add("fontWeight", "fontName.variationSettings.wght", node.fontName.variationSettings.wght);
+    }
   }
   for (const axis of ["fontVariationAxes", "fontVariations"]) {
     if (node[axis] && Object.hasOwn(node[axis], "wght")) add("fontWeight", `${axis}.wght`, node[axis].wght);
@@ -776,8 +779,31 @@ const LITERAL_PREFIXES = Object.freeze({
   paddingTop: ["pt", "py"], paddingRight: ["pr", "px"],
   paddingBottom: ["pb", "py"], paddingLeft: ["pl", "px"],
   fill: ["bg", "text"], fontSize: ["text"], lineHeight: ["leading"],
+  borderTopLeftRadius: ["rounded"], borderTopRightRadius: ["rounded"],
+  borderBottomRightRadius: ["rounded"], borderBottomLeftRadius: ["rounded"],
   opacity: ["opacity"],
 });
+
+/** Closed bracketed Tailwind literals, scoped to the JSX tag that names this node. */
+export const extractNodeLiterals = (text, nodeId, snapshotDigest = structuredDigest(text)) => {
+  const facts = [];
+  for (const tag of text.match(/<[^>]+>/g) ?? []) {
+    if (!tag.includes(`data-node-id="${nodeId}"`)) continue;
+    const classes = /className="([^"]*)"/.exec(tag)?.[1]?.split(/\s+/) ?? [];
+    for (const rawProperty of classes) {
+      const match = /^([a-z-]+)-\[([^\]]+)\]$/i.exec(rawProperty);
+      if (!match) continue;
+      for (const [property, prefixes] of Object.entries(LITERAL_PREFIXES)) {
+        if (!prefixes.includes(match[1])) continue;
+        try {
+          const value = normalizeVisualValue(property, match[2]);
+          facts.push({ nodeId, property, value, source: "DESIGN_CONTEXT_LITERAL", rawProperty, snapshotDigest });
+        } catch { /* A bracketed class for another CSS property establishes nothing here. */ }
+      }
+    }
+  }
+  return facts;
+};
 
 const isCitedLiteral = (item, property) => {
   const match = /^([a-z-]+)-\[([^\]]+)\]$/i.exec(item.rawProperty ?? "");
@@ -831,4 +857,193 @@ export const resolveVisualProvenance = (evidence, nodeId, property) => {
   return { nodeId, property, value: JSON.parse(valueKey), support: strongest[0],
     corroborating: support.filter((item) => STRUCTURED_PROVENANCE_RANKS[item.source] > rank),
     ...(tokenIds.length ? { tokenIds: [...new Set(tokenIds)].sort() } : {}) };
+};
+
+const STRUCTURAL_PROPERTIES = new Set(["type", "isAsset", "parentId", "childIds"]);
+
+/** Derive the complete comparable set from pinned node bytes, not the contract. */
+export const deriveStructuredAuthority = ({ records, rootId, ancestry, metadataFacts = [], literalFacts = [],
+  sourceDigests = {}, assets = [], screenshotDigest, capture }) => {
+  const byId = new Map(records.map((record) => [record.nodeId, record]));
+  if (byId.size !== records.length || !byId.has(rootId)) {
+    throw new Error("VISUAL_STRUCTURED_INVALID: root or unique node snapshots missing");
+  }
+  const nodes = {};
+  const certified = [];
+  for (const record of records) {
+    const recaptured = captureStructuredNode({ nodeId: record.nodeId, rawSnapshot: record.rawSnapshot, capture: record.capture });
+    for (const key of ["digest", "parentId", "childIds", "propertyKeys"]) {
+      if (JSON.stringify(record[key]) !== JSON.stringify(recaptured[key])) {
+        throw new Error(`VISUAL_AUTHORITY_TAMPERED: ${record.nodeId}.${key} differs from pinned bytes`);
+      }
+    }
+    const expectedPath = ancestry(record.nodeId);
+    if (!expectedPath || expectedPath[0] !== rootId || expectedPath.at(-1) !== record.nodeId ||
+        (record.nodeId !== rootId && record.parentId !== expectedPath.at(-2))) {
+      throw new Error(`VISUAL_HIERARCHY_MISMATCH: metadata and structured ancestry disagree for ${record.nodeId}`);
+    }
+    for (const childId of record.childIds ?? []) {
+      if (!byId.has(childId) || byId.get(childId).parentId !== record.nodeId ||
+          JSON.stringify(ancestry(childId)) !== JSON.stringify([...expectedPath, childId])) {
+        throw new Error(`VISUAL_HIERARCHY_MISMATCH: structured child ${childId} is absent or misparented`);
+      }
+    }
+    const extracted = [...extractStructuredFacts(record),
+      ...metadataFacts.filter((fact) => fact.nodeId === record.nodeId),
+      ...literalFacts.filter((fact) => fact.nodeId === record.nodeId)];
+    const facts = {};
+    for (const property of new Set(extracted.map((fact) => fact.property))) {
+      const resolved = resolveVisualProvenance(extracted, record.nodeId, property);
+      if (!resolved) continue;
+      certified.push({ nodeId: record.nodeId, property, value: resolved.value,
+        rank: STRUCTURED_PROVENANCE_RANKS[resolved.support.source], rawProperty: resolved.support.rawProperty,
+        snapshotDigest: resolved.support.snapshotDigest ?? null });
+      if (!STRUCTURAL_PROPERTIES.has(property)) facts[property] = resolved;
+    }
+    const rawNode = JSON.parse(record.rawSnapshot);
+    nodes[record.nodeId] = { type: rawNode.type, isAsset: rawNode.isAsset, facts,
+      parentId: record.parentId, childIds: record.childIds };
+  }
+  const assetIds = [...new Set(assets.map((asset) => asset.nodeId))].sort();
+  const requiredAssets = records.flatMap((record) => structuredAssetIdentity(record) ? [record.nodeId] : []).sort();
+  if (JSON.stringify(assetIds) !== JSON.stringify(requiredAssets)) {
+    throw new Error(`VISUAL_ASSET_OMITTED: asset-bearing subtree requires ${requiredAssets.join(", ")}`);
+  }
+  for (const id of assetIds) {
+    const primary = assets.find((asset) => asset.nodeId === id && asset.exportKind === "SVG") ??
+      assets.find((asset) => asset.nodeId === id);
+    if (!primary?.contentDigest || !primary.exportKind || !primary.mimeType) {
+      throw new Error(`VISUAL_ASSET_OMITTED: ${id} has no official export bytes, kind or MIME type`);
+    }
+    nodes[id].facts.assetContentDigest = { nodeId: id, property: "assetContentDigest",
+      value: primary.contentDigest, support: { source: "STRUCTURED_NODE", rawProperty: "officialExport.content",
+        snapshotDigest: byId.get(id).digest } };
+    certified.push({ nodeId: id, property: "assetContentDigest", value: primary.contentDigest,
+      rank: 1, rawProperty: "officialExport.content", snapshotDigest: byId.get(id).digest });
+  }
+  nodes[rootId].facts.assets = { nodeId: rootId, property: "assets", value: assetIds,
+    support: { source: "STRUCTURED_NODE", snapshotDigest: byId.get(rootId).digest } };
+  certified.push({ nodeId: rootId, property: "assets", value: assetIds, rank: 1,
+    snapshotDigest: byId.get(rootId).digest });
+  const authorityDigest = structuredDigest(JSON.stringify({
+    versionPinned: false, versionSource: "none", rootId,
+    records: records.map((record) => ({ nodeId: record.nodeId, digest: record.digest,
+      parentId: record.parentId, childIds: record.childIds, propertyKeys: record.propertyKeys,
+      capture: record.capture })).sort((a, b) => a.nodeId.localeCompare(b.nodeId)),
+    certified: certified.sort((a, b) => `${a.nodeId}.${a.property}`.localeCompare(`${b.nodeId}.${b.property}`)),
+    assets: [...assets].sort((a, b) => a.nodeId.localeCompare(b.nodeId)), screenshotDigest, capture,
+    sourceDigests,
+  }));
+  return { nodes, authorityDigest, versionPinned: false, versionSource: "none" };
+};
+
+/** The same node contract and target comparison for module and artifact engines. */
+export const validateStructuredContract = (authorityNodes, contractNodes, { requireProvenance = false } = {}) => {
+  if (!contractNodes || typeof contractNodes !== "object" || Array.isArray(contractNodes)) {
+    throw new Error("VISUAL_FACT_OMITTED: node-scoped contract is required");
+  }
+  const normalized = {};
+  for (const [nodeId, authority] of Object.entries(authorityNodes)) {
+    const claimed = contractNodes[nodeId];
+    if (!claimed) throw new Error(`VISUAL_FACT_OMITTED: node ${nodeId} is absent`);
+    if (typeof claimed.targetLocator !== "string" || !claimed.targetLocator.trim()) {
+      throw new Error(`VISUAL_TARGET_LOCATOR_MISSING: ${nodeId}`);
+    }
+    const expected = claimed.expect ?? claimed.facts;
+    if (!expected || typeof expected !== "object") throw new Error(`VISUAL_FACT_OMITTED: ${nodeId}.facts absent`);
+    for (const [property, fact] of Object.entries(expected)) {
+      if (!authority.facts[property]) {
+        const owner = Object.entries(authorityNodes).find(([id, node]) => id !== nodeId && node.facts[property] &&
+          JSON.stringify(node.facts[property].value) === JSON.stringify(normalizeVisualValue(property, fact?.value)));
+        throw new Error(`${owner ? "VISUAL_FACT_NODE_MISATTRIBUTED" : "VISUAL_FACT_UNBACKED"}: ${nodeId}.${property}`);
+      }
+    }
+    for (const [property, resolved] of Object.entries(authority.facts)) {
+      if (!Object.hasOwn(expected, property)) throw new Error(`VISUAL_FACT_OMITTED: ${nodeId}.${property}`);
+      if (requireProvenance) {
+        const cited = expected[property].provenance;
+        if (cited?.nodeId !== nodeId) throw new Error(`VISUAL_FACT_NODE_MISATTRIBUTED: ${nodeId}.${property}`);
+        if (cited.kind !== resolved.support.source || cited.rawProperty !== resolved.support.rawProperty ||
+            cited.snapshotDigest !== resolved.support.snapshotDigest) {
+          throw new Error(`VISUAL_FACT_UNBACKED: ${nodeId}.${property} provenance differs from pinned source`);
+        }
+      }
+      if (JSON.stringify(normalizeVisualValue(property, expected[property]?.value)) !== JSON.stringify(resolved.value)) {
+        throw new Error(`VISUAL_CONTRACT_DIVERGES: ${nodeId}.${property}`);
+      }
+    }
+    normalized[nodeId] = { targetLocator: claimed.targetLocator, expect: expected };
+  }
+  for (const nodeId of Object.keys(contractNodes)) {
+    if (!authorityNodes[nodeId]) throw new Error(`VISUAL_FACT_NODE_MISATTRIBUTED: unknown node ${nodeId}`);
+  }
+  return normalized;
+};
+
+export const compareStructuredTarget = (contractNodes, observation, compareFact, tolerance) => {
+  const failures = [];
+  for (const [nodeId, contract] of Object.entries(contractNodes)) {
+    const measured = observation.nodes?.[nodeId];
+    if (measured?.targetLocator !== contract.targetLocator || !measured.values || typeof measured.values !== "object") {
+      failures.push(`${nodeId} targetLocator or measurements missing`);
+      continue;
+    }
+    if (contract.parentId !== undefined && measured.parentNodeId !== contract.parentId) {
+      failures.push(`${nodeId} parentNodeId expected ${contract.parentId}`);
+    }
+    for (const [property, fact] of Object.entries(contract.expect)) {
+      const mismatch = compareFact({ ...fact, normalized: property }, measured.values[property], tolerance);
+      if (mismatch) failures.push(`${nodeId}.${property} ${mismatch}`);
+    }
+  }
+  return failures;
+};
+
+const STRUCTURED_REQUIRED = Object.freeze({
+  FRAME: { geometry: ["width", "height"], spacing: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "gap"],
+    fill: ["fill"], stroke: ["stroke"], effects: ["effects", "boxShadow"],
+    radius: ["borderTopLeftRadius", "borderTopRightRadius", "borderBottomRightRadius", "borderBottomLeftRadius"],
+    opacity: ["opacity"], visibility: ["visibility"], hierarchy: ["childIds"], assets: ["assets"] },
+  TEXT: { geometry: ["width", "height"], typography: ["fontFamily", "fontStyle", "fontWeight", "fontSize", "lineHeight"],
+    fill: ["fill"], opacity: ["opacity"], visibility: ["visibility"], hierarchy: ["parentId"] },
+  ELLIPSE: { geometry: ["width", "height"], fill: ["fill"], opacity: ["opacity"],
+    visibility: ["visibility"], hierarchy: ["parentId"], assets: ["isAsset", "assetContentDigest"] },
+});
+
+export const structuredCapabilityProfile = (nodes, targetMatched = false) => {
+  const profile = {};
+  const unresolved = [];
+  for (const [nodeId, node] of Object.entries(nodes)) {
+    const required = STRUCTURED_REQUIRED[node.type] ?? { geometry: ["width", "height"], visibility: ["visibility"] };
+    profile[nodeId] = {};
+    for (const [dimension, properties] of Object.entries(required)) {
+      const missing = properties.filter((property) =>
+        property === "parentId" || property === "childIds" ? node[property] === undefined :
+        property === "isAsset" ? node.isAsset !== true : !Object.hasOwn(node.facts, property));
+      profile[nodeId][dimension] = missing.length ? "NOT_PROVABLE" : targetMatched ? "SEMANTICALLY_PROVEN" : "PARTIALLY_PROVEN";
+      if (missing.length) unresolved.push({ nodeId, dimension, missing });
+    }
+    profile[nodeId].tokenBinding = Object.values(node.facts).some((fact) => fact.tokenIds?.length)
+      ? "PARTIALLY_PROVEN" : "NOT_PROVABLE";
+    if (node.childIds !== undefined) profile[nodeId].wholeFrameLayout = targetMatched
+      ? "VISUALLY_PROVEN" : "PARTIALLY_PROVEN";
+  }
+  return { profile, unresolved };
+};
+
+export const assertStructuredCaptureScale = (capture, viewport) => {
+  const positive = (value) => Number.isInteger(value) && value > 0;
+  const { requested, returned, frameBox, compare } = capture ?? {};
+  if (![frameBox?.width, frameBox?.height, returned?.imageWidth, returned?.imageHeight,
+    requested?.width, requested?.height, requested?.maxDimension].every(positive) ||
+    capture.imageWidth !== returned.imageWidth || capture.imageHeight !== returned.imageHeight ||
+    compare?.width !== frameBox.width || compare?.height !== frameBox.height ||
+    frameBox.width !== viewport.width || frameBox.height !== viewport.height) {
+    throw new Error("VISUAL_CAPTURE_MISMATCH: requested, returned, frameBox and compare must be pinned");
+  }
+  const k = returned.imageWidth / frameBox.width;
+  if (!Number.isInteger(k) || k < 1 || returned.imageHeight !== frameBox.height * k) {
+    throw new Error(`VISUAL_CAPTURE_DOWNSCALED: returned ${returned.imageWidth}x${returned.imageHeight} for ${frameBox.width}x${frameBox.height}`);
+  }
+  return k;
 };

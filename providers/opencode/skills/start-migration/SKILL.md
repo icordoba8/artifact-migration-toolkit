@@ -1007,8 +1007,21 @@ pinned design source → derived visual-acceptance contract → implementation �
 Playwright runtime measurements and screenshots → deterministic engine
 comparison → PASS/FAIL.
 
-- `ASSESS_TARGET` — call the Figma MCP (`get_metadata`, `get_design_context`,
-  `get_variable_defs`, `get_screenshot`) for every recorded `figmaSources` node.
+- `ASSESS_TARGET` — prefer the official structured `use_figma` Plugin API read.
+  Persist each node's returned JSON snapshot bytes without rewriting them,
+  including the root and relevant descendants. Record each node's id,
+  SHA-256 digest, `use_figma` operation/parameters/timestamp, and its
+  `parentId`/`childIds`. Persist `get_metadata` to cross-check ancestry,
+  `get_screenshot` at the frame's full dimensions, and official downloaded
+  assets with export kind, MIME type, bytes and digest. A structured frame's
+  `sources` adds `structuredNodes[]` and `assets[]`; its `authority` is
+  `{versionPinned:false,versionSource:"none",authorityDigest}`. The pinned
+  snapshot is the authority; resume and FINALIZE re-derive it without a live
+  Figma refresh. The screenshot `capture` records `requested`, `returned`,
+  `frameBox`, and `compare`; returned dimensions must equal the frame box or
+  an exact integer multiple. Use `get_metadata`, `get_design_context`,
+  `get_variable_defs`, and `get_screenshot` as the classic fallback when the
+  Plugin API is unavailable.
   Persist each output **verbatim** under `inventories/figma/<node>/` — hierarchy,
   dimensions, positions, visibility, components/variants, text, typography,
   Auto Layout, fills, strokes, radius, opacity, effects, tokens, and assets live
@@ -1019,10 +1032,16 @@ comparison → PASS/FAIL.
   reads back from the persisted metadata), `states`, `extraction`
   (`retrievedAt`, `fidelity: COMPLETE | DEGRADED`, `limitations[]`), and
   `sources` `{ metadata, designContext[], variableDefs, screenshot }`, each
-  `{ reference, hash }`. The engine pins the context when `ASSESS_TARGET`
+  `{ reference, hash }` on the classic path. The engine pins the context when `ASSESS_TARGET`
   closes and re-hashes every persisted source at each verification.
 - `BUILD_BASELINE` — derive `matrices/visual-acceptance.json` from that
-  evidence at `"version": 2`: one row per required UI behavior state with
+  evidence at `"version": 2`: structured frames use `frame.nodes[nodeId] =
+  {facts,targetLocator}` and each acceptance row uses `nodes[nodeId] =
+  {targetLocator,expect}`. Include every source-established fact on its owning
+  node, directional padding and corners, explicit empty strokes/effects, and
+  nonempty asset ids for an asset-bearing subtree. The engine derives the
+  complete set and refuses omission, unsupported values, or wrong-node claims.
+  The classic fallback retains one row per required UI behavior state with
   `figmaNodeId`, `figmaState`, the frame `viewport`, and an `expect` set that
   covers the **full visual taxonomy** — `width`/`height`, `padding`/`gap`,
   `color`/`backgroundColor`, `fontFamily`, `fontSize`, `fontWeight`,
@@ -1045,7 +1064,9 @@ comparison → PASS/FAIL.
 - `VERIFY_SLICES` — each Figma-backed `origin: "TARGET"` row carries
   `figmaNodeId`, the contract `viewport`, a runtime `screenshot`, and
   `measurements` `{ reference, hash[, pointer] }` naming the persisted Playwright
-  observation file (`{ viewport, values }`, measured with
+  observation file (`{ viewport, nodes: { [nodeId]: { targetLocator,
+  parentNodeId?, values } } }` for structured frames, `{ viewport, values }`
+  for classic frames), measured with
   `getBoundingClientRect`/locator counts and computed styles). The engine
   compares `values` with the
   contract at the fixed ±1px and owns the verdict: an authored `result: "PASS"`
@@ -1059,7 +1080,8 @@ Never re-fetch Figma on a plain `CONTINUE`; reuse the pinned evidence unless the
 engine reports it stale. If the Figma MCP is unavailable or a file is not
 permitted, record it as a limitation and let verification refuse — never persist
 a Figma token or author a fidelity claim you did not derive from the design.
-Screenshots are never compared pixel for pixel. No new checkpoint and no eighth
+The engine compares screenshots at the pinned frame-box resolution and reports
+`diffPixels`, `diffRatio`, threshold and margin. No new checkpoint and no eighth
 gate. A format-16 figma-mcp record keeps the older provenance-only behavior.
 
 A **completed** pre-17 figma-mcp record can opt in without restarting. Under

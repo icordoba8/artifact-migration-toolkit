@@ -1375,6 +1375,22 @@ data-source mode, behavior, and state:
 
 Applies only to `designSource: figma-mcp` records at format 17 or later.
 
+For structured Plugin API evidence, `sources.structuredNodes[]` names persisted
+raw JSON node snapshots with `{nodeId,reference,hash,digest,capture}` and
+`sources.assets[]` names official exports with `{nodeId,exportKind,mimeType,
+contentDigest,reference,hash,capture}`. The frame also records `authority:
+{versionPinned:false,versionSource:"none",authorityDigest}` and a node-scoped
+`nodes` map. Each node has its source-derived `facts` and `targetLocator`;
+each fact cites its owning node, source kind, raw property and snapshot digest.
+The screenshot capture pins `requested`, `returned`, `frameBox`, and `compare`.
+Returned dimensions must equal the frame box or an exact integer multiple.
+The acceptance row uses `nodes[nodeId].expect`, and TARGET measurements use
+`nodes[nodeId] = {targetLocator,parentNodeId?,values}`. Resume and FINALIZE
+re-hash source bytes and re-derive facts, hierarchy, assets and the combined
+authority digest. An incomplete required node/dimension reports
+`FIGMA_CAPABILITY_INCOMPLETE`, never parity. The frame-root example below is
+the classic MCP fallback schema.
+
 `inventories/figma-context.json` frames (validated at `ASSESS_TARGET` and again
 at every verification):
 

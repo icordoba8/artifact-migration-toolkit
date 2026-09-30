@@ -17,6 +17,7 @@ import test from "node:test";
 import { PNG } from "pngjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
 
 import {
   FINAL_GATES,
@@ -484,7 +485,8 @@ const authorSource = async (fixture, options) => {
 
 const advanceDiscovery = async (fixture, options) => {
   const source = await authorSource(fixture, options);
-  assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+  const discovered = await runArtifact(fixture.options);
+  assert.equal(discovered.outcome, "CONTINUE", discovered.reason);
   await writeJson(fixture.artifactRoot, "inventories/completeness.json", {
     version: 1,
     sourceFiles: source.sourceFiles,
@@ -4619,6 +4621,73 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
     const comparison = history.findLast((event) => event.from === "VERIFY_SLICES")?.visualComparison?.[0];
     assert.equal(comparison?.diffPixels, 0);
     assert.equal(comparison?.threshold, 0.05);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("structured Figma authority: artifact lifecycle compares child facts, pins evidence and refuses injections", async () => {
+  const fixture = await createFixture();
+  const options = { ...fixture.options, designSource: "figma-mcp",
+    figma: ["https://www.figma.com/design/File123?node-id=12-34"] };
+  try {
+    await bootstrap(fixture, options);
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    const structured = await writeStructuredFigmaContext(fixture.artifactRoot);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    const matrix = { version: 2, rows: [{ id: "VA-1", uiBehaviorId: "B-1", state: "DEFAULT",
+      figmaNodeId: "12:34", figmaState: "default", viewport: { width: 40, height: 20 },
+      nodes: structured.nodes }], unbacked: [] };
+    await writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", matrix);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await advancePlan(fixture, "TARGET_REUSE");
+    await advanceImplementation(fixture, "TARGET_REUSE");
+    const measurementPath = "evidence/slice-1/ui/measurements.json";
+    structured.observation.viewport = { width: 40, height: 20 };
+    const measured = await writeJson(fixture.artifactRoot, measurementPath, structured.observation);
+    const verification = await verificationDocument(fixture, { ui: true });
+    verification.runtimeEvidence[0].viewport = { width: 40, height: 20 };
+    verification.runtimeEvidence[0].figmaNodeId = "12:34";
+    verification.runtimeEvidence[0].measurements = { path: measurementPath, sha256: await digest(measured) };
+    verification.runtimeEvidence[0].boundTo.figmaContextDigest =
+      (await stateOf(fixture)).artifactHashes["inventories/figma-context.json"];
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    structured.observation.nodes["12:36"].values.fontWeight = 600;
+    await writeJson(fixture.artifactRoot, measurementPath, structured.observation);
+    verification.runtimeEvidence[0].measurements.sha256 = await digest(measured);
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    const divergent = await runArtifact(fixture.options);
+    assert.match(divergent.reason, /VISUAL_ACCEPTANCE_FAIL.*12:36.fontWeight/);
+    structured.observation.nodes["12:36"].values.fontWeight = 500;
+    await writeJson(fixture.artifactRoot, measurementPath, structured.observation);
+    verification.runtimeEvidence[0].measurements.sha256 = await digest(measured);
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", verification);
+    const passed = await runArtifact(fixture.options);
+    assert.equal(passed.outcome, "CONTINUE", passed.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    const history = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    const comparison = history.findLast((event) => event.from === "VERIFY_SLICES")?.visualComparison?.[0];
+    assert.equal(comparison?.authorityDigest, structured.authorityDigest);
+    assert.equal(comparison?.diffPixels, 0);
+    assert.deepEqual(comparison?.capability.unresolved, []);
+    await writeBaseline(fixture, "TARGET_REUSE", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture, { ui: true }));
+    structured.observation.nodes["12:36"].values.fontWeight = 600;
+    await writeJson(fixture.artifactRoot, measurementPath, structured.observation);
+    assert.match((await runArtifact(fixture.options)).reason, /measurement evidence is missing|stale|tampered/);
+    structured.observation.nodes["12:36"].values.fontWeight = 500;
+    await writeJson(fixture.artifactRoot, measurementPath, structured.observation);
+    const snapshot = path.join(fixture.artifactRoot, `${structured.base}/12-36.json`);
+    const originalSnapshot = await readFile(snapshot, "utf8");
+    await writeFile(snapshot, originalSnapshot.replace('"fontSize":12', '"fontSize":13'));
+    const tampered = await getArtifactStatus(fixture.options);
+    assert.match(tampered.reason ?? tampered.validation?.reason, /VISUAL_AUTHORITY_TAMPERED|Pinned artifact changed/);
+    await writeFile(snapshot, originalSnapshot);
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
   } finally {
     await fixture.cleanup();
   }

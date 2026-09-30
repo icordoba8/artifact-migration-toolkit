@@ -34,6 +34,7 @@ import test from "node:test";
 import { PNG } from "pngjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
 
 import {
   dirtyManifest,
@@ -83,6 +84,7 @@ import {
   compareVisualFact,
   compareVisualEvidence,
   validateVisualAcceptance,
+  validateFigmaContext,
   compatibilityBlocker,
   createDecisionCandidate,
   getMigrationStatus,
@@ -166,6 +168,52 @@ const exists = async (target) => {
 };
 
 const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));
+
+test("structured Figma context re-derives authority on repeated validation and rejects pinned mutation", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "structured-context-"));
+  try {
+    const { context, nodes, base, authorityDigest } = await writeStructuredFigmaContext(root);
+    const state = { formatVersion: 17, figmaSources: [{ fileKey: "File123", nodeId: "12:34" }],
+      artifactHashes: {}, designSource: "figma-mcp" };
+    const first = await validateFigmaContext(root, state);
+    const second = await validateFigmaContext(root, state);
+    assert.equal(first.get("12:34").structuredAuthority.authorityDigest, authorityDigest);
+    assert.equal(second.get("12:34").structuredAuthority.authorityDigest, authorityDigest);
+    assert.equal(first.get("12:34").structuredAuthority.nodes["12:36"].facts.fontWeight.value, 500);
+    const matrix = { version: 2, rows: [{ id: "VA-1", uiBehaviorId: "B-1", state: "DEFAULT",
+      figmaNodeId: "12:34", figmaState: "default", viewport: { width: 40, height: 20 }, nodes }],
+      unbacked: [] };
+    const matrixPath = path.join(root, "matrices/visual-acceptance.json");
+    await mkdir(path.dirname(matrixPath), { recursive: true });
+    const writeMatrix = () => writeFile(matrixPath, JSON.stringify(matrix));
+    await writeMatrix();
+    const acceptance = () => validateVisualAcceptance(root, state,
+      { uiBehaviors: [{ id: "B-1", runtimeStates: ["DEFAULT"], conditional: false }] },
+      { uiMismatches: [] });
+    assert.equal((await acceptance())[0].nodes["12:36"].targetLocator, '[data-node-id="12:36"]');
+    delete nodes["12:36"].expect.fontWeight;
+    await writeMatrix();
+    await assert.rejects(acceptance(), /VISUAL_FACT_OMITTED/);
+    nodes["12:36"].expect.fontWeight = { kind: "equals", value: 500 };
+    nodes["12:34"].expect.fontWeight = { kind: "equals", value: 500 };
+    await writeMatrix();
+    await assert.rejects(acceptance(), /VISUAL_FACT_NODE_MISATTRIBUTED/);
+    delete nodes["12:34"].expect.fontWeight;
+    await writeMatrix();
+    context.frames[0].capture.returned.imageWidth = 39;
+    context.frames[0].capture.imageWidth = 39;
+    await writeFile(path.join(root, "inventories/figma-context.json"), JSON.stringify(context));
+    await assert.rejects(validateFigmaContext(root, state), /VISUAL_CAPTURE_DOWNSCALED/);
+    context.frames[0].capture.returned.imageWidth = 40;
+    context.frames[0].capture.imageWidth = 40;
+    await writeFile(path.join(root, "inventories/figma-context.json"), JSON.stringify(context));
+    const snapshot = path.join(root, `${base}/12-36.json`);
+    await writeFile(snapshot, (await readFile(snapshot, "utf8")).replace('"fontSize":12', '"fontSize":13'));
+    await assert.rejects(validateFigmaContext(root, state), /VISUAL_AUTHORITY_TAMPERED|no longer matches its recorded hash/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 const writeJson = (file, value) =>
   writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
