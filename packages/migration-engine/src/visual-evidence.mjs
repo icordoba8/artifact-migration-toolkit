@@ -862,7 +862,8 @@ export const figmaStroke = (node) => {
     return { unsupported: `VISUAL_STROKE_UNSUPPORTED: align${node.strokeAlign === "CENTER" ? "-center" : ""}` };
   }
   const dashes = node.strokeDashes ?? node.dashPattern;
-  if (dashes !== undefined && (!Array.isArray(dashes) || ![0, 2].includes(dashes.length))) {
+  // Computed CSS border-style cannot reveal the source dash lengths.
+  if (dashes !== undefined && (!Array.isArray(dashes) || dashes.length)) {
     return { unsupported: "VISUAL_STROKE_UNSUPPORTED: dash" };
   }
   const individual = node.individualStrokeWeights;

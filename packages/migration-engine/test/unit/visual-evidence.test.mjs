@@ -781,7 +781,7 @@ test("an unsupported stroke or effect shape is NOT_PROVABLE with its own reason,
     "VISUAL_STROKE_UNSUPPORTED: align-center": { strokes: [{ type: "SOLID", color: "#d4cfc6" }],
       strokeWeight: 1, strokeAlign: "CENTER" },
     "VISUAL_STROKE_UNSUPPORTED: dash": { strokes: [{ type: "SOLID", color: "#d4cfc6" }],
-      strokeWeight: 1, strokeAlign: "INSIDE", dashPattern: [4, 2, 1] },
+      strokeWeight: 1, strokeAlign: "INSIDE", dashPattern: [4, 2] },
   };
   for (const [reason, properties] of Object.entries(cases)) {
     const record = synthetic(properties);
