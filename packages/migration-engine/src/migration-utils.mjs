@@ -802,7 +802,17 @@ export const gitRevision = async (root) => {
 export const dirtyManifest = async (root, { exclude = [] } = {}) => {
   let stdout;
   let repoRoot;
+  let base;
   try {
+    // `root` reaches us however the caller spelled it, and on Windows that is
+    // routinely an 8.3 short path (`C:\Users\RUNNER~1\...`) while Git always
+    // answers with the canonical long one. Two spellings of the same directory
+    // make `path.relative` below produce a `..\..`-style path that matches none
+    // of the caller's `exclude` prefixes -- the migration's own writes stop
+    // being excluded, so the dirty digest moves under the toolkit's own feet
+    // and every already-issued confirmation reads as stale. One canonical form
+    // for both sides is the whole fix.
+    base = await realpath(root);
     // `--porcelain` always prints repository-root-relative paths, so the
     // repository root -- not `root` -- is the base they must be resolved from.
     const top = await execFileAsync(
@@ -810,7 +820,10 @@ export const dirtyManifest = async (root, { exclude = [] } = {}) => {
       ["-C", root, "rev-parse", "--show-toplevel"],
       { encoding: "utf8" },
     );
-    repoRoot = top.stdout.trim();
+    // Through the same canonicalization as `base`, so the two are always
+    // comparable: resolving only one side would invent a mismatch on any
+    // symlinked checkout that has none today.
+    repoRoot = await realpath(top.stdout.trim());
     ({ stdout } = await execFileAsync(
       "git",
       ["-C", root, "status", "--porcelain=v1", "-uall", "--", "."],
@@ -830,7 +843,7 @@ export const dirtyManifest = async (root, { exclude = [] } = {}) => {
       .map((value) => value.replace(/^"|"$/g, ""));
     for (const relative of paths) {
       const absolute = path.resolve(repoRoot, relative);
-      const portable = portablePath(path.relative(root, absolute));
+      const portable = portablePath(path.relative(base, absolute));
       if (exclude.some((prefix) => portable.startsWith(prefix))) continue;
       let digest = null;
       try {

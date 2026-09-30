@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { buildRelease, contentHashOf, payloadPaths, recordRelease, releaseCheck, repositoryRoot } from "../scripts/release.mjs";
 import { resolveRelease } from "../scripts/runtime-bootstrap.mjs";
+import { linkEngineDependencies } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
 const execFileAsync = promisify(execFile);
 const hash = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -78,8 +79,7 @@ const candidate = async (t) => {
       await writeFile(destination, json({ ...value, version: toolkit.version }));
     }
   }
-  await symlink(path.join(repositoryRoot, "packages/migration-engine/node_modules"),
-    path.join(root, "packages/migration-engine/node_modules"), "junction");
+  await linkEngineDependencies(root);
   return root;
 };
 

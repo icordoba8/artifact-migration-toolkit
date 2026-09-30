@@ -29,6 +29,36 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 /** Obviously a candidate, and no publication's version. */
 const CANDIDATE_VERSION = "0.0.1";
 
+/**
+ * Give `root` the engine dependencies `release.mjs` dereferences, one link per
+ * declared dependency pointed at its *resolved* store directory.
+ *
+ * Not one link over `node_modules` as a whole: pnpm links each dependency into
+ * the workspace package relatively (`../../../node_modules/.pnpm/...`), and
+ * Windows resolved those relative targets against the candidate root, where no
+ * store exists -- ENOENT on the first dependency the build dereferenced.
+ * Resolving here makes every target an absolute real directory, which both
+ * platforms traverse the same way.
+ *
+ * ponytail: declared dependencies only, which is exactly the set `release.mjs`
+ * copies. Ceiling: a suite that needed to *execute* from such a root would want
+ * the transitive tree; none does.
+ */
+export const linkEngineDependencies = async (root) => {
+  const modules = path.join(root, "packages/migration-engine/node_modules");
+  await mkdir(modules, { recursive: true });
+  const { dependencies = {} } = JSON.parse(
+    await readFile(path.join(repositoryRoot, "packages/migration-engine/package.json"), "utf8"),
+  );
+  for (const dependency of Object.keys(dependencies)) {
+    await symlink(
+      await realpath(path.join(repositoryRoot, "packages/migration-engine/node_modules", dependency)),
+      path.join(modules, dependency),
+      "junction",
+    );
+  }
+};
+
 const declaresVersion = (relative) =>
   ["package.json", "packages/migration-engine/package.json"].includes(relative) ||
   path.basename(relative) === "release-identity.json";
@@ -57,30 +87,6 @@ export const candidateReleaseRoot = async (parent, { version = CANDIDATE_VERSION
     }
   }
   await writeFile(path.join(root, "released-versions.json"), "[]\n");
-
-  // One link per declared dependency, pointed at the *resolved* store directory
-  // rather than at `node_modules` as a whole. pnpm links each dependency into
-  // the workspace package relatively (`../../../node_modules/.pnpm/...`), and a
-  // single link over the directory left Windows resolving those relative targets
-  // against the candidate root, where no store exists -- ENOENT on the first
-  // dependency `release.mjs` dereferenced. Resolving here makes every target an
-  // absolute real directory, which both platforms traverse the same way.
-  //
-  // ponytail: declared dependencies only, which is exactly the set `release.mjs`
-  // copies. Ceiling: a suite that needed to *execute* from the candidate root
-  // would need the transitive tree; none does.
-  const engineModules = path.join(repositoryRoot, "packages/migration-engine/node_modules");
-  const candidateModules = path.join(root, "packages/migration-engine/node_modules");
-  await mkdir(candidateModules, { recursive: true });
-  const { dependencies = {} } = JSON.parse(
-    await readFile(path.join(repositoryRoot, "packages/migration-engine/package.json"), "utf8"),
-  );
-  for (const dependency of Object.keys(dependencies)) {
-    await symlink(
-      await realpath(path.join(engineModules, dependency)),
-      path.join(candidateModules, dependency),
-      "junction",
-    );
-  }
+  await linkEngineDependencies(root);
   return root;
 };
