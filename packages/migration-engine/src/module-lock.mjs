@@ -34,10 +34,12 @@ const LOCK_ROOT = ".agents/knowledge/migrations/locks";
 export const lockPathFor = (targetRoot, name) =>
   path.join(targetRoot, LOCK_ROOT, `${name}.lock`);
 
-const sleep = (ms) =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms).unref?.();
-  });
+// Referenced on purpose. This timer is the *only* pending work a waiter has
+// between polls, so unref-ing it let the event loop drain the instant the
+// holder finished its own I/O -- the process exited mid-acquire and the
+// waiter's promise never settled. The wait is already bounded by `timeoutMs`,
+// so holding the loop open costs nothing a caller did not ask for.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Whether a PID currently exists. `kill(pid, 0)` never signals the process. */
 export const processAlive = (pid) => {

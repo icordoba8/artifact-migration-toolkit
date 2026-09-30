@@ -2326,6 +2326,40 @@ test("P1-11: a lock left by a killed process is reclaimed without manual deletio
   }
 });
 
+// --- P1-12: a contended lock must not let the process exit mid-acquire ------
+
+// A waiter's poll timer is the only pending work it has between attempts, so an
+// unreferenced one let the event loop drain the moment the holder's own I/O
+// finished: the process exited while two acquires were still outstanding and
+// their promises never settled. A child process is the subject because the test
+// runner's own handles hold the loop open and would hide it.
+test("P1-12: a contended lock keeps the process alive until every waiter acquires", async () => {
+  const fixture = await createFixture();
+  try {
+    const contendScript = path.join(fixture.root, "contend-lock.mjs");
+    await writeFile(
+      contendScript,
+      `import { acquireModuleLock } from ${JSON.stringify(
+        pathToFileURL(path.join(scriptsRoot, "module-lock.mjs")).href,
+      )};\n` +
+        `const acquired = [];\n` +
+        `await Promise.all([0, 1, 2].map(async (index) => {\n` +
+        `  const release = await acquireModuleLock(process.argv[2], "auth");\n` +
+        `  acquired.push(index);\n` +
+        `  await release();\n` +
+        `}));\n` +
+        `process.stdout.write(\`acquired \${acquired.length}\\n\`);\n`,
+    );
+    const { stdout } = await execFileAsync(process.execPath, [
+      contendScript,
+      fixture.targetRoot,
+    ]);
+    assert.equal(stdout.trim(), "acquired 3");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 // A real kill at every journal/rename boundary `commitReplacement` can reach.
 // `afterRename` fires right after the raw rename, before the journal records
 // it; `afterJournal` fires right after the journal is durable. Both are real

@@ -18,7 +18,7 @@
 // `release.mjs` names them. Upgrade path: none needed while `payloadPaths`
 // stays the one definition of what a payload is.
 
-import { cp, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,10 +57,30 @@ export const candidateReleaseRoot = async (parent, { version = CANDIDATE_VERSION
     }
   }
   await writeFile(path.join(root, "released-versions.json"), "[]\n");
-  await symlink(
-    path.join(repositoryRoot, "packages/migration-engine/node_modules"),
-    path.join(root, "packages/migration-engine/node_modules"),
-    "junction",
+
+  // One link per declared dependency, pointed at the *resolved* store directory
+  // rather than at `node_modules` as a whole. pnpm links each dependency into
+  // the workspace package relatively (`../../../node_modules/.pnpm/...`), and a
+  // single link over the directory left Windows resolving those relative targets
+  // against the candidate root, where no store exists -- ENOENT on the first
+  // dependency `release.mjs` dereferenced. Resolving here makes every target an
+  // absolute real directory, which both platforms traverse the same way.
+  //
+  // ponytail: declared dependencies only, which is exactly the set `release.mjs`
+  // copies. Ceiling: a suite that needed to *execute* from the candidate root
+  // would need the transitive tree; none does.
+  const engineModules = path.join(repositoryRoot, "packages/migration-engine/node_modules");
+  const candidateModules = path.join(root, "packages/migration-engine/node_modules");
+  await mkdir(candidateModules, { recursive: true });
+  const { dependencies = {} } = JSON.parse(
+    await readFile(path.join(repositoryRoot, "packages/migration-engine/package.json"), "utf8"),
   );
+  for (const dependency of Object.keys(dependencies)) {
+    await symlink(
+      await realpath(path.join(engineModules, dependency)),
+      path.join(candidateModules, dependency),
+      "junction",
+    );
+  }
   return root;
 };

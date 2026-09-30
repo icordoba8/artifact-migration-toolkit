@@ -1,2 +1,5 @@
-skills/** text eol=lf
-providers/** text eol=lf
+# Release identity hashes payload *bytes*, and a Windows checkout that turned
+# LF into CRLF would hash a different tree than the Linux one that published it.
+# Whole-tree, not per-directory: the shared bootstrap source lives under
+# `scripts/` and is compared byte-for-byte against its `skills/` copies.
+* text=auto eol=lf
