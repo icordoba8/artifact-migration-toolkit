@@ -718,6 +718,70 @@ A blocked record shows the block where it happened: the active checkpoint
 carries state `BLOCKED`, and `stopReason` and `blocker` are relayed with the
 engine's own wording.
 
+### Canonical progress, and current activity
+
+Two different things, and they are never mixed:
+
+- **Canonical progress** is the engine projection above — `progress`,
+  `progressChecklist`, `checkpoints[]`, `slices.items[]`, `stopReason`,
+  `blocker`, `nextWork`. The engine owns it, and it is the only account of where
+  the migration is.
+- **CURRENT ACTIVITY** is one transient line naming the operation in flight:
+  `CURRENT ACTIVITY: Opening legacy roles route`, `CURRENT ACTIVITY: Running
+  target verification`, `CURRENT ACTIVITY: Verification still running`.
+
+An activity line is presentation and nothing more. It never becomes a
+checkpoint, never becomes `progress`, never writes `state.json`, never implies
+completion, and never carries a percentage. It is not the task list the previous
+section forbids either: one line about the current operation, not a plan. It
+holds no lifecycle authority, so after an interruption it is simply gone and the
+next iteration re-renders canonical progress from the engine — keep no activity
+log, no provider checkpoint, and no second record of migration position.
+
+### Cooperative yielding during long work
+
+Canonical progress for the current iteration is presented first. Then, before
+each operation that does real work, print one CURRENT ACTIVITY line and invoke
+only bounded work, so control returns to the provider between operations.
+
+Work you expect to exceed roughly 10–15 seconds is never held open as one
+foreground call. Where the host supports it, start it in the background, return
+control, then poll with separate bounded calls, printing CURRENT ACTIVITY
+between polls at roughly a 5-10 second cadence until it finishes. Then cross the
+engine boundary as usual: `migration_run` or `migration_status`, canonical
+progress, then the `loop:` line.
+
+This is not a shell rule. It applies to any long operation — a verification
+command, a test run, a build, a long scan, an external process, a long engine
+CLI call. Short operations return normally: an ordinary `browser_*` call, a file
+read, or a quick engine call needs no background process, and manufacturing one
+is noise.
+
+Routine continuation stays automatic, exactly as "Loop directive and handoff"
+requires: `loop: CONTINUE` runs in the same session without asking the operator
+to say "continue", and polling a background operation is not a stop condition.
+Only a typed stop ends the loop, and the decisions that need a human still need
+one — yielding between bounded calls never stands in for operator approval.
+
+### Live-progress capability per provider
+
+| Provider       | Live-progress mode | ≤15s visible-silence ceiling |
+| -------------- | ------------------ | ---------------------------- |
+| Claude Code    | cooperative-yield  | proven                       |
+| OpenCode       | cooperative-yield  | proven                       |
+| Codex          | best-effort        | not-proven                   |
+| GitHub Copilot | best-effort        | not-proven                   |
+
+`proven` means a real interactive host was observed holding visible silence
+under 15 seconds across a long background operation; on those two providers,
+hold that ceiling. `not-proven` means no such observation exists: execute the
+same contract as far as the host allows, but never tell the operator that live
+progress is guaranteed there, and never present the 15-second ceiling as one.
+Canonical progress is correct on all four the moment control returns; only the
+liveness of the intermediate activity differs. The same two values are declared
+machine-readably as `liveProgress` in `providers/<provider>/adapter.json`, which
+is provider capability, never migration state.
+
 ## Checkpoints
 
 Full JSON schemas for every artifact below live in

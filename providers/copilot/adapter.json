@@ -16,6 +16,10 @@
     "migrate-artifact",
     "start-migration"
   ],
+  "liveProgress": {
+    "mode": "best-effort",
+    "guarantee": "not-proven"
+  },
   "install": {
     "mechanism": "repository-archive",
     "skillRoot": {

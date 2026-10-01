@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -98,6 +98,20 @@ const CONTRACT = {
     "### Never author a migration plan",
   "no provider-specific checkpoint interpretation":
     "Providers never decide checkpoint progression themselves",
+  "canonical progress and transient activity are distinct":
+    "**CURRENT ACTIVITY** is one transient line",
+  "activity is never migration state":
+    "never writes `state.json`, never implies completion",
+  "activity before each bounded operation":
+    "before each operation that does real work, print one CURRENT ACTIVITY line and invoke only bounded work",
+  "long work yields instead of blocking":
+    "start it in the background, return control, then poll with separate bounded calls",
+  "polling cadence":
+    "roughly a 5-10 second cadence",
+  "routine continuation stays automatic":
+    "polling a background operation is not a stop condition",
+  "no fabricated live-progress guarantee":
+    "never tell the operator that live progress is guaranteed",
 };
 
 test("every provider receives the same canonical execution contract", async () => {
@@ -115,6 +129,53 @@ test("every provider receives the same canonical execution contract", async () =
     assert.ok(
       prose.includes("reuses a verified runtime another provider already installed in this same consumer without network access"),
       `${provider} omits cross-provider offline reuse`,
+    );
+  }
+});
+
+/**
+ * Live-progress capability is provider presentation, declared once per adapter.
+ * Only Claude and OpenCode were observed holding the <=15s ceiling in a real
+ * host; the other two execute the same contract best-effort and may not claim
+ * it. The skill carries the matrix because adapter.json is not installed into
+ * the consumer, so this pairs the two and fails if either side drifts.
+ */
+const LIVE_PROGRESS = {
+  claude: { label: "Claude Code", mode: "cooperative-yield", guarantee: "proven" },
+  opencode: { label: "OpenCode", mode: "cooperative-yield", guarantee: "proven" },
+  codex: { label: "Codex", mode: "best-effort", guarantee: "not-proven" },
+  copilot: { label: "GitHub Copilot", mode: "best-effort", guarantee: "not-proven" },
+};
+
+test("each adapter declares its live-progress capability and the skill matrix agrees", async () => {
+  const skillLines = (await read("skills/start-migration/SKILL.md")).split("\n");
+
+  for (const [provider, expected] of Object.entries(LIVE_PROGRESS)) {
+    const adapter = JSON.parse(await read(`providers/${provider}/adapter.json`));
+    assert.deepEqual(
+      adapter.liveProgress,
+      { mode: expected.mode, guarantee: expected.guarantee },
+      `${provider} live-progress declaration drifted`,
+    );
+    // Presentation only: two keys, no checkpoint, slice, progress or state field.
+    assert.deepEqual(Object.keys(adapter.liveProgress), ["mode", "guarantee"]);
+
+    const row = skillLines.find((line) => line.startsWith(`| ${expected.label} `));
+    assert.ok(row, `skill capability matrix has no row for ${provider}`);
+    const cells = row.split("|").map((cell) => cell.trim());
+    assert.equal(cells[2], expected.mode, `${provider} matrix mode disagrees with its adapter`);
+    assert.equal(cells[3], expected.guarantee, `${provider} matrix guarantee disagrees with its adapter`);
+  }
+});
+
+test("capability metadata cannot reach the engine's progress or state", async () => {
+  const engineSrc = path.join(root, "packages/migration-engine/src");
+  for (const entry of await readdir(engineSrc, { recursive: true })) {
+    if (!entry.endsWith(".mjs")) continue;
+    const source = await readFile(path.join(engineSrc, entry), "utf8");
+    assert.ok(
+      !source.includes("liveProgress") && !source.includes("CURRENT ACTIVITY"),
+      `engine reads provider presentation metadata: ${entry}`,
     );
   }
 });

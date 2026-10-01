@@ -16,6 +16,10 @@
     "migrate-artifact",
     "start-migration"
   ],
+  "liveProgress": {
+    "mode": "cooperative-yield",
+    "guarantee": "proven"
+  },
   "install": {
     "mechanism": "agent-skills-directory",
     "skillRoot": {

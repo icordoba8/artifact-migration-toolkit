@@ -264,11 +264,19 @@ const FORWARD_APPENDED =
  * `metadata` lists the provider-specific frontmatter keys the target supports
  * beyond the common set. Only Claude has native invocation flags, which is also
  * why only Claude needs no wrapper: its skill is directly user-invocable.
+ *
+ * `liveProgress` records what a real interactive host was observed doing while
+ * the skill yields between bounded operations, and nothing else. It is provider
+ * presentation capability, never migration state: no engine decision reads it,
+ * and it cannot move a checkpoint. `proven` means an observed run held visible
+ * silence under 15 seconds; `not-proven` means no such observation exists, so
+ * the skill must execute the same contract without claiming the ceiling.
  */
 const providers = [
   {
     name: "claude",
     metadata: ["context", "agent", "disable-model-invocation", "user-invocable"],
+    liveProgress: { mode: "cooperative-yield", guarantee: "proven" },
     mcp: {
       output: "providers/claude/.mcp.json",
       render: (server) => renderJson({ mcpServers: { [MCP_SERVER_NAME]: server } }),
@@ -284,6 +292,7 @@ const providers = [
   },
   {
     name: "codex",
+    liveProgress: { mode: "best-effort", guarantee: "not-proven" },
     wrapper: (skill, description) => ({
       output: `providers/codex/prompts/${skill}.md`,
       metadata: { description },
@@ -302,6 +311,7 @@ const providers = [
   },
   {
     name: "opencode",
+    liveProgress: { mode: "cooperative-yield", guarantee: "proven" },
     wrapper: (skill, description) => ({
       output: `providers/opencode/commands/${skill}.md`,
       metadata: { description },
@@ -336,6 +346,7 @@ const providers = [
   },
   {
     name: "copilot",
+    liveProgress: { mode: "best-effort", guarantee: "not-proven" },
     wrapper: (skill, description) => ({
       output: `providers/copilot/prompts/${skill}.prompt.md`,
       metadata: { mode: "agent", description },
@@ -405,6 +416,8 @@ const adapterManifest = (provider, skillNames, outputs) => ({
     mcpEntry: ENGINE_MCP_ENTRY_PLACEHOLDER,
   },
   skills: skillNames,
+  // Presentation capability only; see the `liveProgress` note on `providers`.
+  liveProgress: provider.liveProgress,
   // Where this adapter's host supports installing, per the provider's own
   // documentation. `null` means the provider documents no such scope; an
   // installer must refuse it rather than pick somewhere plausible.
