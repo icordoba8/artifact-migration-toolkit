@@ -1,6 +1,6 @@
 {
   "name": "artifact-migration-tools",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "private": true,
   "type": "module",
   "description": "Standalone, versioned migration toolkit: canonical start-migration and migrate-artifact skills plus the one canonical migration engine.",
