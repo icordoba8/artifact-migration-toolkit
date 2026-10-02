@@ -3,8 +3,13 @@
 ## Goals
 
 Catch Ubuntu and Windows failures before release preparation. A release starts
-from one exact SHA with successful development CI on both platforms. Packaging
-proves the built artifact; it does not rediscover source portability.
+from one exact SHA whose development CI has **run on both platforms** and
+succeeded on the blocking one. Packaging proves the built artifact; it does not
+rediscover source portability.
+
+Ubuntu is the required release gate. Windows is **temporarily advisory** — it
+always runs, always reports, and does not block publication. See *Windows
+advisory status* below; that status is debt, not the portability standard.
 
 ## Development CI
 
@@ -22,10 +27,81 @@ proves the built artifact; it does not rediscover source portability.
 | `pnpm release:check` | no | no | after green CI | clean SHA, version, immutable content identity |
 | Build, verify, installed smoke | no | no | after `release:check` | packaged artifact |
 
-The workflow has no `continue-on-error`. A failed command names its step and
-platform. The published 1.3.4 version may remain in the manifest during ordinary
+Every row above runs on **both** platforms. No step has `continue-on-error`, so
+a failed command still names its step and platform and the job still concludes
+red. The only `continue-on-error` in the workflow is the job-level
+`matrix.os == 'windows-latest'` expression described below; it changes what a
+Windows failure *blocks*, never whether it runs or is seen.
+
+The published 1.3.4 version may remain in the manifest during ordinary
 development; changed payload bytes correctly make `release:check` fail until a
 new version is chosen. It therefore is a release gate, not a development gate.
+
+## Windows advisory status
+
+**Temporary. Technical debt. Not the portability standard.**
+
+Windows failed before `engine:test` for its whole history. Commit 9a328f9 fixed
+that harness blocker, Windows reached `engine:test` for the first time, and
+`engine:test` then exposed 9 further pre-existing portability failures. Ubuntu is
+green. None of it is caused by the live-progress feature, and no previous release
+— 1.3.4 included — was ever proven against a fully green Windows `engine:test`.
+A gate that was never actually met cannot be the thing that stops the next
+release, so every release had become an unbounded Windows stabilization project.
+That is a CI-policy defect, and this is the correction.
+
+What the policy is, exactly:
+
+| | Runs the full matrix | Failure visible | Blocks publication |
+| --- | --- | --- | --- |
+| `ci / toolkit (ubuntu-latest)` | yes | yes | **yes** |
+| `ci / toolkit (windows-latest)` | yes | yes | no (advisory) |
+
+What this is **not**: Windows CI is not removed, no Windows test is skipped or
+marked pending, no individual failing test name is allowlisted, and the Windows
+job still concludes red on its own check. Nothing about this policy says Windows
+works. While Windows is red it is **red** — do not describe the toolkit as
+Windows-green during this period.
+
+### Criteria to make Windows required again
+
+All of these, deliberately verified by a human — never inferred:
+
+1. the full Windows CI job passes;
+2. `pnpm engine:test` passes completely on Windows;
+3. `pnpm providers:test` passes completely on Windows;
+4. `pnpm engine:test:ts` passes completely on Windows;
+5. the provider-generation checks (`pnpm providers:check` and the
+   consumer-relative path scan) pass on Windows;
+6. no known portability failure is quarantined, skipped or allowlisted to get
+   there — only the documented OS-capability skips in *Platform-specific tests*
+   remain;
+7. the green result reproduces on at least **two independent normal CI runs**
+   (different commits, not reruns of one).
+
+Then, in one change: delete the `continue-on-error` expression from
+`.github/workflows/ci.yml`, restore `ci / toolkit (windows-latest)` to the
+required branch-protection checks, and delete this section along with the
+advisory wording in `docs/release.md`. Re-enabling is a deliberate policy
+commit. Do not let it happen by guesswork or by a single lucky green run.
+
+### Follow-up task: Windows baseline stabilization
+
+A separate, bounded engineering task — **not** part of any release, and not to
+be done inside release preparation:
+
+- scope: the known Windows portability backlog, which is the `engine:test`
+  failures exposed after 9a328f9 plus any already-known Windows red;
+- method: for each failure, classify it as product behavior, shared test
+  infrastructure, a one-off test mechanism, or genuinely platform-specific
+  semantics (see *Cross-platform testing rules* and *Troubleshooting red CI*),
+  then fix its owner;
+- out of scope: changing the migration engine's behavior, the live-progress
+  implementation, or provider functionality to make a test pass;
+- done when the re-enable criteria above are met and the policy commit lands.
+
+Releases continue on Ubuntu meanwhile. The backlog is bounded by this list, and
+it does not grow a release-blocking allowlist while it is worked.
 
 ## Cross-platform testing rules
 
@@ -73,13 +149,21 @@ separate. Add a helper only when a second real caller needs the same mechanism.
 
 ## Release preconditions
 
-The candidate and final version commits each need the two successful checks on
-their **own exact SHA**. Never call a known-red SHA release-ready. Configure
-GitHub branch protection on `main` to require these exact status checks before
-merge: `ci / toolkit (ubuntu-latest)` and `ci / toolkit (windows-latest)`.
-Repository code cannot configure branch protection. No workflow or local
-script currently verifies remote check status; the release operator must read
-both check conclusions for the release SHA before running `release:check`.
+The candidate and final version commits each need, on their **own exact SHA**:
+
+- `ci / toolkit (ubuntu-latest)` = **SUCCESS**. Required. A red or missing
+  Ubuntu result means the SHA is not release-ready, with no exceptions.
+- `ci / toolkit (windows-latest)` = **executed**, with its conclusion recorded
+  in the release evidence. Advisory during baseline stabilization: a known
+  portability failure does not block publication. A Windows job that never ran
+  is *not* satisfied — "advisory" means reported, not absent.
+
+Never call a SHA with red Ubuntu release-ready. Configure GitHub branch
+protection on `main` to require exactly one status check while Windows is
+advisory: `ci / toolkit (ubuntu-latest)`. Repository code cannot configure
+branch protection. No workflow or local script verifies remote check status;
+the release operator must read **both** check conclusions for the release SHA
+before running `release:check`, and report the Windows one either way.
 
 ## Release validation
 
