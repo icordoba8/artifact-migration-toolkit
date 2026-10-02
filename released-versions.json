@@ -18,5 +18,9 @@
   {
     "version": "1.3.4",
     "contentHash": "sha256:295b3b58ccba6aee7d5dbaa248dcac87f91adfcc15c591f1fd43062fb063fe76"
+  },
+  {
+    "version": "1.3.5",
+    "contentHash": "sha256:309e5e9fbd72afdb9dd9ac4a95ea2e9c72f808ae48e0c568b6beccac44631ad8"
   }
 ]
