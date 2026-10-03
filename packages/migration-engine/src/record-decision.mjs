@@ -8,7 +8,7 @@
  * every unproven edge cleared by hand needs an approval bound to the exact
  * candidate it approves.
  *
- * *Who* may answer is a policy question with three answers, not one: a human at
+ * For module formats <=18 and artifact 13, *who* may answer is a policy question with three answers, not one: a human at
  * a TTY, a human reached through the host, or the engine itself under
  * `--mode auto` (`autoApprovalChannel`). The TTY is the default boundary for an
  * argv invocation that declared no channel -- an agent harness running helpers
@@ -16,7 +16,7 @@
  * thing that made a decision sound. The comparison against the challenge is,
  * and all three principals go through it.
  *
- * `ask` is the mechanism all non-TTY channels use, and it is an
+ * On those historical formats, `ask` is the mechanism all non-TTY channels use, and it is an
  * in-process function reference, never an argv option, an environment variable,
  * or a tool argument. A front end may pass it only when it has itself obtained
  * a human answer through a channel the model does not control -- today only the
@@ -25,7 +25,7 @@
  * challenge phrase, the same module lock, the same recompute-under-lock, the
  * same chained append.
  *
- * `ask` returns an *answer*, never a verdict. It is compared here against the
+ * On historical formats, `ask` returns an *answer*, never a verdict. It is compared here against the
  * phrase derived from the candidate recomputed under the lock, exactly as a
  * terminal line is, and a front end that returns anything it composed itself
  * rather than something the human supplied has approved nothing on its own
@@ -34,7 +34,11 @@
  * `accept` can authorize multiple ledger lines without an operator. The
  * comparison below is the whole gate and nothing may shortcut it.
  *
- * ponytail: a TTY gate plus one trusted in-process channel, not cryptography.
+ * Format 19 never treats either channel as human attestation. Without a
+ * signer it blocks; a protected AGENT_RELAYED policy can authorize only v2
+ * AGENT_RELAYED lines. The TTY/challenge contract below is legacy only.
+ *
+ * ponytail: a TTY gate plus one in-process channel for legacy, not cryptography.
  * An operator's own terminal can always forge a line -- that is the operator's
  * authority by definition, the same ceiling as history not being hash-chained.
  * Upgrade path: a detached signature over each line, verified against a key
@@ -66,15 +70,21 @@ import {
   assertRecordToolkitIdentity,
   AUTO_DECISIONS_FILE,
   BLOCKED_EXIT_CODE,
+  candidateDigestOf,
   createDecisionCandidate,
+  createNewFormatDecisionCandidate,
+  createNewFormatDecisionGroup,
+  DECISION_GROUP_KIND,
   DECISIONS_FILE,
   decisionAppliesToCandidate,
   decisionChannelOf,
   decisionGroupFor,
   decisionLineDigest,
+  decisionLineProblem,
   decisionRationaleDigest,
   edgeDecisionSubject,
   LATE_DECISION_KINDS,
+  LEGACY_COMPATIBILITY_ACTION_REQUIRED,
   legacySourceBinding,
   legacySourcesOf,
   lifecycleBinding,
@@ -82,11 +92,13 @@ import {
   pendingTargetDriftCandidates,
   pendingVisualUnbackedCandidates,
   previewDiscoveryScan,
+  projectModuleDecision,
   readAutoDecisions,
   readMigrationContext,
   readOperatorDecisions,
   readRecordedDecisions,
   readState,
+  usesDirectLedgerDecisions,
 } from "./resumable-migration.mjs";
 
 export const DECISION_KINDS = [
@@ -245,6 +257,93 @@ const operatorIdentity = () =>
  */
 export const rationaleDigestOf = decisionRationaleDigest;
 
+// ponytail: the signer is absent; keep this typed refusal in the projection until
+// a separately reviewed companion can supply replay-verifiable authority.
+export const SIGNER_UNAVAILABLE = "SIGNER_UNAVAILABLE";
+
+const blockedFor = (candidate) => candidate.requiredPrincipal === "AGENT_RELAYED"
+  ? null
+  : candidate.requiredPrincipal === "HUMAN_ATTESTED"
+    ? { state: SIGNER_UNAVAILABLE, requiredPrincipal: candidate.requiredPrincipal,
+        reason: "No trusted signer or review companion is available; no host interaction can attest this decision." }
+    : { state: "AUTO_DECISION_UNAVAILABLE", requiredPrincipal: candidate.requiredPrincipal,
+        reason: "No engine-owned automatic decision exists for this judgment; a host cannot supply one." };
+
+const REVIEW_EFFECTS = {
+  EXCLUSION: "Authorize the proposed exclusion of this legacy file.",
+  DEAD_CONFIRMATION: "Authorize the proposed DEAD disposition of this legacy file.",
+  EDGE_RESOLUTION: "Authorize the proposed resolution of this module edge to the listed targets.",
+  ROOT_DECLARATION: "Authorize the proposed additional module root.",
+  TARGET_DRIFT_ACCEPTED: "Authorize acceptance of the currently observed target drift.",
+  VISUAL_UNBACKED: "Authorize the proposed visual-unbacked exception for this subject.",
+};
+
+/** Review data comes only from the already derived, policy-bound candidate. */
+export const reviewFor = (candidate) => ({
+  candidateId: candidate.id,
+  title: candidate.kind === DECISION_GROUP_KIND
+    ? `Review one ${candidate.groupMembers.length}-member ${candidate.groupMembers[0].kind} decision group`
+    : `Review ${candidate.kind} for ${candidate.subject.path}`,
+  kind: candidate.kind,
+  migration: candidate.boundTo.module,
+  worktree: candidate.projectRoot,
+  subject: candidate.subject,
+  why: candidate.kind === DECISION_GROUP_KIND
+    ? "Each ordered member requires operator judgment; this is one indivisible decision."
+    : "The proposed disposition requires operator judgment over the current evidence.",
+  approveEffect: `${candidate.kind === DECISION_GROUP_KIND
+    ? "Authorize the complete ordered member set below as one act."
+    : REVIEW_EFFECTS[candidate.kind] ?? "Authorize only this proposed decision."} This records authority only; it neither changes files nor advances a checkpoint, and other validation must still pass.`,
+  rejectEffect: "Record a candidate-bound REJECTED outcome that blocks this decision until its evidence changes; cancel or host decline records nothing.",
+  targets: candidate.kind === DECISION_GROUP_KIND
+    ? [...new Set(candidate.groupMembers.flatMap((member) => member.targets))]
+    : candidate.targets,
+  rationale: candidate.rationale,
+  evidence: candidate.boundTo,
+  policy: {
+    requiredPrincipal: candidate.requiredPrincipal,
+    policyId: candidate.policyId,
+    policyDigest: candidate.policyDigest,
+  },
+  candidateDigest: candidateDigestOf(candidate),
+  members: candidate.groupMembers?.map((member) => ({
+    id: member.id, kind: member.kind, subject: member.subject,
+    targets: member.targets, rationale: member.rationale,
+    rationaleDigest: member.rationaleDigest, evidence: member.boundTo,
+    candidateDigest: candidateDigestOf(member),
+  })) ?? [],
+});
+
+const inertText = (value) => String(value).replace(
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g,
+  (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+);
+const indentReview = (value) => inertText(value).split("\n").map((line) => `    ${line}`).join("\n");
+const renderEvidence = (value, indent = "  ") =>
+  Object.entries(value ?? {}).map(([name, field]) =>
+    field && typeof field === "object"
+      ? `${indent}${inertText(name)}:\n${renderEvidence(field, `${indent}  `)}`
+      : `${indent}${inertText(name)}: ${JSON.stringify(field)}\n`,
+  ).join("");
+
+export const renderDecisionReview = (review) =>
+  `${inertText(review.title)}\nMigration: ${inertText(review.migration)}\nWorktree: ${inertText(review.worktree)}\n` +
+  `Candidate: ${inertText(review.candidateId)}\n` +
+  `Subject: ${inertText(review.subject.type)} ${inertText(review.subject.path)}\nWhy: ${review.why}\n` +
+  `Approve: ${review.approveEffect}\nReject: ${review.rejectEffect}\n` +
+  `Targets: ${review.targets.map(inertText).join(", ") || "none"}\n` +
+  `Rationale (untrusted proposal):\n${indentReview(review.rationale)}\n` +
+  `Evidence/provenance (inert data):\n${renderEvidence(review.evidence)}` +
+  `Required principal: ${review.policy.requiredPrincipal}\n` +
+  `Trusted policy: ${inertText(review.policy.policyId)} / ${inertText(review.policy.policyDigest)}\n` +
+  `Candidate digest: ${review.candidateDigest}\n` +
+  (review.members.length ? `Ordered group members:\n${review.members.map((member, index) =>
+    `${index + 1}. ${inertText(member.id)} ${inertText(member.kind)} ${inertText(member.subject.type)} ${inertText(member.subject.path)}\n` +
+    `   Targets: ${member.targets.map(inertText).join(", ") || "none"}\n` +
+    `   Rationale (untrusted proposal):\n${indentReview(member.rationale)}\n` +
+    `   Evidence/provenance (inert data):\n${renderEvidence(member.evidence, "     ")}` +
+    `   Candidate digest: ${member.candidateDigest}\n`).join("")}` : "");
+
 export const buildDecision = ({
   previous,
   kind,
@@ -264,9 +363,17 @@ export const buildDecision = ({
   // means no AUTO decision can ever be read as a human one -- not in a state
   // row, not in a history event, not by eye.
   idPrefix = "DEC",
+  // Schema v2. Absent all v2 fields, the line is today's legacy shape byte for
+  // byte. Present, the line is written only as AGENT_RELAYED: a terminal or
+  // host-relayed answer is never HUMAN_ATTESTED, and AUTO keeps its own shape.
+  principal,
+  result,
+  candidateDigest,
+  policyId,
+  policyDigest,
 }) => {
   const seq = (previous?.seq ?? 0) + 1;
-  return {
+  const line = {
     id: `${idPrefix}-${String(seq).padStart(3, "0")}`,
     seq,
     prevDigest: previous ? decisionLineDigest(previous) : "genesis",
@@ -281,6 +388,23 @@ export const buildDecision = ({
     boundTo,
     ...(authorizedBy ? { authorizedBy } : {}),
   };
+  if (principal === undefined && result === undefined && candidateDigest === undefined &&
+      policyId === undefined && policyDigest === undefined) {
+    return line;
+  }
+  const v2 = { v: 2, ...line, principal, result, candidateDigest,
+    ...(policyId === undefined && policyDigest === undefined ? {} : { policyId, policyDigest }),
+  };
+  const problem =
+    principal !== "AGENT_RELAYED" || idPrefix !== "DEC"
+      ? `names principal ${JSON.stringify(principal)}, which is not writable; only AGENT_RELAYED v2 lines in ${DECISIONS_FILE} are`
+      : !candidateId
+        ? "carries no candidateId"
+        : decisionLineProblem(v2);
+  if (problem) {
+    throw new Error(`Refusing to build a v2 decision line that ${problem}.`);
+  }
+  return v2;
 };
 
 const derivePendingDecisions = async ({ registryPath, moduleName }) => {
@@ -292,6 +416,11 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     registryData.targetRoot,
     resolved.canonical,
   );
+  // Which decision format this record derives is read off the persisted record,
+  // not chosen by the caller: an argument could otherwise ask for new-format
+  // candidates over an 18 record, or legacy ones over a 19, and the "pending"
+  // answer would stop meaning the same thing as the gate's.
+  const directLedger = usesDirectLedgerDecisions(state);
   assertDiscoveryCompletenessFormat(
     state,
     resolved.canonical,
@@ -325,7 +454,12 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   // operator reading them out of a file. Derived, never authored -- each one is
   // a line that `decisionAppliesToCandidate` already bound to a live candidate.
   const references = [];
-  const addCandidate = ({
+  // Every derived candidate with its projected state, including the ones that
+  // are no longer pending. `candidates` is what still needs an operator;
+  // `projected` is what the record's decision gate currently says, which is the
+  // thing status, pending and run have to agree on.
+  const projected = [];
+  const addCandidate = async ({
     kind,
     subjectType,
     subjectPath,
@@ -340,14 +474,67 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     // opts out, and it opts out of AUTO alone; a human can still decide it.
     autoResolvable = true,
   }) => {
-    const candidate = createDecisionCandidate({
+    const input = {
       kind,
       subjectType,
       subjectPath,
       rationale: rationale ?? "",
       targets,
       boundTo: boundToOverride ?? boundTo,
-    });
+    };
+    const candidate = directLedger
+      ? await createNewFormatDecisionCandidate({
+          projectRoot: registryData.targetRoot,
+          ...input,
+        })
+      : createDecisionCandidate(input);
+    const allBlockers = [...blockers];
+    if (!String(rationale ?? "").trim()) {
+      allBlockers.push("The classification has no operator-reviewable rationale.");
+    }
+    const pending = {
+      ...candidate,
+      approvable: allBlockers.length === 0,
+      autoResolvable,
+      blockers: allBlockers,
+      ...(directLedger ? {
+        review: reviewFor(candidate),
+        blocked: blockedFor(candidate),
+      } : { command: engineCommand(
+        "record-decision.mjs",
+        resolved.canonical,
+        "--approve",
+        candidate.id,
+      ) }),
+    };
+    if (directLedger) {
+      // One resolver, reported rather than thrown. No receipt is consulted: the
+      // row's `decisionId` is not even read here, because a format-19 record
+      // must not carry one and authority comes from the ledger line bound to
+      // this candidate's current digest.
+      const view = await projectModuleDecision({
+        decisions,
+        candidate,
+        label: `Candidate '${candidate.id}' (${kind} ${subjectPath})`,
+      });
+      projected.push({
+        id: candidate.id,
+        kind: candidate.kind,
+        subject: candidate.subject,
+        approvable: pending.approvable,
+        blockers: allBlockers,
+        review: pending.review,
+        blocked: pending.blocked,
+        ...view,
+      });
+      // An applicable approval and a candidate-bound rejection are both decided:
+      // neither is waiting on an operator. A stale line is not -- the facts moved
+      // and the question is open again -- so it stays pending, with the staleness
+      // visible in the projection beside it.
+      if (view.state === "APPROVED_APPLICABLE" || view.state === "REJECTED") return;
+      candidates.push(pending);
+      return;
+    }
     const applied = [byId.get(decisionId), ...decisions].find((decision) =>
       decisionAppliesToCandidate(decision, candidate),
     );
@@ -358,24 +545,31 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
         decisionId: applied.id,
         decisionDigest: decisionLineDigest(applied),
       });
+      projected.push({
+        id: candidate.id,
+        kind: candidate.kind,
+        subject: candidate.subject,
+        approvable: true,
+        blockers: [],
+        state: "APPROVED_APPLICABLE",
+        reason: null,
+        decisionId: applied.id,
+        decisionDigest: decisionLineDigest(applied),
+      });
       return;
     }
-    const allBlockers = [...blockers];
-    if (!String(rationale ?? "").trim()) {
-      allBlockers.push("The classification has no operator-reviewable rationale.");
-    }
-    candidates.push({
-      ...candidate,
-      approvable: allBlockers.length === 0,
-      autoResolvable,
+    projected.push({
+      id: candidate.id,
+      kind: candidate.kind,
+      subject: candidate.subject,
+      approvable: pending.approvable,
       blockers: allBlockers,
-      command: engineCommand(
-        "record-decision.mjs",
-        resolved.canonical,
-        "--approve",
-        candidate.id,
-      ),
+      state: "AWAITING_HUMAN_DECISION",
+      reason: null,
+      decisionId: null,
+      decisionDigest: null,
     });
+    candidates.push(pending);
   };
 
   const roots = Array.isArray(classification.moduleRoots)
@@ -398,7 +592,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   for (const entry of roots) {
     const rootPath = typeof entry === "string" ? entry : entry?.path;
     if (!rootPath || implicitRoots.has(rootPath)) continue;
-    addCandidate({
+    await addCandidate({
       kind: "ROOT_DECLARATION",
       subjectType: "MODULE_ROOT",
       subjectPath: rootPath,
@@ -416,7 +610,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     : []) {
     const kind = dispositionKinds[row?.disposition];
     if (!kind || typeof row?.path !== "string") continue;
-    addCandidate({
+    await addCandidate({
       kind,
       subjectType: "FILE",
       subjectPath: row.path,
@@ -437,7 +631,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     legacyRoot: registryData.legacyRoot,
     targetRoot: registryData.targetRoot,
   })) {
-    addCandidate({
+    await addCandidate({
       kind: "TARGET_DRIFT_ACCEPTED",
       subjectType: "TARGET_FILE",
       subjectPath: drift.subjectPath,
@@ -448,7 +642,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   }
 
   for (const visual of await pendingVisualUnbackedCandidates(root, state)) {
-    addCandidate({
+    await addCandidate({
       kind: visual.kind,
       subjectType: visual.subject.type,
       subjectPath: visual.subject.path,
@@ -470,7 +664,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
         "The unresolved module edge has no concrete tracked target; prose or approval cannot resolve it.",
       );
     }
-    addCandidate({
+    await addCandidate({
       kind: "EDGE_RESOLUTION",
       subjectType: scan.algorithmVersion >= 2 ? "MODULE_EDGE" : "FILE",
       subjectPath:
@@ -496,7 +690,22 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   )
     ? candidates.filter((candidate) => LATE_DECISION_KINDS.has(candidate.kind))
     : candidates;
-  const group = decisionGroupFor(groupable, lifecycle);
+  const group = directLedger
+    ? await createNewFormatDecisionGroup({
+        candidates: groupable,
+        lifecycle,
+        projectRoot: registryData.targetRoot,
+      })
+    : decisionGroupFor(groupable, lifecycle);
+  if (directLedger && group) {
+    group.review = reviewFor(group);
+    group.blocked = blockedFor(group);
+    for (const view of projected) {
+      if (group.groupMembers.some((member) => member.id === view.id)) {
+        view.groupReview = group.review;
+      }
+    }
+  }
   return {
     public: {
       module: resolved.canonical,
@@ -505,7 +714,11 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
       lifecycle,
       group,
       candidates,
+      // Legacy wire field. A format-19 record resolves authority from the ledger
+      // against the current candidate digest, so there is no receipt to hand
+      // back and the key stays present and empty rather than disappearing.
       references,
+      decisions: decisionProjection({ state, directLedger, projected, candidates }),
     },
     registryData,
     resolved,
@@ -514,8 +727,148 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   };
 };
 
-export const pendingDecisionCandidates = async (options) =>
-  (await derivePendingDecisions(options)).public;
+/**
+ * Which checkpoint the decisions currently in question are consumed by, and
+ * whether it has closed. Separate from any decision state on purpose: a
+ * recorded approval is `APPROVED_APPLICABLE` the instant it is appended, with
+ * `state.json` untouched and this `false`. Conflating the two is what made
+ * "approved" and "advanced" indistinguishable and sent callers looking for a
+ * restart.
+ */
+const decisionCheckpoint = (state) => {
+  const completed = state.completedSteps ?? [];
+  const step = completed.includes("DISCOVERY_COMPLETENESS")
+    ? "FINALIZE"
+    : "DISCOVERY_COMPLETENESS";
+  return { checkpoint: step, checkpointAdvanced: completed.includes(step) };
+};
+
+/** Overall state: the worst thing standing between the record and its gate. */
+const PROJECTION_PRECEDENCE = ["REJECTED", "STALE", "AWAITING_HUMAN_DECISION"];
+
+const decisionProjection = ({ state, directLedger, projected, candidates }) => {
+  const states = new Set(projected.map((entry) => entry.state));
+  // A derived candidate nobody has decided yet is awaiting one even when its
+  // own blockers make it unapprovable: the gate is not clear either way.
+  if (candidates.length > 0) states.add("AWAITING_HUMAN_DECISION");
+  return {
+    directLedger,
+    ...decisionCheckpoint(state),
+    state:
+      PROJECTION_PRECEDENCE.find((value) => states.has(value)) ??
+      "READY_TO_ADVANCE",
+    candidates: projected,
+    ...(directLedger ? { blocked: candidates.find((entry) => entry.blocked)?.blocked ?? null } : {}),
+  };
+};
+
+// Named fields, not a pass-through: which decision format a record derives is
+// not a caller's, an agent's or a tool argument's choice.
+export const pendingDecisionCandidates = async ({ registryPath, moduleName }) =>
+  (await derivePendingDecisions({ registryPath, moduleName })).public;
+
+/**
+ * The canonical fresh module decision projection, and the only authority view
+ * status, pending and run read.
+ *
+ * Fresh by construction: it re-reads the registry, the record, the
+ * classification, the current scan and both ledgers on every call, and caches
+ * nothing. An approval appended a moment ago is visible to the next call in the
+ * same process -- no restart, no invalidation step to forget.
+ *
+ * Read-only by construction too: everything it calls is a reader. It never takes
+ * the module lock, never advances a checkpoint, never appends a decision, and
+ * never runs a target's own code.
+ *
+ * A record whose authority cannot be expressed under its own format is the one
+ * state that is not a candidate outcome, so it is reported as the typed
+ * compatibility action rather than thrown at a read-only caller.
+ */
+export const projectDecisions = async ({ registryPath, moduleName }) => {
+  try {
+    return (await derivePendingDecisions({ registryPath, moduleName })).public
+      .decisions;
+  } catch (error) {
+    if (error?.compatibilityAction !== LEGACY_COMPATIBILITY_ACTION_REQUIRED) {
+      throw error;
+    }
+    return {
+      directLedger: true,
+      checkpoint: null,
+      checkpointAdvanced: false,
+      state: LEGACY_COMPATIBILITY_ACTION_REQUIRED,
+      reason: error.message,
+      candidates: [],
+    };
+  }
+};
+
+/** Re-derive a module's candidates under the lock, in the same format. */
+const moduleRecompute =
+  ({ registryPath, moduleName }) =>
+  async () => {
+    const locked = await derivePendingDecisions({
+      registryPath,
+      moduleName,
+    });
+    return {
+      candidates: locked.public.group
+        ? [...locked.public.candidates, locked.public.group]
+        : locked.public.candidates,
+      root: locked.root,
+      targetRoot: locked.registryData.targetRoot,
+      state: locked.state,
+      recordName: locked.resolved.canonical,
+      recordKind: "module",
+    };
+  };
+
+/**
+ * Record one new-format decision group against its persisted format and trusted
+ * policy. Without a signer the default HUMAN_ATTESTED requirement blocks before
+ * any prompt; explicitly permitted AGENT_RELAYED uses one v2 group line.
+ *
+ * Reachable from no argv option, exactly like the rest of the recorder: the
+ * TTY/`ask` refusal below is the same one `runRecordDecisionCli` applies.
+ */
+export const recordNewFormatDecisionGroup = async ({
+  registryPath,
+  moduleName,
+  stdin = process.stdin,
+  stdout = process.stdout,
+  ask = null,
+}) => {
+  if (!ask && (!stdin.isTTY || !stdout.isTTY)) {
+    stdout.write(
+      "Operator decisions are recorded only from an interactive terminal. " +
+        "This invocation has no TTY, so nothing was read or written.\n",
+    );
+    process.exitCode = BLOCKED_EXIT_CODE;
+    return { blocked: true };
+  }
+  assertSafeName(moduleName);
+  const pending = await derivePendingDecisions({
+    registryPath,
+    moduleName,
+  });
+  if (!usesDirectLedgerDecisions(pending.state)) {
+    throw new Error(`Record '${moduleName}' is not format 19. A v2 group cannot be requested for a legacy record.`);
+  }
+  if (!pending.public.group) {
+    throw new Error(
+      `No homogeneous decision group is pending for '${moduleName}'. Nothing was written.`,
+    );
+  }
+  return approveDecisionGroup({
+    group: pending.public.group,
+    stdin,
+    stdout,
+    ask,
+    lockName: pending.resolved.canonical,
+    targetRoot: pending.registryData.targetRoot,
+    recompute: moduleRecompute({ registryPath, moduleName }),
+  });
+};
 
 /**
  * The one approval gate. Both ledgers -- the module record and the standalone
@@ -542,6 +895,44 @@ const withOperatorApproval = async ({
   ask,
   onApproved,
 }) => {
+  if (selected.policyId !== undefined) {
+    const review = selected.review ?? reviewFor(selected);
+    stdout.write(renderDecisionReview(review));
+    if (selected.requiredPrincipal !== "AGENT_RELAYED" || channelOf(ask) === "AUTO") {
+      const blocked = selected.blocked ?? blockedFor(selected) ?? {
+        state: "NON_SIGNER_AUTHORITY_REFUSED", requiredPrincipal: selected.requiredPrincipal,
+        reason: "No host channel can claim a signer result; no authority was appended.",
+      };
+      stdout.write(`${blocked.state}: ${blocked.reason}\n`);
+      process.exitCode = BLOCKED_EXIT_CODE;
+      return { blocked };
+    }
+    // A host reply is only a relayed statement, never attestation. The trusted
+    // policy has already explicitly authorized this weaker principal.
+    const answer = ask
+      ? await ask({ candidate: selected, review, summary: renderDecisionReview(review) })
+      : await (async () => {
+          const reader = createInterface({ input: stdin, output: stdout });
+          try { return await reader.question("Relay Approve? (yes to approve; anything else cancels)\n> "); }
+          finally { reader.close(); }
+        })();
+    if (answer !== "yes" && answer !== "accept") {
+      stdout.write("No relayed approval received. Nothing was written.\n");
+      process.exitCode = BLOCKED_EXIT_CODE;
+      return { blocked: { state: "CANCELLED", reason: "No decision was recorded." } };
+    }
+    return withModuleLock(targetRoot, lockName, async () => {
+      const locked = await recompute();
+      assertRecordToolkitIdentity(locked.state, locked.recordName, "Recording an operator decision", locked.recordKind);
+      assertNoPendingFormatUpgrade(locked.state, locked.recordName, "Recording an operator decision");
+      const current = locked.candidates.find((candidate) => candidate.id === selected.id);
+      if (!current || !current.approvable || JSON.stringify(current) !== JSON.stringify(selected) ||
+          current.requiredPrincipal !== "AGENT_RELAYED") {
+        throw new Error(`Candidate '${selected.id}' changed while its review was open. Nothing was written.`);
+      }
+      return onApproved(current, locked);
+    });
+  }
   // Ahead of the summary, the challenge and the lock, because it is not a
   // refusal of this answer -- it is a statement that this principal was never
   // eligible to be asked. A candidate whose question the engine cannot derive
@@ -582,7 +973,7 @@ const withOperatorApproval = async ({
         : "Challenge phrase did not match. Nothing was written.\n",
     );
     process.exitCode = BLOCKED_EXIT_CODE;
-    return { blocked: true };
+    return { blocked: true, ...(answer.trim() === "cancel" ? { reason: "CANCELLED" } : {}) };
   }
 
   return withModuleLock(targetRoot, lockName, async () => {
@@ -748,6 +1139,61 @@ const appendGroupDecisions = async ({ group, locked, ask, stdout }) => {
   return { decisions: written, group: group.id };
 };
 
+/**
+ * The new-format group append: one reviewed group act, one v2 ledger line.
+ *
+ * Not one line per member. The complete ordered member set, with each member's
+ * own evidence binding, is inside `boundTo.members`, and `boundTo.members` is
+ * inside the `candidateDigest` this line names -- so the one line *is* the
+ * whole group, and there is exactly one result, one principal, one policy
+ * binding and one decision identity for it.
+ *
+ * That is what makes the append crash-atomic. A torn write leaves an
+ * unparseable or newline-less last line, which the ledger reader refuses
+ * whole, so the interrupted group is simply absent: there is no subset of it
+ * left behind to become authority. The legacy N-line group had no such
+ * property, which is why it stays behind its own gate rather than being
+ * rewritten.
+ */
+const appendNewFormatGroupDecision = async ({ group, locked, ask, stdout }) => {
+  const candidateDigest = candidateDigestOf(group);
+  // Under the lock, and before writing: a second line over the same reviewed
+  // group would make its outcome ambiguous, and `resolveGroupDecision` would
+  // then refuse the record. Refuse the write instead of creating that record.
+  const { decisions } = await readRecordedDecisions(locked.root);
+  const existing = decisions.find(
+    (decision) => decision?.v === 2 && decision.candidateDigest === candidateDigest,
+  );
+  if (existing) {
+    throw new Error(
+      `Decision group '${group.id}' already has ledger entry ${existing.id} (${existing.result}). A second line over one reviewed group is a duplicate or a conflict, and both fail closed. Nothing was written.`,
+    );
+  }
+  const { previous, idPrefix } = await ledgerHeadFor(
+    locked.root,
+    channelOf(ask),
+  );
+  const decision = buildDecision({
+    previous,
+    idPrefix,
+    kind: group.kind,
+    subjectType: group.subject.type,
+    subject: group.subject.path,
+    statement: `AGENT_RELAYED approval of decision group ${group.id} over ${group.boundTo.members.length} ${group.groupMembers[0].kind} candidate(s).`,
+    rationale: group.rationale,
+    candidateId: group.id,
+    targets: group.targets,
+    boundTo: group.boundTo,
+    principal: "AGENT_RELAYED",
+    result: "APPROVED",
+    candidateDigest,
+    policyId: group.policyId,
+    policyDigest: group.policyDigest,
+  });
+  await appendDecisions(locked, [decision], stdout);
+  return { decisions: [decision], group: group.id };
+};
+
 const approveDecisionGroup = async ({ group, ...gate }) =>
   withOperatorApproval({
     ...gate,
@@ -765,8 +1211,14 @@ const approveDecisionGroup = async ({ group, ...gate }) =>
         .join("") +
       `This one approval binds to that exact ordered set and lifecycle.\n` +
       `Type the challenge phrase to approve all of them, anything else to abort.\n`,
+    // The new format is selected by the candidate the operator reviewed, not by
+    // a caller: only `createNewFormatDecisionGroup` produces a policy-bound
+    // group, and only a policy-bound group gets the single-line v2 append. An
+    // old-format group keeps its exact existing serialization.
     onApproved: (lockedGroup, locked) =>
-      appendGroupDecisions({
+      (lockedGroup.policyId === undefined
+        ? appendGroupDecisions
+        : appendNewFormatGroupDecision)({
         group: lockedGroup,
         locked,
         ask: gate.ask,
@@ -795,6 +1247,25 @@ const approveCandidate = async ({
     ...gate,
     selected,
     onApproved: async (lockedCandidate, locked) => {
+      if (lockedCandidate.policyId !== undefined) {
+        const { decisions } = await readRecordedDecisions(locked.root);
+        const digest = candidateDigestOf(lockedCandidate);
+        if (decisions.some((decision) => decision.v === 2 && decision.candidateDigest === digest)) {
+          throw new Error(`Candidate '${lockedCandidate.id}' already has a decision. Nothing was written.`);
+        }
+        const { previous, idPrefix } = await ledgerHeadFor(locked.root, channelOf(gate.ask));
+        const decision = buildDecision({
+          previous, idPrefix, kind: lockedCandidate.kind,
+          subjectType: lockedCandidate.subject.type, subject: lockedCandidate.subject.path,
+          statement: `Relayed approval of candidate ${lockedCandidate.id}.`,
+          rationale: lockedCandidate.rationale, candidateId: lockedCandidate.id,
+          targets: lockedCandidate.targets, boundTo: lockedCandidate.boundTo,
+          principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: digest,
+          policyId: lockedCandidate.policyId, policyDigest: lockedCandidate.policyDigest,
+        });
+        await appendDecisions(locked, [decision], gate.stdout);
+        return { decision };
+      }
       const { previous, idPrefix } = await ledgerHeadFor(
         locked.root,
         channelOf(gate.ask),
@@ -939,6 +1410,7 @@ const BOUND_TO_FIELDS = [
 export const auditDecisionLedger = (lines) => {
   const findings = [];
   const groups = [];
+  const v2Positions = new Map();
   let previous = null;
   let chainBrokenAt = null;
   lines.forEach((raw, index) => {
@@ -973,6 +1445,53 @@ export const auditDecisionLedger = (lines) => {
         detail: `records seq ${decision.seq} at position ${position}`,
       });
     }
+    const missingBinding = () => [
+      ...(decision.candidateId ? [] : ["candidateId"]),
+      ...BOUND_TO_FIELDS.filter(
+        (field) => decision.boundTo?.[field] === undefined,
+      ).map((field) => `boundTo.${field}`),
+    ];
+    const problem = decisionLineProblem(decision);
+    if (problem) {
+      findings.push({
+        position,
+        id: decision.id ?? null,
+        code: "INVALID_DECISION_PRINCIPAL",
+        detail: problem,
+      });
+    }
+    // A v2 line's authority is its explicit principal/result/candidateDigest;
+    // its statement is description only. A legacy line has only its statement.
+    if (decision?.v === 2) {
+      const missing = missingBinding();
+      if (missing.length > 0) {
+        findings.push({
+          position,
+          id: decision.id ?? null,
+          code: "UNBOUND_EVIDENCE_CLAIM",
+          detail: `records ${decision.principal} ${decision.result} but carries no ${missing.join(", ")}`,
+        });
+      }
+      // One reviewed group act -- its whole ordered member set -- has one
+      // outcome. A second line over the same group digest is a duplicate or a
+      // conflict, and the auditor names it rather than leaving a resolver to
+      // discover it. Single candidates keep their own resolution rules.
+      if (decision.kind === DECISION_GROUP_KIND) {
+        const first = v2Positions.get(decision.candidateDigest);
+        if (first === undefined) {
+          v2Positions.set(decision.candidateDigest, position);
+        } else {
+          findings.push({
+            position,
+            id: decision.id ?? null,
+            code: "AMBIGUOUS_DECISION",
+            detail: `records ${decision.result} over the group digest already decided at line ${first}; duplicate or conflicting group outcomes fail closed`,
+          });
+        }
+      }
+      previous = decision;
+      return;
+    }
     const statement = String(decision.statement ?? "");
     const claimed = APPROVAL_EVIDENCE_PHRASES.find((phrase) =>
       statement.includes(phrase),
@@ -985,12 +1504,7 @@ export const auditDecisionLedger = (lines) => {
         detail: `statement names no channel the recorder can produce: ${JSON.stringify(statement)}`,
       });
     } else {
-      const missing = [
-        ...(decision.candidateId ? [] : ["candidateId"]),
-        ...BOUND_TO_FIELDS.filter(
-          (field) => decision.boundTo?.[field] === undefined,
-        ).map((field) => `boundTo.${field}`),
-      ];
+      const missing = missingBinding();
       if (missing.length > 0) {
         findings.push({
           position,
@@ -1224,23 +1738,17 @@ export const runRecordDecisionCli = async (
       `Type the challenge phrase to approve, anything else to abort.\n`,
     statementFor: (candidate, ask_) =>
       `Approved stable candidate ${candidate.id} ${approvedByPhrase(ask_)} ${APPROVAL_EVIDENCE(ask_)}.`,
-    recompute: async () => {
-      const locked = await derivePendingDecisions({
-        registryPath,
-        moduleName: options.moduleName,
-      });
-      return {
-        candidates: locked.public.group
-          ? [...locked.public.candidates, locked.public.group]
-          : locked.public.candidates,
-        root: locked.root,
-        targetRoot: locked.registryData.targetRoot,
-        state: locked.state,
-        recordName: locked.resolved.canonical,
-        recordKind: "module",
-      };
-    },
+    recompute: moduleRecompute({ registryPath, moduleName: options.moduleName }),
   };
+  if (pending.public.group && usesDirectLedgerDecisions(pending.state) &&
+      pending.public.group.groupMembers.some((member) => member.id === options.approve)) {
+    const blocked = { state: "GROUP_REVIEW_REQUIRED",
+      reason: "This candidate belongs to one ordered decision group; an individual line cannot authorize a subset. Review the complete group instead." };
+    stdout.write(renderDecisionReview(pending.public.group.review));
+    stdout.write(`${blocked.state}: ${blocked.reason}\n`);
+    process.exitCode = BLOCKED_EXIT_CODE;
+    return { blocked };
+  }
   return pending.public.group?.id === options.approve
     ? approveDecisionGroup({ group: pending.public.group, ...gate })
     : approveCandidate({

@@ -51,6 +51,7 @@ import {
   runDiscoverCli,
 } from "../../src/cli/discover-module.mjs";
 import {
+  buildDecision,
   challengeFor,
   parseDecisionArguments,
   pendingDecisionCandidates,
@@ -87,6 +88,10 @@ import {
   validateFigmaContext,
   compatibilityBlocker,
   createDecisionCandidate,
+  createNewFormatDecisionCandidate,
+  DEFAULT_DECISION_POLICY_DIGEST,
+  DEFAULT_DECISION_POLICY_ID,
+  resolveRequiredPrincipal,
   getMigrationStatus,
   MIGRATION_FORMAT_VERSION,
   decisionLineDigest,
@@ -125,7 +130,25 @@ import {
   repairSliceState,
   previewUiObservationsAdoption,
   REQUIRED_OBSERVATIONS_FORMAT,
+  assertDirectLedgerEligible,
+  assertNoPendingFormatUpgrade,
+  directLedgerAdoptionPreview,
+  DIRECT_LEDGER_DECISIONS_FORMAT,
+  FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+  FORMAT_UPGRADERS,
+  LEGACY_COMPATIBILITY_ACTION_REQUIRED,
+  MIGRATION_FORMAT_SUPPORTED,
+  resolveApplicableDecision,
+  projectModuleDecision,
+  DECISION_PROJECTION_STATES,
+  stampedFormatVersion,
+  usesDirectLedgerDecisions,
+  candidateDigestOf,
+  createNewFormatDecisionGroup,
+  principalSatisfiesRequirement,
+  validateProtectedDecisionPolicy,
 } from "../../src/resumable-migration.mjs";
+import { assertRegistryCoverage, nextIncrement } from "../../src/format-upgrade.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
 import { exitCodeFor, maySelfConfirm } from "../../src/migration-policy.mjs";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
@@ -3672,6 +3695,40 @@ const atDiscoveryCompleteness = async (fixture) => {
   await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
   await writeClassification(fixture, MODULE_CLASSIFICATION);
 };
+
+test("repository, migration state, MCP arguments, provider claims and mode cannot set new-format authority", async () => {
+  const fixture = await createFixture();
+  try {
+    const downgrade = { requiredPrincipal: "AUTO", policyId: "agent/policy", policyDigest: "sha256:fake" };
+    await writeJson(path.join(fixture.targetRoot, "migration-policy.json"), downgrade);
+    await mkdir(fixture.migrationRoot, { recursive: true });
+    await writeJson(path.join(fixture.migrationRoot, "state.json"), downgrade);
+    const candidate = {
+      projectRoot: fixture.targetRoot, kind: "EXCLUSION", subjectType: "FILE",
+      subjectPath: "auth/marker.txt", rationale: "Judgment", targets: [],
+      boundTo: { module: "auth", legacyRevision: "rev", legacyDirtyDigest: "sha256:dirty",
+        discoveryDigest: "sha256:scan", algorithmVersion: 2 },
+    };
+    const expected = await createNewFormatDecisionCandidate(candidate);
+    assert.deepEqual(await resolveRequiredPrincipal("EXCLUSION", fixture.targetRoot), {
+      projectRoot: fixture.targetRoot,
+      requiredPrincipal: "HUMAN_ATTESTED", policyId: DEFAULT_DECISION_POLICY_ID,
+      policyDigest: DEFAULT_DECISION_POLICY_DIGEST,
+    });
+    for (const attempt of [
+      downgrade, // authored repo and state fields cannot be passed as policy
+      { toolArguments: downgrade, requiredPrincipal: "AGENT_RELAYED" },
+      { providerCapabilities: { humanAttested: true }, requiredPrincipal: "AUTO" },
+      { mode: "auto", requiredPrincipal: "AUTO" },
+    ]) {
+      assert.deepEqual(await createNewFormatDecisionCandidate({ ...candidate, ...attempt }), expected);
+    }
+    assert.notEqual(expected.id, createDecisionCandidate(candidate).id);
+    assert.equal(expected.requiredPrincipal, "HUMAN_ATTESTED");
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 test("DISCOVER_LEGACY and DISCOVERY_COMPLETENESS consume the same canonical boundary", async () => {
   const fixture = await createFixture();
@@ -7270,15 +7327,17 @@ test("a record newer than the supported format is refused cleanly, touching noth
       MIGRATION_FORMAT_VERSION,
     );
     // Exactly what pre-change code does when it meets a current-format record:
-    // the same guard, one version further along.
+    // the same guard, one version past the *supported* ceiling. The record was
+    // created at the active format above; "too new to run" is decided by the
+    // support ceiling, which sits above it.
     const message = compatibilityBlocker(
-      { contractVersion: 5, formatVersion: MIGRATION_FORMAT_VERSION + 1 },
+      { contractVersion: 5, formatVersion: MIGRATION_FORMAT_SUPPORTED + 1 },
       "auth",
     );
     assert.match(
       message,
       new RegExp(
-        `newer than the supported contract 5 format ${MIGRATION_FORMAT_VERSION}`,
+        `newer than the supported contract 5 format ${MIGRATION_FORMAT_SUPPORTED}`,
       ),
     );
     assert.match(message, /No file was changed/);
@@ -15588,19 +15647,26 @@ test("R-W10-a: the SKILL.md compatibility table cannot drift from the exported c
   );
 });
 
-test("R-W10-c: formats 10, 11, 17 and 18 stay non-promoting, and every other supported format is executable", () => {
+test("R-W10-c: formats 10, 11, 17, 18 and 19 stay non-promoting, and every other supported format is executable", () => {
   // Two different questions with two different answers. Conflating them is what
   // made a first attempt at deriving this set turn every format-10 record
   // unexecutable: 10 and 11 are never promoted *into*, but a record already at
   // 10 must still run its own lifecycle to completion.
-  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18]);
+  //
+  // 19 joins the set for the third reason: it changes where a decision's
+  // authority comes from, so an advance that promoted into it would reinterpret
+  // receipts the record already recorded under citation rules.
+  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18, 19]);
   for (const version of SUPPORTED_FORMAT_VERSIONS) {
     assert.equal(
       formatIsSupported(version),
       true,
       `format ${version} must remain executable`,
     );
-    assert.equal(formatIsPromoting(version), ![10, 11, 17, 18].includes(version));
+    assert.equal(
+      formatIsPromoting(version),
+      ![10, 11, 17, 18, 19].includes(version),
+    );
   }
   // Bumping the constant cannot orphan the format that was current a moment
   // ago: the previous format is derived into the supported set, not typed into
@@ -15610,16 +15676,396 @@ test("R-W10-c: formats 10, 11, 17 and 18 stay non-promoting, and every other sup
 
 test("R-W10-e: a format newer than supported is refused with the update message", () => {
   const blocker = compatibilityBlocker(
-    { contractVersion: 5, formatVersion: MIGRATION_FORMAT_VERSION + 1 },
+    { contractVersion: 5, formatVersion: MIGRATION_FORMAT_SUPPORTED + 1 },
     "auth",
   );
   assert.match(blocker, /Update start-migration before continuing/);
+  // Both controls admit a record: the active creation format and the supported
+  // ceiling above it. "Supported" is what decides whether a record runs.
+  for (const formatVersion of [
+    FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+    MIGRATION_FORMAT_SUPPORTED,
+  ]) {
+    assert.equal(compatibilityBlocker({ contractVersion: 5, formatVersion }, "auth"), null);
+  }
+});
+
+test("ODA-1: format 19 is supported, 18 stays the creation default, and nothing promotes into 19", () => {
+  // Support and activation are two controls, and the whole compatibility
+  // boundary rests on them being different numbers here.
+  assert.equal(MIGRATION_FORMAT_SUPPORTED, DIRECT_LEDGER_DECISIONS_FORMAT);
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 18);
+  assert.notEqual(MIGRATION_FORMAT_SUPPORTED, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
+  assert.equal(formatIsSupported(19), true);
+  assert.equal(formatIsSupported(20), false);
+  assert.equal(usesDirectLedgerDecisions({ formatVersion: 19 }), true);
+  assert.equal(usesDirectLedgerDecisions({ formatVersion: 18 }), false);
+
+  // No highest-supported auto-selection and no self-healing stamp: an 18
+  // record that uses every other feature is still stamped 18, and only a
+  // record already at 19 is stamped 19.
+  assert.equal(stampedFormatVersion({ formatVersion: 18 }), 18);
+  assert.equal(stampedFormatVersion({ formatVersion: 19 }), 19);
+
+  // The registry covers the increment to the ceiling, and it is adjacent.
+  assertRegistryCoverage({
+    floor: FORMAT_UPGRADE_FLOOR,
+    runtimeFormat: MIGRATION_FORMAT_SUPPORTED,
+    registry: FORMAT_UPGRADERS,
+  });
+  const row = FORMAT_UPGRADERS.find((entry) => entry.from === 18);
+  assert.equal(row.to, 19);
+  assert.equal(row.id, "DIRECT_LEDGER_DECISIONS_ADOPTED");
+
+  // The ordinary cursor runs to the *active* format, so an 18 record owes no
+  // increment and is neither frozen behind one nor walked into 19.
   assert.equal(
-    compatibilityBlocker(
-      { contractVersion: 5, formatVersion: MIGRATION_FORMAT_VERSION },
-      "auth",
-    ),
+    nextIncrement(FORMAT_UPGRADERS, 18, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, FORMAT_UPGRADE_FLOOR),
     null,
+  );
+  assert.doesNotThrow(() =>
+    assertNoPendingFormatUpgrade({ formatVersion: 18 }, "auth", "advance"),
+  );
+  assert.doesNotThrow(() =>
+    assertNoPendingFormatUpgrade({ formatVersion: 19 }, "auth", "advance"),
+  );
+  // Only the explicit selection reaches the row.
+  assert.deepEqual(
+    nextIncrement(FORMAT_UPGRADERS, 18, MIGRATION_FORMAT_SUPPORTED, FORMAT_UPGRADE_FLOOR),
+    { from: 18, to: 19, row },
+  );
+});
+
+/* ------- P2-3: the one policy-aware direct-ledger resolver (format 19) -------
+ *
+ * The engine default requires HUMAN_ATTESTED for every judgment kind, and
+ * HUMAN_ATTESTED is not writable in this build -- which is the asserted
+ * production state, not a thing to work around. To observe what the resolver
+ * does once a principal *does* satisfy the requirement, these tests bind the
+ * candidate to a trusted admin policy verified through
+ * `validateProtectedDecisionPolicy`, exactly as the Phase-1 suite does. That
+ * parser grants no provenance by itself: production only reaches it through
+ * root-owned storage, so nothing here is a bypass, a flag or an override.
+ */
+const RESOLVER_ROOT = path.resolve(os.tmpdir(), "p2-resolver-project");
+
+const relayPolicy = (rules) => {
+  const policy = {
+    policyId: "admin/p2",
+    projectRoot: RESOLVER_ROOT,
+    revision: 1,
+    rules,
+  };
+  return validateProtectedDecisionPolicy(
+    {
+      policy,
+      policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`,
+      provenance: {
+        action: "OPERATOR_ADMIN_POLICY_CHANGE",
+        actor: "admin",
+        at: "2026-10-02T00:00:00.000Z",
+        reason: "Exercise an applicable decision without weakening the default",
+        previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST,
+      },
+    },
+    RESOLVER_ROOT,
+  );
+};
+
+const resolverBoundTo = (index = 0) => ({
+  module: "auth",
+  legacyRevision: "abc123",
+  legacyDirtyDigest: `sha256:${"d".repeat(64)}`,
+  discoveryDigest: `sha256:${"e".repeat(64)}`,
+  algorithmVersion: 2,
+  pathDigest: `sha256:${String(index).repeat(64).slice(0, 64)}`,
+});
+
+/** A policy-bound EXCLUSION candidate, with its id re-derived over the binding. */
+const boundCandidate = async (policy, { index = 0, rationale = "Unused legacy helper." } = {}) => {
+  const base = await createNewFormatDecisionCandidate({
+    projectRoot: RESOLVER_ROOT,
+    kind: "EXCLUSION",
+    subjectType: "FILE",
+    subjectPath: `src/auth/legacy-${index}.ts`,
+    rationale,
+    targets: [],
+    boundTo: resolverBoundTo(index),
+  });
+  const bound = {
+    ...base,
+    policyId: policy.policyId,
+    policyDigest: policy.policyDigest,
+    requiredPrincipal: policy.rules.EXCLUSION,
+  };
+  return { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
+};
+
+const lineFor = (candidate, overrides = {}) =>
+  buildDecision({
+    previous: null,
+    kind: candidate.kind,
+    subjectType: candidate.subject.type,
+    subject: candidate.subject.path,
+    statement: `Relayed decision for ${candidate.id}.`,
+    rationale: candidate.rationale,
+    candidateId: candidate.id,
+    targets: candidate.targets,
+    boundTo: candidate.boundTo,
+    at: "2026-10-02T00:00:00.000Z",
+    operator: "tester@host",
+    principal: "AGENT_RELAYED",
+    result: "APPROVED",
+    candidateDigest: candidateDigestOf(candidate),
+    policyId: candidate.policyId,
+    policyDigest: candidate.policyDigest,
+    ...overrides,
+  });
+
+const resolve = (decisions, candidate, extra = {}) =>
+  resolveApplicableDecision({
+    decisions,
+    candidate,
+    label: "Module classification files[0]",
+    ...extra,
+  });
+
+test("ODA-3: the direct resolver binds candidate, policy and principal, and fails closed otherwise", async () => {
+  const policy = relayPolicy({ EXCLUSION: "AGENT_RELAYED" });
+  const candidate = await boundCandidate(policy);
+  const approved = lineFor(candidate);
+
+  // The one applicable APPROVED line resolves, and nothing else does.
+  assert.equal(resolve([approved], candidate).id, approved.id);
+
+  // Stale: the same operator's decision over evidence that has since moved.
+  const moved = await boundCandidate(policy, { rationale: "Rewritten rationale." });
+  assert.throws(
+    () => resolve([lineFor({ ...moved, id: candidate.id })], candidate),
+    /stale|not applicable|no applicable decision/i,
+  );
+
+  // Weaker principal: an AUTO line never satisfies an AGENT_RELAYED
+  // requirement, and never falls back to one.
+  const strict = relayPolicy({ EXCLUSION: "HUMAN_ATTESTED" });
+  const strictCandidate = await boundCandidate(strict);
+  assert.equal(principalSatisfiesRequirement("AGENT_RELAYED", "HUMAN_ATTESTED"), false);
+  assert.throws(
+    () =>
+      resolve(
+        [
+          {
+            ...lineFor(strictCandidate),
+            // Strength is read off the line's own principal, never asserted
+            // by the candidate it claims to cover.
+            principal: "AGENT_RELAYED",
+          },
+        ],
+        strictCandidate,
+      ),
+    /weaker principal|requires 'HUMAN_ATTESTED'/,
+  );
+
+  // REJECTED blocks; it is never read as an absent decision or an approval.
+  assert.throws(
+    () => resolve([lineFor(candidate, { result: "REJECTED" })], candidate),
+    /REJECTED|blocked by decision/,
+  );
+
+  // Duplicate and conflicting outcomes over the same candidate fail closed
+  // rather than selecting the newest, the oldest or the first.
+  for (const second of [
+    lineFor(candidate),
+    lineFor(candidate, { result: "REJECTED" }),
+  ]) {
+    assert.throws(
+      () => resolve([approved, { ...second, id: "DEC-002" }], candidate),
+      /2 ledger entries|fail closed/i,
+    );
+  }
+
+  // Policy mismatch: a decision recorded under a different pinned policy
+  // cannot retroactively authorize a candidate bound to this one.
+  assert.throws(
+    () =>
+      resolve(
+        [{ ...approved, policyDigest: `sha256:${"0".repeat(64)}` }],
+        candidate,
+      ),
+    /policy/i,
+  );
+
+  // An unbound candidate is refused rather than resolved under a default
+  // nobody pinned.
+  assert.throws(
+    () => resolve([approved], createDecisionCandidate({
+      kind: "EXCLUSION",
+      subjectType: "FILE",
+      subjectPath: "src/auth/legacy-0.ts",
+      rationale: "Unused legacy helper.",
+      boundTo: resolverBoundTo(0),
+    })),
+    /without a trusted policy binding/,
+  );
+
+  // A format-19 record never authors a receipt, and a hand-edited one is
+  // refused at the gate as well as in the schema.
+  assert.throws(
+    () => resolve([approved], candidate, { row: { decisionId: "DEC-001" } }),
+    /must not author/,
+  );
+  assert.throws(
+    () => resolve([approved], candidate, { row: { decisionDigest: "sha256:x" } }),
+    /must not author/,
+  );
+  // An absent receipt is the normal case, not a missing field.
+  assert.equal(
+    resolve([approved], candidate, {
+      row: { disposition: "EXCLUDED", rationale: candidate.rationale },
+    }).id,
+    approved.id,
+  );
+
+  // A legacy (pre-v2) line carries no explicit principal or result and can
+  // never authorize a policy-bound candidate.
+  const legacy = buildDecision({
+    previous: null,
+    kind: candidate.kind,
+    subjectType: candidate.subject.type,
+    subject: candidate.subject.path,
+    statement: "Legacy approval.",
+    rationale: candidate.rationale,
+    candidateId: candidate.id,
+    targets: candidate.targets,
+    boundTo: candidate.boundTo,
+  });
+  assert.equal(legacy.v, undefined);
+  assert.throws(() => resolve([legacy], candidate), /no applicable decision/i);
+});
+
+test("ODA-4: group authority is atomic -- one entry for the whole set, or none", async () => {
+  const policy = relayPolicy({ EXCLUSION: "AGENT_RELAYED" });
+  const members = await Promise.all(
+    [0, 1, 2].map(async (index) => ({
+      ...(await createNewFormatDecisionCandidate({
+        projectRoot: RESOLVER_ROOT,
+        kind: "EXCLUSION",
+        subjectType: "FILE",
+        subjectPath: `src/auth/legacy-${index}.ts`,
+        rationale: `Unused legacy helper ${index}.`,
+        targets: [],
+        boundTo: resolverBoundTo(index),
+      })),
+      approvable: true,
+    })),
+  );
+  const group = await createNewFormatDecisionGroup({
+    candidates: members,
+    lifecycle: { stateDigest: "sha256:state", step: "DISCOVERY_COMPLETENESS" },
+    projectRoot: RESOLVER_ROOT,
+  });
+  // Bind the group to the trusted admin policy, as the resolver will when it
+  // re-derives it.
+  const relayable = (() => {
+    const bound = {
+      ...group,
+      policyId: policy.policyId,
+      policyDigest: policy.policyDigest,
+      requiredPrincipal: policy.rules.EXCLUSION,
+    };
+    return { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
+  })();
+  const groupLine = lineFor(relayable);
+
+  // Every member resolves through the one group entry, and the entry is the
+  // authority -- not three member-shaped projections of it.
+  for (const member of members) {
+    assert.equal(
+      resolve([groupLine], member, { group: relayable }).id,
+      groupLine.id,
+    );
+  }
+
+  // A line over a single member is not authority for the group's act: it does
+  // not digest to the group candidate.
+  const memberOnlyLine = lineFor(await boundCandidate(policy));
+  assert.throws(
+    () => resolve([memberOnlyLine], members[0], { group: relayable }),
+    /no applicable decision|not bound/i,
+  );
+
+  // A trimmed, extended or reordered member set is a different candidate, so
+  // the old entry stops applying rather than covering a subset.
+  for (const variant of [
+    members.slice(0, 2),
+    [members[1], members[0], members[2]],
+  ]) {
+    const other = await createNewFormatDecisionGroup({
+      candidates: variant,
+      lifecycle: { stateDigest: "sha256:state", step: "DISCOVERY_COMPLETENESS" },
+      projectRoot: RESOLVER_ROOT,
+    });
+    assert.notEqual(candidateDigestOf(other), candidateDigestOf(group));
+  }
+
+  // Duplicate group outcomes fail closed.
+  assert.throws(
+    () =>
+      resolve([groupLine, { ...groupLine, id: "DEC-002" }], members[0], {
+        group: relayable,
+      }),
+    /2 ledger entries|fail closed/i,
+  );
+});
+
+test("ODA-2: the 18 -> 19 transition is explicit, pre-pin, and otherwise a typed compatibility action", () => {
+  const eligible = {
+    formatVersion: 18,
+    status: "ACTIVE",
+    revision: 4,
+    migrationId: "auth",
+    currentStep: "DISCOVER_LEGACY",
+    artifactHashes: { "inventories/legacy.json": "sha256:aa" },
+  };
+  assert.doesNotThrow(() => assertDirectLedgerEligible(eligible));
+
+  // Every ineligible shape is the same typed action, never a silent promotion
+  // and never a freeze.
+  for (const state of [
+    { ...eligible, formatVersion: 17 },
+    { ...eligible, formatVersion: 19 },
+    { ...eligible, status: "COMPLETE" },
+    {
+      ...eligible,
+      artifactHashes: {
+        ...eligible.artifactHashes,
+        "inventories/module-classification.json": "sha256:bb",
+      },
+    },
+    {
+      ...eligible,
+      artifactHashes: {
+        ...eligible.artifactHashes,
+        "inventories/discovery-scan.json": "sha256:cc",
+      },
+    },
+  ]) {
+    assert.throws(
+      () => assertDirectLedgerEligible(state),
+      (error) =>
+        error.compatibilityAction === LEGACY_COMPATIBILITY_ACTION_REQUIRED &&
+        /LEGACY_COMPATIBILITY_ACTION_REQUIRED/.test(error.message),
+    );
+  }
+
+  // The confirmation binds to the record as it stands: a record that moved
+  // between preview and commit produces a different digest.
+  const preview = directLedgerAdoptionPreview(eligible);
+  assert.equal(preview.from, 18);
+  assert.equal(preview.to, 19);
+  assert.notDeepEqual(
+    directLedgerAdoptionPreview({ ...eligible, revision: 5 }),
+    preview,
   );
 });
 
@@ -19522,4 +19968,186 @@ test("FU-11: the historical adoption spelling stays valid forever", () => {
   assert.equal(isUiObservationsAdoption({ event: "FORMAT_UPGRADED" }), false);
   assert.equal(isUiObservationsAdoption({ event: "STEP_COMPLETED" }), false);
   assert.equal(isUiObservationsAdoption(null), false);
+});
+
+/* ------- P3: the projected decision state table -----------------------------
+ *
+ * The projection and the gate are two faces of one resolver, so these assert the
+ * reported state beside the enforced one on the same inputs. A state the
+ * projection shows and the gate would not refuse -- or the reverse -- is the
+ * exact disagreement Phase 3 removes.
+ */
+const project = (decisions, candidate, extra = {}) =>
+  projectModuleDecision({
+    decisions,
+    candidate,
+    label: "Module classification files[0]",
+    ...extra,
+  });
+
+test("ODA-5: the projection names every decision state the gate enforces", async () => {
+  const policy = relayPolicy({ EXCLUSION: "AGENT_RELAYED" });
+  const candidate = await boundCandidate(policy);
+  const approved = lineFor(candidate);
+
+  // Applicable: reported as approved, and the gate agrees by not refusing.
+  const applicable = await project([approved], candidate);
+  assert.equal(applicable.state, "APPROVED_APPLICABLE");
+  assert.equal(applicable.decisionId, approved.id);
+  assert.equal(applicable.principal, "AGENT_RELAYED");
+  assert.equal(applicable.result, "APPROVED");
+  assert.equal(applicable.requiredPrincipal, "AGENT_RELAYED");
+  assert.equal(applicable.policyId, policy.policyId);
+  assert.equal(applicable.candidateDigest, candidateDigestOf(candidate));
+  assert.equal(applicable.group, null);
+  assert.equal(applicable.reason, null);
+  assert.equal(resolve([approved], candidate).id, approved.id);
+
+  // Awaiting: nothing in the ledger resolves to this candidate at all.
+  const awaiting = await project([], candidate);
+  assert.equal(awaiting.state, "AWAITING_HUMAN_DECISION");
+  assert.equal(awaiting.decisionId, null);
+  assert.throws(() => resolve([], candidate), /no applicable decision/i);
+
+  // Rejected is a decision, and a distinct state from never having decided.
+  const rejectedLine = lineFor(candidate, { result: "REJECTED" });
+  const rejected = await project([rejectedLine], candidate);
+  assert.equal(rejected.state, "REJECTED");
+  assert.equal(rejected.decisionId, rejectedLine.id);
+  assert.equal(rejected.result, "REJECTED");
+  assert.match(rejected.reason, /blocked by decision/);
+  assert.throws(() => resolve([rejectedLine], candidate), /REJECTED/);
+
+  // Stale: the operator's own earlier decision, over evidence that has moved.
+  const moved = await boundCandidate(policy, { rationale: "Rewritten rationale." });
+  const staleLine = lineFor({ ...moved, id: candidate.id });
+  const stale = await project([staleLine], candidate);
+  assert.equal(stale.state, "STALE");
+  assert.equal(stale.decisionId, staleLine.id);
+  assert.match(stale.reason, /stale/);
+  assert.throws(() => resolve([staleLine], candidate), /stale/i);
+
+  // A policy change invalidates an outstanding binding: also stale, never a
+  // weaker approval carried forward.
+  const otherPolicy = await project(
+    [{ ...approved, policyDigest: `sha256:${"0".repeat(64)}` }],
+    candidate,
+  );
+  assert.equal(otherPolicy.state, "STALE");
+
+  // A weaker principal leaves the candidate awaiting a real decision, with the
+  // line it refused still named.
+  const strict = relayPolicy({ EXCLUSION: "HUMAN_ATTESTED" });
+  const strictCandidate = await boundCandidate(strict);
+  const weak = await project(
+    [{ ...lineFor(strictCandidate), principal: "AGENT_RELAYED" }],
+    strictCandidate,
+  );
+  assert.equal(weak.state, "AWAITING_HUMAN_DECISION");
+  assert.equal(weak.principal, "AGENT_RELAYED");
+  assert.equal(weak.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.match(weak.reason, /weaker principal/);
+
+  // Ambiguity is not a state to display: both faces fail closed identically.
+  await assert.rejects(
+    project([approved, { ...approved, id: "DEC-002" }], candidate),
+    /fail closed/i,
+  );
+  await assert.rejects(
+    project([approved], candidate, { row: { decisionId: "DEC-001" } }),
+    /must not author/,
+  );
+
+  // The six states the plan names, and no seventh.
+  assert.deepEqual([...DECISION_PROJECTION_STATES], [
+    "AWAITING_HUMAN_DECISION",
+    "APPROVED_APPLICABLE",
+    "REJECTED",
+    "STALE",
+    "READY_TO_ADVANCE",
+    "LEGACY_COMPATIBILITY_ACTION_REQUIRED",
+  ]);
+});
+
+test("ODA-6: a grouped member view points at one group entry and is never its own authority", async () => {
+  const members = await Promise.all(
+    [0, 1, 2].map(async (index) => ({
+      ...(await createNewFormatDecisionCandidate({
+        projectRoot: RESOLVER_ROOT,
+        kind: "EXCLUSION",
+        subjectType: "FILE",
+        subjectPath: `src/auth/legacy-${index}.ts`,
+        rationale: `Unused legacy helper ${index}.`,
+        targets: [],
+        boundTo: resolverBoundTo(index),
+      })),
+      approvable: true,
+    })),
+  );
+  // Bound to the engine default policy -- the one the projection itself resolves
+  // when it re-derives the recorded member set. Nothing is injected: the view
+  // finds its own group entry, which is the property under test.
+  const group = await createNewFormatDecisionGroup({
+    candidates: members,
+    lifecycle: { stateDigest: "sha256:state", step: "DISCOVERY_COMPLETENESS" },
+    projectRoot: RESOLVER_ROOT,
+  });
+  const groupLine = lineFor(group);
+
+  // Three member views, one authority: each finds the same single group entry
+  // and names the same group candidate, and none of them is its own authority.
+  // The state is `AWAITING_HUMAN_DECISION` because the default policy requires
+  // HUMAN_ATTESTED and this build cannot write it -- the member set is still
+  // resolved through the one entry, which is what must never split.
+  for (const member of members) {
+    const view = await project([groupLine], member);
+    assert.equal(view.group.id, group.id);
+    assert.equal(view.group.candidateDigest, candidateDigestOf(group));
+    assert.notEqual(view.group.candidateDigest, candidateDigestOf(member));
+    assert.equal(view.decisionId, groupLine.id);
+    assert.equal(view.result, "APPROVED");
+    assert.equal(view.state, "AWAITING_HUMAN_DECISION");
+    assert.match(view.reason, /weaker principal|requires 'HUMAN_ATTESTED'/);
+    assert.equal(view.requiredPrincipal, "HUMAN_ATTESTED");
+  }
+
+  // A line over a single member is not the group's act: no group covers the
+  // member, and the member-only line is not bound to the member either.
+  const alone = await project([lineFor(members[0])], members[0]);
+  assert.equal(alone.group, null);
+  assert.equal(alone.state, "AWAITING_HUMAN_DECISION");
+
+  // Changed membership is reflected consistently rather than partially: a member
+  // whose evidence moved fails the group's own binding instead of resolving
+  // through a set that no longer describes it.
+  const moved = {
+    ...(await createNewFormatDecisionCandidate({
+      projectRoot: RESOLVER_ROOT,
+      kind: "EXCLUSION",
+      subjectType: "FILE",
+      subjectPath: "src/auth/legacy-1.ts",
+      rationale: "Rewritten rationale.",
+      targets: [],
+      boundTo: resolverBoundTo(1),
+    })),
+    approvable: true,
+  };
+  const tampered = {
+    ...groupLine,
+    boundTo: {
+      ...groupLine.boundTo,
+      members: groupLine.boundTo.members.map((fact, index) =>
+        index === 1 ? { ...fact, id: moved.id } : fact,
+      ),
+    },
+  };
+  await assert.rejects(
+    project([tampered], moved),
+    /does not re-derive to the candidate digest|evidence binding has changed/,
+  );
+  // And the untouched members do not keep resolving through the edited entry.
+  await assert.rejects(
+    project([tampered], members[0]),
+    /does not re-derive to the candidate digest/,
+  );
 });

@@ -122,13 +122,22 @@ the upgrade floor forward, a registered upgrader is the sole promoter of that
 cursor, one adjacent increment at a time, each in its own journalled
 transaction.
 
+Module 19 is supported for explicit selection, but normal module creation and
+ordinary resume target active format 18. The 18→19 increment is an explicit,
+previewed/confirmed, journalled pre-pin adoption for an eligible unfinished
+record, never a self-healing or default transition. Ineligible records keep
+their historical citation path or report `LEGACY_COMPATIBILITY_ACTION_REQUIRED`.
+Artifact 13 remains the only active and supported artifact format; artifact 14
+and direct-ledger artifact decisions are unavailable.
+
 ```text
 FORMAT_UPGRADE_FLOOR          = 17   (module engine)
 ARTIFACT_FORMAT_UPGRADE_FLOOR = 13   (artifact engine)
 ```
 
-- **At or above the floor**: `state.formatVersion < runtime format` means an
-  increment is owed. Each adjacent `N → N+1` increment has one registered
+- **At or above the floor**: `state.formatVersion < active format` means an
+  ordinary increment is owed. Each adjacent `N → N+1` increment through the
+  supported ceiling has one registered
   upgrader. While its declared old-format prerequisite is absent it is
   `INACTIVE`: the format stays at N and the historical lifecycle may produce
   that prerequisite. Once present it is `ACTIVE` and exclusive: the lifecycle
@@ -142,11 +151,11 @@ ARTIFACT_FORMAT_UPGRADE_FLOOR = 13   (artifact engine)
   their own stamp.
 - The floors are declared constants, never derived from the promotion or
   self-healing tables. Above a floor nothing may promote the cursor except the
-  registry, and the release gate refuses a bumped runtime format that has no
+  registry, and the release gate refuses a bumped supported format that has no
   registered adjacent upgrader.
 
 Nothing new is persisted for any of this: pending-ness is a pure function of
-`(state.formatVersion, runtime format, registry, record tree)`, so status,
+`(state.formatVersion, selected active/supported target, registry, record tree)`, so status,
 preflight and the transaction always agree and a crash can leave no
 "upgrade started" flag behind.
 
@@ -306,6 +315,15 @@ additional evidence, never a substitute for those targets.
 
 ## `inventories/module-classification.json` (authored)
 
+The example below is the historical module-format-≤18 `version: 1` citation
+shape. Module format 19 authors `version: 2` with the same proposed roots,
+files, findings, rationale, evidence and concrete targets, but **without**
+`decisionId` or `decisionDigest` on any root, file, finding or visual-unbacked
+entry. Those fields are rejected on version 2: the verified decision ledger,
+not agent-authored JSON, supplies authority against the current candidate
+digest and trusted policy. Do not inspect state/ledger JSON or transcribe IDs
+or digests to authorize a module-19 decision.
+
 ```json
 {
   "version": 1,
@@ -413,7 +431,10 @@ without changing one census path.
 
 ## `decisions/operator-decisions.ndjson` (operator-only)
 
-One hash-chained JSON object per line, appended with `O_APPEND`:
+The following is the historical module-format-≤18 ledger and challenge
+contract only; artifact 13 retains its own legacy citation path. One
+hash-chained JSON object per line is appended
+with `O_APPEND`:
 
 ```json
 {
@@ -457,7 +478,25 @@ identical and pending. An agent may list candidates but cannot approve one. A
 stale id, a generic `y`, an agent-authored line lacking the current
 `candidateId`, or an approval with different concrete targets writes nothing.
 
-A row citing an algorithm-2 decision must satisfy all of: the decision exists
+For module 19, the engine presents the complete candidate-bound review and
+resolves one applicable v2 APPROVED/REJECTED entry directly from the verified
+ledger, with full candidate digest, principal, trusted policy identity/digest
+and (for a group) all ordered members bound as one act. An approval authorizes
+only that candidate and does not advance a checkpoint; rejection blocks until
+evidence changes. Status, pending decisions and run consume the same fresh,
+read-only projection (`checkpointAdvanced` is separate), so a newly appended
+decision is visible in the same session without a restart or copied receipt.
+The provider displays the review only. A native button, terminal or MCP answer
+cannot mint `HUMAN_ATTESTED`, and `AGENT_RELAYED` cannot meet an attested
+requirement. Judgment defaults to attested authority; an explicitly trusted,
+protected operator/admin policy can permit a relayed principal, but repository
+files, state, provider capabilities and `--mode auto` cannot weaken it. No
+production signer/companion or WebAuthn verifier exists in this milestone:
+missing signer yields `SIGNER_UNAVAILABLE` and writes nothing. Artifact 13
+retains the historical citation path; artifact 14 is not implemented.
+
+For historical module formats ≤18, a row citing an algorithm-2 scanner decision
+must satisfy all of: the decision exists
 and the chain verifies; `candidateId` is the current derived candidate;
 `kind`, `subject.type`, `subject.path`, and `targets` match exactly;
 `rationaleDigest` equals the digest of that row's own rationale;
@@ -1438,6 +1477,8 @@ at every verification):
   visual acceptance row.
 
 `matrices/visual-acceptance.json` (authored and pinned at `BUILD_BASELINE`):
+the `unbacked` receipt fields in this example apply only to module formats ≤18;
+module 19 omits both and resolves the decision from its verified ledger.
 
 ```json
 {
@@ -1484,8 +1525,9 @@ at every verification):
   descendant) + `figmaState` (one of that frame's recorded states/variants).
   Nothing is inferred from node or frame names, state text, or viewport. A state
   with a row cannot also be `unbacked`, not even by an operator.
-- `unbacked` is never an agent's call: a state with no row must cite a
-  `VISUAL_UNBACKED` operator decision
+- `unbacked` is never an agent's call: a state with no row needs a
+  `VISUAL_UNBACKED` decision. Module 19 resolves it from the verified ledger
+  without receipt fields; module formats ≤18 cite the historical
   (`decisionId`, `decisionDigest`) recorded through `record-decision.mjs`
   (`--pending`, then `--approve` at a terminal). `unbacked` is a judgement
   about design that was never supplied, so it is not derivable evidence: the
@@ -2219,8 +2261,9 @@ slice it belongs to, with
 a reopened slice — add-only, at least one `--add-file`.
 
 The second is acceptance: a `TARGET_DRIFT_ACCEPTED` operator decision recorded by
-`record-decision.mjs` under the same challenge phrase as every other approval —
-never a CLI flag. It binds to the path's SHA-256, so editing the file after
+`record-decision.mjs`, never a CLI flag. Module formats ≤18 retain the
+historical challenge; module 19 uses the policy-bound direct ledger, without
+transcribing a challenge or receipt. It binds to the path's SHA-256, so editing the file after
 acceptance invalidates the decision and re-blocks.
 
 It is the only decision kind that may be appended after

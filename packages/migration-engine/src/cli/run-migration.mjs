@@ -51,6 +51,7 @@ import {
   moduleApprover,
   recorderFor,
 } from "../operator-approval.mjs";
+import { renderDecisionReview } from "../record-decision.mjs";
 
 export const parseRunArguments = (arguments_) => {
   const { positionals, values } = parseArgs({
@@ -165,7 +166,7 @@ const pendingApprovals = async ({ step, state, registryPath, moduleName }) => {
     "DISCOVERY_COMPLETENESS",
   );
   if (step !== "DISCOVERY_COMPLETENESS" && !censusClosed) {
-    return { candidates: [], references: [], group: null };
+    return { candidates: [], references: [], group: null, decisions: null };
   }
   const pending = await pendingDecisionCandidates({ registryPath, moduleName });
   if (step === "DISCOVERY_COMPLETENESS") return pending;
@@ -202,11 +203,11 @@ export const decisionCandidates = async (options) =>
  * the wire; treating any of them as a final rejection is what left a valid
  * migration blocked with no way forward.
  */
-const operatorApproval = (candidates, group = null) => ({
-  cwd: process.cwd(),
-  candidates,
-  group,
-});
+const operatorApproval = (candidates, group = null) =>
+  candidates[0]?.review
+    ? { cwd: process.cwd(), review: group?.review ?? candidates[0].review,
+        blocked: group?.blocked ?? candidates[0].blocked ?? null }
+    : { cwd: process.cwd(), candidates, group };
 
 /**
  * D4-1, D4-2. The pause is not a second approval path: it is the existing gate,
@@ -265,6 +266,10 @@ export const runMigration = async (
   // to decide anything -- so an iteration that failed before reaching a record
   // simply reports no progress rather than inventing one.
   const decisionReferences = [];
+  // The shared decision projection this iteration read, carried on the result so
+  // a front end sees the same authority view `migration_status` and
+  // `migration_pending_decisions` do, from the same read.
+  let decisions = null;
   let latestState = null;
   // The preflight preview's own projection, already computed against the same
   // record by the same function. A blocked preflight returns no result, so
@@ -286,6 +291,7 @@ export const runMigration = async (
       outcome,
       request: null,
       decisionReferences,
+      decisions,
       ...extra,
       progress,
       progressChecklist: progress ? renderProgress(progress) : null,
@@ -452,6 +458,12 @@ export const runMigration = async (
       //     silent (D4-7).
       let candidates = [];
       let group = null;
+      // Whether this record resolves authority directly from the ledger. Read
+      // off the shared projection, never guessed from the record's contents or
+      // from what the ledger happens to contain: on that path there is no
+      // receipt to cite and instructing the agent to cite one would be asking
+      // it to author the field the format refuses.
+      let directLedger = false;
       try {
         const pending = await pendingApprovals({
           step,
@@ -461,6 +473,8 @@ export const runMigration = async (
         });
         candidates = pending.candidates;
         group = pending.group ?? null;
+        decisions = pending.decisions ?? null;
+        directLedger = decisions?.directLedger === true;
         // An approval recorded in a previous iteration -- at a terminal, or
         // inline -- and not yet cited. Reporting it here is what makes the
         // trusted fallback complete: the operator approves in their own
@@ -472,6 +486,26 @@ export const runMigration = async (
       }
       const approvable = candidates.filter((candidate) => candidate.approvable);
       if (approvable.length > 0) {
+        if (directLedger && (group?.blocked ?? approvable[0].blocked)) {
+          const review = group?.review ?? approvable[0].review;
+          const blocked = group?.blocked ?? approvable[0].blocked;
+          stdout.write(renderDecisionReview(review));
+          return finish("BLOCKED", {
+            reason: `${blocked.state}: ${blocked.reason}`,
+            next: step,
+            operatorApproval: operatorApproval(approvable, group),
+            blocked,
+          });
+        }
+        if (directLedger && approver?.channel === "AUTO") {
+          const blocked = { state: "RELAY_CHANNEL_UNAVAILABLE", requiredPrincipal: "AGENT_RELAYED",
+            reason: "The trusted policy requires AGENT_RELAYED; --mode auto cannot silently become a relayed decision." };
+          stdout.write(renderDecisionReview(group?.review ?? approvable[0].review));
+          return finish("BLOCKED", {
+            reason: `${blocked.state}: ${blocked.reason}`, next: step,
+            operatorApproval: operatorApproval(approvable, group), blocked,
+          });
+        }
         // 4b/4c. Pause in the operator's terminal, print the commands anywhere
         //        else. Either way `run` performs no advance afterwards (D4-3).
         const recorded = await approveWithOperator(
@@ -481,25 +515,38 @@ export const runMigration = async (
           decisionReferences,
           group,
         );
-        if (recorded.length < approvable.length) {
+        let remaining = approvable.slice(recorded.length);
+        if (directLedger && recorded.length > 0) {
+          const fresh = await pendingDecisionCandidates({ registryPath, moduleName: options.moduleName });
+          decisions = fresh.decisions;
+          remaining = fresh.candidates.filter((candidate) => candidate.approvable);
+          group = fresh.group;
+        }
+        if (remaining.length > 0) {
           return finish("OPERATOR_DECISION", {
             reason:
-              `${recordedPrefix(recorded)}${approvable.length - recorded.length} operator decision(s) are still pending, ` +
-              `each requiring its own operator approval in a new iteration; ` +
-              `cite every returned decisionId with its decisionDigest in ${MODULE_CLASSIFICATION_FILE}.`,
+              `${recordedPrefix(recorded)}${remaining.length} operator decision(s) are still pending, ` +
+              `each requiring its own operator approval in a new iteration` +
+              (directLedger
+                ? `. Each recorded decision is resolved from the verified ledger against the current candidate; nothing is cited in ${MODULE_CLASSIFICATION_FILE}.`
+                : `; cite every returned decisionId with its decisionDigest in ${MODULE_CLASSIFICATION_FILE}.`),
             next: step,
             operatorApproval: operatorApproval(
-              approvable.slice(recorded.length),
-              recorded.length === 0 ? group : null,
+              remaining,
+              directLedger || recorded.length === 0 ? group : null,
             ),
           });
         }
-        // An approval is half an act (§1.6): the checkpoint stays invalid until
-        // the agent cites each id and its digest in the classification.
+        // An approval is half an act (§1.6): on the legacy path the checkpoint
+        // stays invalid until the agent cites each id and its digest. On the
+        // direct-ledger path the approval is already authority -- the remaining
+        // half is the advance, not a transcription.
         return finish("CONTINUE", {
           reason:
-            `${error.message} Recorded ${recorded.join(", ")}; ` +
-            `cite each as decisionId with its decisionDigest in ${MODULE_CLASSIFICATION_FILE}.`,
+            `${error.message} Recorded ${recorded.join(", ")}` +
+            (directLedger
+              ? `; resolved from the verified ledger against the current candidate, nothing to cite.`
+              : `; cite each as decisionId with its decisionDigest in ${MODULE_CLASSIFICATION_FILE}.`),
           next: step,
           request: authoringRequest(discovered.result.state),
         });

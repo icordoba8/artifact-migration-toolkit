@@ -2,7 +2,7 @@ import {
   decisionLineDigest,
   isAutoAuthority,
 } from "./resumable-migration.mjs";
-import { autoApprovalChannel, runRecordDecisionCli } from "./record-decision.mjs";
+import { autoApprovalChannel, renderDecisionReview, runRecordDecisionCli } from "./record-decision.mjs";
 
 export const renderGroupBlock = (group) =>
   `  One approval covers all ${group.boundTo.members.length}:\n` +
@@ -112,14 +112,16 @@ export const approveWithOperator = async (
   group = null,
 ) => {
   if (!approver) {
-    stdout?.write(renderCandidateBlock(candidates, group));
+    stdout?.write(candidates[0]?.review
+      ? renderDecisionReview(group?.review ?? candidates[0].review)
+      : renderCandidateBlock(candidates, group));
     return [];
   }
   const record = async (offered) => {
     const result = await approver(offered.id);
     const decisions =
       result?.decisions ?? (result?.decision ? [result.decision] : []);
-    for (const decision of decisions) {
+    for (const decision of decisions.filter((entry) => entry.v !== 2)) {
       references.push({
         candidateId: decision.candidateId,
         subject: decision.subject,

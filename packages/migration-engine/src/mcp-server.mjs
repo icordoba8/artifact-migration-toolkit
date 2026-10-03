@@ -10,7 +10,7 @@
  * exit-code table; it never maps, prunes, or renames a field the core returned
  * (D6-8); and *no tool it exposes can approve an operator decision* (D6-3).
  *
- * `08` D8-2 adds the one thing D6-4 deferred: when the client declares
+ * For legacy records, `08` D8-2 adds the one thing D6-4 deferred: when the client declares
  * `elicitation` during `initialize`, this server originates the approval
  * request itself -- a server-to-client `elicitation/create` carrying the
  * candidate's read-only details and the per-candidate confirmation phrase the
@@ -312,14 +312,28 @@ const CONFIRMATION_SCHEMA = {
  * Upgrade path: an out-of-band token the operator reads from the record, or a
  * detached signature verified against a key pinned at RESOLVE.
  */
+const ELICITATION_TIMEOUT_MS = 5000;
+
 const trustedDecisionRecorder = (session, stdout) => (arguments_) =>
   runRecordDecisionCli(arguments_, {
     stdout,
-    ask: async ({ challenge, summary }) => {
-      const response = await session.request("elicitation/create", {
-        message: `Working directory: ${process.cwd()}\n${summary}\nConfirmation phrase: ${challenge}`,
-        requestedSchema: CONFIRMATION_SCHEMA,
-      });
+    ask: async ({ challenge, summary, review }) => {
+      let timer;
+      const response = await Promise.race([
+        Promise.resolve().then(() => session.request("elicitation/create", {
+          message: `Working directory: ${process.cwd()}\n${summary}` +
+            (review ? "\nThis host response is AGENT_RELAYED only, never HUMAN_ATTESTED." : `\nConfirmation phrase: ${challenge}`),
+          requestedSchema: review ? {
+            type: "object", properties: { decision: { type: "string", enum: ["Approve"] } }, required: ["decision"],
+          } : CONFIRMATION_SCHEMA,
+        })),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Elicitation timed out; no decision was recorded.")), ELICITATION_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (response?.action === "cancel") return "cancel";
+      if (review) return response?.action === "accept" && response.content?.decision === "Approve"
+        ? "accept" : "";
       // The human's own text, or nothing. Never `challenge`.
       return response?.action === "accept" &&
         typeof response.content?.confirmation === "string" &&
@@ -367,13 +381,21 @@ const runTool = async (arguments_, session) => {
     request: result.request ?? null,
     progress: result.progress ?? null,
     progressChecklist: result.progressChecklist ?? null,
+    // Legacy wire field, empty on the direct-ledger path: a format-19 record
+    // cites no receipt and the adapter invents none.
     decisionReferences: result.decisionReferences ?? [],
+    // The core's own decision projection, crossing verbatim. The adapter does
+    // not interpret it, does not derive authority from this response, and does
+    // not reconcile it with the status read below -- both come from the one
+    // projection, so there is nothing to reconcile.
+    decisions: result.decisions ?? null,
     // The core's own fallback contract, crossing verbatim (D6-8). The adapter
     // does not decide when it is offered and does not compose its commands: it
     // is the driver that knows which candidates are still pending and which
     // directory it resolved them in.
     pendingDecisions: result.pendingDecisions ?? null,
     operatorApproval: result.operatorApproval ?? null,
+    ...(result.blocked ? { blocked: result.blocked } : {}),
     // Read after the iteration, so the client sees where the record now stands.
     // A record the run could not reach at all has no status to report.
     state: await getMigrationStatus(await registryFor(arguments_)).catch(
@@ -401,7 +423,7 @@ const TOOLS = [
   {
     name: "migration_pending_decisions",
     description:
-      "List the operator decisions this record is waiting on, with the command that records each. Approving one is never a tool call: it happens only when a human selects Approve in the host request during migration_run, or answers the challenge at a terminal.",
+      "List pending decisions and their engine-owned reviews. Format-19 human decisions require an unavailable independent signer; host responses are presentation only and never human attestation. Legacy records retain their terminal/host interaction.",
     inputSchema: INPUT_SCHEMA,
     call: readOnly(pendingDecisionCandidates),
   },
@@ -465,13 +487,25 @@ const callTool = (id, parameters, session) => {
 const callToolInContext = async (id, parameters, session) => {
   const name = parameters?.name;
   const module = parameters?.arguments?.module ?? "<module>";
+  // A legacy refusal may name its historical recorder command. Format 19 has
+  // no ID-transcription workflow, even when a caller tries an invalid tool.
+  const approvalRefusal = async () => {
+    if (typeof module === "string" && module !== "<module>") {
+      const pending = await registryFor(parameters.arguments)
+        .then(pendingDecisionCandidates).catch(() => null);
+      if (pending?.decisions?.directLedger) {
+        return "Format-19 decisions require the engine-owned review and its trusted policy. No MCP tool or host response attests HUMAN authority; the signer is unavailable.";
+      }
+    }
+    return `Run it as an operator: ${REFUSED_TOOLS.migration_approve(module)}`;
+  };
   if (Object.hasOwn(REFUSED_TOOLS, name ?? "")) {
     return failure(
       id,
       JSON_RPC_METHOD_NOT_FOUND,
-      `'${name}' is not an MCP tool. Run it as an operator: ${REFUSED_TOOLS[
-        name
-      ](module)}`,
+      `'${name}' is not an MCP tool. ${name === "migration_approve"
+        ? await approvalRefusal()
+        : `Run it as an operator: ${REFUSED_TOOLS[name](module)}`}`,
     );
   }
   // The named list above covers the tools that were asked for by name. This
@@ -486,7 +520,7 @@ const callToolInContext = async (id, parameters, session) => {
     return failure(
       id,
       JSON_RPC_INVALID_REQUEST,
-      `'${name}' carries an approval-shaped argument '${smuggled}'. An operator decision is never an MCP argument. Run it as an operator: ${REFUSED_TOOLS.migration_approve(module)}`,
+      `'${name}' carries an approval-shaped argument '${smuggled}'. An operator decision is never an MCP argument. ${await approvalRefusal()}`,
     );
   }
   const tool = TOOLS_BY_NAME.get(name);
@@ -593,13 +627,26 @@ export const serve = ({
   });
   const pending = new Map();
   let issued = 0;
+  // ponytail: a fixed finite lifetime; no provider capability is proof that a
+  // dialog renders. Late replies cannot match an expired pending request.
   const request = (method, params) =>
     new Promise((resolve, reject) => {
       const id = `sm-${(issued += 1)}`;
-      pending.set(id, { resolve, reject });
-      output.write(
-        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-      );
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("Elicitation timed out; no decision was recorded."));
+      }, ELICITATION_TIMEOUT_MS);
+      pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      try {
+        output.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   const session = createSession({ request });
   let chain = Promise.resolve();

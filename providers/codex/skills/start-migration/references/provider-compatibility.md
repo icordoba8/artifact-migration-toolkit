@@ -15,6 +15,16 @@ canonical documents. `skills/` is the source the generator reads; it is not a
 skill path any provider is configured with. Each adapter installs its generated
 tree into the root its own host supports.
 
+For supported module format 19, provider UI only presents the engine's
+candidate-bound review and fresh decision projection. A native button, MCP
+elicitation or terminal input does not attest HUMAN authority. Without the
+separately deferred production signer/companion, a default `HUMAN_ATTESTED`
+request is explicitly blocked (`SIGNER_UNAVAILABLE`); no host path may
+downgrade it to `AGENT_RELAYED`. Module 18 remains the creation default, and
+artifact 13 remains the only supported/active artifact format; artifact 14 is
+unavailable. Historical module ≤18 and artifact-13 citation/challenge flows
+retain their format-gated compatibility behavior.
+
 Provider wrappers contain no workflow logic. They load the generated skill and
 forward invocation text, preventing four copies of the workflow from drifting.
 Claude gets no wrapper: its skill is directly user-invocable, so a wrapper would

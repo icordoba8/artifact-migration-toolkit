@@ -17,6 +17,7 @@ import {
   advanceMigration,
   assertExecutionConfirmation,
   bootstrapMigration,
+  commitFormatUpgrade,
   previewAdvance,
   previewMigrationExecution,
   resolveRegistryPath,
@@ -410,6 +411,57 @@ const atDiscoveryCompleteness = async (
   );
 };
 
+/**
+ * A classification authored the way a format-19 record authors one: schema
+ * version 2, rationale and evidence intact, and no `decisionId`/`decisionDigest`
+ * anywhere -- authority is resolved from the ledger, never cited in the file.
+ */
+const directLedgerClassification = (classification) => ({
+  ...classification,
+  version: 2,
+  moduleRoots: (classification.moduleRoots ?? []).map(
+    ({ decisionId, decisionDigest, ...entry }) => entry,
+  ),
+  files: (classification.files ?? []).map(
+    ({ decisionId, decisionDigest, ...row }) => row,
+  ),
+  findings: (classification.findings ?? []).map(
+    ({ decisionId, decisionDigest, ...row }) => row,
+  ),
+});
+
+/**
+ * The same position as `atDiscoveryCompleteness`, on a real format-19 record.
+ *
+ * The 18 -> 19 transition is taken the only way it can be taken -- explicitly,
+ * before any decision-bearing artifact is pinned, through the journalled
+ * upgrade -- so nothing here reinterprets an existing approval or hand-edits a
+ * stamp into `state.json`.
+ */
+const atDirectLedgerCompleteness = async (
+  fixture,
+  classification,
+  base = MODULE_CLASSIFICATION,
+) => {
+  await initialize(fixture);
+  const resolution = await resolutionFor(fixture);
+  const upgraded = await commitFormatUpgrade({
+    ...resolution,
+    moduleName: "auth",
+    adoptDirectLedger: true,
+  });
+  if (upgraded.to !== 19) {
+    throw new Error(`fixture expected format 19, got ${upgraded.to}`);
+  }
+  await authorDiscoverLegacy(fixture, directLedgerClassification(base));
+  await advanceDirect(fixture);
+  await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+  await writeJson(
+    path.join(fixture.migrationRoot, "inventories/module-classification.json"),
+    directLedgerClassification(classification),
+  );
+};
+
 const state = (fixture) =>
   readJson(path.join(fixture.migrationRoot, "state.json"));
 
@@ -439,8 +491,10 @@ export {
   MODULE_CLASSIFICATION,
   NON_APPROVABLE_CLASSIFICATION,
   addLegacyFiles,
+  atDirectLedgerCompleteness,
   atDiscoveryCompleteness,
   authorDiscoverLegacy,
+  directLedgerClassification,
   behaviorBacked,
   createFixture,
   extraFileNames,

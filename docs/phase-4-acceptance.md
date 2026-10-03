@@ -124,8 +124,8 @@ The update fixture is a synthetic compatible `1.1.1` identity, not a published
 second release. Acceptance builds use the working tree with `force: true`; a
 clean committed release and protected tag remain separate release gates.
 
-These are automated filesystem/configuration and real engine/MCP acceptance
-checks on this Linux host. They do not claim interactive discovery in all four
+These are automated filesystem/configuration and engine/MCP acceptance
+checks on Linux. They do not claim interactive discovery in all four
 native host UIs, a marketplace installation, signing ownership approval, or a
 Windows execution result. CI owns Windows execution. Production Claude namespace
 and marketplace/signing approval remain release-owner decisions from the plan.

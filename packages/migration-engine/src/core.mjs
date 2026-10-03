@@ -29,9 +29,12 @@ export {
   ARTIFACT_DELEGATION_FORMAT,
   CAPABILITY_OWNERSHIP_FORMAT,
   DESIGN_SOURCE_FORMAT,
+  DIRECT_LEDGER_DECISIONS_FORMAT,
   DISCOVERY_COMPLETENESS_FORMAT,
   FINAL_GATES,
+  FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
   LEGACY_MIGRATION_STEPS,
+  MIGRATION_FORMAT_SUPPORTED,
   MIGRATION_FORMAT_VERSION,
   MIGRATION_STEPS,
   MULTI_SOURCE_FORMAT,
@@ -161,6 +164,16 @@ export { LATE_DECISION_KINDS } from "./resumable-migration.mjs";
 // `OPERATOR_DECISION` with. Reading candidates is not approving one -- the TTY
 // gate that governs approval lives in `runRecordDecisionCli` and is untouched.
 export { pendingDecisionCandidates } from "./record-decision.mjs";
+
+// The canonical fresh decision projection. One read-only view over current
+// candidates, trusted policy, both verified ledgers and checkpoint state --
+// status, pending decisions and run all consume this, so a consumer cannot
+// construct a second opinion by reading something else.
+export { projectDecisions } from "./record-decision.mjs";
+export {
+  DECISION_PROJECTION_STATES,
+  projectModuleDecision,
+} from "./resumable-migration.mjs";
 
 // The operation half of the same idea: one human act over an ordered set of
 // operator *transitions*, not ledger lines. Only the authorization minted here

@@ -1,8 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
   access,
   appendFile,
   link,
+  lstat,
   mkdir,
   open,
   readdir,
@@ -228,6 +231,38 @@ export const usesVisualAcceptance = (state) =>
 export const REQUIRED_OBSERVATIONS_FORMAT = 18;
 export const usesRequiredObservations = (state) =>
   (state?.formatVersion ?? 1) >= REQUIRED_OBSERVATIONS_FORMAT;
+
+/**
+ * Format 19: a module decision's authority is resolved *directly* from the
+ * verified ledger against the current full candidate digest and the trusted
+ * policy pin, instead of from a `decisionId`/`decisionDigest` receipt copied
+ * into an agent-authored record file. Classification is authored at
+ * `version: 2`, which carries proposal, rationale, evidence and targets and
+ * explicitly rejects those receipt fields -- a record that both cites a receipt
+ * and claims direct authority is ambiguous, and an ambiguous authority is not
+ * one.
+ *
+ * Supported, not active. Creation stays at 18 (see
+ * `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS`) and no advance ever stamps 19: 19 is in
+ * `NON_PROMOTING_FORMAT_VERSIONS` and its registry row is reachable only from
+ * the explicit pre-pin adoption path. Activating it for new records is a
+ * separate release/security gate that this constant does not open.
+ */
+export const DIRECT_LEDGER_DECISIONS_FORMAT = 19;
+export const usesDirectLedgerDecisions = (state) =>
+  (state?.formatVersion ?? 1) >= DIRECT_LEDGER_DECISIONS_FORMAT;
+
+/**
+ * The two independent controls, never inferred from one constant.
+ *
+ * `MIGRATION_FORMAT_SUPPORTED` is the highest format this engine can read,
+ * validate, test and -- when explicitly selected -- move a record to.
+ * `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS` is the format ordinary creation stamps.
+ * They are deliberately different numbers right now; collapsing them back into
+ * one would silently activate 19 for every new record.
+ */
+export const MIGRATION_FORMAT_SUPPORTED = DIRECT_LEDGER_DECISIONS_FORMAT;
+export const FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = MIGRATION_FORMAT_VERSION;
 /**
  * The format from which every increment is owned by the upgrade registry
  * (`FORMAT_UPGRADERS`, below): at or above it, `state.formatVersion` is a real
@@ -440,6 +475,10 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
   CAPABILITY_OWNERSHIP_FORMAT,
   VISUAL_ACCEPTANCE_FORMAT,
   REQUIRED_OBSERVATIONS_FORMAT,
+  // 19 changes where a decision's authority comes from, so promoting a record
+  // into it would reinterpret authority it already recorded under citation
+  // rules. It is reached only by the explicit, journalled pre-pin adoption.
+  DIRECT_LEDGER_DECISIONS_FORMAT,
 ]);
 
 /**
@@ -450,6 +489,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
  * no third place, which is what the negation chain kept growing.
  */
 const FORMAT_FEATURES = [
+  [DIRECT_LEDGER_DECISIONS_FORMAT, usesDirectLedgerDecisions],
   [REQUIRED_OBSERVATIONS_FORMAT, usesRequiredObservations],
   [VISUAL_ACCEPTANCE_FORMAT, usesVisualAcceptance],
   [SLICE_REWORK_FORMAT, usesSliceRework],
@@ -461,19 +501,23 @@ const FORMAT_FEATURES = [
   [DISCOVERY_COMPLETENESS_FORMAT, usesDiscoveryCompleteness],
 ];
 
-const stampedFormatVersion = (state) => {
+export const stampedFormatVersion = (state) => {
   // Lowest unmet feature wins: a record that predates the capability matrix is
   // stamped 10 even though it also predates every later feature.
   const unmet = FORMAT_FEATURES.filter(([, uses]) => !uses(state));
+  // The ceiling is the *supported* format, not the active one, so a record
+  // already at 19 is re-stamped 19 rather than demoted to 18. An 18 record
+  // leaves `usesDirectLedgerDecisions` unmet and is stamped 18, which is what
+  // keeps an ordinary advance from promoting it.
   return unmet.length === 0
-    ? MIGRATION_FORMAT_VERSION
+    ? MIGRATION_FORMAT_SUPPORTED
     : Math.min(...unmet.map(([version]) => version)) - 1;
 };
 
 /** The supported formats, for the SKILL.md compatibility table (W10-3). */
 export const SUPPORTED_FORMAT_VERSIONS = Object.freeze(
   Array.from(
-    { length: MIGRATION_FORMAT_VERSION - EARLIEST_SUPPORTED_FORMAT + 1 },
+    { length: MIGRATION_FORMAT_SUPPORTED - EARLIEST_SUPPORTED_FORMAT + 1 },
     (_unused, index) => EARLIEST_SUPPORTED_FORMAT + index,
   ),
 );
@@ -481,6 +525,7 @@ export const SUPPORTED_FORMAT_VERSIONS = Object.freeze(
 /** Whether a record at this format still executes under the current contract. */
 export const formatIsSupported = (version) =>
   version === MIGRATION_FORMAT_VERSION ||
+  version === MIGRATION_FORMAT_SUPPORTED ||
   SELF_HEALING_FORMAT_VERSIONS.has(version);
 
 /**
@@ -601,8 +646,7 @@ export const compatibilityBlocker = (state, moduleName) => {
   const formatVersion = state.formatVersion ?? 1;
   if (
     contractVersion === RESUMABLE_CONTRACT_VERSION &&
-    (formatVersion === MIGRATION_FORMAT_VERSION ||
-      SELF_HEALING_FORMAT_VERSIONS.has(formatVersion))
+    formatIsSupported(formatVersion)
   ) {
     return null;
   }
@@ -614,9 +658,9 @@ export const compatibilityBlocker = (state, moduleName) => {
   }
   if (
     contractVersion > RESUMABLE_CONTRACT_VERSION ||
-    formatVersion > MIGRATION_FORMAT_VERSION
+    formatVersion > MIGRATION_FORMAT_SUPPORTED
   ) {
-    return `Migration '${moduleName}' uses contract ${contractVersion} format ${formatVersion}, which is newer than the supported contract ${RESUMABLE_CONTRACT_VERSION} format ${MIGRATION_FORMAT_VERSION}. Update start-migration before continuing. No file was changed.`;
+    return `Migration '${moduleName}' uses contract ${contractVersion} format ${formatVersion}, which is newer than the supported contract ${RESUMABLE_CONTRACT_VERSION} format ${MIGRATION_FORMAT_SUPPORTED}. Update start-migration before continuing. No file was changed.`;
   }
   return `Migration '${moduleName}' uses contract ${contractVersion} format ${formatVersion}, which is unsupported and is never converted. It was left untouched.`;
 };
@@ -4233,6 +4277,17 @@ export const lifecycleBinding = async (state, statePath) => ({
 export const edgeDecisionSubject = (finding) =>
   `${finding.file}:${finding.line}#${finding.id}`;
 
+const candidateHash = ({ kind, subject, rationaleDigest, targets, boundTo, projectRoot, policyId, policyDigest, requiredPrincipal }) =>
+  createHash("sha256")
+    .update(JSON.stringify({ kind, subject, rationaleDigest, targets, boundTo,
+      ...(policyId === undefined ? {} : { projectRoot, policyId, policyDigest, requiredPrincipal }),
+    }))
+    .digest("hex");
+
+/** The full digest the candidate id is the 20-hex prefix of. */
+export const candidateDigestOf = (candidate) =>
+  `sha256:${candidateHash(candidate)}`;
+
 export const createDecisionCandidate = ({
   kind,
   subjectType,
@@ -4249,13 +4304,24 @@ export const createDecisionCandidate = ({
     boundTo,
   };
   return {
-    id: `APP-${createHash("sha256")
-      .update(JSON.stringify(candidate))
-      .digest("hex")
-      .slice(0, 20)}`,
+    id: `APP-${candidateHash(candidate).slice(0, 20)}`,
     ...candidate,
     rationale: String(rationale).replace(/\r\n/g, "\n").trim(),
   };
+};
+
+/**
+ * New-format only. No caller-supplied policy, mode or capability is authority.
+ *
+ * `policyKind` exists for the one case where the kind under review is not the
+ * kind the policy is about: a decision *group* is kind `GROUP_APPROVAL`, but
+ * the authority it needs is its members' kind's authority. It selects a policy
+ * row; it never supplies one.
+ */
+export const createNewFormatDecisionCandidate = async ({ projectRoot, policyKind, ...candidate }) => {
+  const binding = await resolveRequiredPrincipal(policyKind ?? candidate.kind, projectRoot);
+  const bound = { ...createDecisionCandidate(candidate), ...binding };
+  return { ...bound, id: `APP-${candidateHash(bound).slice(0, 20)}` };
 };
 
 const decisionGroupMemberFact = (candidate) => ({
@@ -4277,8 +4343,12 @@ const DECISION_MODULE_BINDING = [
   "algorithmVersion",
 ];
 
-/** One stable candidate representing the first homogeneous approvable group. */
-export const decisionGroupFor = (candidates, lifecycle) => {
+/**
+ * Which approvable candidates form the first homogeneous group, and the module
+ * binding they share. One selection rule, used by both the legacy group and the
+ * new-format one, so the two can never disagree about who the members are.
+ */
+const groupMembersOf = (candidates) => {
   const approvable = candidates.filter((candidate) => candidate.approvable);
   const [first] = approvable;
   if (!first) return null;
@@ -4292,32 +4362,142 @@ export const decisionGroupFor = (candidates, lifecycle) => {
         (field) => candidate.boundTo?.[field] === binding[field],
       ),
   );
-  if (members.length < 2) return null;
-  const facts = members.map(decisionGroupMemberFact);
-  const group = createDecisionCandidate({
-    kind: DECISION_GROUP_KIND,
-    subjectType: "DECISION_GROUP",
-    subjectPath: `${first.kind}@${String(binding.discoveryDigest).replace(/^sha256:/, "").slice(0, 12)}`,
-    rationale: facts
-      .map(
-        (fact, index) =>
-          `${index + 1}. ${fact.id} ${fact.kind} ${fact.subject.path}` +
-          (fact.pathDigest ? ` [${fact.pathDigest}]` : ""),
-      )
-      .join("\n"),
-    targets: [],
-    boundTo: {
-      ...binding,
-      groupKind: "DECISION_CANDIDATES",
+  return members.length < 2 ? null : { first, binding, members };
+};
+
+/** The candidate inputs a group is derived from, given its ordered facts. */
+const groupCandidateInput = ({ first, binding, lifecycle, facts }) => ({
+  kind: DECISION_GROUP_KIND,
+  subjectType: "DECISION_GROUP",
+  subjectPath: `${first.kind}@${String(binding.discoveryDigest).replace(/^sha256:/, "").slice(0, 12)}`,
+  rationale: facts
+    .map(
+      (fact, index) =>
+        `${index + 1}. ${fact.id} ${fact.kind} ${fact.subject.path}` +
+        (fact.pathDigest ? ` [${fact.pathDigest}]` : ""),
+    )
+    .join("\n"),
+  targets: [],
+  boundTo: {
+    ...binding,
+    groupKind: "DECISION_CANDIDATES",
+    lifecycle,
+    members: facts,
+  },
+});
+
+/** One stable candidate representing the first homogeneous approvable group. */
+export const decisionGroupFor = (candidates, lifecycle) => {
+  const selection = groupMembersOf(candidates);
+  if (!selection) return null;
+  const group = createDecisionCandidate(
+    groupCandidateInput({
+      ...selection,
       lifecycle,
-      members: facts,
-    },
+      facts: selection.members.map(decisionGroupMemberFact),
+    }),
+  );
+  return {
+    ...group,
+    approvable: true,
+    blockers: [],
+    groupMembers: selection.members,
+  };
+};
+
+/**
+ * One reviewed group act, one authoritative ledger entry.
+ *
+ * The complete ordered member set is part of the group candidate's own digest,
+ * and each fact carries that member's full evidence binding -- not just its
+ * `APP-` id, which is a display identifier. So a reorder, an omission, an
+ * addition or changed member evidence is a *different* candidate rather than
+ * the same one with a detail moved, and a decision over the old one stops
+ * applying. The group's required principal comes from its members' kind: a
+ * batch of judgments is not a lesser act than one of them.
+ */
+export const createNewFormatDecisionGroup = async ({
+  candidates,
+  lifecycle,
+  projectRoot,
+}) => {
+  const selection = groupMembersOf(candidates);
+  if (!selection) return null;
+  const group = await createNewFormatDecisionCandidate({
+    projectRoot,
+    policyKind: selection.first.kind,
+    ...groupCandidateInput({
+      ...selection,
+      lifecycle,
+      facts: selection.members.map((member) => ({
+        ...decisionGroupMemberFact(member),
+        boundTo: member.boundTo ?? null,
+      })),
+    }),
   });
-  return { ...group, approvable: true, blockers: [], groupMembers: members };
+  return {
+    ...group,
+    approvable: true,
+    blockers: [],
+    groupMembers: selection.members,
+  };
+};
+
+/**
+ * The one authoritative entry for a reviewed group act, or none.
+ *
+ * Two v2 lines over the same reviewed group -- a duplicate APPROVED, or an
+ * APPROVED beside a REJECTED -- is an ambiguity, and an ambiguous decision is
+ * not a decision. Picking the newest, the oldest or the first would be the
+ * engine deciding, so this refuses instead. A member line cannot answer for the
+ * group either: it would be a second line over the same digest and fail here
+ * too.
+ */
+export const resolveGroupDecision = (decisions, candidate) => {
+  if (candidate?.kind !== DECISION_GROUP_KIND) {
+    throw new Error(
+      `resolveGroupDecision takes a ${DECISION_GROUP_KIND} candidate, not '${candidate?.kind}'.`,
+    );
+  }
+  const digest = candidateDigestOf(candidate);
+  const matching = decisions.filter(
+    (decision) => decision?.v === 2 && decision.candidateDigest === digest,
+  );
+  if (matching.length > 1) {
+    throw new Error(
+      `Decision group '${candidate.id}' has ${matching.length} ledger entries (${matching
+        .map((decision) => `${decision.id} ${decision.result}`)
+        .join(", ")}). Duplicate or conflicting group outcomes fail closed; nothing is authoritative until the record is repaired.`,
+    );
+  }
+  const [decision] = matching;
+  return {
+    decision: decision ?? null,
+    result: decision?.result ?? null,
+    applicable: Boolean(
+      decision && decisionAppliesToCandidate(decision, candidate),
+    ),
+  };
 };
 
 export const decisionAppliesToCandidate = (decision, candidate) =>
   Boolean(decision && candidate) &&
+  // A policy-bound candidate cannot shed one field and fall back to legacy.
+  ((candidate.policyId === undefined && candidate.policyDigest === undefined &&
+    candidate.requiredPrincipal === undefined) ||
+    (typeof candidate.projectRoot === "string" && path.isAbsolute(candidate.projectRoot) &&
+      candidate.policyId !== undefined && candidate.policyDigest !== undefined &&
+      candidate.requiredPrincipal !== undefined && decision.v === 2 &&
+      candidate.id === `APP-${candidateHash(candidate).slice(0, 20)}` &&
+      decision.policyId === candidate.policyId &&
+      decision.policyDigest === candidate.policyDigest &&
+      principalSatisfiesRequirement(decision.principal, candidate.requiredPrincipal))) &&
+  // A v2 line applies only as an explicit APPROVED over the full candidate
+  // digest. REJECTED is never an approval. For a policy-bound candidate, the
+  // required principal and pinned policy are also checked above.
+  (decision.v !== 2 ||
+    (decision.result === "APPROVED" &&
+      decision.candidateDigest === candidateDigestOf(candidate))) &&
   decision.candidateId === candidate.id &&
   decision.kind === candidate.kind &&
   decision.subject?.type === candidate.subject.type &&
@@ -4352,6 +4532,197 @@ export const decisionChannelOf = (decision) =>
   decision?.authorizedBy?.channel ?? "TERMINAL";
 
 /**
+ * Decision-line schema v2: `v: 2` plus an explicit `principal`, an explicit
+ * `result` and the full `candidateDigest`. A legacy line carries none of those
+ * top-level fields and keeps its exact bytes; its principal is derived, and a
+ * non-AUTO legacy line is historical `LEGACY_HUMAN` -- never `HUMAN_ATTESTED`.
+ *
+ * ponytail: `HUMAN_ATTESTED` and v2 `AUTO` are named but refused on read and
+ * write. No attestation verifier exists, so an attested line can only be a
+ * forgery; AUTO keeps its existing ledger shape. Upgrade path: the signer step
+ * admits HUMAN_ATTESTED here once its proof is verified on every read.
+ */
+export const DECISION_PRINCIPALS = Object.freeze([
+  "HUMAN_ATTESTED",
+  "AGENT_RELAYED",
+  "AUTO",
+]);
+export const DECISION_RESULTS = Object.freeze(["APPROVED", "REJECTED"]);
+const DECISION_V2_FIELDS = ["v", "principal", "result", "candidateDigest", "policyId", "policyDigest"];
+
+// ponytail: one engine default and one fixed OS-protected manifest; no agent-facing
+// policy selector. Add multi-project storage only when an admin service owns it.
+export const DEFAULT_DECISION_POLICY_ID = "engine/judgment/v1";
+const PROTECTED_DECISION_POLICY_FILE = "/etc/artifact-migration-tools/decision-policy.json";
+const JUDGMENT_KINDS = new Set([
+  "EXCLUSION", "DEAD_CONFIRMATION", "EDGE_RESOLUTION", "ROOT_DECLARATION",
+  "TARGET_DRIFT_ACCEPTED", "VISUAL_UNBACKED", "ARTIFACT_DECISION",
+]);
+const sha256Json = (value) =>
+  `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+const canonicalPolicy = ({ policyId, projectRoot, revision, rules }) => ({
+  policyId, projectRoot, revision,
+  rules: Object.fromEntries(Object.entries(rules).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
+});
+export const DEFAULT_DECISION_POLICY_DIGEST = sha256Json(canonicalPolicy({
+  policyId: DEFAULT_DECISION_POLICY_ID, projectRoot: null, revision: 1, rules: {},
+}));
+
+/** Principal strength is explicit; legacy HUMAN never acquires attestation. */
+export const principalSatisfiesRequirement = (actual, required) => {
+  const eligible = { HUMAN_ATTESTED: ["HUMAN_ATTESTED"],
+    AGENT_RELAYED: ["HUMAN_ATTESTED", "AGENT_RELAYED"],
+    AUTO: ["HUMAN_ATTESTED", "AGENT_RELAYED", "AUTO"],
+  };
+  return Object.hasOwn(eligible, required) && eligible[required].includes(actual);
+};
+
+/** Validate contents and the protected pin; this parser alone grants no provenance. */
+export const validateProtectedDecisionPolicy = (document, projectRoot) => {
+  const onlyKeys = (value, keys) =>
+    value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).every((key) => keys.includes(key));
+  if (!onlyKeys(document, ["policy", "policyDigest", "provenance", "previous"])) {
+    throw new Error("Protected decision policy document is malformed.");
+  }
+  const policy = document?.policy;
+  if (!onlyKeys(policy, ["policyId", "projectRoot", "revision", "rules"]) ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$/.test(policy.policyId ?? "") ||
+      policy.projectRoot !== path.resolve(projectRoot) ||
+      !Number.isSafeInteger(policy.revision) || policy.revision < 1 ||
+      !policy.rules || typeof policy.rules !== "object" || Array.isArray(policy.rules) ||
+      Object.entries(policy.rules).some(([kind, principal]) =>
+        !JUDGMENT_KINDS.has(kind) || !DECISION_PRINCIPALS.includes(principal))) {
+    throw new Error("Protected decision policy has invalid identity, project binding or rules.");
+  }
+  if (document.policyDigest !== sha256Json(canonicalPolicy(policy))) {
+    throw new Error("Protected decision policy identity/digest pin mismatch.");
+  }
+  const audit = document.provenance;
+  if (!onlyKeys(audit, ["action", "actor", "at", "reason", "previousPolicyDigest"]) ||
+      audit.action !== "OPERATOR_ADMIN_POLICY_CHANGE" ||
+      typeof audit.actor !== "string" || !audit.actor.trim() ||
+      typeof audit.reason !== "string" || !audit.reason.trim() ||
+      typeof audit.at !== "string" ||
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(audit.at) ||
+      !Number.isFinite(Date.parse(audit.at)) ||
+      !/^sha256:[0-9a-f]{64}$/.test(audit.previousPolicyDigest ?? "")) {
+    throw new Error("Protected decision policy has missing or invalid admin-change provenance.");
+  }
+  if (policy.revision === 1) {
+    if (document.previous !== undefined ||
+        audit.previousPolicyDigest !== DEFAULT_DECISION_POLICY_DIGEST) {
+      throw new Error("Protected decision policy genesis provenance does not match the engine default.");
+    }
+  } else {
+    if (!document.previous ||
+        validateProtectedDecisionPolicy(document.previous, projectRoot).revision !== policy.revision - 1 ||
+        document.previous.policy.policyId !== policy.policyId ||
+        audit.previousPolicyDigest !== document.previous.policyDigest) {
+      throw new Error("Protected decision policy admin-change history does not match its previous pin.");
+    }
+  }
+  // The audit and pin become authority only when read from root-owned storage.
+  return { ...canonicalPolicy(policy), policyDigest: document.policyDigest };
+};
+
+const trustedPolicyFor = async (projectRoot) => {
+  // Only Linux has the fixed root-owned trust store; elsewhere keep the strict default.
+  if (process.platform !== "linux") return null;
+  for (const directory of ["/", "/etc", path.dirname(PROTECTED_DECISION_POLICY_FILE)]) {
+    let details;
+    try { details = await lstat(directory); }
+    catch (error) {
+      if (error.code === "ENOENT" && directory !== "/etc") return null;
+      throw error;
+    }
+    if (!details.isDirectory() || details.uid !== 0 || (details.mode & 0o022)) {
+      throw new Error(`Untrusted protected decision policy directory: ${directory}`);
+    }
+  }
+  let handle;
+  try {
+    handle = await open(PROTECTED_DECISION_POLICY_FILE, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const details = await handle.stat();
+    if (!details.isFile() || details.uid !== 0 || (details.mode & 0o022)) {
+      throw new Error("Untrusted protected decision policy file ownership or permissions.");
+    }
+    return validateProtectedDecisionPolicy(JSON.parse(await handle.readFile("utf8")), projectRoot);
+  } finally {
+    await handle.close();
+  }
+};
+
+/** The only production policy resolver; repository/state/tool input is not read. */
+export const resolveRequiredPrincipal = async (kind, projectRoot) => {
+  if (!JUDGMENT_KINDS.has(kind)) throw new Error(`Unknown judgment decision kind: ${kind}`);
+  if (typeof projectRoot !== "string" || !path.isAbsolute(projectRoot)) {
+    throw new Error("A canonical absolute project root is required for decision policy.");
+  }
+  const canonicalRoot = path.resolve(projectRoot);
+  const policy = await trustedPolicyFor(canonicalRoot);
+  return {
+    projectRoot: canonicalRoot,
+    policyId: policy?.policyId ?? DEFAULT_DECISION_POLICY_ID,
+    policyDigest: policy?.policyDigest ?? DEFAULT_DECISION_POLICY_DIGEST,
+    requiredPrincipal: policy?.rules[kind] ?? "HUMAN_ATTESTED",
+  };
+};
+
+/** Why a line's principal/result cannot be trusted, or null. Fail-closed. */
+export const decisionLineProblem = (decision) => {
+  if (decision?.v === undefined) {
+    const stray = DECISION_V2_FIELDS.filter(
+      (field) => decision?.[field] !== undefined,
+    );
+    return stray.length === 0
+      ? null
+      : `carries ${stray.join(", ")} without "v": 2; a legacy line has no explicit principal or result`;
+  }
+  if (decision.v !== 2) {
+    return `declares unknown decision schema v ${JSON.stringify(decision.v)}`;
+  }
+  if (!DECISION_PRINCIPALS.includes(decision.principal)) {
+    return `declares unknown principal ${JSON.stringify(decision.principal)}`;
+  }
+  if (decision.principal === "HUMAN_ATTESTED") {
+    return "claims HUMAN_ATTESTED, which this build has no verifier for; an unverifiable attestation is refused, not trusted";
+  }
+  if (decision.principal === "AUTO") {
+    return `claims a v2 AUTO principal; AUTO decisions keep their own ledger shape in ${AUTO_DECISIONS_FILE}`;
+  }
+  if (!DECISION_RESULTS.includes(decision.result)) {
+    return `declares unknown result ${JSON.stringify(decision.result)}`;
+  }
+  if (!/^sha256:[0-9a-f]{64}$/.test(decision.candidateDigest ?? "")) {
+    return `carries no full candidateDigest (${JSON.stringify(decision.candidateDigest)})`;
+  }
+  if (decision.policyId !== undefined || decision.policyDigest !== undefined) {
+    if (typeof decision.policyId !== "string" || !decision.policyId ||
+        !/^sha256:[0-9a-f]{64}$/.test(decision.policyDigest ?? "")) {
+      return "carries a missing or malformed policy identity/digest";
+    }
+  }
+  if (decision.authorizedBy !== undefined) {
+    return "carries a legacy authorizedBy block; a v2 line's principal is explicit";
+  }
+  return null;
+};
+
+/** The principal a line is read as: explicit for v2, derived for legacy. */
+export const decisionPrincipalOf = (decision) =>
+  decision?.v === 2
+    ? decision.principal
+    : decisionChannelOf(decision) === "AUTO"
+      ? "AUTO"
+      : "LEGACY_HUMAN";
+
+/**
  * Reads one decision ledger and verifies its hash chain. Absent file is legal:
  * a module with nothing to approve records nothing.
  *
@@ -4366,7 +4737,17 @@ const readDecisionLedger = async (root, file, principal) => {
   const absolute = path.join(root, file);
   if (!(await fileExists(absolute))) return { decisions: [], byId: new Map() };
   const decisions = [];
-  const lines = (await readFile(absolute, "utf8")).split("\n");
+  const content = await readFile(absolute, "utf8");
+  // Every line this engine has ever appended ended in a newline, written with
+  // the record in one O_APPEND write. A ledger that does not end in one is a
+  // torn append, and a torn line is refused whole rather than parsed as far as
+  // it got -- a group entry is one line, so refusing it refuses the group.
+  if (content.length > 0 && !content.endsWith("\n")) {
+    throw new Error(
+      `${file} does not end in a newline, so its last line is an incomplete append: the process was interrupted mid-write. A torn decision line is never authority; nothing was read.`,
+    );
+  }
+  const lines = content.split("\n");
   for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue;
     let decision;
@@ -4377,10 +4758,18 @@ const readDecisionLedger = async (root, file, principal) => {
         `${file} line ${index + 1} is not valid JSON: ${error.message}. The operator decision record was truncated or rewritten.`,
       );
     }
-    const channel = decisionChannelOf(decision);
-    if (principal === "AUTO" ? channel !== "AUTO" : channel === "AUTO") {
+    const problem = decisionLineProblem(decision);
+    if (problem) {
       throw new Error(
-        `${file} line ${index + 1} ('${decision.id ?? "unknown"}') records channel '${channel}', which does not belong in this ledger. ${DECISIONS_FILE} is the human operator record and ${AUTO_DECISIONS_FILE} is the AUTO principal's; a line in the wrong one is a forged principal, not a misfile.`,
+        `${file} line ${index + 1} ('${decision.id ?? "unknown"}') ${problem}. The operator decision record is untrusted.`,
+      );
+    }
+    const isAuto = decisionPrincipalOf(decision) === "AUTO";
+    const channel =
+      decision?.v === 2 ? decision.principal : decisionChannelOf(decision);
+    if (principal === "AUTO" ? !isAuto : isAuto) {
+      throw new Error(
+        `${file} line ${index + 1} ('${decision.id ?? "unknown"}') records ${decision?.v === 2 ? "principal" : "channel"} '${channel}', which does not belong in this ledger. ${DECISIONS_FILE} is the human operator record and ${AUTO_DECISIONS_FILE} is the AUTO principal's; a line in the wrong one is a forged principal, not a misfile.`,
       );
     }
     const previous = decisions.at(-1) ?? null;
@@ -4591,6 +4980,375 @@ const requireDecision = ({ byId, row, label, candidate }) => {
   return decision;
 };
 
+// --- Format 19: direct ledger authority ------------------------------------
+
+/**
+ * The decisions one checkpoint advance actually consumed.
+ *
+ * An `AsyncLocalStorage` rather than a parameter threaded through forty
+ * validator signatures, and rather than a module-level variable: two records
+ * can validate concurrently in one process (`withModuleLock` keys on the
+ * record, not the process), and a shared mutable collector would attribute one
+ * record's authority to the other's checkpoint. The store is a `Map` keyed by
+ * decision id, so a group entry resolved once per member is recorded once --
+ * "exactly once", structurally, not by a later de-duplication pass.
+ *
+ * Absent outside an advance. Status, preview and every read-only projection
+ * resolve authority through the same resolver and record nothing.
+ */
+const consumedDecisionStore = new AsyncLocalStorage();
+
+/** The identity set the approved plan journals, and nothing else from the line. */
+const consumedDecisionIdentity = (decision, candidate) => ({
+  candidateDigest: decision.candidateDigest ?? candidateDigestOf(candidate),
+  decisionId: decision.id,
+  decisionDigest: decisionLineDigest(decision),
+  policyId: decision.policyId ?? null,
+  policyDigest: decision.policyDigest ?? null,
+  principal: decisionPrincipalOf(decision),
+  result: decision.result ?? null,
+});
+
+const recordConsumedDecision = (decision, candidate) => {
+  const store = consumedDecisionStore.getStore();
+  if (!store || !decision?.id) return;
+  store.set(decision.id, consumedDecisionIdentity(decision, candidate));
+};
+
+/**
+ * The typed compatibility state. A module-19 path that meets authority it
+ * cannot express -- an artifact-13 citation, a pinned pre-19 decision artifact
+ * -- surfaces this instead of reinterpreting the old authority as new, and
+ * instead of freezing the record.
+ */
+export const LEGACY_COMPATIBILITY_ACTION_REQUIRED =
+  "LEGACY_COMPATIBILITY_ACTION_REQUIRED";
+
+export class LegacyCompatibilityActionRequired extends Error {
+  constructor(message) {
+    super(`${LEGACY_COMPATIBILITY_ACTION_REQUIRED}: ${message}`);
+    this.name = "LegacyCompatibilityActionRequired";
+    this.compatibilityAction = LEGACY_COMPATIBILITY_ACTION_REQUIRED;
+  }
+}
+
+/**
+ * The one policy-aware module resolver for format 19, and the only thing that
+ * turns a ledger line into authority there.
+ *
+ * It reads no receipt off the record. The candidate is re-derived from current
+ * evidence by the caller and carries its own trusted policy pin and
+ * `requiredPrincipal`; this resolves the *unique* applicable APPROVED line for
+ * that exact candidate digest out of the verified ledgers.
+ *
+ * Fail-closed, in this order, because the order is what makes a refusal
+ * nameable: an unbound candidate, a receipt field the record must not carry,
+ * duplicate or conflicting lines over the same reviewed act, a current
+ * REJECTED, a line for a superseded candidate (stale), and finally the full
+ * binding predicate -- which is where a weaker principal, a different policy
+ * digest and a changed evidence binding are all refused.
+ *
+ * A grouped member resolves only through its complete group entry: the group
+ * line is the authority and the member view is a projection of it, so a line
+ * over one member can never stand for the set.
+ */
+/**
+ * The six projected decision states. `AWAITING_HUMAN_DECISION`,
+ * `APPROVED_APPLICABLE`, `REJECTED` and `STALE` are per-candidate outcomes of
+ * the resolver below; `READY_TO_ADVANCE` is the whole record's decision gate
+ * being clear; `LEGACY_COMPATIBILITY_ACTION_REQUIRED` is the typed state a
+ * record reaches when its authority is not expressible under this format.
+ */
+export const DECISION_PROJECTION_STATES = Object.freeze([
+  "AWAITING_HUMAN_DECISION",
+  "APPROVED_APPLICABLE",
+  "REJECTED",
+  "STALE",
+  "READY_TO_ADVANCE",
+  LEGACY_COMPATIBILITY_ACTION_REQUIRED,
+]);
+
+/**
+ * The resolver's own answer, before anyone decides whether to throw it.
+ *
+ * Status, pending and run disagreed historically because each ran its own test
+ * for "is this decided": the gate threw, the projection re-implemented a
+ * lenient version of the same question, and the two could answer differently
+ * over one ledger. So there is one body, and exactly two faces over it -- this
+ * one, which names the state, and `resolveApplicableDecision`, which refuses on
+ * anything but `APPROVED_APPLICABLE` using this function's own message. A
+ * difference between what status shows and what run enforces is now a
+ * structural impossibility rather than a tested coincidence.
+ *
+ * Ambiguity and malformed records still throw from here: a duplicate outcome or
+ * a record authoring receipts under direct authority is not a decision state to
+ * display, it is a refusal every caller must fail closed on identically.
+ */
+const applicableDecisionOutcome = ({
+  decisions,
+  candidate,
+  label,
+  group = null,
+  row = null,
+}) => {
+  if (!candidate) {
+    throw new Error(
+      `${label} requires an operator decision, but no stable candidate could be derived to bind one to. A recorded ledger line is never authority by itself; re-run discovery and resolve the current candidate.`,
+    );
+  }
+  if (
+    candidate.policyId === undefined ||
+    candidate.policyDigest === undefined ||
+    candidate.requiredPrincipal === undefined ||
+    typeof candidate.projectRoot !== "string"
+  ) {
+    throw new Error(
+      `${label} derived candidate '${candidate.id}' without a trusted policy binding. A format-${DIRECT_LEDGER_DECISIONS_FORMAT} decision is resolved against a pinned policy identity, required principal and project root; an unbound candidate is refused rather than resolved under a default nobody pinned.`,
+    );
+  }
+  // Direct authority and a copied receipt are two different claims about where
+  // authority lives, and a record making both is ambiguous. Rejected here as
+  // well as in the schema so a hand-edited row cannot slip past the authoring
+  // check and then be silently ignored at the gate.
+  if (row && (row.decisionId !== undefined || row.decisionDigest !== undefined)) {
+    throw new Error(
+      `${label} carries decisionId/decisionDigest, which a format-${DIRECT_LEDGER_DECISIONS_FORMAT} record must not author. Authority is resolved from the ledger against the current candidate digest, never from a receipt copied into the record. Remove the receipt fields.`,
+    );
+  }
+  // One reviewed act, one authoritative entry. A member resolves through the
+  // group's own candidate, never through a line of its own.
+  const authority = group ?? candidate;
+  const digest = candidateDigestOf(authority);
+  const matching = decisions.filter(
+    (decision) => decision?.v === 2 && decision.candidateDigest === digest,
+  );
+  if (matching.length > 1) {
+    throw new Error(
+      `${label} resolves to ${matching.length} ledger entries over the same candidate '${authority.id}' (${matching
+        .map((decision) => `${decision.id} ${decision.result}`)
+        .join(", ")}). Duplicate or conflicting outcomes fail closed; nothing is authoritative until the record is repaired.`,
+    );
+  }
+  const [decision] = matching;
+  if (decision?.result === "REJECTED") {
+    return {
+      state: "REJECTED",
+      decision,
+      authority,
+      message: `${label} is blocked by decision '${decision.id}', a candidate-bound REJECTED outcome over '${authority.id}'. A rejection is a decision, not a missing one; it blocks until the candidate's evidence actually changes.`,
+    };
+  }
+  if (!decision) {
+    // Distinguish "never decided" from "decided, then the facts moved": a line
+    // that names this candidate id but a different digest is the operator's
+    // own earlier decision over superseded evidence, and saying so is the
+    // difference between a usable refusal and a mysterious one.
+    const stale = decisions.find(
+      (line) => line?.v === 2 && line.candidateId === authority.id,
+    );
+    return stale
+      ? {
+          state: "STALE",
+          decision: stale,
+          authority,
+          message: `${label} has no applicable decision: '${stale.id}' was recorded against candidate digest ${stale.candidateDigest}, and the current candidate '${authority.id}' digests to ${digest}. The facts changed after that decision; it is stale and cannot authorize the current candidate.`,
+        }
+      : {
+          state: "AWAITING_HUMAN_DECISION",
+          decision: null,
+          authority,
+          message: `${label} has no applicable decision for candidate '${authority.id}' (${digest}). It requires a ${authority.requiredPrincipal} decision under policy ${authority.policyId}; nothing in the verified ledger resolves to it.`,
+        };
+  }
+  if (!decisionAppliesToCandidate(decision, authority)) {
+    const weaker = !principalSatisfiesRequirement(
+      decisionPrincipalOf(decision),
+      authority.requiredPrincipal,
+    );
+    const otherPolicy =
+      decision.policyId !== authority.policyId ||
+      decision.policyDigest !== authority.policyDigest;
+    return {
+      // A line that is present but does not authorize is still an undecided
+      // candidate, except when the *policy* moved underneath it: that line was
+      // a real decision over a binding that no longer exists, which is exactly
+      // staleness, and saying "never decided" would hide the operator's own act.
+      state: otherPolicy && !weaker ? "STALE" : "AWAITING_HUMAN_DECISION",
+      decision,
+      authority,
+      message: weaker
+        ? `${label} is not authorized by decision '${decision.id}': it was recorded by principal '${decisionPrincipalOf(decision)}', and candidate '${authority.id}' requires '${authority.requiredPrincipal}'. A weaker principal never satisfies a stronger requirement and never falls back to one.`
+        : otherPolicy
+          ? `${label} is not authorized by decision '${decision.id}': it was recorded under policy ${decision.policyId}/${decision.policyDigest}, and candidate '${authority.id}' is pinned to ${authority.policyId}/${authority.policyDigest}. A policy change invalidates outstanding candidate bindings and cannot retroactively authorize them.`
+          : `${label} cites no applicable decision: '${decision.id}' is not bound to current stable candidate '${authority.id}'.`,
+    };
+  }
+  return {
+    state: "APPROVED_APPLICABLE",
+    decision,
+    authority,
+    message: null,
+  };
+};
+
+/**
+ * The enforcing face: the same resolution, refused unless it is an applicable
+ * approval. The consumed identity is journalled here and nowhere else, so a
+ * read-only projection resolving the same line records nothing even if it runs
+ * inside an advance.
+ */
+export const resolveApplicableDecision = (input) => {
+  const outcome = applicableDecisionOutcome(input);
+  if (outcome.state !== "APPROVED_APPLICABLE") {
+    throw new Error(outcome.message);
+  }
+  recordConsumedDecision(outcome.decision, outcome.authority);
+  return outcome.decision;
+};
+
+/**
+ * The complete group entry covering this candidate, re-derived and re-digested
+ * rather than believed.
+ *
+ * A group line carries its whole ordered member set in `boundTo.members`, with
+ * each member's own evidence binding, and the group candidate's digest covers
+ * all of it. So the set is rebuilt from the line, bound to the *trusted* policy
+ * resolved now (never to the identity the line asserts), and its digest
+ * compared with the one the line was signed over. A line whose membership was
+ * edited, reordered, extended or trimmed digests to something else and is not
+ * authority for anyone.
+ *
+ * Returns the rebuilt group candidate -- the thing the caller then resolves
+ * against -- so one group yields one decision and one consumed identity, never
+ * a per-member subset.
+ */
+const groupAuthorityFor = async (decisions, candidate, label) => {
+  const lines = decisions.filter(
+    (decision) =>
+      decision?.v === 2 &&
+      decision.kind === DECISION_GROUP_KIND &&
+      (decision.boundTo?.members ?? []).some((fact) => fact?.id === candidate.id),
+  );
+  if (lines.length === 0) return null;
+  if (lines.length > 1) {
+    throw new Error(
+      `${label} is covered by ${lines.length} group entries (${lines
+        .map((decision) => `${decision.id} ${decision.result}`)
+        .join(", ")}). One reviewed group act is one authoritative entry; duplicate or conflicting group outcomes fail closed.`,
+    );
+  }
+  const [line] = lines;
+  const { members: facts, lifecycle, groupKind, ...binding } = line.boundTo ?? {};
+  if (groupKind !== "DECISION_CANDIDATES" || !Array.isArray(facts) || facts.length < 2) {
+    throw new Error(
+      `${label} cites group entry '${line.id}', whose membership is not a well-formed decision group. A malformed group is never partially authoritative.`,
+    );
+  }
+  const rebuilt = await createNewFormatDecisionCandidate({
+    projectRoot: candidate.projectRoot,
+    policyKind: facts[0]?.kind,
+    ...groupCandidateInput({ first: facts[0], binding, lifecycle, facts }),
+  });
+  if (candidateDigestOf(rebuilt) !== line.candidateDigest) {
+    throw new Error(
+      `${label} cites group entry '${line.id}', whose recorded member set does not re-derive to the candidate digest it was decided over (${line.candidateDigest}). The group's membership or policy binding changed after the decision; nothing in it is authoritative.`,
+    );
+  }
+  const fact = facts.find((entry) => entry.id === candidate.id);
+  const current = {
+    ...decisionGroupMemberFact(candidate),
+    boundTo: candidate.boundTo ?? null,
+  };
+  if (JSON.stringify(fact) !== JSON.stringify(current)) {
+    throw new Error(
+      `${label} is a member of group '${line.id}', but its evidence binding has changed since the group was decided. A member's facts are part of the group's digest; re-review the group.`,
+    );
+  }
+  return rebuilt;
+};
+
+/**
+ * The one dispatch every module decision gate goes through, so a new caller
+ * cannot pick the wrong authority by picking the wrong helper. Pre-19 records
+ * keep `requireDecision` byte for byte; 19 and later resolve directly.
+ */
+const requireModuleDecision = async ({
+  state,
+  byId,
+  decisions,
+  row,
+  label,
+  candidate,
+}) => {
+  if (!usesDirectLedgerDecisions(state)) {
+    return requireDecision({ byId, row, label, candidate });
+  }
+  const group = candidate
+    ? await groupAuthorityFor(decisions, candidate, label)
+    : null;
+  return resolveApplicableDecision({ decisions, candidate, label, group, row });
+};
+
+/**
+ * The projected state of one format-19 candidate: the same resolution the gate
+ * enforces, reported instead of thrown.
+ *
+ * A grouped member is resolved through its complete group entry, and the view
+ * says so -- `group` names the one authoritative candidate, so a member can be
+ * read as approved only because the group was, never on a line of its own. The
+ * group lookup is the same `groupAuthorityFor` the gate uses, which re-derives
+ * the recorded member set and refuses a membership that changed.
+ *
+ * Nothing is cached: the ledger is re-read by the caller on every projection,
+ * so an append made a millisecond ago is visible without a restart.
+ */
+export const projectModuleDecision = async ({
+  decisions,
+  candidate,
+  label,
+  row = null,
+}) => {
+  const group = candidate
+    ? await groupAuthorityFor(decisions, candidate, label)
+    : null;
+  const outcome = applicableDecisionOutcome({
+    decisions,
+    candidate,
+    label,
+    group,
+    row,
+  });
+  return {
+    state: outcome.state,
+    reason: outcome.message,
+    requiredPrincipal: candidate.requiredPrincipal ?? null,
+    policyId: candidate.policyId ?? null,
+    policyDigest: candidate.policyDigest ?? null,
+    candidateDigest: candidateDigestOf(candidate),
+    // The single authoritative entry this view is a projection of. Null when the
+    // candidate is its own authority.
+    group: group ? { id: group.id, candidateDigest: candidateDigestOf(group) } : null,
+    principal: outcome.decision ? decisionPrincipalOf(outcome.decision) : null,
+    result: outcome.decision?.result ?? null,
+    // Engine audit only (§4): the projection reports which line it resolved, and
+    // no record or agent ever cites it back as authority.
+    decisionId: outcome.decision?.id ?? null,
+    decisionDigest: outcome.decision ? decisionLineDigest(outcome.decision) : null,
+  };
+};
+
+/**
+ * The candidate a module decision gate binds to, at whichever format the record
+ * actually is. Pre-19 keeps the unbound legacy candidate byte for byte; 19
+ * binds the trusted policy identity, digest and required principal into the
+ * candidate's own digest, so an approval recorded under a different policy
+ * cannot apply to it.
+ */
+const moduleDecisionCandidate = (state, projectRoot, input) =>
+  usesDirectLedgerDecisions(state)
+    ? createNewFormatDecisionCandidate({ projectRoot, ...input })
+    : createDecisionCandidate(input);
+
 const moduleEdgeTargetsFrom = (classification) =>
   Object.fromEntries(
     assertArray(classification.findings ?? [], "findings")
@@ -4652,6 +5410,7 @@ export const readCanonicalModuleBoundary = async (
       "Module classification must declare at least one module root. The census under the declared roots -- not the import graph -- defines the module, so an undeclared module has no boundary to check.",
     );
   }
+  assertDirectLedgerClassificationSchema(classification, state);
   const algorithmVersion = assertRecordedScannerVersion(
     classification.algorithmVersion,
     "Module classification",
@@ -4682,6 +5441,50 @@ export const readCanonicalModuleBoundary = async (
   }
   assertSourcedModuleRoots(declaredRoots, state);
   return { classification, declaredRoots, scan };
+};
+
+/**
+ * The format-19 classification schema, and the one place it is enforced.
+ *
+ * `version: 2` keeps proposal, rationale, evidence and targets -- everything
+ * the operator reviews -- and drops the authorization receipt entirely. A
+ * record that authors `decisionId`/`decisionDigest` under direct authority is
+ * making two incompatible claims about where authority lives, so it is refused
+ * rather than silently resolved one way. Checked over the whole document, not
+ * just the rows that happen to reach a gate: an unreached receipt is still an
+ * ambiguous record, and the row it sits on may reach a gate tomorrow.
+ *
+ * Pre-19 documents are not touched: the receipt is their authority.
+ */
+const assertDirectLedgerClassificationSchema = (classification, state) => {
+  if (!usesDirectLedgerDecisions(state)) return;
+  if (classification.version !== 2) {
+    throw new LegacyCompatibilityActionRequired(
+      `Module classification declares version ${JSON.stringify(classification.version ?? null)}, but a format-${DIRECT_LEDGER_DECISIONS_FORMAT} record authors version 2, whose authority is resolved from the ledger rather than cited in the file. Resume this record under its historical citation rules, or author a version 2 classification before adopting direct ledger decisions.`,
+    );
+  }
+  const bearers = [
+    ...(Array.isArray(classification.moduleRoots) ? classification.moduleRoots : []).map(
+      (row, index) => [`moduleRoots[${index}]`, row],
+    ),
+    ...(Array.isArray(classification.files) ? classification.files : []).map(
+      (row, index) => [`files[${index}]`, row],
+    ),
+    ...(Array.isArray(classification.findings) ? classification.findings : []).map(
+      (row, index) => [`findings[${index}]`, row],
+    ),
+  ].filter(
+    ([, row]) =>
+      isPlainObject(row) &&
+      (row.decisionId !== undefined || row.decisionDigest !== undefined),
+  );
+  if (bearers.length > 0) {
+    throw new Error(
+      `Module classification version 2 carries authorization receipts on ${bearers
+        .map(([at]) => at)
+        .join(", ")}. A format-${DIRECT_LEDGER_DECISIONS_FORMAT} record never authors decisionId or decisionDigest: authority is resolved from the verified ledger against the current candidate digest. Remove the receipt fields.`,
+    );
+  }
 };
 
 /** The declared path of a root entry, whichever accepted form it was authored in. */
@@ -4828,7 +5631,7 @@ export const validateDiscoveryCompleteness = async (
     await readCanonicalModuleBoundary(root, state, roots, {
       scan: precomputed,
     });
-  const { byId } = await readRecordedDecisions(root);
+  const { byId, decisions: ledger } = await readRecordedDecisions(root);
   // The canonical migration identity, not `state.legacyModule`: the recorder
   // binds every approval to `migrationId`, so validation has to recompute the
   // candidate under the same key or a multi-source record (where `migrationId
@@ -4876,8 +5679,10 @@ export const validateDiscoveryCompleteness = async (
       `${label}.reason`,
     );
     if (implicitRoots.has(rootPath)) continue;
-    requireDecision({
+    await requireModuleDecision({
+      state,
       byId,
+      decisions: ledger,
       row: {
         decisionId: entry.decisionId,
         decisionDigest: entry.decisionDigest,
@@ -4886,7 +5691,7 @@ export const validateDiscoveryCompleteness = async (
       // Built exactly as `record-decision.mjs` builds the candidate it
       // challenges on, at every scanner version: same kind, subject type,
       // rationale normalization and binding, so the same id comes out.
-      candidate: createDecisionCandidate({
+      candidate: await moduleDecisionCandidate(state, roots.targetRoot, {
         kind: "ROOT_DECLARATION",
         subjectType: "MODULE_ROOT",
         subjectPath: rootPath,
@@ -5005,11 +5810,13 @@ export const validateDiscoveryCompleteness = async (
     );
     const expectedKind = DECISION_BACKED_DISPOSITIONS[row.disposition];
     if (expectedKind) {
-      requireDecision({
+      await requireModuleDecision({
+        state,
         byId,
+        decisions: ledger,
         row,
         label,
-        candidate: createDecisionCandidate({
+        candidate: await moduleDecisionCandidate(state, roots.targetRoot, {
           kind: expectedKind,
           subjectType: "FILE",
           subjectPath: filePath,
@@ -5193,14 +6000,16 @@ export const validateDiscoveryCompleteness = async (
         );
       }
     }
-    requireDecision({
+    await requireModuleDecision({
+      state,
       byId,
+      decisions: ledger,
       row: {
         decisionId: entry.row.decisionId,
         decisionDigest: entry.row.decisionDigest,
       },
       label: entry.label,
-      candidate: createDecisionCandidate({
+      candidate: await moduleDecisionCandidate(state, roots.targetRoot, {
         kind: "EDGE_RESOLUTION",
         // The pre-2 scanner has no edge identity, so its subject is the file --
         // which is exactly what `record-decision.mjs` challenges on there too.
@@ -6197,7 +7006,9 @@ const validateBaseline = async (root, { final = false, roots, state } = {}) => {
       )
     : [];
   const visualRows = usesVisualContract(state)
-    ? await validateVisualAcceptance(root, state, legacy, target)
+    ? await validateVisualAcceptance(root, state, legacy, target, undefined, {
+        projectRoot: roots?.targetRoot,
+      })
     : null;
   return {
     legacy,
@@ -9014,6 +9825,12 @@ export const validateVisualAcceptance = async (
   legacy,
   target,
   contextFile,
+  // Only a format-19 record reads it, and there it is mandatory: an absent
+  // project root leaves the candidate unbindable to a trusted policy, and
+  // `createNewFormatDecisionCandidate` refuses rather than defaulting. The
+  // artifact engine calls this through `strictVisualState`, which pins format
+  // 17, so artifact-13 behavior is untouched.
+  { projectRoot } = {},
 ) => {
   const authority = visualAuthorityOf(state);
   const frames = await authority.validateContext(
@@ -9285,19 +10102,40 @@ export const validateVisualAcceptance = async (
         );
       }
     }
-    const { candidate } = visualUnbackedCandidate({
+    const { candidate: legacyCandidate } = visualUnbackedCandidate({
       state,
       frames,
       matrix,
       contextDigest,
       item,
     });
-    if (typeof item.decisionId !== "string" || !item.decisionId) {
+    const candidate = usesDirectLedgerDecisions(state)
+      ? await createNewFormatDecisionCandidate({
+          projectRoot,
+          kind: legacyCandidate.kind,
+          subjectType: legacyCandidate.subject.type,
+          subjectPath: legacyCandidate.subject.path,
+          rationale: legacyCandidate.rationale,
+          targets: legacyCandidate.targets,
+          boundTo: legacyCandidate.boundTo,
+        })
+      : legacyCandidate;
+    if (
+      !usesDirectLedgerDecisions(state) &&
+      (typeof item.decisionId !== "string" || !item.decisionId)
+    ) {
       throw new Error(
         `VISUAL_UNBACKED_REQUIRES_OPERATOR: ${label} leaves '${candidate.subject.path}' without Figma visual acceptance. No agent may waive a visual state: an operator must approve candidate '${candidate.id}' (record-decision.mjs <module> --pending, then --approve at a terminal), and the entry must cite its decisionId and decisionDigest.`,
       );
     }
-    requireDecision({ byId: decisions.byId, row: item, label, candidate });
+    await requireModuleDecision({
+      state,
+      byId: decisions.byId,
+      decisions: decisions.decisions,
+      row: item,
+      label,
+      candidate,
+    });
   }
   const mismatchByBehavior = new Map(
     target.uiMismatches.map((row) => [row.uiBehaviorId, row]),
@@ -9747,6 +10585,10 @@ const claimedTargetPaths = async (root, slices) => {
  * scan, no new cost -- and then a classification, because reporting an
  * unclaimed path without saying whose it is just moves the judgement to prose.
  */
+/** One spelling, read by the finding and by the candidate resolved against it. */
+const UNDERIVABLE_OWNERSHIP_REASON =
+  "the slice plan declares no target owner, so whether this path belongs to the migration cannot be derived; only a human can say";
+
 const classifyTargetDrift = async (root, state, roots, slices) => {
   if (!usesSliceRework(state) || !roots?.targetRoot) return [];
   if (!DRIFT_OWNERSHIP_STEPS.has(state.currentStep)) return [];
@@ -9790,10 +10632,73 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       .filter(
         (decision) =>
           decision.kind === "TARGET_DRIFT_ACCEPTED" &&
-          typeof decision.subject?.path === "string",
+          typeof decision.subject?.path === "string" &&
+          // Pre-19 reads exactly as it always did. At 19 the map is only a
+          // prefilter -- `acceptsDrift` below re-derives the full candidate and
+          // resolves it, so a line that merely names the path authorizes
+          // nothing.
+          (!usesDirectLedgerDecisions(state) || decision.v === 2),
       )
       .map((decision) => [decision.subject.path, decision.boundTo?.pathDigest]),
   );
+
+  // The module binding a format-19 drift candidate is digested over, taken from
+  // the record's own pinned discovery scan rather than from a fresh one: drift
+  // is classified on read-only paths too, and re-scanning there would make
+  // status execute the scanner. FINALIZE proves the pin is still current
+  // (`assertDiscoveryUnchanged`) before it holds anyone to it.
+  const driftBinding = usesDirectLedgerDecisions(state)
+    ? await (async () => {
+        const pinned = await readOptionalJson(
+          path.join(root, DISCOVERY_SCAN_FILE),
+          "Discovery scan",
+        );
+        return {
+          module: state.migrationId,
+          ...(await legacySourceBinding(roots.legacyRoot)),
+          discoveryDigest: pinned?.discoveryDigest,
+          algorithmVersion: pinned?.algorithmVersion,
+        };
+      })()
+    : null;
+
+  /**
+   * Whether an operator decision actually authorizes this drifted path, at this
+   * record's format. Pre-19: the historical byte comparison. 19: the same
+   * byte binding *and* the full direct-ledger resolution -- candidate digest,
+   * pinned policy, required principal, group authority, no receipt.
+   */
+  const acceptsDrift = async (relative, currentDigest) => {
+    if (!usesDirectLedgerDecisions(state)) {
+      return currentDigest !== null && currentDigest === accepted.get(relative);
+    }
+    const candidate = await moduleDecisionCandidate(state, roots.targetRoot, {
+      kind: "TARGET_DRIFT_ACCEPTED",
+      subjectType: "TARGET_FILE",
+      subjectPath: relative,
+      // The same rationale `pendingTargetDriftCandidates` offered for this
+      // path, so the candidate resolved here is the candidate reviewed there.
+      rationale: autoResolvable
+        ? `${relative} was modified in the target but is claimed by no validated slice, no authorized rework, and no delegated artifact.`
+        : UNDERIVABLE_OWNERSHIP_REASON,
+      boundTo: { ...driftBinding, pathDigest: currentDigest },
+    });
+    try {
+      await requireModuleDecision({
+        state,
+        decisions,
+        row: null,
+        label: `Target drift '${relative}'`,
+        candidate,
+      });
+      return true;
+    } catch {
+      // A refusal here is "not accepted", which the caller already reports as
+      // unclaimed drift with its own message. The resolver's reason surfaces
+      // through the pending-decision projection, not by failing the scan.
+      return false;
+    }
+  };
 
   // Target files the *record itself* authored, not any slice: the OpenSpec
   // requirements authority the bootstrap writes, and the brief it was given.
@@ -9855,7 +10760,7 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       const current = await hashFile(path.join(roots.targetRoot, relative)).catch(
         () => null,
       );
-      if (current && `sha256:${current}` === accepted.get(relative)) {
+      if (await acceptsDrift(relative, current && `sha256:${current}`)) {
         findings.push({ path: relative, class: DRIFT_CLASSES.OPERATOR_ACCEPTED });
         continue;
       }
@@ -9872,12 +10777,7 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       path: relative,
       class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
       autoResolvable,
-      ...(autoResolvable
-        ? {}
-        : {
-            reason:
-              "the slice plan declares no target owner, so whether this path belongs to the migration cannot be derived; only a human can say",
-          }),
+      ...(autoResolvable ? {} : { reason: UNDERIVABLE_OWNERSHIP_REASON }),
     });
   }
   return findings;
@@ -13185,7 +14085,184 @@ export const FORMAT_UPGRADERS = Object.freeze([
     plan: (root, state) => uiObservationsAdoptionPlan(root, state, false),
     commit: adoptUiObservations,
   }),
+  // 18 -> 19. Registered so `assertRegistryCoverage` is satisfied up to the
+  // supported format, and reachable *only* from the explicit adoption path:
+  // the ordinary cursor runs at `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS`, so an 18
+  // record owes nothing, is never frozen behind this row, and is never
+  // promoted by an advance. `assertDirectLedgerEligible` is the pre-pin
+  // window; outside it the record stays at 18 and usable.
+  Object.freeze({
+    from: REQUIRED_OBSERVATIONS_FORMAT,
+    to: DIRECT_LEDGER_DECISIONS_FORMAT,
+    id: "DIRECT_LEDGER_DECISIONS_ADOPTED",
+    version: 1,
+    // Nothing is authored. The record's decision-bearing artifacts are not yet
+    // pinned -- that is the eligibility window -- so there is nothing to
+    // transform, only a stamp to move. What makes it explicit is the
+    // confirmation digest, not a file.
+    requiredInput: null,
+    activation: null,
+    domain: (state) => {
+      assertDirectLedgerEligible(state);
+      return "TRANSFORM";
+    },
+    plan: async (root, state) => ({
+      blockers: [],
+      candidateDigest: directLedgerAdoptionDigest(state),
+      preview: directLedgerAdoptionPreview(state),
+    }),
+    // Indirected because the row is frozen at module evaluation and the
+    // transaction is declared below it.
+    commit: (args) => adoptDirectLedgerDecisions(args),
+  }),
 ]);
+
+/**
+ * The pre-pin eligibility window, and the typed refusal outside it.
+ *
+ * A record whose classification, discovery scan or any decision-bearing
+ * artifact is already pinned recorded that authority under citation rules.
+ * Moving it to 19 would reinterpret those receipts as direct authority, which
+ * is exactly the promotion the compatibility boundary forbids -- so it is
+ * refused as a compatibility *action*, not as a failure: the record keeps
+ * running under its historical rules, or the operator deliberately starts a
+ * new one.
+ */
+export const DIRECT_LEDGER_PINNED_ARTIFACTS = Object.freeze([
+  MODULE_CLASSIFICATION_FILE,
+  DISCOVERY_SCAN_FILE,
+]);
+
+export const assertDirectLedgerEligible = (state) => {
+  if ((state?.formatVersion ?? 1) !== REQUIRED_OBSERVATIONS_FORMAT) {
+    throw new LegacyCompatibilityActionRequired(
+      `only a format-${REQUIRED_OBSERVATIONS_FORMAT} record can adopt direct ledger decisions; this record is format ${state?.formatVersion ?? 1}.`,
+    );
+  }
+  if (state?.status === "COMPLETE") {
+    throw new LegacyCompatibilityActionRequired(
+      "this record is COMPLETE. A finished record is historical; its decisions keep the citation semantics they were validated under.",
+    );
+  }
+  const pinned = DIRECT_LEDGER_PINNED_ARTIFACTS.filter(
+    (artifact) => state?.artifactHashes?.[artifact],
+  );
+  if (pinned.length > 0) {
+    throw new LegacyCompatibilityActionRequired(
+      `${pinned.join(", ")} is already pinned, so this record's decision-bearing artifacts were authored and validated under citation rules. Promoting them to direct ledger authority would reinterpret approvals nobody re-reviewed. Resume under the historical rules, or start a new record to get format ${DIRECT_LEDGER_DECISIONS_FORMAT}.`,
+    );
+  }
+};
+
+/**
+ * What the operator confirms, and the digest they confirm it by. Derived from
+ * the record as it stands, so a record that moved between preview and commit
+ * produces a different digest and the commit refuses.
+ */
+export const directLedgerAdoptionPreview = (state) => ({
+  migrationId: state.migrationId,
+  revision: state.revision,
+  from: REQUIRED_OBSERVATIONS_FORMAT,
+  to: DIRECT_LEDGER_DECISIONS_FORMAT,
+  currentStep: state.currentStep,
+  effect:
+    "Module decisions stop being cited by decisionId/decisionDigest in the record and are resolved directly from the verified ledger against the current candidate digest and the pinned trusted policy. No existing decision is reinterpreted, invented or carried over; classification must be authored at version 2.",
+});
+
+const directLedgerAdoptionDigest = (state) =>
+  sha256Json(directLedgerAdoptionPreview(state));
+
+/**
+ * The explicit, journalled 18 -> 19 transition. One transaction, the same
+ * shape every other stamp move uses: re-read and re-check eligibility and the
+ * confirmation digest under the module lock, write the integrity anchor, the
+ * state and exactly one history event, drop the journal.
+ */
+const adoptDirectLedgerDecisions = async ({
+  registryPath,
+  moduleName,
+  candidateDigest,
+  formatUpgrade,
+  hooks,
+}) => {
+  const { registryData, resolved } = await readContext({ registryPath, moduleName });
+  return withModuleLock(registryData.targetRoot, resolved.canonical, async () => {
+    const root = migrationRoot(registryData.targetRoot, resolved.canonical);
+    const statePath = statePathFor(registryData.targetRoot, resolved.canonical);
+    await recoverPendingAdvance(registryData.targetRoot, root, statePath);
+    const { state } = await readState(registryData.targetRoot, resolved.canonical);
+    assertRecordToolkitIdentity(state, resolved.canonical, "adopt direct ledger decisions");
+    // Re-derived under the lock: a preview is advice, and the digest is what
+    // makes the operator's confirmation about *this* record at *this* revision.
+    assertDirectLedgerEligible(state);
+    const expected = directLedgerAdoptionDigest(state);
+    if (candidateDigest !== expected) {
+      throw new Error(
+        `The direct-ledger adoption confirmation does not match this record: confirmed ${candidateDigest ?? "nothing"}, current ${expected}. The record moved after the preview was taken; review it again. Nothing was written.`,
+      );
+    }
+    const at = now();
+    const upgraded = {
+      ...state,
+      formatVersion: DIRECT_LEDGER_DECISIONS_FORMAT,
+      revision: state.revision + 1,
+      updatedAt: at,
+    };
+    const event = {
+      event: "FORMAT_UPGRADED",
+      transition: "DIRECT_LEDGER_DECISIONS_ADOPTED",
+      fromFormat: REQUIRED_OBSERVATIONS_FORMAT,
+      toFormat: DIRECT_LEDGER_DECISIONS_FORMAT,
+      domain: "TRANSFORM",
+      upgrader: formatUpgrade?.upgrader ?? {
+        id: "DIRECT_LEDGER_DECISIONS_ADOPTED",
+        version: 1,
+      },
+      inputs: [{ kind: "confirmationDigest", path: null, digest: expected }],
+      priorRevision: state.revision,
+      revision: upgraded.revision,
+      priorStateDigest: `sha256:${hashContent(renderState(state))}`,
+      stateDigest: `sha256:${hashContent(renderState(upgraded))}`,
+      priorStep: state.currentStep,
+      activeSlice: state.activeSlice ?? null,
+      at,
+    };
+    const integrityPath = path.join(root, INTEGRITY_FILE);
+    const integrityBefore = (await fileExists(integrityPath))
+      ? await readFile(integrityPath, "utf8")
+      : null;
+    const nextIntegrity = await renderIntegrityNow(root, upgraded, event);
+    await assertHistoryAppendable(registryData.targetRoot, root);
+    const journalFile = path.join(root, ADVANCE_JOURNAL);
+    await writeJournalAtomic(journalFile, {
+      fromRevision: state.revision,
+      toRevision: upgraded.revision,
+      event,
+      startedAt: at,
+      pid: process.pid,
+      restore: [{ path: "state.json", content: renderState(state) }],
+      integrity: { content: nextIntegrity, before: integrityBefore },
+    });
+    await hooks?.afterWrite?.("journal");
+    await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
+    await hooks?.afterWrite?.("integrity");
+    await atomicWrite(registryData.targetRoot, statePath, renderState(upgraded));
+    await hooks?.afterWrite?.("state");
+    await appendHistoryOnce(registryData.targetRoot, root, event);
+    await hooks?.afterWrite?.("history");
+    await rm(journalFile, { force: true });
+    return {
+      changed: true,
+      upgraded: true,
+      from: REQUIRED_OBSERVATIONS_FORMAT,
+      to: DIRECT_LEDGER_DECISIONS_FORMAT,
+      statePath,
+      migrationRoot: root,
+      state: upgraded,
+      resolved,
+    };
+  });
+};
 
 /**
  * The cursor. At or above the floor a record behind the runtime format always
@@ -13209,20 +14286,26 @@ export const pendingFormatUpgrade = async (
   state,
   moduleName,
   roots,
-  { identityBlocker = null } = {},
+  { identityBlocker = null, adoptDirectLedger = false } = {},
 ) => {
   const recordFormat = state?.formatVersion ?? 1;
+  // The ordinary cursor runs to the *active* format, not the supported one, so
+  // a format-18 record owes nothing and no advance walks it to 19. Only an
+  // explicit adoption request raises the ceiling, and only for that call.
+  const runtimeFormat = adoptDirectLedger
+    ? MIGRATION_FORMAT_SUPPORTED
+    : FORMAT_ACTIVE_FOR_NEW_MIGRATIONS;
   const increment = nextIncrement(
     FORMAT_UPGRADERS,
     recordFormat,
-    MIGRATION_FORMAT_VERSION,
+    runtimeFormat,
     FORMAT_UPGRADE_FLOOR,
   );
   if (!increment) return null;
   const { from, to, row } = increment;
   const cursor = {
     recordFormat,
-    runtimeFormat: MIGRATION_FORMAT_VERSION,
+    runtimeFormat,
     from,
     to,
     // Overridden only by the INACTIVE branch below. Every other result is an
@@ -13487,6 +14570,10 @@ export const commitFormatUpgrade = async ({
   registryPath,
   moduleName,
   confirmationDigest = null,
+  // The explicit module-19 selection, and the only way to reach the 18 -> 19
+  // row. Absent, this is exactly the pre-existing command: it can commit no
+  // increment above `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS`.
+  adoptDirectLedger = false,
   hooks,
 }) => {
   const { registryData, resolved } = await readContext({ registryPath, moduleName });
@@ -13495,7 +14582,7 @@ export const commitFormatUpgrade = async ({
   const pending = await pendingFormatUpgrade(root, state, resolved.canonical, {
     legacyRoot: registryData.legacyRoot,
     targetRoot: registryData.targetRoot,
-  });
+  }, { adoptDirectLedger });
   if (!pending) {
     throw new Error(
       `Migration '${resolved.canonical}' owes no format upgrade at format ${state.formatVersion}. Nothing was written.`,
@@ -14756,6 +15843,20 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
       { identityBlocker },
     ),
   );
+  // The one decision projection, read here rather than re-derived: status used
+  // to report no decision state at all, which is why callers went to the ledger
+  // or to `run`'s log for it and could see something the gate disagreed with.
+  // Imported at call time to keep `record-decision.mjs`'s static import of this
+  // module from becoming a cycle, exactly as the artifact reader is.
+  //
+  // A record with no decision-bearing census -- too early, or a format whose
+  // candidates cannot be derived at all -- reports null rather than failing a
+  // status read: nothing here may block saying where the record stands.
+  const decisions = await import("./record-decision.mjs")
+    .then((module_) =>
+      module_.projectDecisions({ registryPath, moduleName }),
+    )
+    .catch(() => null);
   const progress = migrationProgress(context.state, {
     mode: null,
     uiEvidence,
@@ -14818,6 +15919,9 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
     legacyRevisionChanged:
       context.state.legacyRevision.revision !== currentLegacyRevision.revision,
     uiEvidence,
+    // The canonical fresh decision projection -- the same one pending decisions
+    // and run read, so the three cannot disagree in one session.
+    decisions,
     // The structured contract: the pending increment, or null when the record
     // is at the runtime format or below the upgrade floor.
     formatUpgrade,
@@ -15394,15 +16498,15 @@ const advanceUnderLock = async ({
   }
   await validateCompletedHashes(context.root, state);
   await assertBriefUnchanged(context.root, state);
-  const validated = await validateStep(
-    context.root,
-    state,
-    currentStep,
-    activeSlice,
-    {
+  // Everything the checkpoint's own validation resolves is collected here, so
+  // the history event records the exact authority this advance consumed rather
+  // than whatever the ledger happens to hold when someone reads it later.
+  const consumed = new Map();
+  const validated = await consumedDecisionStore.run(consumed, () =>
+    validateStep(context.root, state, currentStep, activeSlice, {
       legacyRoot: registryData.legacyRoot,
       targetRoot: registryData.targetRoot,
-    },
+    }),
   );
 
   // The machine-generated record of what the checkpoint saw, written before
@@ -15605,6 +16709,18 @@ const advanceUnderLock = async ({
     slice: activeSlice ?? null,
     ...(currentStep === "VERIFY_SLICES" && validated?.visualComparison?.length
       ? { visualComparison: validated.visualComparison }
+      : {}),
+    // Format 19 only, and only when this advance actually consumed authority.
+    // Ordered by decision id so the event -- and therefore the history chain
+    // and the integrity anchor over it -- is byte-stable across replays. A
+    // group contributed one identity because the resolver recorded the group
+    // entry once, keyed by its id, however many members routed through it.
+    ...(consumed.size > 0
+      ? {
+          consumedDecisions: [...consumed.values()].sort((a, b) =>
+            a.decisionId < b.decisionId ? -1 : a.decisionId > b.decisionId ? 1 : 0,
+          ),
+        }
       : {}),
     nextStep,
     nextSlice: nextState.activeSlice,

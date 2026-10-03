@@ -18,8 +18,11 @@ import {
   upgradeProjection,
 } from "../../src/format-upgrade.mjs";
 import {
+  DIRECT_LEDGER_DECISIONS_FORMAT,
+  FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
   FORMAT_UPGRADE_FLOOR,
   FORMAT_UPGRADERS,
+  MIGRATION_FORMAT_SUPPORTED,
   MIGRATION_FORMAT_VERSION,
   NON_PROMOTING_FORMAT_VERSIONS,
   REQUIRED_OBSERVATIONS_FORMAT,
@@ -76,13 +79,34 @@ test("the shipped module registry covers every increment from the floor", () => 
         id: "UI_OBSERVATIONS_ADOPTED",
         version: 1,
       },
+      {
+        from: REQUIRED_OBSERVATIONS_FORMAT,
+        to: DIRECT_LEDGER_DECISIONS_FORMAT,
+        id: "DIRECT_LEDGER_DECISIONS_ADOPTED",
+        version: 1,
+      },
     ],
   );
+  // Coverage runs to the *supported* ceiling, not the creation default: a
+  // release may ship a format it can read and explicitly move a record to
+  // while new records keep being created at the active one, and every
+  // increment up to the ceiling still needs its registered upgrader.
   assert.doesNotThrow(
     coverage(FORMAT_UPGRADERS, {
       floor: FORMAT_UPGRADE_FLOOR,
-      runtimeFormat: MIGRATION_FORMAT_VERSION,
+      runtimeFormat: MIGRATION_FORMAT_SUPPORTED,
     }),
+  );
+  // And the two controls really are different numbers, which is the whole
+  // reason an 18 record is never walked into 19 by an ordinary advance.
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, REQUIRED_OBSERVATIONS_FORMAT);
+  assert.equal(MIGRATION_FORMAT_SUPPORTED, DIRECT_LEDGER_DECISIONS_FORMAT);
+  assert.throws(
+    coverage(FORMAT_UPGRADERS, {
+      floor: FORMAT_UPGRADE_FLOOR,
+      runtimeFormat: FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+    }),
+    /above the runtime format/,
   );
 });
 
@@ -158,13 +182,26 @@ test("coverage requires an explicitly declared, well-formed activation", () => {
       JSON.stringify(prerequisite),
     );
   }
-  // Both legal forms, and the shipped row is one of them.
+  // Both legal forms, and the shipped registry uses one of each: 17 -> 18
+  // waits on a pinned prerequisite, 18 -> 19 carries `null` because it is
+  // never owed by the ordinary cursor at all -- it is reachable only from the
+  // explicit adoption request, which raises the ceiling for that one call.
   assert.doesNotThrow(coverage([{ ...row(17), activation: null }]));
   assert.doesNotThrow(coverage([{ ...row(17), activation: activation() }]));
+  assert.deepEqual(
+    FORMAT_UPGRADERS.map(({ from, activation: declared }) => [
+      from,
+      declared === null ? null : typeof declared.predicate,
+    ]),
+    [
+      [VISUAL_ACCEPTANCE_FORMAT, "function"],
+      [REQUIRED_OBSERVATIONS_FORMAT, null],
+    ],
+  );
   assert.doesNotThrow(
     coverage(FORMAT_UPGRADERS, {
       floor: FORMAT_UPGRADE_FLOOR,
-      runtimeFormat: MIGRATION_FORMAT_VERSION,
+      runtimeFormat: MIGRATION_FORMAT_SUPPORTED,
     }),
   );
 });
@@ -426,7 +463,16 @@ test("the release gate runs for both engines and the manifest states both regist
   assert.equal(supports.formatUpgradeFloor, FORMAT_UPGRADE_FLOOR);
   assert.deepEqual(supports.formatUpgraders, [
     { from: 17, to: 18, id: "UI_OBSERVATIONS_ADOPTED", version: 1 },
+    { from: 18, to: 19, id: "DIRECT_LEDGER_DECISIONS_ADOPTED", version: 1 },
   ]);
+  // The manifest states the two controls separately. A consumer reading it to
+  // decide what it will be handed wants the activation control; a consumer
+  // deciding whether it can read a record wants the ceiling.
+  assert.equal(supports.moduleFormat, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
+  assert.equal(supports.moduleFormatSupported, MIGRATION_FORMAT_SUPPORTED);
+  assert.notEqual(supports.moduleFormat, supports.moduleFormatSupported);
+  // Artifact 14 stays unregistered and unactivated.
+  assert.equal(supports.artifactFormat, 13);
   assert.equal(supports.artifactFormatUpgradeFloor, 13);
   assert.deepEqual(supports.artifactFormatUpgraders, []);
   // Identity only: no domain classifier, plan, commit or record path. A JSON

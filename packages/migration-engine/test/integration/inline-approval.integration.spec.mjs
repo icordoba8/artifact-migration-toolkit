@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { PassThrough, Writable } from "node:stream";
 import {
+  buildDecision,
   challengeFor,
+  projectDecisions,
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
 import {
@@ -20,6 +22,7 @@ import {
 } from "../../src/core.mjs";
 import {
   createFixture,
+  atDirectLedgerCompleteness,
   atDiscoveryCompleteness,
   EXCLUDED_CLASSIFICATION,
   state,
@@ -305,6 +308,238 @@ test("terminal fallback rejects Approve and requires the exact candidate challen
         assert.equal(await decisionLedger(fixture), null);
       }
     }
+  } finally {
+    process.chdir(cwd);
+    process.exitCode = exitCode;
+    await fixture.cleanup();
+  }
+});
+
+/* -- Phase 3: one fresh module decision projection -------------------------- */
+
+/**
+ * Status, pending decisions and run over a real format-19 record, and the one
+ * question this test exists to answer: do the three ever disagree?
+ *
+ * They used to, structurally. Pending ran its own lenient "is this decided"
+ * test, the gate ran a strict one, and status ran none at all -- so the only way
+ * to find out where a record really stood was to read the ledger by hand, and
+ * a decision recorded mid-session was invisible until something restarted.
+ *
+ * Here all three are driven through the MCP adapter, which is the most
+ * suspicious caller available: it is a separate process boundary with its own
+ * response shape, and it is the one that must not be able to form an opinion of
+ * its own from a log, a receipt or a host reply.
+ *
+ * `APPROVED_APPLICABLE` is deliberately *not* reachable here: the engine default
+ * requires `HUMAN_ATTESTED` for every judgment kind and this build cannot write
+ * that principal, which is the asserted production state rather than something
+ * to work around. What is proved end to end is that an appended line is seen
+ * immediately and identically by all three, with its principal and result
+ * reported and refused. The state table itself -- applicable, rejected, stale,
+ * group-through-group -- is proved against a trusted admin policy in
+ * `migration-contract.test.mjs` (ODA-5).
+ */
+test("status, pending and run read one fresh decision projection, and read-only means read-only", async () => {
+  const fixture = await createFixture();
+  const cwd = process.cwd();
+  const exitCode = process.exitCode;
+  try {
+    await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+    assert.equal((await state(fixture)).formatVersion, 19);
+    process.chdir(fixture.root);
+    const resolution = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+
+    const session = createSession({ request: () => ({ action: "decline" }) });
+    await handleMessage(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { capabilities: { elicitation: {} } },
+      },
+      session,
+    );
+    const call = async (name) => {
+      const response = await handleMessage(
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: { name, arguments: { module: "auth", cwd: fixture.root } },
+        },
+        session,
+      );
+      assert.ok(!response.error, JSON.stringify(response));
+      return response.result.structuredContent;
+    };
+
+    /** The projection as each of the four consumers reports it, in one go. */
+    const views = async () => {
+      const status = await call("migration_status");
+      const pending = await call("migration_pending_decisions");
+      const run = await call("migration_run");
+      const direct = await projectDecisions(resolution);
+      return { status, pending, run, direct };
+    };
+
+    const first = await views();
+    assert.deepEqual(first.status.decisions, first.direct);
+    assert.deepEqual(first.pending.decisions, first.direct);
+    assert.deepEqual(first.run.decisions, first.direct);
+    assert.deepEqual(first.run.state.decisions, first.direct);
+    assert.equal(first.direct.directLedger, true);
+    assert.equal(first.direct.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(first.direct.checkpointAdvanced, false);
+    assert.equal(first.direct.candidates.length, 1);
+    const [awaiting] = first.direct.candidates;
+    assert.equal(awaiting.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(awaiting.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(awaiting.decisionId, null);
+    assert.equal(awaiting.group, null);
+    assert.equal(first.pending.candidates.length, 1);
+    assert.equal(first.pending.candidates[0].id, awaiting.id);
+
+    // No receipt crosses any wire on this path, and the agent is never told to
+    // transcribe one into the classification.
+    assert.deepEqual(first.pending.references, []);
+    assert.deepEqual(first.run.decisionReferences, []);
+    assert.equal(first.run.outcome, "BLOCKED");
+    assert.equal(first.run.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(first.direct.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(first.run.operatorApproval.review.candidateDigest, awaiting.candidateDigest);
+    assert.match(first.run.reason, /SIGNER_UNAVAILABLE/);
+    assert.ok(!/decisionDigest/.test(first.run.reason), first.run.reason);
+    assert.equal(await decisionLedger(fixture), null);
+
+    // Read-only is bytes, not intent: status and pending leave the record, the
+    // ledger and the checkpoint exactly as they were.
+    const before = await snapshot(fixture.targetRoot);
+    await call("migration_status");
+    await call("migration_pending_decisions");
+    await pendingDecisionCandidates(resolution);
+    await projectDecisions(resolution);
+    assert.deepEqual(await snapshot(fixture.targetRoot), before);
+
+    // One real ledger append, in this process, with nothing restarted. The line
+    // is `AGENT_RELAYED` -- the strongest principal this build can write -- over
+    // the exact current candidate.
+    const stateBefore = await state(fixture);
+    const line = buildDecision({
+      previous: null,
+      kind: awaiting.kind,
+      subjectType: awaiting.subject.type,
+      subject: awaiting.subject.path,
+      statement: `Relayed decision for ${awaiting.id}.`,
+      rationale: first.pending.candidates[0].rationale,
+      candidateId: awaiting.id,
+      targets: first.pending.candidates[0].targets,
+      boundTo: first.pending.candidates[0].boundTo,
+      principal: "AGENT_RELAYED",
+      result: "APPROVED",
+      candidateDigest: awaiting.candidateDigest,
+      policyId: awaiting.policyId,
+      policyDigest: awaiting.policyDigest,
+    });
+    await mkdir(path.join(fixture.migrationRoot, "decisions"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(fixture.migrationRoot, "decisions/operator-decisions.ndjson"),
+      `${JSON.stringify(line)}\n`,
+    );
+
+    const second = await views();
+    assert.deepEqual(second.status.decisions, second.direct);
+    assert.deepEqual(second.pending.decisions, second.direct);
+    assert.deepEqual(second.run.decisions, second.direct);
+    const [seen] = second.direct.candidates;
+    // Seen immediately: same session, same process, no restart, no cache to
+    // invalidate. And refused: a weaker principal never satisfies the
+    // requirement and never falls back to one, so the gate stays shut and the
+    // candidate stays pending.
+    assert.equal(seen.decisionId, line.id);
+    assert.equal(seen.principal, "AGENT_RELAYED");
+    assert.equal(seen.result, "APPROVED");
+    assert.equal(seen.state, "AWAITING_HUMAN_DECISION");
+    assert.match(seen.reason, /weaker principal|requires 'HUMAN_ATTESTED'/);
+    assert.equal(second.direct.checkpointAdvanced, false);
+    assert.equal((await state(fixture)).revision, stateBefore.revision);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+
+    // A record whose classification cannot express its own format's authority is
+    // a typed compatibility action, not a crashed status read.
+    await writeFile(
+      path.join(
+        fixture.migrationRoot,
+        "inventories/module-classification.json",
+      ),
+      JSON.stringify({ ...EXCLUDED_CLASSIFICATION, version: 1 }),
+    );
+    const legacyView = await projectDecisions(resolution);
+    assert.equal(legacyView.state, "LEGACY_COMPATIBILITY_ACTION_REQUIRED");
+    assert.match(legacyView.reason, /historical citation rules/);
+    assert.deepEqual(
+      (await call("migration_status")).decisions,
+      legacyView,
+    );
+  } finally {
+    process.chdir(cwd);
+    process.exitCode = exitCode;
+    await fixture.cleanup();
+  }
+});
+
+/**
+ * The same three consumers over a format-18 record. Nothing about the legacy
+ * path changes: the receipt is still the authority, the reference still comes
+ * back, and the agent is still told to cite it.
+ */
+test("a format-18 record keeps its historical citation behavior under the shared projection", async () => {
+  const fixture = await createFixture();
+  const cwd = process.cwd();
+  const exitCode = process.exitCode;
+  try {
+    await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+    assert.equal((await state(fixture)).formatVersion, 18);
+    process.chdir(fixture.root);
+    const resolution = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+
+    const pending = await pendingDecisionCandidates(resolution);
+    assert.equal(pending.decisions.directLedger, false);
+    assert.equal(pending.decisions.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(pending.decisions.checkpointAdvanced, false);
+    const [candidate] = pending.candidates;
+    // A legacy candidate is unbound by design: no policy pin enters its digest.
+    assert.equal(candidate.policyId, undefined);
+    assert.equal(candidate.requiredPrincipal, undefined);
+
+    const stdin = new PassThrough();
+    stdin.isTTY = true;
+    stdin.end(`${challengeFor(candidate)}\n`);
+    const stdout = new Writable({ write: (chunk, encoding, done) => done() });
+    stdout.isTTY = true;
+    const recorded = await runRecordDecisionCli(
+      ["auth", "--approve", candidate.id],
+      { stdin, stdout },
+    );
+    assert.equal(recorded.decision.candidateId, candidate.id);
+
+    // Historical behavior, unchanged: the approval leaves pending, comes back as
+    // a citable reference, and the projection reports it as the legacy path
+    // always resolved it.
+    const after = await pendingDecisionCandidates(resolution);
+    assert.deepEqual(after.candidates, []);
+    assert.equal(after.references.length, 1);
+    assert.equal(after.references[0].decisionId, recorded.decision.id);
+    assert.equal(
+      after.references[0].decisionDigest,
+      decisionLineDigest(recorded.decision),
+    );
+    assert.equal(after.decisions.directLedger, false);
+    assert.equal(after.decisions.state, "READY_TO_ADVANCE");
+    assert.equal(after.decisions.candidates[0].state, "APPROVED_APPLICABLE");
+    assert.equal(after.decisions.checkpointAdvanced, false);
   } finally {
     process.chdir(cwd);
     process.exitCode = exitCode;

@@ -1107,6 +1107,70 @@ test("a model-supplied challenge approves nothing when the human declines", asyn
   }
 });
 
+test("cancel and transport failure are not signed REJECTED or any decision", async () => {
+  for (const response of [{ action: "cancel" }, new Error("transport failed")]) {
+    const fixture = await createFixture();
+    try {
+      await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+      const { raw } = await converseWith(
+        fixture,
+        [handshake(1, true), call(2, "migration_run", { module: "auth" })],
+        () => response instanceof Error ? { error: { code: -32603, message: response.message } } : { result: response },
+      );
+      const run = structured(raw.find((frame) => frame.id === 2));
+      assert.equal(run.outcome, response instanceof Error ? "FAILED" : "OPERATOR_DECISION");
+      assert.equal(await decisionLedger(fixture), null);
+      assert.equal((await pendingDecisionCandidates({ ...(await resolutionFor(fixture)), moduleName: "auth" })).candidates.length, 1);
+    } finally { await fixture.cleanup(); }
+  }
+});
+
+test("an unresponsive MCP provider times out, cleans pending, and ignores a late acceptance", async () => {
+  const fixture = await createFixture();
+  const cwd = process.cwd();
+  const previousExitCode = process.exitCode;
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const frames = [];
+  let buffer = "";
+  let requestId;
+  try {
+    await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+    process.chdir(fixture.root);
+    const started = Date.now();
+    output.setEncoding("utf8");
+    output.on("data", (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const frame = JSON.parse(line);
+        frames.push(frame);
+        if (frame.method === "elicitation/create") requestId = frame.id;
+        if (frame.id === 2) {
+          input.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, result: { action: "accept", content: { confirmation: "yes" } } })}\n`);
+          input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" })}\n`);
+        }
+        if (frame.id === 3) input.end();
+      }
+    });
+    const serving = serve({ input, output });
+    input.write(`${JSON.stringify(handshake(1, true))}\n`);
+    input.write(`${JSON.stringify(call(2, "migration_run", { module: "auth" }))}\n`);
+    await serving;
+    assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
+    assert.match(frames.find((frame) => frame.id === 2).result.structuredContent.reason, /timed out/);
+    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 4);
+    assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
+    assert.equal(await decisionLedger(fixture), null);
+  } finally {
+    input.destroy(); output.destroy();
+    process.chdir(cwd);
+    process.exitCode = previousExitCode;
+    await fixture.cleanup();
+  }
+});
+
 /**
  * `08` proof 6. A host that cannot ask a human is D6-4 unchanged: no request is
  * originated, the run stops, and the record is byte-identical.

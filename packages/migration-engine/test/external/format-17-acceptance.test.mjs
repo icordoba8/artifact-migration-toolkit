@@ -931,9 +931,11 @@ test("E2E-D: the built bundle states both engines' upgrade floors and registries
   assert.deepEqual(supports, toolkit.manifest.supports);
 
   assert.equal(supports.moduleFormat, MIGRATION_FORMAT_VERSION);
+  assert.equal(supports.moduleFormatSupported, 19);
   assert.equal(supports.formatUpgradeFloor, 17);
   assert.deepEqual(supports.formatUpgraders, [
     { from: 17, to: 18, id: "UI_OBSERVATIONS_ADOPTED", version: 1 },
+    { from: 18, to: 19, id: "DIRECT_LEDGER_DECISIONS_ADOPTED", version: 1 },
   ]);
 
   assert.equal(supports.artifactFormat, 13);

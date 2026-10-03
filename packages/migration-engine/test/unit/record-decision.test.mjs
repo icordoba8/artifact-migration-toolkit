@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,13 +21,26 @@ import {
   challengeFor,
   parseDecisionArguments,
   rationaleDigestOf,
+  renderDecisionReview,
+  reviewFor,
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
 import {
+  candidateDigestOf,
   createDecisionCandidate,
+  createNewFormatDecisionCandidate,
+  createNewFormatDecisionGroup,
+  DECISION_GROUP_KIND,
+  DEFAULT_DECISION_POLICY_DIGEST,
+  DEFAULT_DECISION_POLICY_ID,
   decisionAppliesToCandidate,
   decisionLineDigest,
+  decisionPrincipalOf,
+  readAutoDecisions,
   readOperatorDecisions,
+  principalSatisfiesRequirement,
+  resolveGroupDecision,
+  validateProtectedDecisionPolicy,
 } from "../../src/resumable-migration.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -356,4 +370,591 @@ test("an artifact and a module positional cannot be combined", () => {
     () => parseDecisionArguments(["auth", "--artifact", "widget", "--pending"]),
     /Usage: record-decision.mjs --artifact/,
   );
+});
+
+/* ---------------- Decision-line schema v2 (principal/result/digest) ---------------- */
+
+const v2Candidate = createDecisionCandidate({
+  kind: "EXCLUSION",
+  subjectType: "FILE",
+  subjectPath: "src/auth/background.tsx",
+  rationale: "Decorative only.",
+  targets: ["src/auth/background.tsx"],
+  boundTo: {
+    module: "auth",
+    legacyRevision: "abc",
+    legacyDirtyDigest: "sha256:dirty",
+    discoveryDigest: "sha256:discovery",
+    algorithmVersion: 2,
+  },
+});
+
+const v2Line = (previous, overrides = {}) =>
+  buildDecision({
+    previous,
+    kind: v2Candidate.kind,
+    subjectType: v2Candidate.subject.type,
+    subject: v2Candidate.subject.path,
+    statement: "Relayed decision.",
+    rationale: v2Candidate.rationale,
+    candidateId: v2Candidate.id,
+    targets: v2Candidate.targets,
+    boundTo: v2Candidate.boundTo,
+    at: "2026-10-02T00:00:00.000Z",
+    operator: "tester@host",
+    principal: "AGENT_RELAYED",
+    result: "APPROVED",
+    candidateDigest: candidateDigestOf(v2Candidate),
+    ...overrides,
+  });
+
+const frozenLines = async () =>
+  (await readFile(frozenLedger, "utf8")).trim().split("\n");
+
+const withLedger = async (file, lines) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sm-decisions-"));
+  await mkdir(path.join(root, "decisions"), { recursive: true });
+  await writeFile(path.join(root, file), `${lines.join("\n")}\n`);
+  return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
+};
+
+test("legacy lines, candidate ids and digests are byte-identical to the pre-v2 engine", async () => {
+  // Golden values produced by the engine before schema v2 existed.
+  const legacy = buildDecision({
+    previous: null,
+    kind: "EXCLUSION",
+    subjectType: "FILE",
+    subject: "src/a.tsx",
+    statement: "Approved stable candidate APP-x by operator at a terminal.",
+    rationale: "Decorative.",
+    candidateId: "APP-x",
+    targets: ["src/a.tsx"],
+    boundTo: { module: "auth", legacyRevision: "abc", legacyDirtyDigest: "sha256:dirty", discoveryDigest: "sha256:d", algorithmVersion: 2 },
+    at: "2026-08-10T00:00:00.000Z",
+    operator: "tester@host",
+  });
+  assert.equal(
+    decisionLineDigest(legacy),
+    "sha256:bca03745c383fa9f508ebf2efa708e7ba4c2faaa5ea05f121d585042ebcb94d2",
+  );
+  for (const field of ["v", "principal", "result", "candidateDigest"]) {
+    assert.equal(field in legacy, false);
+  }
+  assert.equal(v2Candidate.id, "APP-a631ea8835093dccaf8f");
+  assert.equal(candidateDigestOf(v2Candidate).slice(7, 27), v2Candidate.id.slice(4));
+
+  // The frozen record: every line re-serializes to its own bytes, stays
+  // legacy, and is historical LEGACY_HUMAN -- never HUMAN_ATTESTED.
+  const lines = await frozenLines();
+  for (const line of lines) {
+    const decision = JSON.parse(line);
+    assert.equal(JSON.stringify(decision), line);
+    assert.equal(decisionPrincipalOf(decision), "LEGACY_HUMAN");
+  }
+});
+
+test("v2 APPROVED and REJECTED lines continue the legacy DEC chain without moving its anchor", async () => {
+  const lines = await frozenLines();
+  const legacy = lines.map(JSON.parse);
+  const approved = v2Line(legacy.at(-1));
+  const rejected = v2Line(approved, { result: "REJECTED" });
+  assert.equal(approved.id, `DEC-${String(legacy.length + 1).padStart(3, "0")}`);
+  assert.equal(rejected.id, `DEC-${String(legacy.length + 2).padStart(3, "0")}`);
+  assert.equal(approved.prevDigest, decisionLineDigest(legacy.at(-1)));
+  assert.equal(rejected.prevDigest, decisionLineDigest(approved));
+
+  const all = [...lines, JSON.stringify(approved), JSON.stringify(rejected)];
+  assert.equal(auditDecisionLedger(all).outcome, "CONSISTENT");
+
+  const ledger = await withLedger("decisions/operator-decisions.ndjson", all);
+  try {
+    const { decisions } = await readOperatorDecisions(ledger.root);
+    assert.equal(decisions.length, legacy.length + 2);
+    const [readApproved, readRejected] = decisions.slice(-2);
+    assert.equal(readApproved.principal, "AGENT_RELAYED");
+    assert.equal(readApproved.result, "APPROVED");
+    assert.equal(readRejected.result, "REJECTED");
+    assert.equal(readApproved.candidateDigest, candidateDigestOf(v2Candidate));
+    assert.equal(decisionPrincipalOf(readApproved), "AGENT_RELAYED");
+
+    // The pinned integrity anchor still covers exactly the legacy prefix.
+    const integrity = JSON.parse(
+      await readFile(path.join(path.dirname(frozenLedger), "../integrity.json"), "utf8"),
+    );
+    const bytes = await readFile(path.join(ledger.root, "decisions/operator-decisions.ndjson"));
+    assert.equal(
+      createHash("sha256").update(bytes.subarray(0, integrity.decisions.bytes)).digest("hex"),
+      integrity.decisions.sha256,
+    );
+  } finally {
+    await ledger.cleanup();
+  }
+});
+
+test("only an explicit v2 APPROVED over the full candidate digest applies", () => {
+  const approved = v2Line(null);
+  assert.equal(decisionAppliesToCandidate(approved, v2Candidate), true);
+  assert.equal(
+    decisionAppliesToCandidate(v2Line(null, { result: "REJECTED" }), v2Candidate),
+    false,
+  );
+  assert.equal(
+    decisionAppliesToCandidate(
+      { ...approved, candidateDigest: `sha256:${"0".repeat(64)}` },
+      v2Candidate,
+    ),
+    false,
+  );
+});
+
+test("the v2 writer produces AGENT_RELAYED only, never HUMAN_ATTESTED or a v2 AUTO line", () => {
+  for (const principal of ["HUMAN_ATTESTED", "AUTO", "TERMINAL", "human", undefined]) {
+    assert.throws(() => v2Line(null, { principal }), /not writable/);
+  }
+  assert.throws(() => v2Line(null, { idPrefix: "AUTO" }), /not writable/);
+  for (const result of ["ACCEPTED", "approved", undefined, null]) {
+    assert.throws(() => v2Line(null, { result }), /unknown result/);
+  }
+  for (const candidateDigest of [undefined, v2Candidate.id, "sha256:abc"]) {
+    assert.throws(() => v2Line(null, { candidateDigest }), /full candidateDigest/);
+  }
+  assert.throws(() => v2Line(null, { candidateId: undefined }), /candidateId/);
+  assert.throws(
+    () => v2Line(null, { authorizedBy: { v: 1, channel: "TERMINAL" } }),
+    /authorizedBy/,
+  );
+});
+
+test("a malformed or unknown v2 principal or result fails closed on read and audit", async () => {
+  const valid = v2Line(null);
+  for (const [forged, pattern] of [
+    [{ ...valid, principal: "HUMAN_ATTESTED" }, /HUMAN_ATTESTED/],
+    [{ ...valid, principal: "AUTO" }, /v2 AUTO/],
+    [{ ...valid, principal: "OPERATOR" }, /unknown principal/],
+    [{ ...valid, principal: undefined }, /unknown principal/],
+    [{ ...valid, result: "MAYBE" }, /unknown result/],
+    [{ ...valid, candidateDigest: "sha256:short" }, /full candidateDigest/],
+    [{ ...valid, v: 3 }, /unknown decision schema/],
+    [{ ...valid, v: undefined }, /without "v": 2/],
+  ]) {
+    const line = JSON.stringify(forged);
+    const report = auditDecisionLedger([line]);
+    assert.equal(report.outcome, "INCONSISTENT");
+    assert.ok(
+      report.findings.some((finding) => finding.code === "INVALID_DECISION_PRINCIPAL"),
+    );
+    const ledger = await withLedger("decisions/operator-decisions.ndjson", [line]);
+    try {
+      await assert.rejects(readOperatorDecisions(ledger.root), pattern);
+    } finally {
+      await ledger.cleanup();
+    }
+  }
+});
+
+test("AUTO stays isolated: a v2 line in the AUTO ledger and AUTO in the human ledger are both refused", async () => {
+  const relayed = await withLedger("decisions/auto-decisions.ndjson", [
+    JSON.stringify(v2Line(null)),
+  ]);
+  try {
+    await assert.rejects(readAutoDecisions(relayed.root), /principal 'AGENT_RELAYED'.*does not belong/);
+  } finally {
+    await relayed.cleanup();
+  }
+  const auto = buildDecision({
+    previous: null,
+    idPrefix: "AUTO",
+    kind: "EXCLUSION",
+    subjectType: "FILE",
+    subject: "src/a.tsx",
+    statement: "s",
+    rationale: "r",
+    boundTo: {},
+    authorizedBy: { v: 1, principal: "AUTO", channel: "AUTO" },
+  });
+  assert.equal(decisionPrincipalOf(auto), "AUTO");
+  const misfiled = await withLedger("decisions/operator-decisions.ndjson", [
+    JSON.stringify(auto),
+  ]);
+  try {
+    await assert.rejects(readOperatorDecisions(misfiled.root), /channel 'AUTO'.*does not belong/);
+  } finally {
+    await misfiled.cleanup();
+  }
+});
+
+test("new-format judgment uses only the engine policy; weak principals never satisfy it", async () => {
+  const candidate = await createNewFormatDecisionCandidate({
+    projectRoot: os.tmpdir(),
+    kind: "EXCLUSION", subjectType: "FILE", subjectPath: "src/a.tsx",
+    rationale: "Judgment required", targets: [], boundTo: v2Candidate.boundTo,
+    requiredPrincipal: "AUTO", policyId: "repo/forged", policyDigest: "sha256:forged",
+    mode: "auto", providerCapabilities: { humanAttested: true },
+  });
+  assert.deepEqual(
+    [candidate.requiredPrincipal, candidate.policyId, candidate.policyDigest],
+    ["HUMAN_ATTESTED", DEFAULT_DECISION_POLICY_ID, DEFAULT_DECISION_POLICY_DIGEST],
+  );
+  assert.equal(principalSatisfiesRequirement("AGENT_RELAYED", "HUMAN_ATTESTED"), false);
+  assert.equal(principalSatisfiesRequirement("AUTO", "HUMAN_ATTESTED"), false);
+  assert.equal(principalSatisfiesRequirement("LEGACY_HUMAN", "HUMAN_ATTESTED"), false);
+  assert.equal(principalSatisfiesRequirement("AUTO", "__proto__"), false);
+  const relayed = buildDecision({
+    previous: null, kind: candidate.kind, subjectType: candidate.subject.type,
+    subject: candidate.subject.path, statement: "Relayed", rationale: candidate.rationale,
+    candidateId: candidate.id, targets: candidate.targets, boundTo: candidate.boundTo,
+    principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
+    policyId: candidate.policyId, policyDigest: candidate.policyDigest,
+  });
+  assert.equal(decisionAppliesToCandidate(relayed, candidate), false);
+  assert.equal(decisionAppliesToCandidate({ ...relayed, principal: "AUTO" }, candidate), false);
+  assert.equal(decisionAppliesToCandidate({ ...relayed, policyDigest: "sha256:" + "0".repeat(64) }, candidate), false);
+  assert.equal(decisionAppliesToCandidate({ ...relayed, policyId: "other" }, candidate), false);
+  assert.equal(decisionAppliesToCandidate({ ...relayed, policyId: undefined }, candidate), false);
+  assert.equal(decisionAppliesToCandidate({ ...relayed, policyDigest: undefined }, candidate), false);
+  assert.equal(decisionAppliesToCandidate({ ...relayed, v: undefined }, candidate), false);
+  assert.equal(decisionAppliesToCandidate(relayed, { ...candidate, policyId: undefined }), false);
+  assert.equal(decisionAppliesToCandidate(relayed, { ...candidate, policyDigest: undefined }), false);
+  assert.equal(decisionAppliesToCandidate(relayed, { ...candidate, projectRoot: path.dirname(candidate.projectRoot) }), false);
+  assert.equal(decisionAppliesToCandidate(relayed, { ...candidate, requiredPrincipal: "AUTO" }), false);
+  assert.throws(() => buildDecision({ ...relayed, policyDigest: undefined }), /policy identity\/digest/);
+  assert.throws(() => buildDecision({ ...relayed, principal: "HUMAN_ATTESTED" }), /not writable/);
+});
+
+test("protected admin policy requires a pinned identity, provenance and matching change history", () => {
+  const projectRoot = path.resolve(os.tmpdir(), "trusted-policy-project");
+  const document = (revision, rules, previous) => {
+    const policy = { policyId: "admin/project", projectRoot, revision, rules };
+    const policyDigest = `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`;
+    return {
+      policy, policyDigest,
+      provenance: { action: "OPERATOR_ADMIN_POLICY_CHANGE", actor: "admin",
+        at: "2026-10-02T00:00:00.000Z", reason: "Explicit admin authorization",
+        previousPolicyDigest: previous?.policyDigest ?? DEFAULT_DECISION_POLICY_DIGEST },
+      ...(previous ? { previous } : {}),
+    };
+  };
+  const first = document(1, { EXCLUSION: "AGENT_RELAYED" });
+  const changed = document(2, { EXCLUSION: "AUTO" }, first);
+  const verified = validateProtectedDecisionPolicy(first, projectRoot);
+  const verifiedChange = validateProtectedDecisionPolicy(changed, projectRoot);
+  assert.equal(verified.rules.EXCLUSION, "AGENT_RELAYED");
+  assert.equal(verifiedChange.rules.EXCLUSION, "AUTO");
+  assert.notEqual(verified.policyDigest, verifiedChange.policyDigest);
+  const bind = (policy) => {
+    const candidate = { ...v2Candidate, projectRoot: policy.projectRoot, policyId: policy.policyId,
+      policyDigest: policy.policyDigest, requiredPrincipal: policy.rules.EXCLUSION };
+    return { ...candidate, id: `APP-${candidateDigestOf(candidate).slice(7, 27)}` };
+  };
+  const oldCandidate = bind(verified);
+  const newCandidate = bind(verifiedChange);
+  assert.notEqual(oldCandidate.id, newCandidate.id);
+  assert.notEqual(candidateDigestOf(oldCandidate), candidateDigestOf(newCandidate));
+  const oldDecision = buildDecision({
+    previous: null, kind: oldCandidate.kind, subjectType: oldCandidate.subject.type,
+    subject: oldCandidate.subject.path, statement: "Relayed", rationale: oldCandidate.rationale,
+    candidateId: oldCandidate.id, targets: oldCandidate.targets, boundTo: oldCandidate.boundTo,
+    principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(oldCandidate),
+    policyId: oldCandidate.policyId, policyDigest: oldCandidate.policyDigest,
+  });
+  assert.equal(decisionAppliesToCandidate(oldDecision, oldCandidate), true);
+  assert.equal(decisionAppliesToCandidate(oldDecision, newCandidate), false);
+  for (const broken of [
+    { ...first, requiredPrincipal: "AUTO" },
+    { ...first, provenance: undefined },
+    { ...first, provenance: { ...first.provenance, operatorKey: "agent" } },
+    { ...first, provenance: { ...first.provenance, action: "AGENT_CHANGE" } },
+    { ...first, provenance: { ...first.provenance, previousPolicyDigest: changed.policyDigest } },
+    { ...first, policyDigest: changed.policyDigest },
+    { ...first, policy: { ...first.policy, policyId: "admin/other" } },
+    { ...first, policy: { ...first.policy, projectRoot: "/other" } },
+    { ...first, policy: { ...first.policy, rules: { EXCLUSION: "AGENT_RELAYED", UNKNOWN: "AUTO" } } },
+    { ...changed, previous: { ...first, policyDigest: changed.policyDigest } },
+    { ...changed, provenance: { ...changed.provenance, previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST } },
+  ]) {
+    assert.throws(() => validateProtectedDecisionPolicy(broken, projectRoot), /policy|provenance|history/i);
+  }
+});
+
+/* ---------------- One ledger entry per reviewed decision group ---------------- */
+
+const GROUP_LIFECYCLE = { stateDigest: "sha256:state", step: "DISCOVERY_COMPLETENESS" };
+const GROUP_ROOT = path.resolve(os.tmpdir(), "group-project");
+
+/** `count` approvable EXCLUSION candidates sharing one module binding. */
+const memberCandidates = (count, offset = 0) =>
+  Array.from({ length: count }, (_, index) => ({
+    ...createDecisionCandidate({
+      kind: "EXCLUSION",
+      subjectType: "FILE",
+      subjectPath: `src/auth/m${index + offset}.tsx`,
+      rationale: `Decorative ${index + offset}.`,
+      targets: [`src/auth/m${index + offset}.tsx`],
+      boundTo: {
+        ...v2Candidate.boundTo,
+        pathDigest: `sha256:${String(index + offset).repeat(64).slice(0, 64)}`,
+      },
+    }),
+    approvable: true,
+  }));
+
+const newFormatGroup = (candidates) =>
+  createNewFormatDecisionGroup({
+    candidates,
+    lifecycle: GROUP_LIFECYCLE,
+    projectRoot: GROUP_ROOT,
+  });
+
+/**
+ * The same group under a trusted admin policy that allows AGENT_RELAYED, so
+ * applicability is observable in this build. The engine default is
+ * HUMAN_ATTESTED and HUMAN_ATTESTED is not writable, which is the asserted
+ * production state -- it is not a statement about what the resolver does once
+ * a principal does satisfy the requirement.
+ */
+const relayableGroup = (group) => {
+  const bound = { ...group, requiredPrincipal: "AGENT_RELAYED" };
+  return { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
+};
+
+const groupLine = (group, previous = null, overrides = {}) =>
+  buildDecision({
+    previous,
+    kind: group.kind,
+    subjectType: group.subject.type,
+    subject: group.subject.path,
+    statement: `Relayed decision group ${group.id}.`,
+    rationale: group.rationale,
+    candidateId: group.id,
+    targets: group.targets,
+    boundTo: group.boundTo,
+    at: "2026-10-02T00:00:00.000Z",
+    operator: "tester@host",
+    principal: "AGENT_RELAYED",
+    result: "APPROVED",
+    candidateDigest: candidateDigestOf(group),
+    policyId: group.policyId,
+    policyDigest: group.policyDigest,
+    ...overrides,
+  });
+
+test("a new-format group is one candidate binding its complete ordered member set", async () => {
+  const members = memberCandidates(4);
+  const group = await newFormatGroup(members);
+
+  assert.equal(group.kind, DECISION_GROUP_KIND);
+  assert.equal(group.subject.type, "DECISION_GROUP");
+  assert.equal(group.groupMembers.length, 4);
+  assert.deepEqual(
+    group.boundTo.members.map((member) => member.id),
+    members.map((member) => member.id),
+  );
+  // Each member's own evidence binding travels with it, not merely its 20-hex
+  // `APP-` display id.
+  assert.deepEqual(
+    group.boundTo.members.map((member) => member.boundTo.pathDigest),
+    members.map((member) => member.boundTo.pathDigest),
+  );
+  // One policy binding, resolved from the engine default for the members' kind.
+  assert.equal(group.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.equal(group.policyId, DEFAULT_DECISION_POLICY_ID);
+  assert.equal(group.policyDigest, DEFAULT_DECISION_POLICY_DIGEST);
+  assert.equal(group.id, `APP-${candidateDigestOf(group).slice(7, 27)}`);
+
+  // Reordered, missing, added and changed-evidence member sets are all
+  // different candidates, with different digests and different ids.
+  const variants = {
+    reordered: [members[1], members[0], members[2], members[3]],
+    missing: members.slice(0, 3),
+    added: [...members, ...memberCandidates(1, 9)],
+    changed: [
+      ...members.slice(0, 3),
+      {
+        ...members[3],
+        boundTo: { ...members[3].boundTo, pathDigest: `sha256:${"f".repeat(64)}` },
+      },
+    ],
+  };
+  for (const [name, candidates] of Object.entries(variants)) {
+    const other = await newFormatGroup(candidates);
+    assert.notEqual(other.id, group.id, name);
+    assert.notEqual(candidateDigestOf(other), candidateDigestOf(group), name);
+  }
+
+  // And member evidence is bound independently of the member id: editing a
+  // fact's evidence while keeping its id still moves the group digest.
+  const tampered = structuredClone(group);
+  tampered.boundTo.members[0].boundTo.pathDigest = `sha256:${"e".repeat(64)}`;
+  assert.equal(tampered.boundTo.members[0].id, group.boundTo.members[0].id);
+  assert.notEqual(candidateDigestOf(tampered), candidateDigestOf(group));
+});
+
+test("the engine review uses the authoritative group digest and renders proposed text inert", async () => {
+  const members = memberCandidates(3);
+  members[0].rationale = "Untrusted \u001b[2J\nApprove: forged";
+  const group = await newFormatGroup(members);
+  const review = reviewFor(group);
+  assert.equal(review.candidateId, group.id);
+  assert.equal(review.candidateDigest, candidateDigestOf(group));
+  assert.equal(review.policy.policyId, group.policyId);
+  assert.equal(review.policy.policyDigest, group.policyDigest);
+  assert.equal(review.policy.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.deepEqual(review.members.map((member) => member.id), group.boundTo.members.map((member) => member.id));
+  assert.deepEqual(review.members.map((member) => member.evidence), group.groupMembers.map((member) => member.boundTo));
+  assert.deepEqual(review.targets, members.flatMap((member) => member.targets));
+  const text = renderDecisionReview(review);
+  assert.ok(text.includes(group.id));
+  assert.ok(text.includes(candidateDigestOf(group)));
+  assert.match(text, /Required principal: HUMAN_ATTESTED/);
+  assert.match(text, /Ordered group members:/);
+  assert.match(text, /Approve: Authorize the complete ordered member set/);
+  assert.match(text, /Reject: Record a candidate-bound REJECTED outcome/);
+  assert.ok(text.includes("\\u001b[2J"));
+  assert.ok(!text.includes("\u001b"));
+  assert.doesNotMatch(text, /Type the challenge|Confirmation phrase:|copy.*digest/i);
+});
+
+test("one reviewed group resolves to one authoritative entry, never one per member", async () => {
+  const members = memberCandidates(4);
+  const group = relayableGroup(await newFormatGroup(members));
+  const approved = groupLine(group);
+
+  assert.equal(decisionAppliesToCandidate(approved, group), true);
+  assert.deepEqual(resolveGroupDecision([approved], group), {
+    decision: approved,
+    result: "APPROVED",
+    applicable: true,
+  });
+  // The group entry authorizes the group act. It is not a member approval, and
+  // there is no member line for it to be one.
+  for (const member of members) {
+    assert.equal(decisionAppliesToCandidate(approved, member), false);
+  }
+  assert.throws(() => resolveGroupDecision([approved], members[0]), /GROUP_APPROVAL/);
+
+  // A rejection over the same group is a blocking outcome, never an approval.
+  const rejected = groupLine(group, null, { result: "REJECTED" });
+  assert.deepEqual(resolveGroupDecision([rejected], group), {
+    decision: rejected,
+    result: "REJECTED",
+    applicable: false,
+  });
+
+  // Reordered, missing, added and changed-evidence sets are not this decision.
+  for (const candidates of [
+    [members[1], members[0], members[2], members[3]],
+    members.slice(0, 3),
+    [...members, ...memberCandidates(1, 9)],
+    [
+      ...members.slice(0, 3),
+      {
+        ...members[3],
+        boundTo: { ...members[3].boundTo, pathDigest: `sha256:${"f".repeat(64)}` },
+      },
+    ],
+  ]) {
+    const other = relayableGroup(await newFormatGroup(candidates));
+    assert.equal(decisionAppliesToCandidate(approved, other), false);
+    assert.deepEqual(resolveGroupDecision([approved], other), {
+      decision: null,
+      result: null,
+      applicable: false,
+    });
+  }
+
+  // The engine default refuses it outright: AGENT_RELAYED cannot satisfy the
+  // HUMAN_ATTESTED judgment requirement, and HUMAN_ATTESTED is not writable.
+  const defaulted = await newFormatGroup(members);
+  assert.equal(defaulted.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.equal(
+    resolveGroupDecision([groupLine(defaulted)], defaulted).applicable,
+    false,
+  );
+  assert.throws(
+    () => groupLine(defaulted, null, { principal: "HUMAN_ATTESTED" }),
+    /not writable/,
+  );
+  assert.throws(() => groupLine(defaulted, null, { idPrefix: "AUTO" }), /not writable/);
+});
+
+test("duplicate and conflicting group outcomes fail closed instead of picking a line", async () => {
+  const group = relayableGroup(await newFormatGroup(memberCandidates(3)));
+  const approved = groupLine(group);
+  const second = groupLine(group, approved);
+  for (const pair of [
+    [approved, second],
+    [approved, { ...second, result: "REJECTED" }],
+    [{ ...approved, result: "REJECTED" }, second],
+  ]) {
+    assert.throws(
+      () => resolveGroupDecision(pair, group),
+      /Duplicate or conflicting group outcomes fail closed/,
+    );
+  }
+  // A forged member line claiming the group's digest is a second entry too.
+  assert.throws(
+    () => resolveGroupDecision([approved, { ...second, candidateId: "APP-member" }], group),
+    /Duplicate or conflicting group outcomes fail closed/,
+  );
+  // And the auditor names the ambiguity rather than leaving it to a resolver.
+  const report = auditDecisionLedger(
+    [approved, second].map((decision) => JSON.stringify(decision)),
+  );
+  assert.equal(report.outcome, "INCONSISTENT");
+  assert.ok(report.findings.some((finding) => finding.code === "AMBIGUOUS_DECISION"));
+  assert.equal(
+    auditDecisionLedger([JSON.stringify(approved)]).outcome,
+    "CONSISTENT",
+  );
+});
+
+test("a torn group append is refused whole, and recovery drops it without partial authority", async () => {
+  const group = relayableGroup(await newFormatGroup(memberCandidates(5)));
+  const [legacy] = chain(["first"]);
+  const complete = groupLine(group, legacy);
+  const ledger = await withLedger("decisions/operator-decisions.ndjson", [
+    JSON.stringify(legacy),
+  ]);
+  const file = path.join(ledger.root, "decisions/operator-decisions.ndjson");
+  try {
+    const serialized = JSON.stringify(complete);
+    // A write cut off mid-record: unparseable, so the whole line is refused and
+    // not one of the five members it names becomes authority.
+    for (const cut of [20, Math.floor(serialized.length / 2), serialized.length - 1]) {
+      await writeFile(file, `${JSON.stringify(legacy)}\n${serialized.slice(0, cut)}`);
+      await assert.rejects(
+        readOperatorDecisions(ledger.root),
+        /not valid JSON|incomplete append/,
+      );
+      assert.ok(
+        auditDecisionLedger(
+          (await readFile(file, "utf8")).split("\n").filter((line) => line.trim()),
+        ).findings.some((finding) => finding.code === "UNPARSEABLE"),
+      );
+    }
+    // A record that reached disk without its terminating newline is still an
+    // interrupted append, and is refused as one.
+    await writeFile(file, `${JSON.stringify(legacy)}\n${serialized}`);
+    await assert.rejects(readOperatorDecisions(ledger.root), /incomplete append/);
+
+    // Recovery: the incomplete line is not part of the record, the prefix still
+    // verifies, and the group has no entry at all -- not a partial one.
+    await writeFile(file, `${JSON.stringify(legacy)}\n`);
+    const recovered = await readOperatorDecisions(ledger.root);
+    assert.equal(recovered.decisions.length, 1);
+    assert.deepEqual(resolveGroupDecision(recovered.decisions, group), {
+      decision: null,
+      result: null,
+      applicable: false,
+    });
+
+    // Then the complete append lands, once, and chains onto that same prefix.
+    await appendFile(file, `${serialized}\n`);
+    const { decisions } = await readOperatorDecisions(ledger.root);
+    assert.equal(decisions.length, 2);
+    assert.equal(decisions[1].prevDigest, decisionLineDigest(legacy));
+    assert.equal(resolveGroupDecision(decisions, group).applicable, true);
+  } finally {
+    await ledger.cleanup();
+  }
 });

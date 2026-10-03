@@ -194,8 +194,8 @@ Author the artifact it asks for, then obey the `loop:` line. Never continue
 from conversation memory — every iteration re-reads `state.json` through its
 own preflight.
 
-There are two front ends and one rule for choosing between them: **use the one
-that can reach a human.**
+There are two front ends: use connected MCP when available, otherwise the
+installed CLI. Neither front end can attest a module-19 decision.
 
 1. **MCP — preferred whenever the `start-migration` MCP server is connected.**
    Call its `migration_run` tool with the invocation's supplied `module`,
@@ -210,25 +210,24 @@ that can reach a human.**
    plus `cwd` set to the current absolute working directory.
    Omitted `mode` remains `auto`; omitted migration `ponytail` remains disabled,
    regardless of any session-level `/ponytail` mode. It runs the same driver,
-   and when the host supports elicitation the server raises the operator
-   approval itself, as a human request the host presents. Answer it by _not_
-   answering it: the human reviews the read-only candidate details and types
-   back the confirmation phrase the request displays, which is the one thing a
-   host cannot produce from the request's schema alone. The recorder compares
-   that phrase against the candidate it recomputes under the existing lock, and
-   **one iteration records at most one approval** — a record with several
-   pending decisions needs one iteration, and one human act, per decision. The
-   server is registered in the repository's `.mcp.json`. Read `outcome` from the tool
-   result, not the `log`. Use returned `decisionReferences` internally to cite
-   the matching `decisionId`/`decisionDigest` in the existing classification,
-   then re-run with the same `cwd` to validate and follow the typed outcome.
-   Already-delegated artifact decisions use this same recorder path; cite only
-   the fields their existing artifact schema accepts — their pending rows carry
-   `recordedDecisionId` once an approval exists. While elicitation is answering,
-   never ask the operator to transfer identifiers or execute another command;
-   the trusted terminal command below is offered only after an iteration ends at
-   `OPERATOR_DECISION`. Keyboard and focus behavior belong to the host-native
-   elicitation UI.
+    and may present an engine-owned review. The server is registered in the
+    repository's `.mcp.json`. Read `outcome` from the tool result, not the `log`.
+    For module format 19, status, pending decisions and run use the same fresh,
+    read-only decision projection. Its full candidate-bound review is for
+    presentation, not an instruction to transcribe IDs, digests or a challenge.
+    A provider prompt/button is never HUMAN authority. The default judgment
+    policy requires `HUMAN_ATTESTED`, which is not writable: without a trusted
+    signer/companion the result is explicitly `SIGNER_UNAVAILABLE`, not an
+    approval through elicitation or a weaker principal. Only a protected,
+    verified operator/admin policy may explicitly allow `AGENT_RELAYED`; a host
+    reply under that policy remains relayed, not attested. A recorded decision
+    becomes visible to the next status/pending/run call in this same session;
+    no restart and no model-carried receipt are required.
+    For module formats ≤18 and artifact 13 only, the historical elicitation or
+    terminal challenge and `decisionReferences`/`decisionId`/`decisionDigest`
+    citation rules still apply. Cite only fields the existing artifact schema
+    accepts (`recordedDecisionId` in its pending rows). One human act records
+    at most one approval per iteration; a host decline records no rejection.
 2. **Bash — the fallback when that server is not connected.**
 
    ```bash
@@ -241,38 +240,30 @@ that can reach a human.**
 Either way the directive's `next=` repeats the iteration; obey it literally
 through the same front end.
 
-**Whenever an iteration ends at `OPERATOR_DECISION`** — the host declared no
-elicitation, the elicitation came back anything other than an accepted answer
-carrying the exact confirmation phrase, the shell has no TTY, or one approval
-was recorded and further decisions are still pending — decisions remain
-unapproved. `reason` names any line this iteration did record, and
-`decisionReferences` carries its receipt; nothing beyond that was written.
-Prefer inline elicitation and re-offer it on the next iteration. Never call the
-outcome a human rejection: a host that auto-declines without showing anyone and
-a person who genuinely refused are indistinguishable on the wire, so the only
-claim you may make is that no approval arrived.
+**Whenever an iteration ends at `OPERATOR_DECISION`**, follow the typed result.
+For module 19, inspect the engine review and `blocked` state; never request
+transcription or infer approval from host interaction. For historical formats,
+`reason` names any recorded line and `decisionReferences` carries its citation;
+further pending decisions remain unapproved. Never call a host decline a human
+rejection: no applicable approval arrived.
 
 **`--mode auto` is a principal, not consent on a human's behalf.** AUTO is a
 distinct, auditable principal: it decides what it can derive from evidence it
 already holds, records every such decision in its own
 `decisions/auto-decisions.ndjson` ledger under its own hash chain, and may never
 write, forge or impersonate a line in the human `decisions/operator-decisions.ndjson`.
-A decision that is genuinely ambiguous, or that needs something only a person
-can supply, is not AUTO's to make: it stays `BLOCKED` or `OPERATOR_DECISION`,
-costs its own iteration and its own human act. An iteration that reports several
-still pending has approved none of them, whatever any host answered. `--mode
-step` keeps the human-confirmation semantics unchanged.
+A judgment needing a person is not AUTO's to make: legacy records stop for
+the historical operator act, while module 19 blocks if the signer is absent.
+A reported remainder stays unapproved; `--mode step` does not supply attestation.
 
-The migration is never left with nowhere to go. The result carries
-`operatorApproval` with a `cwd` and one candidate per pending approval, each
-with its own `command`. Give the operator that exact command and that exact
-`cwd` — under MCP it is the isolated worktree the call named, and running it
-anywhere else approves in the wrong checkout. Then re-run `/start-migration`
-normally: the ordinary iteration finds the recorded decision, validates its
-binding, and returns it in `decisionReferences` for you to cite. Never ask the
-operator to read back a `decisionId` or a `decisionDigest`, never edit
-`decisions/operator-decisions.ndjson`, never pass approval through a tool or CLI
-argument, and never answer the challenge yourself.
+For historical module formats ≤18 and artifact 13, `operatorApproval` carries
+the pending candidate commands and the exact `cwd` in which to run them; the
+ordinary next iteration returns citation fields for the historical artifacts.
+For module 19, `operatorApproval` instead carries the engine-owned review and
+typed blocked state; no terminal challenge or receipt-copying fallback grants
+`HUMAN_ATTESTED`. Never inspect or edit raw state/ledger JSON to authorize a
+decision, pass approval through a tool/CLI argument, or answer a historical
+challenge yourself.
 
 Everything below is the operator's, either because `run` refuses it by name or
 because a loop can never reach it. Each line names an executable the installed
@@ -405,7 +396,8 @@ constants by a contract test — the table cannot drift from the code.
 
 | Persisted source       | Result                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| contract 5, format 18  | executes the full lifecycle; every legacy UI behavior carries frozen `requiredObservations`                           |
+| contract 5, format 19  | supported for explicit test/pilot selection, with direct-ledger module decisions; not the production creation default; unavailable signer blocks `HUMAN_ATTESTED` |
+| contract 5, format 18  | active production creation default; executes with historical citation decisions and frozen `requiredObservations`     |
 | contract 5, format 17  | owes 17→18; DISCOVER_LEGACY may first validate and pin the legacy inventory, after which the upgrade freezes the lifecycle until it commits (see Format upgrades) |
 | contract 5, format 16  | executes the full lifecycle with controlled same-slice rework and unclaimed-drift refusal at FINALIZE; never promoted to 17 |
 | contract 5, format 15  | executes the full lifecycle with multi-source/brownfield targets; self-heals to 16 on the next advance                |
@@ -418,6 +410,12 @@ constants by a contract test — the table cannot drift from the code.
 | contract 4, format 3   | refused, with the explicit upgrade command                                                                            |
 | contract 2 or 3        | refused as unsupported; files are never touched                                                                       |
 | newer than supported   | refused; update start-migration first                                                                                 |
+
+Module 19 support is not activation: normal module creation stays at 18.
+Artifact 13 is the only supported and active artifact format; artifact 14 is
+unavailable, with no artifact direct-ledger authority. `HUMAN_ATTESTED` writes,
+the production signer, real-host acceptance and production-default activation
+are deferred separately.
 
 ### Format bump policy
 
@@ -440,6 +438,11 @@ constants by a contract test — the table cannot drift from the code.
   owns the increment. Nothing self-heals and nothing is skipped: the lifecycle
   freezes, the normal command reports the owed `N → N+1` transition, and the
   agent supplies only the input that transition names. See Format upgrades.
+- **Format 19** changes decision authority and is non-promoting. An eligible
+  unfinished 18 record may enter it only through an explicit journalled pre-pin
+  adoption with preview/confirmation; otherwise keep historical citation rules
+  or follow the typed `LEGACY_COMPATIBILITY_ACTION_REQUIRED` outcome. Ordinary
+  advances do not promote 18 to 19.
 - A record is never promoted into a feature it never ran, and a persisted
   version field is never hand-edited to route around a refusal.
 
@@ -462,8 +465,8 @@ back.
 
 | Engine | Floor | Registry |
 | --- | --- | --- |
-| module | `FORMAT_UPGRADE_FLOOR = 17` | one registered upgrader per increment from 17 to the runtime format |
-| artifact | `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13` | empty today, because the floor *is* the runtime format |
+| module | `FORMAT_UPGRADE_FLOOR = 17` | adjacent upgraders through supported 19; normal creation/advance targets active 18, with 18→19 only by explicit eligible adoption |
+| artifact | `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13` | empty; supported and active format is 13, not 14 |
 
 Below the module floor nothing here applies: formats 4–16 keep their existing
 compatibility behavior (self-healing where the bump was additive, running the
@@ -494,7 +497,7 @@ automatically mean frozen: only an ACTIVE increment is exclusive.
 ### The typed `formatUpgrade` result
 
 `migration_status` and active-upgrade preflight carry a structured `formatUpgrade`
-(`null` for a record at the runtime format), reporting `recordFormat`,
+(`null` for a record at the active format, unless explicit adoption was selected), reporting `recordFormat`,
 `runtimeFormat`, `from`/`to`, `upgrader {id, version}`, `active`, `state`,
 `prerequisite`, `domain`, `requiredInput`, `blockers` and `nextAction`. Read that object; do not
 rediscover which transition is required.
@@ -711,8 +714,9 @@ any general instruction to open a task list before multi-step work.
 
 A progress row is a display, never a control. No task item, checkbox or todo
 may approve a candidate, close a checkpoint or advance a slice. Operator
-approval happens only through MCP elicitation or the interactive terminal
-challenge, never through a model-callable affordance. After a decision is
+approval for historical formats uses their elicitation/terminal challenge;
+module 19 requires its trusted policy and verified ledger, with attested writes
+unavailable; authorization is never through a model-callable affordance. After a decision is
 persisted, re-read `migration_status` and re-render; do not edit the rendered
 progress in place.
 
@@ -813,18 +817,15 @@ Full JSON schemas for every artifact below live in
    recomputed census, graph, and findings to author against. A
    production-reachable component, style, image, SVG, or other visual asset is
    never dismissed on agent-authored rationale: it is `BEHAVIOR_BACKED` or
-   `EXCLUDED_APPROVED` with an operator decision a human authorized. That
-   happens one decision per iteration — inline in the operator's terminal, or
-   through an MCP host's elicitation — and either way approval recomputes that
-   candidate under the module lock and requires the exact subject challenge.
-   `artifact-migration-decision <module> --approve <stable-id>` at a TTY remains the
-   low-level equivalent.
-   An approval is half the act. After the operator records one, write its
-   `decisionId` and `decisionDigest` into the matching
-   `inventories/module-classification.json` row — the checkpoint stays invalid
-   until you do. A stale decision never suppresses the exact current pending
-   candidate; the operator can approve it through the same locked flow without
-   first deleting the stale reference. Non-literal module edges also require
+   `EXCLUDED_APPROVED` with a decision authorized under the record's policy. That
+    happens one decision per iteration. Module 19 validates a policy-bound
+    decision directly against the verified ledger; no challenge or receipt
+    fields are authored in classification version 2. With no signer, a default
+    `HUMAN_ATTESTED` request is blocked, not implicitly approved. Historical
+    module formats ≤18 instead retain the terminal/elicitation challenge and
+    require the cited `decisionId` and `decisionDigest` in the classification
+    row after recording. A stale decision cannot authorize the current candidate.
+    Non-literal module edges also require
    concrete tracked targets; prose and approval never substitute for a target.
    `new URL(expr, import.meta.url)`, safe immutable aliases, and nested module
    URL bases are module-resource edges. Proven HTTP/runtime URLs are recorded
@@ -1124,9 +1125,9 @@ comparison → PASS/FAIL.
   path a new record may choose.
   The row is the only binding of a state to
   Figma; nothing is inferred from frame names or states. A state with no row
-  goes under `unbacked` with its reason, and only a cited `VISUAL_UNBACKED`
-  operator decision (`artifact-migration-decision`, approved at a terminal) makes it
-  valid; a state with a row can never be unbacked. A DEGRADED frame cannot back a row and
+  goes under `unbacked` with its reason. Module 19 resolves `VISUAL_UNBACKED`
+  directly from the verified ledger; module formats ≤18 require a cited
+  historical decision. A state with a row can never be unbacked. A DEGRADED frame cannot back a row and
   is not absence of design. Pinned.
 - `VERIFY_SLICES` — each Figma-backed `origin: "TARGET"` row carries
   `figmaNodeId`, the contract `viewport`, a runtime `screenshot`, and
@@ -1184,7 +1185,7 @@ output, large binaries, or symlinked evidence.
 
 ### The operator-approval boundary, and exactly what it is worth
 
-An operator decision is recorded by one function, reached two ways: a terminal
+For module formats ≤18 and artifact 13, an operator decision is recorded by one function, reached two ways: a terminal
 (`process.stdin.isTTY`) or an in-process `ask` callback a front end may supply
 only after it has itself obtained a human answer. `ask` is a function
 reference, never an argv option, an environment variable, or a tool argument —
@@ -1211,9 +1212,14 @@ appears in the message the host renders, so a host that scrapes its own dialog
 text can still forge one approval per request — the same ceiling as an
 operator's terminal being able to echo the phrase it was just printed. What it
 does buy is that no default, no enum pick, and no empty auto-accept is ever an
-approval. Do not tell an operator it is stronger than that. The named upgrade
-path is a detached signature over each ledger line, verified against a key
-pinned at `RESOLVE`.
+approval. Do not tell an operator it is stronger than that. This historical
+challenge does not mint `HUMAN_ATTESTED`. Module 19 instead requires a verified
+ledger line bound to the current full candidate and trusted policy. Status,
+pending and run share its fresh projection; a valid append is immediately
+visible without advancing a checkpoint or restarting the session. The
+production signer/WebAuthn verifier is not implemented, so attested writes are
+unavailable and a missing signer is explicitly blocked. Native provider UI is
+presentation only; `AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`.
 
 `artifact-migration-decision <module> --verify` audits a record read-only: it takes no
 lock, re-derives every `prevDigest` itself, reports the first chain break, flags

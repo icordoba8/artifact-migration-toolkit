@@ -427,7 +427,11 @@ export const supportedMigrationVersions = async (root = repositoryRoot) => {
   const { core, artifact } = await engineFormatUpgrades(root);
   return {
     moduleContract: core.RESUMABLE_CONTRACT_VERSION,
-    moduleFormat: core.MIGRATION_FORMAT_VERSION,
+    // The format new records are created at. Deliberately not the supported
+    // ceiling: a consumer reading this to decide what it will be handed wants
+    // the activation control, and the two are stated separately below.
+    moduleFormat: core.FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+    moduleFormatSupported: core.MIGRATION_FORMAT_SUPPORTED,
     moduleWorkflow: core.WORKFLOW_VERSION,
     formatUpgradeFloor: core.FORMAT_UPGRADE_FLOOR,
     formatUpgraders: releaseUpgraders(core.FORMAT_UPGRADERS),
@@ -463,8 +467,12 @@ export const engineFormatUpgrades = async (root = repositoryRoot) => {
     pathToFileURL(path.join(root, "packages/migration-engine/src/format-upgrade.mjs")).href
   );
   assertRegistryCoverage({
+    // The *supported* ceiling, not the creation default: a release may ship a
+    // format it can read and explicitly move a record to while new records
+    // keep being created at the active one, and every increment up to the
+    // ceiling still needs its registered upgrader.
     floor: core.FORMAT_UPGRADE_FLOOR,
-    runtimeFormat: core.MIGRATION_FORMAT_VERSION,
+    runtimeFormat: core.MIGRATION_FORMAT_SUPPORTED,
     registry: core.FORMAT_UPGRADERS,
   });
   assertRegistryCoverage({

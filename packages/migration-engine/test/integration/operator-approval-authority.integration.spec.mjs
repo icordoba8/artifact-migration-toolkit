@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import {
@@ -33,11 +34,16 @@ import {
 import {
   challengeFor,
   parseDecisionArguments,
+  recordNewFormatDecisionGroup,
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
 import {
+  candidateDigestOf,
+} from "../../src/resumable-migration.mjs";
+import {
   addLegacyFiles,
   atDiscoveryCompleteness,
+  atDirectLedgerCompleteness,
   behaviorBacked,
   createFixture,
   decisionLedger,
@@ -399,6 +405,117 @@ test("one explicit group approval appends every member atomically", async () => 
       "every group member stopped pending together",
     );
   } finally {
+    await fixture.cleanup();
+  }
+});
+
+// The historical group above still appends legacy member lines. Format 19
+// instead presents one bound group review, but cannot attest it without a signer.
+
+test("a format-19 group shows one complete review and refuses host/terminal attestation", async () => {
+  const fixture = await createFixture();
+  try {
+    const names = extraFileNames(BATCH_SIZE - 1);
+    await addLegacyFiles(fixture, names);
+    await atDirectLedgerCompleteness(fixture, manyExcluded(names), behaviorBacked(names));
+    const { registryPath } = await resolutionFor(fixture);
+    const pending = await pendingFor(fixture);
+    const group = pending.group;
+    assert.equal(group.groupMembers.length, BATCH_SIZE);
+    assert.equal(group.review.candidateDigest, candidateDigestOf(group));
+    assert.deepEqual(group.review.members.map((member) => member.id), group.boundTo.members.map((member) => member.id));
+    assert.deepEqual(group.review.members.map((member) => member.evidence), group.boundTo.members.map((member) => member.boundTo));
+    assert.equal(group.review.policy.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(group.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.ok(group.review.approveEffect.includes("complete ordered member set"));
+    assert.ok(group.review.rejectEffect.includes("REJECTED"));
+    assert.equal(group.review.worktree, fixture.targetRoot);
+    assert.ok(group.review.rationale);
+    const previousCwd = process.cwd();
+    process.chdir(fixture.root);
+    try {
+      const subset = await runRecordDecisionCli(["auth", "--approve", group.groupMembers[0].id], {
+        stdout: { isTTY: true, write: () => true }, ask: () => "accept",
+      });
+      assert.equal(subset.blocked.state, "GROUP_REVIEW_REQUIRED");
+      assert.equal(await decisionLedger(fixture), null);
+    } finally { process.chdir(previousCwd); }
+    const record = (ask) =>
+      recordNewFormatDecisionGroup({
+        registryPath,
+        moduleName: "auth",
+        stdout: { write: (text) => ((rendered += text), true) },
+        ask,
+      });
+    let rendered = "";
+    const refused = await record(() => assert.fail("No host can answer a HUMAN_ATTESTED review"));
+    assert.equal(refused.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.ok(rendered.includes(group.review.candidateDigest));
+    assert.match(rendered, /Ordered group members:/);
+    assert.doesNotMatch(rendered, /challenge phrase|Confirmation phrase|Type the challenge/i);
+    assert.equal(await decisionLedger(fixture), null);
+  } finally {
+    process.exitCode = 0;
+    await fixture.cleanup();
+  }
+});
+
+test("a format-19 single candidate cannot write v1, attest via host/TTY/argv, or downgrade to AUTO", async () => {
+  const fixture = await createFixture();
+  const previousCwd = process.cwd();
+  const previousExitCode = process.exitCode;
+  try {
+    await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+    process.chdir(fixture.root);
+    const pending = await pendingFor(fixture);
+    const [candidate] = pending.candidates;
+    const review = candidate.review;
+    assert.equal(review.candidateDigest, candidateDigestOf(candidate));
+    assert.equal(review.policy.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.ok(review.rationale.includes("Decorative"));
+    assert.equal(review.evidence.discoveryDigest, pending.discoveryDigest);
+    assert.ok(review.approveEffect.includes("exclusion"));
+    assert.ok(review.rejectEffect.includes("REJECTED"));
+    assert.equal(candidate.command, undefined);
+    const transcript = [];
+    const output = { isTTY: true, write: (chunk) => (transcript.push(String(chunk)), true) };
+    for (const answer of ["accept", "yes", "cancel", "APPROVE", "REJECTED"]) {
+      const denied = await runRecordDecisionCli(["auth", "--approve", candidate.id], {
+        stdout: output, ask: () => answer,
+      });
+      assert.equal(denied.blocked.state, "SIGNER_UNAVAILABLE");
+      assert.equal(await decisionLedger(fixture), null);
+    }
+    const stdin = new PassThrough();
+    stdin.isTTY = true;
+    stdin.end("yes\n");
+    const tty = await runRecordDecisionCli(["auth", "--approve", candidate.id], { stdin, stdout: output });
+    assert.equal(tty.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.doesNotMatch(transcript.join(""), /Type the challenge|Challenge:|Confirmation phrase:/);
+    assert.equal(await decisionLedger(fixture), null);
+
+    let requests = 0;
+    const host = await runThroughHost(fixture, () => { requests++; return { action: "accept", content: { confirmation: "yes" } }; });
+    assert.equal(host.outcome, "BLOCKED");
+    assert.equal(host.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(host.operatorApproval.review.candidateDigest, review.candidateDigest);
+    assert.equal(requests, 0, "host elicitation is presentation, not human authority");
+    assert.equal(await decisionLedger(fixture), null);
+    for (const [name, argument] of [
+      ["migration_approve", {}],
+      ["migration_status", { confirmation: "yes" }],
+    ]) {
+      const refused = await handleMessage({
+        jsonrpc: "2.0", id: 3, method: "tools/call",
+        params: { name, arguments: { module: "auth", cwd: fixture.root, ...argument } },
+      });
+      assert.ok(refused.error);
+      assert.doesNotMatch(refused.error.message, /--approve|<candidate-id>|challenge phrase/);
+    }
+    assert.equal((await pendingFor(fixture)).decisions.state, "AWAITING_HUMAN_DECISION");
+  } finally {
+    process.chdir(previousCwd);
+    process.exitCode = previousExitCode;
     await fixture.cleanup();
   }
 });

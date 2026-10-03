@@ -257,14 +257,17 @@ Do not enter `ASSESS_TARGET` when any of these remains:
   define;
 - `EXCLUDED_APPROVED` or `DEAD` without an operator decision that matches the
   current stable candidate, exact subject, exact rationale bytes, concrete
-  targets, current discovery digest, and current legacy source bytes;
+  targets, current discovery digest, and current legacy source bytes (module
+  format 19 resolves this directly from the verified, policy-bound ledger;
+  module formats ≤18 retain historical citation fields);
 - a supporting file the module requires without the computed relation type and
   exact `requiredBy` list, or an unrelated shared file declared supporting;
 - any unresolved first-party reference;
 - a non-literal `import()`/`require()` or `new URL(expr, import.meta.url)`
   without one or more concrete tracked targets and an `EDGE_RESOLUTION`
-  candidate approved by the operator. Prose and approval alone never resolve a
-  module edge;
+  candidate authorized under the record's format-specific decision policy.
+  Prose and approval alone never resolve a module edge; a missing module-19
+  signer blocks `HUMAN_ATTESTED` rather than accepting provider interaction;
 - an i18n namespace without a proven governing mapping to a tracked runtime
   resource;
 - a `legacy.json` evidence location outside `OWNED`, typed `SUPPORTING`,
