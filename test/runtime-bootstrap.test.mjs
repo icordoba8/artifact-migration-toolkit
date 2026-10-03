@@ -189,7 +189,7 @@ test('latest and exact resolvers accept only stable immutable releases pinned to
       : { value: release, viaGh: true };
   };
   assert.equal((await resolveRelease(undefined, { api })).version, '1.1.0');
-  assert.equal(routes[0], '/repos/icordoba8/artifact-migration-tools/releases/latest');
+  assert.equal(routes[0], '/repos/icordoba8/artifact-migration-toolkit/releases/latest');
   routes.length = 0;
   assert.equal((await resolveRelease('1.1.0', { api })).commit, commit);
   assert.match(routes[0], /releases\/tags\/v1\.1\.0$/);

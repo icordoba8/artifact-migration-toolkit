@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
 
 const execFileAsync = promisify(execFile);
-const REPOSITORY = 'icordoba8/artifact-migration-tools';
+const REPOSITORY = 'icordoba8/artifact-migration-toolkit';
 const TOOLKIT = 'artifact-migration-tools';
 const PROVIDERS = new Map([
   ['claude', 'claude'], ['claude-code', 'claude'],

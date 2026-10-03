@@ -9,8 +9,8 @@ The normal user path is now standard Agent Skills installation followed by the
 installed skill's first-use preflight:
 
 ```sh
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools --skill start-migration
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools --skill migrate-artifact
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit --skill start-migration
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit --skill migrate-artifact
 ```
 
 Both skills carry byte-identical generated copies of

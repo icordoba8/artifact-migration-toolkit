@@ -77,10 +77,10 @@ docs/release.md           release gate, format-bump and approval-boundary rules
 Normal users install either skill with the standard Agent Skills CLI:
 
 ```bash
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools \
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit \
   --skill start-migration
 
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-tools \
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit \
   --skill migrate-artifact
 ```
 
