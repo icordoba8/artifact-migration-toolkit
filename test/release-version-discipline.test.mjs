@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { gzipSync } from "node:zlib";
-import { buildRelease, contentHashOf, payloadPaths, recordRelease, releaseCheck, repositoryRoot } from "../scripts/release.mjs";
+import { gunzipSync, gzipSync } from "node:zlib";
+import { buildRelease, buildReleaseArchive, contentHashOf, payloadPaths, recordRelease, releaseCheck, repositoryRoot } from "../scripts/release.mjs";
 import { resolveRelease } from "../scripts/runtime-bootstrap.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
@@ -202,4 +202,51 @@ test("the public resolver rejects nonpublication evidence before download or reg
   }
   await assert.rejects(execFileAsync(process.execPath, [path.join(repositoryRoot, "scripts/release.mjs"), "--record", "0.0.1", "extra"]),
     (error) => error.code === 1 && /Usage/.test(error.stderr));
+});
+
+const tarHeaders = (gz) => {
+  const raw = gunzipSync(gz);
+  const headers = [];
+  for (let offset = 0; offset + 512 <= raw.length;) {
+    const block = raw.subarray(offset, offset + 512);
+    if (block.every((byte) => byte === 0)) break;
+    const field = (start, length) => block.subarray(start, start + length).toString("latin1").replace(/\0[\s\S]*$/, "").trim();
+    const size = Number.parseInt(field(124, 12) || "0", 8);
+    headers.push({
+      name: field(0, 100), type: field(156, 1), mode: Number.parseInt(field(100, 8), 8) & 0o7777,
+      uid: Number.parseInt(field(108, 8), 8), gid: Number.parseInt(field(116, 8), 8),
+      uname: field(265, 32), gname: field(297, 32), body: raw.subarray(offset + 512, offset + 512 + size),
+    });
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  return headers;
+};
+
+test("the release archive carries no builder account, only normalized ownership", async (t) => {
+  const root = await scratch(t);
+  const stagingRoot = path.join(root, `artifact-migration-tools-${toolkit.version}`);
+  const manifest = path.join(stagingRoot, "release-manifest.json");
+  const script = path.join(stagingRoot, "scripts", "synthetic-builder-probe.mjs");
+  await mkdir(path.dirname(script), { recursive: true });
+  await writeFile(manifest, json({ toolkit }));
+  await writeFile(script, "#!/usr/bin/env node\n");
+  await chmod(manifest, 0o644);
+  await chmod(script, 0o755);
+
+  const { archive } = await buildReleaseArchive({ stagingRoot, identity: { version: toolkit.version } });
+  const headers = tarHeaders(await readFile(archive));
+  const builder = os.userInfo();
+
+  assert.ok(headers.length >= 4);
+  for (const header of headers) {
+    assert.deepEqual([header.uid, header.gid, header.uname, header.gname], [0, 0, "", ""], header.name);
+    if (builder.uid > 0) assert.ok(header.uname !== builder.username && header.gname !== builder.username);
+  }
+  const entry = (suffix) => headers.find((header) => header.name.endsWith(suffix));
+  assert.deepEqual(entry("release-manifest.json").body, await readFile(manifest));
+  assert.deepEqual(entry("synthetic-builder-probe.mjs").body, await readFile(script));
+  if (process.platform !== "win32") {
+    assert.equal(entry("release-manifest.json").mode, 0o644);
+    assert.equal(entry("synthetic-builder-probe.mjs").mode, 0o755);
+  }
 });

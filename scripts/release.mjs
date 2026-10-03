@@ -404,9 +404,10 @@ export const buildReleaseArchive = async (built) => {
     `${TOOLKIT_NAME}-v${built.identity.version}.tar.gz`,
   );
   await rm(archive, { force: true });
+  // Normalized ownership: the published asset must not carry the builder's account.
   await execFileAsync(
     "tar",
-    ["-czf", archive, "-C", path.dirname(built.stagingRoot), path.basename(built.stagingRoot)],
+    ["--owner=0", "--group=0", "--numeric-owner", "-czf", archive, "-C", path.dirname(built.stagingRoot), path.basename(built.stagingRoot)],
     { maxBuffer: 64 * 1024 * 1024 },
   );
   return { archive, digest: `sha256:${sha256(await readFile(archive))}` };
