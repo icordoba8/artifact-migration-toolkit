@@ -125,10 +125,10 @@ const localCanonical = (value: unknown): string =>
   JSON.stringify(
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.fromEntries(
-        Object.entries(value as Record<string, unknown>)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([key, child]) => [key, JSON.parse(localCanonical(child))]),
-      )
+          Object.entries(value as Record<string, unknown>)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, child]) => [key, JSON.parse(localCanonical(child))]),
+        )
       : Array.isArray(value)
         ? value.map((child) => JSON.parse(localCanonical(child)))
         : value,
