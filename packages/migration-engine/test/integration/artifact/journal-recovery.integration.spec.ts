@@ -125,10 +125,10 @@ const localCanonical = (value: unknown): string =>
   JSON.stringify(
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.fromEntries(
-          Object.entries(value as Record<string, unknown>)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([key, child]) => [key, JSON.parse(localCanonical(child))]),
-        )
+        Object.entries(value as Record<string, unknown>)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, child]) => [key, JSON.parse(localCanonical(child))]),
+      )
       : Array.isArray(value)
         ? value.map((child) => JSON.parse(localCanonical(child)))
         : value,
@@ -289,7 +289,7 @@ describe("VERIFY_SLICES and FINALIZE recover through the same reproof", () => {
     const result = await runArtifact(fixture.options);
     expect(result.outcome).toBe("CONTINUE");
     expect((await stateOf(fixture)).currentStep).toBe("VERIFY_SLICES");
-  });
+  }, 15_000); // Drives the record through BUILD first; 6.1s observed on Windows CI.
 });
 
 describe("forged (but internally self-consistent) transactions fail production replay", () => {
