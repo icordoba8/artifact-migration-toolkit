@@ -27,7 +27,14 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { once } from "node:events";
 import { linkPackageDependencies } from "../support/dependency-links.mjs";
+import {
+  comparisonPath,
+  removeTree,
+  renderedCommandPattern,
+  stopChild,
+} from "../support/portability.mjs";
 
 import {
   engineArgv,
@@ -399,12 +406,7 @@ const externalInstall = async (
       await writeFile(statePath, `${JSON.stringify({ registry })}\n`);
       return statePath;
     },
-    cleanup: () =>
-      Promise.all(
-        [home, away].map((target) =>
-          rm(target, { recursive: true, force: true }),
-        ),
-      ),
+    cleanup: () => Promise.all([home, away].map(removeTree)),
   };
 };
 
@@ -778,8 +780,9 @@ test("R-1 proof: --doctor from an external engine reports the consumer, not its 
 
 test("R-1 proof: the MCP server starts from an external engine installation", async () => {
   const install = await externalInstall();
+  let server;
   try {
-    const server = spawn(process.execPath, [install.script("mcp-server.mjs")], {
+    server = spawn(process.execPath, [install.script("mcp-server.mjs")], {
       cwd: install.consumerRoot,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -825,12 +828,93 @@ test("R-1 proof: the MCP server starts from an external engine installation", as
       }, 50);
       server.on("error", reject);
     });
-    server.stdin.end();
-    server.kill();
 
     assert.equal(frames[0].result.serverInfo.name, "start-migration");
     assert.ok(frames[1].result.tools.length > 0);
   } finally {
+    if (server) await stopChild(server);
     await install.cleanup();
+  }
+});
+
+// --- Windows portability boundary (synthetic paths only) --------------------
+
+test("portability: a rendered command matches by meaning on either shell family", () => {
+  const rendered = (script, platform) =>
+    `node ${quoteCommandToken(script, platform)} auth --approve APP-1`;
+  const pattern = renderedCommandPattern("record-decision.mjs", "auth --approve APP-");
+  const forms = [
+    rendered("/home/user/tools/src/record-decision.mjs", "linux"),
+    rendered("/home/user/My Tools/src/record-decision.mjs", "linux"),
+    rendered(String.raw`C:\Tools\src\record-decision.mjs`, "win32"),
+    // `~` (an 8.3 short name) and a space both force a Windows quote.
+    rendered(String.raw`C:\Users\RUNNER~1\src\record-decision.mjs`, "win32"),
+    rendered(String.raw`C:\Users\First Last\src\record-decision.mjs`, "win32"),
+  ];
+  assert.deepEqual(forms.slice(1).map((form) => /node ["']/.test(form)), [true, false, true, true]);
+  for (const form of forms) assert.match(form, pattern);
+
+  const nested = renderedCommandPattern("upgrades/upgrade-migration.mjs", "auth");
+  assert.match(String.raw`node "C:\Users\First Last\src\upgrades\upgrade-migration.mjs" auth`, nested);
+  assert.match("node /opt/tools/src/upgrades/upgrade-migration.mjs auth", nested);
+  // Still the named script with the named arguments, nothing looser.
+  assert.doesNotMatch("node /opt/src/record-decision.mjs auth --refuse APP-1", pattern);
+  assert.doesNotMatch("node /opt/src/xrecord-decision.mjs auth --approve APP-1", pattern);
+});
+
+test("portability: a comparison path is the repository-relative `/` form, for text only", () => {
+  const manifest = path.join("packages", "migration-engine", "package.json");
+  assert.equal(comparisonPath(manifest), "packages/migration-engine/package.json");
+  // The rendered manifest is a host path; only its comparison form is `/`.
+  assert.equal(
+    comparisonPath(path.join(engineSkillRoot, "package.json")),
+    `${comparisonPath(engineSkillRoot)}/package.json`,
+  );
+});
+
+test("portability: a file URL becomes a path with exactly one drive prefix", async () => {
+  const windows = "file:///C:/Example/First%20Last/pkg/package.json";
+  const converted = fileURLToPath(windows, { windows: true });
+  assert.equal(converted, String.raw`C:\Example\First Last\pkg\package.json`);
+  assert.equal(converted.match(/[A-Za-z]:/g).length, 1);
+  assert.equal(path.win32.resolve(converted), converted);
+  // The defect this guards: a URL pathname resolved as a Windows path.
+  assert.equal(
+    path.win32.resolve(String.raw`C:\cwd`, new URL(windows).pathname),
+    String.raw`C:\C:\Example\First%20Last\pkg\package.json`,
+  );
+  assert.equal(
+    fileURLToPath("file:///home/user/My%20Tools/package.json", { windows: false }),
+    "/home/user/My Tools/package.json",
+  );
+
+  // No engine module or test derives a filesystem path from a URL pathname.
+  const offenders = [];
+  for (const root of [scriptsRoot, path.join(enginePackage, "test")]) {
+    for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !/\.(m?js|ts)$/.test(entry.name)) continue;
+      const file = path.join(entry.parentPath, entry.name);
+      if (/URL\(\s*import\.meta\.url\s*\)\.pathname/.test(await readFile(file, "utf8"))) {
+        offenders.push(file);
+      }
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
+
+test("portability: a stopped child has exited and released its cwd", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "amt portability child "));
+  try {
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      cwd,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    await once(child, "spawn");
+    await stopChild(child);
+    assert.ok(child.exitCode !== null || child.signalCode !== null);
+    // No retries: a held handle would surface here as EBUSY.
+    await rm(cwd, { recursive: true });
+  } finally {
+    await removeTree(cwd);
   }
 });

@@ -54,6 +54,7 @@ import {
   snapshot,
   state,
 } from "./approval.fixture.mjs";
+import { renderedCommandPattern } from "../support/portability.mjs";
 
 const DECISIONS = "decisions/operator-decisions.ndjson";
 const CLASSIFICATION = "inventories/module-classification.json";
@@ -208,7 +209,7 @@ test("a host that cannot deliver a human answer still leaves a trusted worktree-
     assert.ok(declined.operatorApproval, "a fallback path is offered");
     assert.equal(declined.operatorApproval.cwd, fixture.root);
     const [offered] = declined.operatorApproval.candidates;
-    assert.match(offered.command, /record-decision\.mjs auth --approve APP-/);
+    assert.match(offered.command, renderedCommandPattern("record-decision.mjs", "auth --approve APP-"));
     assert.ok(
       !offered.command.includes("DEC-"),
       "the operator is never asked to carry a decision id",
@@ -915,7 +916,7 @@ test("R-W2-e: no argv option, environment variable, or tool argument can produce
     createSession(),
   );
   assert.match(refused.error.message, /approval-shaped argument 'decision'/);
-  assert.match(refused.error.message, /record-decision\.mjs auth --approve/);
+  assert.match(refused.error.message, renderedCommandPattern("record-decision.mjs", "auth --approve"));
 });
 
 /**

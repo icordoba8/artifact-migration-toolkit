@@ -35,6 +35,7 @@ import { PNG } from "pngjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
+import { comparisonPath, renderedCommandPattern } from "../support/portability.mjs";
 
 import {
   dirtyManifest,
@@ -58,7 +59,7 @@ import {
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
 import { acquireModuleLock, lockPathFor } from "../../src/module-lock.mjs";
-import { engineCommand } from "../../src/engine-paths.mjs";
+import { engineCommand, quoteCommandToken } from "../../src/engine-paths.mjs";
 import { digestToolkitIdentity } from "../../src/toolkit-identity.mjs";
 import {
   AMEND_SLICE,
@@ -3835,11 +3836,12 @@ test("an initialized unregistered migration lists deterministic pending commands
         first.candidates[0].id,
       ),
     );
-    assert.equal(
-      first.candidates[0].command.split(" ")[1],
-      path.join(scriptsRoot, "record-decision.mjs"),
+    const recorder = path.join(scriptsRoot, "record-decision.mjs");
+    assert.ok(
+      first.candidates[0].command.startsWith(`node ${quoteCommandToken(recorder)} `),
+      first.candidates[0].command,
     );
-    assert.ok(await exists(first.candidates[0].command.split(" ")[1]));
+    assert.ok(await exists(recorder));
     assert.deepEqual(
       parseDecisionArguments(["auth", "--approve", first.candidates[0].id]),
       {
@@ -14747,7 +14749,7 @@ test("R-W9-b: --doctor on a host without the parser reports it, names the instal
     assert.equal(parser.status, "BLOCKED");
     assert.match(parser.detail, /ts-discovery-compiler/);
     assert.match(parser.detail, /pnpm install/);
-    assert.match(parser.detail, /packages\/migration-engine\/package\.json/);
+    assert.match(comparisonPath(parser.detail), /packages\/migration-engine\/package\.json/);
 
     // A preflight that repairs the host it is inspecting is not a preflight.
     assert.deepEqual(await snapshot(root), before);
@@ -15247,7 +15249,10 @@ test("R-W4-a: an unclaimed modified target file blocks FINALIZE by name", async 
     // real CLI syntax, and the operator decision that accepts it.
     assert.match(
       failure.message,
-      /discover-module\.mjs <module> --amend-slice <slice> --add-file <path>/,
+      renderedCommandPattern(
+        "discover-module.mjs",
+        "<module> --amend-slice <slice> --add-file <path>",
+      ),
       "the refusal renders the amendment exit as a runnable command",
     );
     assert.match(

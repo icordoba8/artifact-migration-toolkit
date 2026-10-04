@@ -18,6 +18,7 @@ import { PNG } from "pngjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
+import { comparisonPath } from "../support/portability.mjs";
 
 import {
   FINAL_GATES,
@@ -4253,7 +4254,7 @@ test("R-W1-d: an unresolvable parser names the dependency, the manifest, the sea
   ).message;
   assert.match(message, /ts-discovery-compiler/);
   assert.match(message, /npm:typescript@5\.9\.3/);
-  assert.match(message, /packages\/migration-engine\/package\.json/);
+  assert.match(comparisonPath(message), /packages\/migration-engine\/package\.json/);
   assert.match(message, /pnpm install --frozen-lockfile/);
   assert.ok(message.includes(scriptsRoot), "must name the directory searched");
   assert.match(message, /Nothing was changed\./);

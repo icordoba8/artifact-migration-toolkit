@@ -53,6 +53,7 @@ import {
 import { ARTIFACT_FORMAT_VERSION } from "../../src/artifact/artifact-migration.mjs";
 import { buildRelease, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
 import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
+import { renderedCommandPattern } from "../support/portability.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -466,8 +467,9 @@ test("A-02 artifact mismatch remains BLOCKED with progress and exact identity re
   assert.equal(blockedResult.artifactId, before.artifactId);
   assert.equal(blockedResult.progress.activeCheckpoint, "DISCOVER_LEGACY");
   assert.match(blockedResult.progressChecklist, /stop reason: BLOCKED/);
-  assert.match(blockedResult.reason, /toolkit-identity\.mjs update --artifact src\/widget\.ts/);
-  assert.match(blockedResult.nextCommand, /toolkit-identity\.mjs update --artifact src\/widget\.ts/);
+  const update = renderedCommandPattern("cli/toolkit-identity.mjs", "update --artifact src/widget.ts");
+  assert.match(blockedResult.reason, update);
+  assert.match(blockedResult.nextCommand, update);
   const resumed = await runEngine(engine, "artifact/run-artifact.mjs", args, root);
   assert.equal(resumed.code, 0, resumed.output);
   assert.equal(JSON.parse(resumed.output).artifactId, before.artifactId);

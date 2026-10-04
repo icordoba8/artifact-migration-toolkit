@@ -25,6 +25,7 @@ import { buildRelease } from "../../../../scripts/release.mjs";
 import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 import { createUnstampedRecord } from "../support/consumer-fixture.mjs";
 import { downgradeToV4, readTree } from "../support/downgrade-v4.mjs";
+import { stopChild } from "../support/portability.mjs";
 import { MIGRATION_FORMAT_VERSION } from "../../src/resumable-migration.mjs";
 import { validateToolkitIdentity } from "../../src/toolkit-identity.mjs";
 
@@ -213,7 +214,7 @@ test("the MCP server runs from the installation and keeps host elicitation the o
     params: { name: "migration_status", arguments: { module: "auth" } },
   });
   await new Promise((resolve) => setTimeout(resolve, 2500));
-  child.kill();
+  await stopChild(child);
 
   const tools = responses.find((message) => message.id === 2)?.result?.tools ?? [];
   assert.ok(tools.length > 0, `MCP listed no tools: ${JSON.stringify(responses)}`);

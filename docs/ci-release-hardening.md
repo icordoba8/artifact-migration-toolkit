@@ -143,6 +143,11 @@ product behavior is globally skipped on Windows.
 external dependencies for the candidate release root and the isolated engine
 runners. `candidate-release-root.mjs` owns synthetic release payload/version
 construction. `serialized-path.mjs` owns encoded path tampering.
+`portability.mjs` owns the test side of the Windows boundary: `comparisonPath`
+for asserting on rendered paths, `renderedCommandPattern` for asserting on a
+command `engineCommand` rendered (quoted or not, either separator), `stopChild`
+to await a child's exit before its cwd is removed, and `removeTree` for bounded
+`fs.rm` retries.
 `scripts/test-isolation.mjs` copies the source into a unique scratch checkout,
 then links only external dependencies; the source and test identities remain
 separate. Add a helper only when a second real caller needs the same mechanism.

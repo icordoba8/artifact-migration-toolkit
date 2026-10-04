@@ -205,7 +205,7 @@ export const parserResolutionError = (error, fromUrl, skillName) => {
   const skillRoot = engineSkillRoot;
   return new Error(
     `Cannot load the pinned discovery parser 'ts-discovery-compiler': ${error.message}. ` +
-      `It is declared as 'npm:typescript@5.9.3' by ${skillRoot}/package.json and is resolved ` +
+      `It is declared as 'npm:typescript@5.9.3' by ${path.join(skillRoot, "package.json")} and is resolved ` +
       `from the node_modules directories above ${searchedFrom}. ` +
       `Run 'pnpm install --frozen-lockfile' at the repository root that contains the ${skillName} skill, or ` +
       `'pnpm install' inside ${skillRoot} when the skill is installed into a target repository. ` +

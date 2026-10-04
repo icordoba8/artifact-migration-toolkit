@@ -10,10 +10,11 @@
 // questions are answerable at any revision.
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { removeTree } from "./portability.mjs";
 
 import { resolveRegistryPath } from "../../src/migration-utils.mjs";
 import {
@@ -249,6 +250,6 @@ export const createUnstampedRecord = async ({
       const current = JSON.parse(await readFile(statePath, "utf8"));
       await writeFile(statePath, `${JSON.stringify(mutate(current), null, 2)}\n`);
     },
-    cleanup: () => rm(root, { recursive: true, force: true }),
+    cleanup: () => removeTree(root),
   };
 };

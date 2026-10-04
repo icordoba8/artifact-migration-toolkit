@@ -45,6 +45,7 @@ import {
   historyEvents,
   decisionLedger,
 } from "../integration/approval.fixture.mjs";
+import { renderedCommandPattern } from "../support/portability.mjs";
 
 /**
  * Drives the server over a pair of streams, from the fixture's working
@@ -336,13 +337,13 @@ test("every refused tool returns a method error naming the operator command", as
     await atDiscoveryCompleteness(fixture, EXCLUDED_CLASSIFICATION);
     const before = await snapshot(fixture.migrationRoot);
     const refused = [
-      ["migration_approve", /record-decision\.mjs auth --approve/],
-      ["migration_bootstrap", /discover-module\.mjs auth --registry/],
-      ["migration_refresh", /discover-module\.mjs auth --refresh/],
-      ["migration_register", /update-migration-registry\.mjs auth/],
-      ["migration_upgrade", /upgrades\/upgrade-migration\.mjs auth/],
-      ["migration_advance", /run-migration\.mjs auth/],
-      ["migration_validate", /run-migration\.mjs auth/],
+      ["migration_approve", renderedCommandPattern("record-decision.mjs", "auth --approve")],
+      ["migration_bootstrap", renderedCommandPattern("discover-module.mjs", "auth --registry")],
+      ["migration_refresh", renderedCommandPattern("discover-module.mjs", "auth --refresh")],
+      ["migration_register", renderedCommandPattern("update-migration-registry.mjs", "auth")],
+      ["migration_upgrade", renderedCommandPattern("upgrades/upgrade-migration.mjs", "auth")],
+      ["migration_advance", renderedCommandPattern("run-migration.mjs", "auth")],
+      ["migration_validate", renderedCommandPattern("run-migration.mjs", "auth")],
     ];
 
     const { raw } = await converse(
