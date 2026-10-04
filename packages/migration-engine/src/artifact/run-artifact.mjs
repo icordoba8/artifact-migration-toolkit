@@ -42,11 +42,25 @@ export const parseArtifactArguments = (arguments_) => {
       slice: { type: "string" },
       "design-source": { type: "string" },
       figma: { type: "string", multiple: true },
+      "pilot-format": { type: "string" },
+      "upgrade-format": { type: "string" },
+      "confirm-format": { type: "string" },
       json: { type: "boolean", default: false },
     },
   });
   assertOptionCombination("artifact", { positionals, values });
   if (values.ponytail !== undefined) assertPonytailTarget(values.ponytail);
+  if (values["pilot-format"] !== undefined && values["pilot-format"] !== "14") {
+    throw new Error("--pilot-format accepts only 14.");
+  }
+  if (values["upgrade-format"] !== undefined && values["upgrade-format"] !== "14") {
+    throw new Error("--upgrade-format accepts only 14.");
+  }
+  if ((values.status && (values["pilot-format"] || values["upgrade-format"] || values["confirm-format"])) ||
+      (values["pilot-format"] && values["upgrade-format"]) ||
+      (values["confirm-format"] && !values["pilot-format"] && !values["upgrade-format"])) {
+    throw new Error("Format selection, upgrade and confirmation must be invoked explicitly and separately from --status.");
+  }
   return {
     source: positionals[0],
     sources: values.source,
@@ -60,6 +74,9 @@ export const parseArtifactArguments = (arguments_) => {
     slice: values.slice,
     designSource: values["design-source"],
     figma: values.figma,
+    pilotFormat: values["pilot-format"] === "14" ? 14 : undefined,
+    upgradeFormat: values["upgrade-format"] === "14" ? 14 : undefined,
+    confirmationId: values["confirm-format"],
     json: values.json,
   };
 };
@@ -128,6 +145,9 @@ export const runArtifactCli = async (
     slice: parsed.slice,
     designSource: parsed.designSource,
     figma: parsed.figma,
+    pilotFormat: parsed.pilotFormat,
+    upgradeFormat: parsed.upgradeFormat,
+    confirmationId: parsed.confirmationId,
   };
   // No interactive consent prompt here. `AWAITING_CONFIRMATION` returns to the
   // agent under the same rule as every other confirmation in this workflow, so

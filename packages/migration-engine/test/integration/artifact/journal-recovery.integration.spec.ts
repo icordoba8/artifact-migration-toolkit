@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error -- untyped production JS module, consumed directly for real behavior.
-import { getArtifactStatus, runArtifact } from "../../../src/artifact/artifact-migration.mjs";
+import { getArtifactStatus, previewArtifact, previewArtifactFormatUpgrade, runArtifact, upgradeArtifactFormat } from "../../../src/artifact/artifact-migration.mjs";
 
 import {
   advanceAssessment,
@@ -85,7 +85,7 @@ afterEach(async () => {
 const captureTransaction = async (
   fixture: Fixture,
   action: () => Promise<unknown>,
-  input: { kind: "BOOTSTRAP" | "ADVANCE"; selectedSlice?: string | null; artifactType?: string; source?: unknown; target?: unknown },
+  input: { kind: "BOOTSTRAP" | "ADVANCE" | "FORMAT_UPGRADE"; selectedSlice?: string | null; confirmationId?: string; artifactType?: string; source?: unknown; target?: unknown },
 ) => {
   const pre = await snapshot(fixture);
   await action();
@@ -97,8 +97,13 @@ const captureTransaction = async (
   const event = historyEvents(post["history/history.ndjson"])[preCount];
   const resolvedInput =
     input.kind === "BOOTSTRAP"
-      ? { kind: "BOOTSTRAP" as const, artifactType: state.artifactType, source: state.source, target: state.target }
-      : { kind: "ADVANCE" as const, selectedSlice: input.selectedSlice ?? null };
+      ? {
+        kind: "BOOTSTRAP" as const, artifactType: state.artifactType, source: state.source, target: state.target,
+        ...(state.formatVersion === 14 ? { pilotFormat: 14 } : {})
+      }
+      : input.kind === "FORMAT_UPGRADE"
+        ? { kind: "FORMAT_UPGRADE" as const, from: 13, to: 14, confirmationId: input.confirmationId }
+        : { kind: "ADVANCE" as const, selectedSlice: input.selectedSlice ?? null };
   const transaction = { version: 2, previousState, previousIntegrity, input: resolvedInput, state, event };
   return { pre, post, transaction };
 };
@@ -125,10 +130,10 @@ const localCanonical = (value: unknown): string =>
   JSON.stringify(
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.fromEntries(
-          Object.entries(value as Record<string, unknown>)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([key, child]) => [key, JSON.parse(localCanonical(child))]),
-        )
+        Object.entries(value as Record<string, unknown>)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, child]) => [key, JSON.parse(localCanonical(child))]),
+      )
       : Array.isArray(value)
         ? value.map((child) => JSON.parse(localCanonical(child)))
         : value,
@@ -206,6 +211,41 @@ describe("crash windows: bootstrap", () => {
   }
 });
 
+describe("crash windows: explicit pilot bootstrap", () => {
+  for (const phase of PHASES) {
+    it(`replays a confirmed format-14 bootstrap once after ${phase}`, async () => {
+      const fixture = await tracked();
+      const options = { ...fixture.options, pilotFormat: 14 };
+      const preview = await previewArtifact(options);
+      const { pre, post, transaction } = await captureTransaction(
+        fixture,
+        () => runArtifact({ ...options, confirmationId: preview.confirmationId }),
+        { kind: "BOOTSTRAP" },
+      );
+      await applyPhase(fixture, pre, post, phase, transaction);
+      expect((await runArtifact(fixture.options)).outcome).toBe("CONTINUE");
+      expect((await stateOf(fixture)).formatVersion).toBe(14);
+      expect(await snapshot(fixture)).toEqual(post);
+    });
+  }
+
+  it("refuses a format-14 bootstrap journal with no pilot selection", async () => {
+    const fixture = await tracked();
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    const { pre, post, transaction } = await captureTransaction(
+      fixture,
+      () => runArtifact({ ...options, confirmationId: preview.confirmationId }),
+      { kind: "BOOTSTRAP" },
+    );
+    const { pilotFormat: _pilotFormat, ...input } = transaction.input as Record<string, unknown>;
+    await applyPhase(fixture, pre, post, "JOURNAL_ONLY", { ...transaction, input });
+    const before = await snapshot(fixture);
+    expect((await runArtifact(fixture.options)).outcome).toBe("BLOCKED");
+    expect(await snapshot(fixture)).toEqual(before);
+  });
+});
+
 describe("crash windows: advance", () => {
   for (const phase of PHASES) {
     it(`recovers an advance interrupted at ${phase}, producing the exact same record`, async () => {
@@ -230,6 +270,51 @@ describe("crash windows: advance", () => {
       expect(finalSnapshot["history/history.ndjson"]).toBe(post["history/history.ndjson"]);
     });
   }
+});
+
+describe("crash windows: explicit pristine 13 -> 14 upgrade", () => {
+  for (const phase of PHASES) {
+    it(`replays the exact format upgrade once after ${phase}`, async () => {
+      const fixture = await tracked();
+      await bootstrap(fixture);
+      const { confirmationId } = await previewArtifactFormatUpgrade(fixture.options);
+      const { pre, post, transaction } = await captureTransaction(
+        fixture,
+        () => upgradeArtifactFormat({ ...fixture.options, confirmationId }),
+        { kind: "FORMAT_UPGRADE", confirmationId },
+      );
+      await applyPhase(fixture, pre, post, phase, transaction);
+      expect((await getArtifactStatus(fixture.options)).outcome).toBe("CONTINUE");
+      const result = await runArtifact(fixture.options);
+      expect(result.outcome).toBe("CONTINUE");
+      expect((await stateOf(fixture)).formatVersion).toBe(14);
+      expect(await snapshot(fixture)).toEqual(post);
+      await runArtifact(fixture.options);
+      expect(await snapshot(fixture)).toEqual(post);
+    });
+  }
+
+  it("refuses a forged confirmation journal without changing any record bytes", async () => {
+    const fixture = await tracked();
+    await bootstrap(fixture);
+    const { confirmationId } = await previewArtifactFormatUpgrade(fixture.options);
+    const { pre, post, transaction } = await captureTransaction(
+      fixture,
+      () => upgradeArtifactFormat({ ...fixture.options, confirmationId }),
+      { kind: "FORMAT_UPGRADE", confirmationId },
+    );
+    await applyPhase(fixture, pre, post, "JOURNAL_ONLY", {
+      ...transaction,
+      input: { kind: "FORMAT_UPGRADE", from: 13, to: 14, confirmationId: "forged" },
+    });
+    const before = await snapshot(fixture);
+    const status = await getArtifactStatus(fixture.options);
+    expect(status.outcome).toBe("BLOCKED");
+    expect(status.reason).toMatch(/format upgrade does not match its pristine preimage/);
+    expect(await snapshot(fixture)).toEqual(before);
+    expect((await runArtifact(fixture.options)).outcome).toBe("BLOCKED");
+    expect(await snapshot(fixture)).toEqual(before);
+  });
 });
 
 describe("PLAN slice selection recovers unambiguously", () => {

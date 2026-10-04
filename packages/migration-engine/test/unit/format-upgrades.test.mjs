@@ -31,6 +31,8 @@ import {
   renderLoopDirective,
 } from "../../src/resumable-migration.mjs";
 import {
+  ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+  ARTIFACT_FORMAT_SUPPORTED,
   ARTIFACT_FORMAT_UPGRADE_FLOOR,
   ARTIFACT_FORMAT_UPGRADERS,
   ARTIFACT_FORMAT_VERSION,
@@ -427,22 +429,26 @@ test("upgradeProjection carries the contract and none of the internals", () => {
 
 // --- the artifact engine's adapter, and the release gate over both ----------
 
-test("the artifact engine declares a floor at its runtime format and owes nothing", () => {
-  // The floor is the current runtime format, so the empty registry is complete,
-  // not unfinished: there is no adjacent increment to register yet, and a
-  // historical 12 -> 13 upgrader would claim a path never walked.
-  assert.equal(ARTIFACT_FORMAT_UPGRADE_FLOOR, ARTIFACT_FORMAT_VERSION);
-  assert.deepEqual(ARTIFACT_FORMAT_UPGRADERS, []);
+test("the artifact engine supports 14, creates 13 and registers exactly one adjacent upgrade", () => {
+  assert.equal(ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 13);
+  assert.equal(ARTIFACT_FORMAT_SUPPORTED, ARTIFACT_FORMAT_VERSION);
+  assert.equal(ARTIFACT_FORMAT_VERSION, 14);
+  assert.equal(ARTIFACT_FORMAT_UPGRADE_FLOOR, 13);
+  assert.deepEqual(
+    ARTIFACT_FORMAT_UPGRADERS.map(({ from, to, id, version }) => ({ from, to, id, version })),
+    [{ from: 13, to: 14, id: "PRISTINE_ARTIFACT_ADOPTED", version: 1 }],
+  );
   assert.doesNotThrow(
     coverage(ARTIFACT_FORMAT_UPGRADERS, {
       floor: ARTIFACT_FORMAT_UPGRADE_FLOOR,
       runtimeFormat: ARTIFACT_FORMAT_VERSION,
     }),
   );
-  // No format is both at or above the floor and behind the runtime, so the
-  // cursor answers null for every input -- including the pre-floor format an
-  // artifact record can be persisted at, which must not become pending work.
-  for (const formatVersion of [11, 12, 13, 14, undefined]) {
+  const upgrade = artifactFormatUpgrade({ formatVersion: 13 });
+  assert.equal(upgrade.state, "INACTIVE");
+  assert.equal(upgrade.active, false);
+  assert.equal(upgrade.to, 14);
+  for (const formatVersion of [11, 12, 14, undefined]) {
     assert.equal(artifactFormatUpgrade({ formatVersion }), null, `format ${formatVersion}`);
   }
   assert.equal(artifactFormatUpgrade(null), null);
@@ -471,10 +477,12 @@ test("the release gate runs for both engines and the manifest states both regist
   assert.equal(supports.moduleFormat, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
   assert.equal(supports.moduleFormatSupported, MIGRATION_FORMAT_SUPPORTED);
   assert.notEqual(supports.moduleFormat, supports.moduleFormatSupported);
-  // Artifact 14 stays unregistered and unactivated.
-  assert.equal(supports.artifactFormat, 13);
+  assert.equal(supports.artifactFormat, ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
+  assert.equal(supports.artifactFormatSupported, ARTIFACT_FORMAT_SUPPORTED);
   assert.equal(supports.artifactFormatUpgradeFloor, 13);
-  assert.deepEqual(supports.artifactFormatUpgraders, []);
+  assert.deepEqual(supports.artifactFormatUpgraders, [
+    { from: 13, to: 14, id: "PRISTINE_ARTIFACT_ADOPTED", version: 1 },
+  ]);
   // Identity only: no domain classifier, plan, commit or record path. A JSON
   // round trip is the manifest's own serialization, so anything that would be
   // dropped or rendered as null shows up here.

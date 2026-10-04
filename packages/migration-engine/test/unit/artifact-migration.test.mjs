@@ -30,6 +30,8 @@ import { artifactPrerequisiteWork } from "../../src/resumable-migration.mjs";
 import { runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { lockPathFor } from "../../src/module-lock.mjs";
 import {
+  ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+  ARTIFACT_FORMAT_SUPPORTED,
   ARTIFACT_FORMAT_UPGRADE_FLOOR,
   ARTIFACT_FORMAT_VERSION,
   artifactFormatUpgrade,
@@ -39,6 +41,8 @@ import {
   artifactIdFor,
   artifactRoot,
   getArtifactStatus,
+  previewArtifact,
+  previewArtifactFormatUpgrade,
   architectureFindings,
   hasCodeValidationCheck,
   legacyDependencies,
@@ -48,6 +52,7 @@ import {
   runArtifact,
   structuralUnits,
   targetTypeScript,
+  upgradeArtifactFormat,
   validateArtifactComplete,
 } from "../../src/artifact/artifact-migration.mjs";
 import { artifactDirective, parseArtifactArguments, runArtifactCli } from "../../src/artifact/run-artifact.mjs";
@@ -1503,7 +1508,7 @@ test("a pending recoverable transaction reports ACTIVE from --status and is reco
   }
 });
 
-test("the artifact engine admits its own format, refuses every other, and owes no upgrade", async () => {
+test("the artifact engine keeps 13 active and refuses unsupported old and future formats", async () => {
   const fixture = await createFixture();
   try {
     assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
@@ -1512,14 +1517,15 @@ test("the artifact engine admits its own format, refuses every other, and owes n
       files.map((relative) => readFile(path.join(fixture.artifactRoot, relative), "utf8")),
     );
     const state = JSON.parse(before[0]);
-    assert.equal(state.formatVersion, ARTIFACT_FORMAT_VERSION);
-    assert.equal(ARTIFACT_FORMAT_UPGRADE_FLOOR, ARTIFACT_FORMAT_VERSION);
+    assert.equal(state.formatVersion, ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
+    assert.equal(ARTIFACT_FORMAT_UPGRADE_FLOOR, 13);
+    assert.equal(ARTIFACT_FORMAT_SUPPORTED, ARTIFACT_FORMAT_VERSION);
 
-    // Floor === runtime, so a record at the runtime format owes nothing and the
-    // cursor has no increment to point at. Status projects it and writes nothing.
     const status = await getArtifactStatus(fixture.options);
     assert.equal(status.status, "ACTIVE", status.reason);
-    assert.equal(status.formatUpgrade, null);
+    assert.equal(status.formatUpgrade.to, 14);
+    assert.equal(status.formatUpgrade.state, "INACTIVE");
+    assert.equal(status.formatUpgrade.active, false);
     assert.equal(status.state.revision, state.revision);
     assert.deepEqual(
       await Promise.all(
@@ -1528,11 +1534,8 @@ test("the artifact engine admits its own format, refuses every other, and owes n
       before,
     );
 
-    // Below the floor and newer than the runtime are both refused, with the
-    // message they have always been refused with. Relaxed admission admits
-    // nothing that an empty registry cannot walk to the runtime format.
     const statePath = path.join(fixture.artifactRoot, "state.json");
-    for (const formatVersion of [12, 14]) {
+    for (const formatVersion of [12, 15]) {
       await writeFile(statePath, `${JSON.stringify({ ...state, formatVersion }, null, 2)}\n`);
       await assert.rejects(
         readArtifactState(fixture.targetRoot, state.artifactId),
@@ -1542,6 +1545,184 @@ test("the artifact engine admits its own format, refuses every other, and owes n
     }
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("pilot creation requires an explicit 14 selection, preview and confirmation", async () => {
+  const fixture = await createFixture();
+  try {
+    assert.equal(parseArtifactArguments(["widget", "--pilot-format", "14"]).pilotFormat, 14);
+    assert.throws(() => parseArtifactArguments(["widget", "--pilot-format", "13"]), /only 14/);
+    await assert.rejects(runArtifact({ ...fixture.options, formatVersion: 14 }), /Unsupported artifact migration format/);
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    assert.equal(preview.formatVersion, 14);
+    assert.equal((await runArtifact(options)).outcome, "AWAITING_CONFIRMATION");
+    assert.equal(await exists(path.join(fixture.artifactRoot, "state.json")), false);
+    assert.equal((await runArtifact({ ...options, confirmationId: preview.confirmationId })).outcome, "CONTINUE");
+    assert.equal((await stateOf(fixture)).formatVersion, 14);
+    assert.equal((await getArtifactStatus(fixture.options)).state.formatVersion, 14);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the CLI confirms a pilot and an explicit upgrade without changing ordinary creation", async () => {
+  const pilot = await createFixture();
+  const legacy = await createFixture();
+  try {
+    const pilotArgs = ["widget", "--type", "component", "--target", "src/widget.ts", "--source-root", pilot.sourceRoot, "--target-root", pilot.targetRoot, "--pilot-format", "14", "--json"];
+    let output = "";
+    const previousExitCode = process.exitCode;
+    try {
+      const pending = await runArtifactCli(pilotArgs, { stdout: { write: (chunk) => { output += chunk; } } });
+      assert.equal(pending.outcome, "AWAITING_CONFIRMATION");
+      await runArtifactCli([...pilotArgs, "--confirm-format", pending.confirmationId], { stdout: { write: () => {} } });
+      assert.equal((await stateOf(pilot)).formatVersion, 14);
+      await bootstrap(legacy);
+      output = "";
+      const legacyArgs = ["widget", "--type", "component", "--target", "src/widget.ts", "--source-root", legacy.sourceRoot, "--target-root", legacy.targetRoot, "--upgrade-format", "14", "--json"];
+      const upgrade = await runArtifactCli(legacyArgs, { stdout: { write: (chunk) => { output += chunk; } } });
+      assert.equal(upgrade.outcome, "AWAITING_CONFIRMATION");
+      const committed = await runArtifactCli([...legacyArgs, "--confirm-format", upgrade.confirmationId], { stdout: { write: () => {} } });
+      assert.equal(committed.outcome, "FORMAT_UPGRADED");
+      assert.equal((await stateOf(legacy)).formatVersion, 14);
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  } finally {
+    await pilot.cleanup();
+    await legacy.cleanup();
+  }
+});
+
+test("pilot 14 never accepts format-13 cited source decisions as authority", async () => {
+  const fixture = await createFixture();
+  try {
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await authorSource(fixture, { pendingDecision: true });
+    const result = await runArtifact(fixture.options);
+    assert.match(result.reason, /Artifact 14 decision authority is unavailable/);
+    assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("pilot 14 cannot accept cited visual exceptions through the legacy adapter", async () => {
+  const fixture = await createFixture();
+  const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
+  try {
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    await writeLegacyRuntimeContext(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeLegacyVisualAcceptance(fixture);
+    const relative = "matrices/visual-acceptance.json";
+    const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+    matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", decisionId: "APP-legacy" }];
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    const result = await runArtifact(fixture.options);
+    assert.match(result.reason, /Artifact 14 visual decision authority is unavailable/);
+    assert.equal((await stateOf(fixture)).currentStep, "BUILD_BASELINE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("delegated child arguments create format 13 without inheriting a parent's format", async () => {
+  const fixture = await createFixture();
+  try {
+    const args = artifactArgumentsFor({
+      artifactType: fixture.options.type,
+      source: { root: fixture.sourceRoot, path: fixture.options.source },
+      target: { root: fixture.targetRoot, path: fixture.options.target },
+    });
+    assert.equal(args.includes("--pilot-format"), false);
+    const parsed = parseArtifactArguments(args);
+    assert.equal((await runArtifact(parsed)).outcome, "CONTINUE");
+    assert.equal((await stateOf(fixture)).formatVersion, 13);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("only a pristine 13 bootstrap upgrades, with an explicit byte-bound confirmation", async () => {
+  const fixture = await createFixture();
+  const files = ["state.json", "integrity.json", "history/history.ndjson"];
+  const recordBytes = () => Promise.all(files.map((file) => readFile(path.join(fixture.artifactRoot, file), "utf8")));
+  try {
+    await bootstrap(fixture);
+    const before = await recordBytes();
+    const preview = await previewArtifactFormatUpgrade(fixture.options);
+    assert.equal(preview.to, 14);
+    assert.equal((await runArtifact({ ...fixture.options, upgradeFormat: 14 })).outcome, "AWAITING_CONFIRMATION");
+    await assert.rejects(upgradeArtifactFormat({ ...fixture.options, confirmationId: "wrong" }), /confirmation is missing or stale/);
+    assert.deepEqual(await recordBytes(), before);
+    const upgraded = await upgradeArtifactFormat({ ...fixture.options, confirmationId: preview.confirmationId });
+    assert.equal(upgraded.formatVersion, 14);
+    assert.equal(upgraded.revision, 1);
+    const history = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8")).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(history.map((event) => event.event), ["BOOTSTRAPPED", "FORMAT_UPGRADED"]);
+    assert.equal((await getArtifactStatus(fixture.options)).formatUpgrade, null);
+    const finalBytes = await recordBytes();
+    await assert.rejects(upgradeArtifactFormat({ ...fixture.options, confirmationId: preview.confirmationId }), /LEGACY_COMPATIBILITY_ACTION_REQUIRED/);
+    assert.deepEqual(await recordBytes(), finalBytes);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("authored, decided, pinned, journalled and drifted 13 records refuse without mutation", async () => {
+  const blockers = [
+    { file: "inventories/source.json", content: "{}\n" },
+    { file: "matrices/visual.json", content: "{}\n" },
+    { file: "decisions/operator-decisions.ndjson", content: "approval\n" },
+    { file: "decisions/auto-decisions.ndjson", content: "approval\n" },
+    { file: "evidence/pinned.json", content: "{}\n" },
+    { file: "transaction.json", content: "{}\n" },
+  ];
+  for (const blocker of blockers) {
+    const fixture = await createFixture();
+    try {
+      await bootstrap(fixture);
+      const file = path.join(fixture.artifactRoot, blocker.file);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, blocker.content);
+      const files = ["state.json", "integrity.json", "history/history.ndjson", blocker.file];
+      const bytes = () => Promise.all(files.map((relative) => readFile(path.join(fixture.artifactRoot, relative))));
+      const before = await bytes();
+      await assert.rejects(previewArtifactFormatUpgrade(fixture.options), /LEGACY_COMPATIBILITY_ACTION_REQUIRED/);
+      assert.deepEqual(await bytes(), before, blocker.file);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+  const fixture = await createFixture();
+  try {
+    await bootstrap(fixture);
+    const statePath = path.join(fixture.artifactRoot, "state.json");
+    const before = await readFile(statePath);
+    await writeFile(path.join(fixture.sourceRoot, "widget/source.ts"), "export const changed = true;\n");
+    await assert.rejects(previewArtifactFormatUpgrade(fixture.options), /LEGACY_COMPATIBILITY_ACTION_REQUIRED/);
+    assert.deepEqual(await readFile(statePath), before);
+  } finally {
+    await fixture.cleanup();
+  }
+  const pinned = await createFixture();
+  try {
+    await bootstrap(pinned);
+    await advanceDiscovery(pinned);
+    const before = await readFile(path.join(pinned.artifactRoot, "state.json"));
+    await assert.rejects(previewArtifactFormatUpgrade(pinned.options), /LEGACY_COMPATIBILITY_ACTION_REQUIRED/);
+    assert.deepEqual(await readFile(path.join(pinned.artifactRoot, "state.json")), before);
+  } finally {
+    await pinned.cleanup();
   }
 });
 

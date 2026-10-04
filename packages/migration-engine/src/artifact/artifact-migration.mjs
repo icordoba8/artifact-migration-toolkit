@@ -116,7 +116,9 @@ const PRESERVED_DISPOSITIONS = Object.freeze([
 const EXTERNAL_ELEMENT = /^EXTERNAL (.+)$/;
 
 export const ARTIFACT_CONTRACT_VERSION = 1;
-export const ARTIFACT_FORMAT_VERSION = 13;
+export const ARTIFACT_FORMAT_VERSION = 14;
+export const ARTIFACT_FORMAT_SUPPORTED = ARTIFACT_FORMAT_VERSION;
+export const ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = 13;
 export const ARTIFACT_WORKFLOW_VERSION = "1.0";
 export const ARTIFACT_RESOLUTIONS = Object.freeze([
   "TARGET_REUSE",
@@ -130,25 +132,24 @@ export const ARTIFACT_RESOLUTIONS = Object.freeze([
  * registry is the sole promoter of `formatVersion`, and below it nothing here
  * applies.
  *
- * The floor is the current runtime format, so the registry is *correctly* empty
- * -- there is no adjacent increment to register yet, and inventing a historical
- * 12 -> 13 upgrader would claim a path this toolkit has never been able to walk.
- * `assertRegistryCoverage` is what makes that self-correcting: bumping
- * `ARTIFACT_FORMAT_VERSION` to 14 fails the release gate until exactly one
- * 13 -> 14 row exists.
+ * The floor remains 13: no historical 12 -> 13 upgrader is claimed.
  */
-export const ARTIFACT_FORMAT_UPGRADE_FLOOR = ARTIFACT_FORMAT_VERSION;
-export const ARTIFACT_FORMAT_UPGRADERS = Object.freeze([]);
+export const ARTIFACT_FORMAT_UPGRADE_FLOOR = 13;
+export const ARTIFACT_FORMAT_UPGRADERS = Object.freeze([Object.freeze({
+  from: 13,
+  to: 14,
+  id: "PRISTINE_ARTIFACT_ADOPTED",
+  version: 1,
+  domain: () => "TRANSFORM",
+  requiredInput: null,
+  activation: null,
+  plan: (options) => previewArtifactFormatUpgrade(options),
+  commit: (options) => upgradeArtifactFormat(options),
+})]);
 
 /**
- * The cursor, over the shared walk. Today it can only ever answer `null`: floor
- * and runtime are the same number, so no format is both at or above the floor
- * and behind the runtime. It is the seam a registered row plugs into, not a
- * guess about what that row will need.
- *
- * ponytail: no domain/plan classification, because an empty registry has nothing
- * to classify. Ceiling: a registered row makes `state`/`domain`/`requiredInput`
- * real, and the module engine's `pendingFormatUpgrade` is the shape to follow.
+ * A cursor is informational only. Explicit preview and confirmation are the
+ * sole route to the registered transition; normal execution never promotes.
  */
 export const artifactFormatUpgrade = (state) => {
   const increment = nextIncrement(
@@ -167,7 +168,8 @@ export const artifactFormatUpgrade = (state) => {
     upgrader: row ? { id: row.id, version: row.version } : null,
     // Fail closed: a missing row means this toolkit cannot move the record, and
     // `validateState` has already refused to admit it.
-    state: row ? "READY" : "BLOCKED",
+    state: row ? "INACTIVE" : "BLOCKED",
+    active: !row,
     domain: null,
     blockers: row
       ? []
@@ -175,7 +177,7 @@ export const artifactFormatUpgrade = (state) => {
           `No registered artifact format upgrader for ${from} -> ${to}. This toolkit cannot move the record past format ${from}; nothing was read or written.`,
         ],
     nextAction: row
-      ? `Commit the artifact format upgrade ${from} -> ${to} (${row.id} v${row.version}).`
+      ? `Preview the explicit artifact format upgrade ${from} -> ${to} (${row.id} v${row.version}).`
       : `Install a toolkit that registers the ${from} -> ${to} artifact format upgrader.`,
   });
 };
@@ -1293,7 +1295,8 @@ export const resolveArtifact = async ({
   target,
   sourceRoot = process.cwd(),
   targetRoot = process.cwd(),
-  formatVersion = ARTIFACT_FORMAT_VERSION,
+  formatVersion = ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+  pilotFormat,
   designSource,
   figma,
   ponytail,
@@ -1321,14 +1324,15 @@ export const resolveArtifact = async ({
   }
   const targetPaths = targetPathsFor(sourcePath, targetPath, sourcePaths);
   const id = artifactIdFor({ source: sourcePath, type: artifactType });
-  if (formatVersion !== ARTIFACT_FORMAT_VERSION) {
+  if (formatVersion !== ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS ||
+    (pilotFormat !== undefined && pilotFormat !== ARTIFACT_FORMAT_SUPPORTED)) {
     throw new Error(`Unsupported artifact migration format ${formatVersion}.`);
   }
   const design = resolveDesignSource({ designSource, figma });
   return {
     id,
     artifactType,
-    formatVersion,
+    formatVersion: pilotFormat ?? formatVersion,
     source: { root: resolvedSourceRoot, path: sourcePath },
     sourcePaths,
     target: { root: resolvedTargetRoot, path: targetPath },
@@ -1693,6 +1697,58 @@ const bootstrapEventInput = () => ({
 
 const EMPTY_HISTORY = { events: [] };
 
+const pristineFormatUpgrade = async (root, state, history, journalled = false) => {
+  const refuse = () => {
+    throw Object.assign(new Error("LEGACY_COMPATIBILITY_ACTION_REQUIRED: Artifact 13 is not a pristine bootstrap record."), {
+      code: "LEGACY_COMPATIBILITY_ACTION_REQUIRED",
+    });
+  };
+  if (state.formatVersion !== 13 || history.events.length < 1 || history.events.length > (journalled ? 2 : 1)) refuse();
+  const bootstrapHistory = { events: history.events.slice(0, 1) };
+  const bootstrapBytes = `${JSON.stringify(bootstrapHistory.events[0])}\n`;
+  if (history.content !== (journalled && history.events.length === 2
+    ? `${bootstrapBytes}${JSON.stringify(history.events[1])}\n`
+    : bootstrapBytes)) refuse();
+  const files = [];
+  const visit = async (directory, relative = "") => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const child = relative ? `${relative}/${entry.name}` : entry.name;
+      const details = await lstat(path.join(directory, entry.name));
+      if (details.isDirectory()) {
+        files.push(`${child}/`);
+        await visit(path.join(directory, entry.name), child);
+      } else if (details.isFile()) files.push(child);
+      else refuse();
+    }
+  };
+  await visit(root);
+  const expectedFiles = ["history/", "history/history.ndjson", "integrity.json", "state.json", ...(journalled ? ["transaction.json"] : [])].sort();
+  if (canonical(files.sort()) !== canonical(expectedFiles)) refuse();
+  const [sourceBinding, targetBinding] = await Promise.all([
+    captureBinding(state.source.root, state.bindings.source.paths, "source"),
+    captureBinding(state.target.root, state.bindings.target.paths, "target"),
+  ]);
+  if (canonical(sourceBinding) !== canonical(state.bindings.source) ||
+      canonical(targetBinding) !== canonical(state.bindings.target)) refuse();
+  const resolved = {
+    id: state.artifactId,
+    artifactType: state.artifactType,
+    formatVersion: 13,
+    source: state.source,
+    sourcePaths: state.bindings.source.paths,
+    target: state.target,
+    targetPaths: state.bindings.target.paths,
+    ...resolveDesignSource({ designSource: state.designSource, figma: (state.figmaSources ?? []).map((item) => item.raw) }),
+    ...(state.ponytail ? { ponytail: state.ponytail } : {}),
+  };
+  const expectedState = initialArtifactState(resolved, sourceBinding, targetBinding, state.createdAt);
+  if (canonical(state) !== canonical(expectedState) || state.updatedAt !== state.createdAt ||
+      canonical(bootstrapHistory.events[0]) !== canonical(eventFor(EMPTY_HISTORY, expectedState, bootstrapEventInput()))) refuse();
+  const previousIntegrity = integrityFor(state, bootstrapBytes);
+  const confirmationId = sha256(canonical({ state, previousIntegrity, bootstrapBytes })).slice(0, 16);
+  return { bootstrapHistory, bootstrapBytes, previousIntegrity, confirmationId };
+};
+
 // Strict discriminated transition input: ADVANCE carries the selected slice
 // explicitly, independently of the event's slice (which retains the existing
 // previous-active-slice semantics); BOOTSTRAP carries exactly what the shared
@@ -1704,9 +1760,12 @@ const validateTransactionInput = (input, label) => {
       input,
       label,
       ["kind", "artifactType", "source", "target"],
-      ["designSource", "figmaSources", "sourcePaths", "ponytail"],
+      ["designSource", "figmaSources", "sourcePaths", "ponytail", "pilotFormat"],
     );
     assertSafeName(input.artifactType, `${label}.artifactType`);
+    if (input.pilotFormat !== undefined && input.pilotFormat !== 14) {
+      throw new Error(`${label}.pilotFormat must be 14.`);
+    }
     for (const key of ["source", "target"]) {
       exactObject(input[key], `${label}.${key}`, ["root", "path"]);
       nonEmpty(input[key].root, `${label}.${key}.root`);
@@ -1733,6 +1792,10 @@ const validateTransactionInput = (input, label) => {
   } else if (input.kind === "ADVANCE") {
     exactObject(input, label, ["kind", "selectedSlice"]);
     if (input.selectedSlice !== null) nonEmpty(input.selectedSlice, `${label}.selectedSlice`);
+  } else if (input.kind === "FORMAT_UPGRADE") {
+    exactObject(input, label, ["kind", "from", "to", "confirmationId"]);
+    if (input.from !== 13 || input.to !== 14) throw new Error(`${label} must describe 13 -> 14.`);
+    nonEmpty(input.confirmationId, `${label}.confirmationId`);
   } else if (input.kind === "TOOLKIT_IDENTITY") {
     // Engine maintenance, not a lifecycle transition: it moves no step, slice,
     // pin, binding or decision. It is a third transaction kind rather than a
@@ -1742,7 +1805,7 @@ const validateTransactionInput = (input, label) => {
     if (input.previous !== null) validateToolkitIdentity(input.previous, `${label}.previous`);
     validateToolkitIdentity(input.next, `${label}.next`);
   } else {
-    throw new Error(`${label}.kind must be BOOTSTRAP, ADVANCE or TOOLKIT_IDENTITY.`);
+    throw new Error(`${label}.kind must be BOOTSTRAP, ADVANCE, FORMAT_UPGRADE or TOOLKIT_IDENTITY.`);
   }
 };
 
@@ -1854,6 +1917,9 @@ const assertKnownRecoveryPhase = async (root, transaction, prefixContent) => {
 // bindings, reproduces the exact persisted proposal.
 const proveBootstrapTransaction = async (root, transaction) => {
   const { input, state } = transaction;
+  if ((state.formatVersion === 14) !== (input.pilotFormat === 14)) {
+    throw new Error("Recovered artifact bootstrap has no explicit pilot format selection.");
+  }
   const resolved = {
     id: state.artifactId,
     artifactType: input.artifactType,
@@ -1885,6 +1951,30 @@ const proveBootstrapTransaction = async (root, transaction) => {
     throw new Error("Recovered bootstrap transaction event does not reproduce the persisted proposal.");
   }
   await assertKnownRecoveryPhase(root, transaction, "");
+};
+
+const proveFormatUpgradeTransaction = async (root, transaction) => {
+  const { previousState, previousIntegrity, input, state, event } = transaction;
+  const history = await readHistory(root);
+  const pristine = await pristineFormatUpgrade(root, previousState, history, true);
+  if (canonical(previousIntegrity) !== canonical(pristine.previousIntegrity) ||
+      input.confirmationId !== pristine.confirmationId) {
+    throw new Error("Recovered artifact format upgrade does not match its pristine preimage.");
+  }
+  const expectedState = {
+    ...previousState,
+    formatVersion: 14,
+    revision: 1,
+    updatedAt: state.updatedAt,
+  };
+  const expectedEvent = eventFor(pristine.bootstrapHistory, expectedState, {
+    event: "FORMAT_UPGRADED", from: "DISCOVER_LEGACY", to: "DISCOVER_LEGACY", slice: null,
+  });
+  if (canonical(state) !== canonical(expectedState) || canonical(event) !== canonical(expectedEvent) ||
+      (history.events.length === 2 && canonical(history.events[1]) !== canonical(event))) {
+    throw new Error("Recovered artifact format upgrade does not reproduce its proposal.");
+  }
+  await assertKnownRecoveryPhase(root, transaction, pristine.bootstrapBytes);
 };
 
 // Independently reconstructs and proves an advance transaction from its
@@ -2106,12 +2196,17 @@ const recoverTransaction = async (targetRoot, root) => {
   if (transaction.version === TRANSACTION_VERSION) {
     if (transaction.input?.kind === "BOOTSTRAP") {
       await proveBootstrapTransaction(root, transaction);
+    } else if (transaction.input?.kind === "FORMAT_UPGRADE") {
+      await proveFormatUpgradeTransaction(root, transaction);
     } else if (transaction.input?.kind === "TOOLKIT_IDENTITY") {
       await proveToolkitIdentityTransaction(root, transaction);
     } else {
       await proveAdvanceTransaction(root, transaction);
     }
   } else if (transaction.version === 1) {
+    if (transaction.state.formatVersion === 14) {
+      throw new Error("Artifact 14 cannot be recovered from a legacy bootstrap transaction.");
+    }
     await reconstructLegacyTransaction(root, transaction);
   } else {
     throw new Error(`Unsupported artifact transaction version ${transaction.version}.`);
@@ -2152,6 +2247,12 @@ const stateFileExists = (root) => exists(path.join(root, STATE_FILE));
 export const previewArtifact = async (options = {}) => {
   const location = locate(options);
   if (await stateFileExists(location.root)) {
+    if (options.pilotFormat !== undefined) {
+      const state = await readArtifactState(location.targetRoot, location.id);
+      if (options.pilotFormat !== 14 || state.formatVersion !== 14) {
+        throw new Error("Pilot format selection cannot change an existing artifact.");
+      }
+    }
     // The inner reader, not the exported wrapper: a nested status must not
     // reset the counters of the run that asked for it.
     const status = await readArtifactStatus({ ...options, targetRoot: location.targetRoot, id: location.id });
@@ -2210,6 +2311,7 @@ const createArtifactRecord = async (resolved, options, confirmExecution) => {
       source: resolved.source,
       ...(resolved.sourcePaths.length > 1 ? { sourcePaths: resolved.sourcePaths } : {}),
       target: resolved.target,
+      ...(resolved.formatVersion === 14 ? { pilotFormat: 14 } : {}),
       designSource: resolved.designSource,
       figmaSources: resolved.figmaSources,
       ...(resolved.ponytail ? { ponytail: resolved.ponytail } : {}),
@@ -2226,6 +2328,61 @@ export const bootstrapArtifact = async ({ confirmExecution, ...options } = {}) =
     await recoverTransaction(resolved.target.root, resolved.root);
     if (await stateFileExists(resolved.root)) throw new Error(`Artifact migration '${resolved.id}' already exists.`);
     return createArtifactRecord(resolved, options, confirmExecution);
+  });
+};
+
+export const previewArtifactFormatUpgrade = async (options = {}) => {
+  const location = locate(options);
+  if (await exists(path.join(location.root, TRANSACTION_FILE))) {
+    throw Object.assign(new Error("LEGACY_COMPATIBILITY_ACTION_REQUIRED: Artifact has a pending journal."), {
+      code: "LEGACY_COMPATIBILITY_ACTION_REQUIRED",
+    });
+  }
+  const state = await readArtifactState(location.targetRoot, location.id);
+  assertInvocationMatches(state, options);
+  const history = await readHistory(location.root);
+  const pristine = await pristineFormatUpgrade(location.root, state, history);
+  if (await readFile(path.join(location.root, STATE_FILE), "utf8") !== jsonBytes(state) ||
+      await readFile(path.join(location.root, INTEGRITY_FILE), "utf8") !== jsonBytes(pristine.previousIntegrity)) {
+    throw Object.assign(new Error("LEGACY_COMPATIBILITY_ACTION_REQUIRED: Bootstrap bytes are not canonical."), {
+      code: "LEGACY_COMPATIBILITY_ACTION_REQUIRED",
+    });
+  }
+  return {
+    artifactId: state.artifactId,
+    from: 13,
+    to: 14,
+    requiresConfirmation: true,
+    confirmationId: pristine.confirmationId,
+  };
+};
+
+export const upgradeArtifactFormat = async ({ confirmationId, ...options } = {}) => {
+  const location = locate(options);
+  return withModuleLock(location.targetRoot, `artifact-${location.id}`, async () => {
+    const preview = await previewArtifactFormatUpgrade(options);
+    if (confirmationId !== preview.confirmationId) {
+      throw new Error("Artifact format upgrade confirmation is missing or stale.");
+    }
+    const previousState = await readArtifactState(location.targetRoot, location.id);
+    const history = await readHistory(location.root);
+    const state = {
+      ...previousState,
+      formatVersion: 14,
+      revision: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    const event = eventFor(history, state, {
+      event: "FORMAT_UPGRADED", from: "DISCOVER_LEGACY", to: "DISCOVER_LEGACY", slice: null,
+    });
+    return writeTransaction(location.targetRoot, location.root, {
+      version: TRANSACTION_VERSION,
+      previousState,
+      previousIntegrity: integrityFor(previousState, history.content),
+      input: { kind: "FORMAT_UPGRADE", from: 13, to: 14, confirmationId },
+      state,
+      event,
+    });
   });
 };
 
@@ -2282,6 +2439,9 @@ const validateSourceInventory = async (root, state) => {
   versionOne(document.version, "source inventory");
   if (document.artifactId !== state.artifactId) throw new Error("source inventory artifactId does not match state.");
   boolean(document.hasVisibleUi, "source inventory.hasVisibleUi");
+  if (state.formatVersion === 14 && arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").length > 0) {
+    throw new Error("Artifact 14 decision authority is unavailable; legacy citations cannot authorize this record.");
+  }
   const sourceFiles = arrayOf(document.sourceFiles, "source inventory.sourceFiles").map((file) =>
     normalizeRelative(file, "source inventory source file"),
   );
@@ -2714,9 +2874,7 @@ const validateTargetInventory = async (root, state) => {
   return { relative, document, source, nativeIds, targetFiles };
 };
 
-// Artifact records keep format 13 for compatibility; the shared visual-authority
-// validators receive the format-17 view that opts into the existing strict
-// start-migration contract without creating a second contract.
+// The visual evidence adapter retains the existing format-17 evidence checks.
 const strictVisualState = (state) => ({
   ...state,
   formatVersion: VISUAL_ACCEPTANCE_FORMAT,
@@ -2746,13 +2904,20 @@ const artifactUiInventory = (source) => ({
     })),
 });
 
-const artifactVisualAcceptance = async (root, state, source, target) =>
-  validateVisualAcceptance(
+const artifactVisualAcceptance = async (root, state, source, target) => {
+  if (state.formatVersion === 14) {
+    const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
+    if (Array.isArray(matrix.unbacked) && matrix.unbacked.length > 0) {
+      throw new Error("Artifact 14 visual decision authority is unavailable; legacy citations cannot authorize this record.");
+    }
+  }
+  return validateVisualAcceptance(
     root,
     strictVisualState(state),
     artifactUiInventory(source),
     { uiMismatches: [] },
   );
+};
 
 const artifactVisualDecisions = async (root, state, source) => {
   if (!visualAuthorityOf(strictVisualState(state))) return [];
@@ -2762,6 +2927,9 @@ const artifactVisualDecisions = async (root, state, source) => {
     source ? artifactUiInventory(source) : undefined,
   );
   if (candidates.length === 0) return [];
+  if (state.formatVersion === 14) {
+    throw new Error("Artifact 14 visual decision authority is unavailable; legacy citations cannot authorize this record.");
+  }
   const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
   const { byId, decisions } = await readRecordedDecisions(root);
   return candidates.map((candidate) => {
@@ -3735,6 +3903,9 @@ const locate = ({ targetRoot = process.cwd(), id, source, type = "artifact", sou
 };
 
 const assertInvocationMatches = (state, options) => {
+  if (options.pilotFormat !== undefined && (options.pilotFormat !== 14 || state.formatVersion !== 14)) {
+    throw new Error("Invocation pilot format conflicts with persisted state.");
+  }
   if (options.type && options.type !== state.artifactType) throw new Error("Invocation artifact type conflicts with persisted state.");
   if (options.source !== undefined) {
     const requestedSource = sourcePathForId({ source: options.source, sourceRoot: options.sourceRoot });
@@ -3791,6 +3962,8 @@ const readArtifactStatus = async (options = {}) => {
     try {
       transaction = JSON.parse(await readFile(transactionFile, "utf8"));
       await assertTransactionReplayable(location.root, transaction);
+      // Same read-only proof recovery runs, so status cannot promise a replay run refuses.
+      if (transaction.input?.kind === "FORMAT_UPGRADE") await proveFormatUpgradeTransaction(location.root, transaction);
       replayable = true;
       if (transaction.state.artifactId !== location.id) {
         throw new Error("Artifact state identity does not match its directory.");
@@ -4067,7 +4240,21 @@ const runArtifactIteration = async (options = {}) => {
     throw new Error(`--mode accepts ${MIGRATION_MODES.map((value) => `'${value}'`).join(" or ")}.`);
   }
   const location = locate(options);
-  if (mode === "step" && !(await stateFileExists(location.root))) {
+  if (options.upgradeFormat !== undefined) {
+    if (options.upgradeFormat !== 14 || options.pilotFormat !== undefined) {
+      throw new Error("Only an explicit 13 -> 14 format upgrade is supported.");
+    }
+    const preview = await previewArtifactFormatUpgrade(options);
+    const state = await readArtifactState(location.targetRoot, location.id);
+    if (options.confirmationId !== preview.confirmationId) {
+      return outcomeResult(state, "AWAITING_CONFIRMATION", "Artifact format upgrade confirmation is pending; nothing was written.", mode, {
+        preview, confirmationId: preview.confirmationId,
+      });
+    }
+    const upgraded = await upgradeArtifactFormat(options);
+    return outcomeResult(upgraded, "FORMAT_UPGRADED", null, mode);
+  }
+  if ((mode === "step" || options.pilotFormat === 14) && !(await stateFileExists(location.root))) {
     const preview = await previewArtifact(options);
     if (options.confirmationId !== preview.confirmationId) {
       const synthetic = {
@@ -4112,7 +4299,7 @@ const runArtifactIteration = async (options = {}) => {
       const state = await createArtifactRecord(
         resolved,
         options,
-        mode === "auto" ? preview.confirmationId : options.confirmationId,
+        mode === "auto" && options.pilotFormat !== 14 ? preview.confirmationId : options.confirmationId,
       );
       return outcomeResult(state, "CONTINUE", null, mode);
     }
