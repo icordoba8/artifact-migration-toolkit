@@ -34,7 +34,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -340,10 +340,41 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
   // output, not runtime input, and are deliberately excluded at every depth.
   // Read from the manifest rather than named here, so adding a dependency
   // cannot ship a bundle that fails to resolve it at runtime.
-  const dependencies = Object.keys(
+  // The full transitive closure: pnpm's isolated layout keeps a dependency's
+  // own dependencies beside it in the store, not under it. Placed as Node will
+  // resolve them: top level first, nested under the dependent only when the
+  // name it would find there is another version.
+  const resolveFrom = async (from, name) => {
+    for (let directory = from; ; directory = path.dirname(directory)) {
+      const candidate = path.join(directory, "node_modules", name);
+      try { return await realpath(candidate); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (path.dirname(directory) === directory) throw new Error(`Cannot resolve runtime dependency '${name}' from ${from}.`);
+    }
+  };
+  const placed = new Map();
+  const visibleFrom = (installed, name) => {
+    for (let parent = installed; parent; parent = parent.includes("/node_modules/") ? parent.slice(0, parent.lastIndexOf("/node_modules/")) : null) {
+      const nested = `${parent}/node_modules/${name}`;
+      if (placed.has(nested)) return nested;
+    }
+    return placed.has(name) ? name : null;
+  };
+  const queue = Object.keys(
     (await readJson(path.join(root, "packages/migration-engine/package.json"))).dependencies ?? {},
-  );
-  for (const dependency of dependencies) {
+  ).map((name) => [name, path.join(root, "packages/migration-engine"), null]);
+  while (queue.length > 0) {
+    const [name, from, parent] = queue.shift();
+    const directory = await resolveFrom(from, name);
+    const visible = parent ? visibleFrom(parent, name) : (placed.has(name) ? name : null);
+    if (visible && placed.get(visible) === directory) continue;
+    const installed = !placed.has(name) ? name : parent ? `${parent}/node_modules/${name}` : null;
+    if (!installed || placed.has(installed)) throw new Error(`Runtime dependency '${name}' cannot be staged without a resolution conflict.`);
+    placed.set(installed, directory);
+    for (const next of Object.keys((await readJson(path.join(directory, "package.json"))).dependencies ?? {})) {
+      queue.push([next, directory, installed]);
+    }
+  }
+  for (const [dependency, source] of placed) {
     const dependencyTarget = path.join(
       stagingRoot,
       "packages/migration-engine/node_modules",
@@ -351,7 +382,7 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
     );
     await mkdir(path.dirname(dependencyTarget), { recursive: true });
     await cp(
-      path.join(root, "packages/migration-engine/node_modules", dependency),
+      source,
       dependencyTarget,
       {
         recursive: true,

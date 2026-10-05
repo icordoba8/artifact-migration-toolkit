@@ -4730,7 +4730,42 @@ export const decisionLineProblem = (decision) => {
   if (decision.authorizedBy !== undefined) {
     return "carries a legacy authorizedBy block; a v2 line's principal is explicit";
   }
+  if (decision.webauthn !== undefined) {
+    return "carries a webauthn proof without being a HUMAN_ATTESTED line";
+  }
   return null;
+};
+
+/**
+ * The protected verifier for HUMAN_ATTESTED lines, scoped to one call tree by
+ * whoever holds the protected signer store. Never set from argv, env, MCP or
+ * repository input; absent, every attested line is refused (fail closed).
+ */
+export const attestationVerifierScope = new AsyncLocalStorage();
+
+/** Shape of a HUMAN_ATTESTED v2 line; proof validity is the verifier's job. */
+export const attestedLineProblem = (decision) => {
+  const problem = decisionLineProblem({ ...decision, principal: "AGENT_RELAYED", webauthn: undefined });
+  if (problem) return problem;
+  if (!/^DEC-\d{3,}$/.test(decision.id ?? "") || !decision.candidateId) return "is not a candidate-bound DEC- line";
+  if (decision.policyId === undefined) return "carries no policy binding";
+  if (!decision.webauthn || typeof decision.webauthn !== "object") return "claims HUMAN_ATTESTED without a webauthn proof";
+  return null;
+};
+
+const verifyAttestedLine = async (decision, ledgerFile) => {
+  const verifier = attestationVerifierScope.getStore();
+  if (!verifier) {
+    return "claims HUMAN_ATTESTED, but no protected signer verifier is available in this process; an unverifiable attestation is refused, not trusted (SIGNER_UNAVAILABLE)";
+  }
+  const shape = attestedLineProblem(decision);
+  if (shape) return shape;
+  try {
+    await verifier.verifyDecisionLine(decision, ledgerFile);
+    return null;
+  } catch (error) {
+    return `claims HUMAN_ATTESTED, but its proof failed protected replay verification (${error.message})`;
+  }
 };
 
 /** The principal a line is read as: explicit for v2, derived for legacy. */
@@ -4777,7 +4812,9 @@ const readDecisionLedger = async (root, file, principal) => {
         `${file} line ${index + 1} is not valid JSON: ${error.message}. The operator decision record was truncated or rewritten.`,
       );
     }
-    const problem = decisionLineProblem(decision);
+    const problem = decision?.v === 2 && decision.principal === "HUMAN_ATTESTED" && principal !== "AUTO"
+      ? await verifyAttestedLine(decision, absolute)
+      : decisionLineProblem(decision);
     if (problem) {
       throw new Error(
         `${file} line ${index + 1} ('${decision.id ?? "unknown"}') ${problem}. The operator decision record is untrusted.`,

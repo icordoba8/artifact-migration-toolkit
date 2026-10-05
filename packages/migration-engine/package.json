@@ -29,6 +29,7 @@
     "references"
   ],
   "dependencies": {
+    "@simplewebauthn/server": "14.0.3",
     "pixelmatch": "7.2.0",
     "pngjs": "7.0.0",
     "ts-discovery-compiler": "npm:typescript@5.9.3"

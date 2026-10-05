@@ -29,7 +29,10 @@ import {
 } from "../../src/core.mjs";
 import { artifactPrerequisiteWork, candidateDigestOf, createNewFormatDecisionGroup, DEFAULT_DECISION_POLICY_DIGEST,
   validateProtectedDecisionPolicy } from "../../src/resumable-migration.mjs";
-import { assertReviewedCandidateCurrent, buildDecision, runRecordDecisionCli } from "../../src/record-decision.mjs";
+import { assertReviewedCandidateCurrent, beginAttestedDecision, buildDecision, completeAttestedDecision, runRecordDecisionCli } from "../../src/record-decision.mjs";
+import { ATTESTED_ARTIFACT_KINDS } from "../../src/operator-webauthn.mjs";
+import { attestationVerifierScope } from "../../src/resumable-migration.mjs";
+import { enrolledSigner } from "../support/signer-fixture.mjs";
 import { lockPathFor } from "../../src/module-lock.mjs";
 import {
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
@@ -57,6 +60,7 @@ import {
   targetTypeScript,
   upgradeArtifactFormat,
   validateArtifactComplete,
+  reconcileArtifactDecisions,
 } from "../../src/artifact/artifact-migration.mjs";
 import { artifactDirective, parseArtifactArguments, runArtifactCli } from "../../src/artifact/run-artifact.mjs";
 
@@ -5607,5 +5611,107 @@ test("Figma parity: DEGRADED frames cannot back acceptance and pinned evidence r
     );
   } finally {
     await fixture.cleanup();
+  }
+});
+
+/* -- Artifact 14 through the one protected signer --------------------------- */
+
+const signerTarget = (fixture) => ({ recordKind: "artifact", artifact: {
+  source: fixture.options.source, type: fixture.options.type, sourceRoot: fixture.sourceRoot, targetRoot: fixture.targetRoot } });
+const attestArtifact = async ({ signer, auth }, target, candidateId, result) => {
+  const begun = await beginAttestedDecision({ signer, target, candidateId, result });
+  assert.equal(begun.binding.recordKind, "artifact");
+  assert.equal(begun.binding.groupMembersDigest, null);
+  return completeAttestedDecision({ signer, target, candidateId, nonce: begun.nonce, response: auth.assert(begun.options) });
+};
+const artifactLedger = (fixture) =>
+  readFile(path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson"), "utf8").catch(() => "");
+
+test("pilot 14 signer: signed ARTIFACT_DECISION APPROVED and REJECTED, stale after change, verified on reread", async () => {
+  for (const result of ["APPROVED", "REJECTED"]) {
+    const fixture = await createFixture();
+    const signed = await enrolledSigner();
+    try {
+      const options = { ...fixture.options, pilotFormat: 14 };
+      const preview = await previewArtifact(options);
+      await runArtifact({ ...options, confirmationId: preview.confirmationId });
+      await authorSource(fixture, { pendingDecision: true });
+      const target = signerTarget(fixture);
+      const { candidate } = (await artifactOperatorDecisions(fixture.options)).decisions[0];
+      assert.equal(candidate.kind, "ARTIFACT_DECISION");
+      // Changed evidence after issue: nothing written, nonce never claimed.
+      const stale = await beginAttestedDecision({ ...signed, target, candidateId: candidate.id, result });
+      const relative = "inventories/source.json";
+      const inventory = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+      const original = structuredClone(inventory);
+      inventory.behaviors[0].description += " revised";
+      await writeJson(fixture.artifactRoot, relative, inventory);
+      await assert.rejects(completeAttestedDecision({ ...signed, target, candidateId: candidate.id, nonce: stale.nonce,
+        response: signed.auth.assert(stale.options) }), /STALE_REVIEW/);
+      assert.equal(await artifactLedger(fixture), "");
+      await writeJson(fixture.artifactRoot, relative, original);
+      const done = await attestArtifact(signed, target, candidate.id, result);
+      assert.equal(done.decision.principal, "HUMAN_ATTESTED");
+      assert.equal(done.decision.result, result);
+      assert.equal(done.decision.candidateDigest, candidateDigestOf(candidate));
+      assert.equal((await artifactLedger(fixture)).split("\n").filter(Boolean).length, 1);
+      // Shared projection, verified through the same protected replay.
+      const reread = await attestationVerifierScope.run(signed.signer, () => artifactOperatorDecisions(fixture.options));
+      assert.equal(reread.decisions[0].projection?.state ?? reconcileArtifactDecisions(reread.state, reread.decisions).projection.state,
+        result === "APPROVED" ? "APPROVED_APPLICABLE" : "REJECTED");
+      await assert.rejects(artifactOperatorDecisions(fixture.options), /no protected signer verifier|SIGNER_UNAVAILABLE/);
+      await assert.rejects(beginAttestedDecision({ ...signed, target, candidateId: candidate.id, result }), /STALE_REVIEW/);
+      // Evidence moves after the decision: it no longer authorizes the new candidate.
+      inventory.behaviors[0].description += " again";
+      await writeJson(fixture.artifactRoot, relative, inventory);
+      const moved = await attestationVerifierScope.run(signed.signer, () => artifactOperatorDecisions(fixture.options));
+      assert.notEqual(candidateDigestOf(moved.decisions[0].candidate), done.decision.candidateDigest);
+      assert.notEqual(reconcileArtifactDecisions(moved.state, moved.decisions).projection.state, "READY");
+    } finally {
+      process.exitCode = 0;
+      await signed.cleanup();
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("pilot 14 signer: signed VISUAL_UNBACKED uses the same protocol; artifact 13 and groups are refused", async () => {
+  assert.deepEqual(ATTESTED_ARTIFACT_KINDS, ["ARTIFACT_DECISION", "VISUAL_UNBACKED"]);
+  const fixture = await createFixture();
+  const legacy = await createFixture();
+  const signed = await enrolledSigner();
+  try {
+    const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    await writeLegacyRuntimeContext(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeLegacyVisualAcceptance(fixture);
+    const relative = "matrices/visual-acceptance.json";
+    const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+    matrix.rows = [];
+    matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", reason: "No complete capture" }];
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    const visual = (await artifactOperatorDecisions(fixture.options)).decisions.find((row) => row.candidate.kind === "VISUAL_UNBACKED").candidate;
+    const done = await attestArtifact(signed, signerTarget(fixture), visual.id, "APPROVED");
+    assert.equal(done.decision.kind, "VISUAL_UNBACKED");
+    assert.equal(done.decision.principal, "HUMAN_ATTESTED");
+
+    // Artifact 13 keeps its historical recorder; the signer refuses it.
+    const legacyPreview = await previewArtifact(legacy.options);
+    await runArtifact({ ...legacy.options, confirmationId: legacyPreview.confirmationId });
+    await authorSource(legacy, { pendingDecision: true });
+    const [row] = (await artifactOperatorDecisions(legacy.options)).decisions;
+    await assert.rejects(beginAttestedDecision({ ...signed, target: signerTarget(legacy), candidateId: row.candidate.id, result: "APPROVED" }),
+      /NOT_ATTESTABLE|not an approvable direct-ledger/);
+    await assert.rejects(readFile(path.join(legacy.artifactRoot, "decisions/operator-decisions.ndjson")), { code: "ENOENT" });
+  } finally {
+    process.exitCode = 0;
+    await signed.cleanup();
+    await fixture.cleanup();
+    await legacy.cleanup();
   }
 });

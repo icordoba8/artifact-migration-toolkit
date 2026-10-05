@@ -46,8 +46,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { writeSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { constants as fsConstants, writeSync } from "node:fs";
+import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -68,6 +68,8 @@ import {
   assertDiscoveryCompletenessFormat,
   assertNoPendingFormatUpgrade,
   assertRecordToolkitIdentity,
+  attestationVerifierScope,
+  attestedLineProblem,
   AUTO_DECISIONS_FILE,
   BLOCKED_EXIT_CODE,
   candidateDigestOf,
@@ -1299,6 +1301,185 @@ const approveCandidate = async ({
   });
 };
 
+/* -- HUMAN_ATTESTED: one locked writer for module 19 and artifact 14 -------- */
+
+// Lazy: only a protected signer process loads the WebAuthn verifier.
+const webauthnProtocol = () => import("./operator-webauthn.mjs");
+const refused = (code, message) => Object.assign(new Error(`${code}: ${message} Nothing was written.`), { code });
+
+const attestedRecompute = (target) => {
+  if (target?.recordKind === "module") {
+    assertSafeName(target.moduleName);
+    return moduleRecompute({ registryPath: target.registryPath, moduleName: target.moduleName });
+  }
+  if (target?.recordKind === "artifact") {
+    return async () => {
+      const locked = await deriveArtifactDecisions(target.artifact);
+      return { candidates: locked.candidates, root: locked.context.root, targetRoot: locked.context.targetRoot,
+        state: locked.context.state, recordName: locked.context.id, recordKind: "artifact" };
+    };
+  }
+  throw refused("UNKNOWN_TARGET", "An attested decision needs a module or artifact record target.");
+};
+
+/** Every payload binding, derived by the engine from the locked record; none from the caller. */
+const attestedBinding = async (candidate, locked, result) => {
+  const protocol = await webauthnProtocol();
+  if (!candidate) throw refused("STALE_REVIEW", "The reviewed candidate is no longer pending.");
+  if (!candidate.approvable || candidate.policyId === undefined || !candidate.requiredPrincipal) {
+    throw refused("NOT_ATTESTABLE", `Candidate '${candidate.id}' is not an approvable direct-ledger candidate.`);
+  }
+  if (candidate.projectRoot !== path.resolve(locked.targetRoot)) {
+    throw refused("WRONG_RECORD", "Candidate project root is not the locked record's target root.");
+  }
+  let record;
+  if (locked.recordKind === "module") {
+    if (!usesDirectLedgerDecisions(locked.state) || typeof locked.state.migrationId !== "string" || !locked.state.migrationId) {
+      throw refused("NOT_ATTESTABLE", "Only a format-19 module record with a persisted migrationId takes attested decisions.");
+    }
+    if (candidate.kind !== DECISION_GROUP_KIND && locked.candidates.some((entry) =>
+      entry.kind === DECISION_GROUP_KIND && entry.groupMembers.some((member) => member.id === candidate.id))) {
+      throw refused("GROUP_REVIEW_REQUIRED", "This candidate belongs to one ordered decision group; attest the group.");
+    }
+    record = { migrationId: locked.state.migrationId, module: locked.recordName };
+  } else {
+    if (locked.state.formatVersion !== 14 || !protocol.ATTESTED_ARTIFACT_KINDS.includes(candidate.kind)) {
+      throw refused("NOT_ATTESTABLE", "Artifact direct-ledger attestation covers only format-14 ARTIFACT_DECISION and VISUAL_UNBACKED candidates.");
+    }
+    if (locked.state.artifactId !== locked.recordName) throw refused("WRONG_RECORD", "Artifact identity does not match its record.");
+    record = { artifactId: locked.state.artifactId, artifactType: locked.state.artifactType,
+      sourceRoot: locked.state.source?.root, sourcePath: locked.state.source?.path };
+  }
+  const group = candidate.kind === DECISION_GROUP_KIND;
+  return {
+    protocol: protocol.ASSERTION_PROTOCOL,
+    recordKind: locked.recordKind,
+    record,
+    projectRoot: candidate.projectRoot,
+    lifecycleDigest: protocol.sha256Digest(await lifecycleBinding(locked.state, path.join(locked.root, "state.json"))),
+    candidateDigest: candidateDigestOf(candidate),
+    result,
+    requiredPrincipal: candidate.requiredPrincipal,
+    policyId: candidate.policyId,
+    policyDigest: candidate.policyDigest,
+    groupMembersDigest: group ? protocol.groupMembersDigestOf(candidate.boundTo.members) : null,
+    groupMemberCount: group ? candidate.boundTo.members.length : 0,
+  };
+};
+
+const appendDurably = async (targetRoot, file, text, onBoundary) => {
+  await assertSecurePath(targetRoot, file);
+  await mkdir(path.dirname(file), { recursive: true });
+  const handle = await open(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600);
+  try {
+    const bytes = Buffer.from(text, "utf8");
+    await onBoundary("during-append", { writePrefix: (length) => handle.write(bytes, 0, length) });
+    for (let offset = 0; offset < bytes.length;) {
+      offset += (await handle.write(bytes, offset, bytes.length - offset)).bytesWritten;
+    }
+    await onBoundary("after-append");
+    await handle.sync();
+    await onBoundary("after-fsync");
+  } finally {
+    await handle.close();
+  }
+  if (process.platform !== "win32") {
+    const directory = await open(path.dirname(file), fsConstants.O_RDONLY);
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
+};
+
+/** Fresh review data for the companion: the same derivation the writer uses. */
+export const reviewAttestedCandidate = ({ signer, target, candidateId }) =>
+  attestationVerifierScope.run(signer, async () => {
+    const locked = await attestedRecompute(target)();
+    const candidate = locked.candidates.find((entry) => entry.id === candidateId);
+    const binding = await attestedBinding(candidate, locked, "APPROVED");
+    return { candidate, review: candidate.review ?? reviewFor(candidate), record: binding.record };
+  });
+
+/** Issue one challenge for one explicit result over the freshly derived candidate. */
+export const beginAttestedDecision = ({ signer, target, candidateId, result, expectedDigest }) =>
+  attestationVerifierScope.run(signer, async () => {
+    const locked = await attestedRecompute(target)();
+    const binding = await attestedBinding(locked.candidates.find((entry) => entry.id === candidateId), locked, result);
+    if (expectedDigest !== undefined && binding.candidateDigest !== expectedDigest) {
+      throw refused("STALE_REVIEW", "The candidate changed after the page was rendered.");
+    }
+    return signer.issue({ binding, ledgerFile: path.join(locked.root, DECISIONS_FILE) });
+  });
+
+/**
+ * The only HUMAN_ATTESTED append. Under the record lock: rederive candidate,
+ * policy and lifecycle, compare with the issued payload, refuse duplicates,
+ * verify the assertion, claim nonce+counter durably, append one fsynced line,
+ * have the signer COMMIT that exact line, then reread the fresh projection.
+ * `onBoundary` exists for crash-injection tests; it can only throw.
+ */
+export const completeAttestedDecision = ({ signer, target, candidateId, nonce, response, onBoundary = () => {} }) =>
+  attestationVerifierScope.run(signer, async () => {
+    const recompute = attestedRecompute(target);
+    const first = await recompute();
+    const ledgerFile = path.join(first.root, DECISIONS_FILE);
+    const issued = signer.issued(nonce, ledgerFile);
+    const lockName = first.recordKind === "artifact" ? `artifact-${first.recordName}` : first.recordName;
+    const decision = await withModuleLock(first.targetRoot, lockName, async () => {
+      const locked = await recompute();
+      assertRecordToolkitIdentity(locked.state, locked.recordName, "Recording an operator decision", locked.recordKind);
+      if (locked.recordKind !== "artifact") {
+        assertNoPendingFormatUpgrade(locked.state, locked.recordName, "Recording an operator decision");
+      }
+      if (path.join(locked.root, DECISIONS_FILE) !== ledgerFile) throw refused("WRONG_RECORD", "The record moved while its review was open.");
+      const candidate = locked.candidates.find((entry) => entry.id === candidateId);
+      const binding = await attestedBinding(candidate, locked, issued.result);
+      const { BINDING_KEYS } = await webauthnProtocol();
+      const current = signer.issued(nonce, ledgerFile);
+      if (BINDING_KEYS.some((key) => JSON.stringify(binding[key]) !== JSON.stringify(current[key]))) {
+        throw refused("STALE_REVIEW", "Candidate, policy, lifecycle or record changed after the challenge was issued.");
+      }
+      const { decisions } = await readRecordedDecisions(locked.root);
+      const existing = decisions.find((line) => line.v === 2 && line.candidateDigest === binding.candidateDigest);
+      if (existing) throw refused("DUPLICATE_DECISION", `Candidate already has ledger entry ${existing.id} (${existing.result}).`);
+      const { decisions: operatorLines } = await readOperatorDecisions(locked.root);
+      await onBoundary("before-verify");
+      const verified = await signer.preverify({ nonce, response, ledgerFile });
+      await onBoundary("after-verify");
+      const shape = buildDecision({
+        previous: operatorLines.at(-1) ?? null,
+        kind: candidate.kind,
+        subjectType: candidate.subject.type,
+        subject: candidate.subject.path,
+        statement: `HUMAN_ATTESTED ${binding.result} of candidate ${candidate.id}.`,
+        rationale: candidate.rationale,
+        candidateId: candidate.id,
+        targets: candidate.targets,
+        boundTo: candidate.boundTo,
+        operator: `webauthn:${verified.operator}`,
+        principal: "AGENT_RELAYED",
+        result: binding.result,
+        candidateDigest: binding.candidateDigest,
+        policyId: binding.policyId,
+        policyDigest: binding.policyDigest,
+      });
+      // Same v2 shape and key order as every DEC- line; only the principal and
+      // the public proof differ, and only the signer's claim makes them authority.
+      const line = { ...shape, principal: "HUMAN_ATTESTED", webauthn: verified.proof };
+      await onBoundary("before-claim");
+      signer.claim({ nonce, verified, line, ledgerFile });
+      await onBoundary("after-claim");
+      await appendDurably(locked.targetRoot, ledgerFile, `${JSON.stringify(line)}\n`, onBoundary);
+      await onBoundary("before-commit");
+      await signer.commit({ nonce, ledgerFile });
+      await onBoundary("after-commit");
+      return line;
+    });
+    const projection = target.recordKind === "module"
+      ? await projectDecisions({ registryPath: target.registryPath, moduleName: target.moduleName })
+      : (await deriveArtifactDecisions(target.artifact)).decisionProjection;
+    await onBoundary("before-response");
+    return { decision, projection };
+  });
+
 // The artifact half of the one operator-decision recorder. Same TTY/`ask`
 // gate, same challenge phrase, same recompute-under-lock, same append-only
 // chain -- only the ledger location (the artifact record) and the candidate
@@ -1426,7 +1607,7 @@ const BOUND_TO_FIELDS = [
   "algorithmVersion",
 ];
 
-export const auditDecisionLedger = (lines) => {
+export const auditDecisionLedger = (lines, verifiedAttested = new Set()) => {
   const findings = [];
   const groups = [];
   const v2Positions = new Map();
@@ -1470,7 +1651,8 @@ export const auditDecisionLedger = (lines) => {
         (field) => decision.boundTo?.[field] === undefined,
       ).map((field) => `boundTo.${field}`),
     ];
-    const problem = decisionLineProblem(decision);
+    // An attested line is consistent only after protected replay verification.
+    const problem = verifiedAttested.has(position) ? null : decisionLineProblem(decision);
     if (problem) {
       findings.push({
         position,
@@ -1624,7 +1806,21 @@ const verifyRecord = async (root) => {
   // Both chains are audited, each against its own genesis. They are separate
   // records with separate principals, so a finding in one says nothing about
   // the other and merging them would only hide which is broken.
-  const ledger = auditDecisionLedger(await linesOf(DECISIONS_FILE));
+  const operatorLines = await linesOf(DECISIONS_FILE);
+  const verifier = attestationVerifierScope.getStore();
+  const verifiedAttested = new Set();
+  for (const [index, raw] of operatorLines.entries()) {
+    let decision;
+    try { decision = JSON.parse(raw); } catch { continue; }
+    if (!verifier || decision?.v !== 2 || decision.principal !== "HUMAN_ATTESTED" || attestedLineProblem(decision)) continue;
+    try {
+      await verifier.verifyDecisionLine(decision, path.join(root, DECISIONS_FILE));
+      verifiedAttested.add(index + 1);
+    } catch {
+      // Left unverified: the audit reports it as an untrusted principal.
+    }
+  }
+  const ledger = auditDecisionLedger(operatorLines, verifiedAttested);
   const autoLedger = auditDecisionLedger(await linesOf(AUTO_DECISIONS_FILE));
 
   const anchors = [];

@@ -332,3 +332,28 @@ test('SHA256SUMS disagreeing with the release manifest fails closed', async () =
   await assert.rejects(verifyBundle(receipt.release, b.pin), /SHA256SUMS does not match/);
   await assert.rejects(adapter('codex', { ...options, action: 'doctor' }), /SHA256SUMS does not match/);
 });
+
+test('staged release ships the pinned signer runtime closure and no test credential or key', async () => {
+  const { first } = await bundles();
+  const engine = path.join(first, 'packages/migration-engine');
+  const manifest = JSON.parse(await readFile(path.join(first, 'release-manifest.json')));
+  const shipped = Object.keys(manifest.files);
+  for (const dependency of ['@simplewebauthn/server', '@peculiar/x509', '@levischuck/tiny-cbor', 'tslib', 'pngjs']) {
+    assert.ok(shipped.includes(`packages/migration-engine/node_modules/${dependency}/package.json`), dependency);
+  }
+  assert.ok(shipped.some(file => file.startsWith('packages/migration-engine/node_modules/tsyringe/node_modules/tslib/')), 'conflicting version nested under its dependent');
+  assert.deepEqual(shipped.filter(file => /software-authenticator|signer-fixture|\.pem$|\.sqlite$/.test(file) ||
+    /^packages\/migration-engine\/(src|test)\/.*\btest\//.test(file)), []);
+  for (const file of shipped.filter(file => file.startsWith('packages/migration-engine/src/'))) {
+    assert.doesNotMatch(await readFile(path.join(first, file), 'utf8'), /BEGIN (EC |RSA )?PRIVATE KEY/, file);
+  }
+  // The staged signer and verifier load from the bundle alone under this Node.
+  const result = await capture(process.execPath, ['--input-type=module', '-e', `
+    const signer = await import(${JSON.stringify(new URL(`file://${path.join(engine, 'src/operator-signer.mjs')}`).href)});
+    const webauthn = await import(${JSON.stringify(new URL(`file://${path.join(engine, 'src/operator-webauthn.mjs')}`).href)});
+    console.log(JSON.stringify({ writes: signer.PRODUCTION_ATTESTED_WRITES, protocol: webauthn.ASSERTION_PROTOCOL,
+      activation: (await signer.readSignerActivation({})).writesEnabled }));`], scratch);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)),
+    { writes: false, protocol: 'amt.operator-decision.webauthn.assertion.v1', activation: false });
+});
