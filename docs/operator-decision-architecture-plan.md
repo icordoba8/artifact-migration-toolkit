@@ -1,5 +1,11 @@
 # Operator Decision Architecture Implementation Plan
 
+> Historical implementation plan. Its default-policy and format-activation
+> restrictions are superseded by the [current architecture](../README.md#architecture):
+> Module 19 / Artifact 14 are active, STANDARD_LOCAL requires AGENT_RELAYED,
+> and the retained protected WebAuthn signer is optional high assurance.
+> The milestone descriptions below record the earlier implementation sequence.
+
 ## 1. Goal
 
 Replace agent-carried authorization receipts with ledger-resolved, candidate-bound decisions for **new-format** migrations. Keep the decision ledger authoritative; give status, pending decisions, and run one fresh decision projection; make the review readable without asking the operator to inspect record files, copy identifiers, type challenge text, or restart the skill. A provider may display a review but cannot attest HUMAN authority. Enable `HUMAN_ATTESTED` writes only after the independent signer boundary passes real-host security sign-off. No implementation or host experiment is authorized by this plan.

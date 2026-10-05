@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -331,19 +332,18 @@ test("terminal fallback rejects Approve and requires the exact candidate challen
  * response shape, and it is the one that must not be able to form an opinion of
  * its own from a log, a receipt or a host reply.
  *
- * `APPROVED_APPLICABLE` is deliberately *not* reachable here: the engine default
- * requires `HUMAN_ATTESTED` for every judgment kind and this build cannot write
- * that principal, which is the asserted production state rather than something
- * to work around. What is proved end to end is that an appended line is seen
+ * This case opts up through a protected HUMAN_ATTESTED policy. A local relayed
+ * decision cannot satisfy that requirement. An appended line is seen
  * immediately and identically by all three, with its principal and result
  * reported and refused. The state table itself -- applicable, rejected, stale,
  * group-through-group -- is proved against a trusted admin policy in
  * `migration-contract.test.mjs` (ODA-5).
  */
-test("status, pending and run read one fresh decision projection, and read-only means read-only", async () => {
+test("protected high assurance: status, pending and run refuse relayed authority identically", async () => {
   const fixture = await createFixture();
   const cwd = process.cwd();
   const exitCode = process.exitCode;
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }), async () => {
   try {
     await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
     assert.equal((await state(fixture)).formatVersion, 19);
@@ -488,6 +488,7 @@ test("status, pending and run read one fresh decision projection, and read-only 
     process.exitCode = exitCode;
     await fixture.cleanup();
   }
+  });
 });
 
 /**

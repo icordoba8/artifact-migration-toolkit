@@ -108,7 +108,7 @@ const artifactEngine = () =>
   import("./artifact/artifact-migration.mjs");
 
 export const RESUMABLE_CONTRACT_VERSION = 5;
-export const MIGRATION_FORMAT_VERSION = 18;
+export const MIGRATION_FORMAT_VERSION = 19;
 export const WORKFLOW_VERSION = "5.0";
 
 /**
@@ -242,11 +242,8 @@ export const usesRequiredObservations = (state) =>
  * and claims direct authority is ambiguous, and an ambiguous authority is not
  * one.
  *
- * Supported, not active. Creation stays at 18 (see
- * `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS`) and no advance ever stamps 19: 19 is in
- * `NON_PROMOTING_FORMAT_VERSIONS` and its registry row is reachable only from
- * the explicit pre-pin adoption path. Activating it for new records is a
- * separate release/security gate that this constant does not open.
+ * Active for new records. Existing records reach 19 only through explicit
+ * pre-pin adoption; ordinary advances never reinterpret historical authority.
  */
 export const DIRECT_LEDGER_DECISIONS_FORMAT = 19;
 export const usesDirectLedgerDecisions = (state) =>
@@ -258,8 +255,7 @@ export const usesDirectLedgerDecisions = (state) =>
  * `MIGRATION_FORMAT_SUPPORTED` is the highest format this engine can read,
  * validate, test and -- when explicitly selected -- move a record to.
  * `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS` is the format ordinary creation stamps.
- * They are deliberately different numbers right now; collapsing them back into
- * one would silently activate 19 for every new record.
+ * Creation and compatibility are independent of the historical upgrade cursor.
  */
 export const MIGRATION_FORMAT_SUPPORTED = DIRECT_LEDGER_DECISIONS_FORMAT;
 export const FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = MIGRATION_FORMAT_VERSION;
@@ -2459,7 +2455,7 @@ const initialJsonArtifacts = {
     explicitNoRouteFlows: false,
   },
   [MODULE_CLASSIFICATION_FILE]: {
-    version: 1,
+    version: 2,
     algorithmVersion: CENSUS_ALGORITHM_VERSION,
     moduleRoots: [],
     declaredEntryPoints: [],
@@ -4537,10 +4533,8 @@ export const decisionChannelOf = (decision) =>
  * top-level fields and keeps its exact bytes; its principal is derived, and a
  * non-AUTO legacy line is historical `LEGACY_HUMAN` -- never `HUMAN_ATTESTED`.
  *
- * ponytail: `HUMAN_ATTESTED` and v2 `AUTO` are named but refused on read and
- * write. No attestation verifier exists, so an attested line can only be a
- * forgery; AUTO keeps its existing ledger shape. Upgrade path: the signer step
- * admits HUMAN_ATTESTED here once its proof is verified on every read.
+ * HUMAN_ATTESTED requires the optional protected verifier on every read.
+ * The standard writer can only relay decisions; AUTO keeps its legacy shape.
  */
 export const DECISION_PRINCIPALS = Object.freeze([
   "HUMAN_ATTESTED",
@@ -4550,9 +4544,8 @@ export const DECISION_PRINCIPALS = Object.freeze([
 export const DECISION_RESULTS = Object.freeze(["APPROVED", "REJECTED"]);
 const DECISION_V2_FIELDS = ["v", "principal", "result", "candidateDigest", "policyId", "policyDigest"];
 
-// ponytail: one engine default and one fixed OS-protected manifest; no agent-facing
-// policy selector. Add multi-project storage only when an admin service owns it.
-export const DEFAULT_DECISION_POLICY_ID = "engine/judgment/v1";
+// ponytail: one built-in policy and the existing protected opt-up, no policy selector.
+export const DEFAULT_DECISION_POLICY_ID = "engine/STANDARD_LOCAL/v1";
 const PROTECTED_DECISION_POLICY_FILE = "/etc/artifact-migration-tools/decision-policy.json";
 const JUDGMENT_KINDS = new Set([
   "EXCLUSION", "DEAD_CONFIRMATION", "EDGE_RESOLUTION", "ROOT_DECLARATION",
@@ -4564,9 +4557,17 @@ const canonicalPolicy = ({ policyId, projectRoot, revision, rules }) => ({
   policyId, projectRoot, revision,
   rules: Object.fromEntries(Object.entries(rules).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
 });
-export const DEFAULT_DECISION_POLICY_DIGEST = sha256Json(canonicalPolicy({
-  policyId: DEFAULT_DECISION_POLICY_ID, projectRoot: null, revision: 1, rules: {},
+const STANDARD_LOCAL = Object.freeze(canonicalPolicy({
+  policyId: DEFAULT_DECISION_POLICY_ID, projectRoot: null, revision: 1,
+  rules: Object.fromEntries([...JUDGMENT_KINDS].map((kind) => [kind, "AGENT_RELAYED"])),
 }));
+export const DEFAULT_DECISION_POLICY_DIGEST = sha256Json(STANDARD_LOCAL);
+// The former default remains a historical pin, never reinterpreted as local authority.
+const LEGACY_DECISION_POLICY_ID = "engine/judgment/v1";
+const LEGACY_DECISION_POLICY_DIGEST = sha256Json(canonicalPolicy({
+  policyId: LEGACY_DECISION_POLICY_ID, projectRoot: null, revision: 1, rules: {},
+}));
+const policyPrincipal = (policy, kind) => policy.rules[kind] ?? "HUMAN_ATTESTED";
 
 /** Principal strength is explicit; legacy HUMAN never acquires attestation. */
 export const principalSatisfiesRequirement = (actual, required) => {
@@ -4611,7 +4612,7 @@ export const validateProtectedDecisionPolicy = (document, projectRoot) => {
   }
   if (policy.revision === 1) {
     if (document.previous !== undefined ||
-        audit.previousPolicyDigest !== DEFAULT_DECISION_POLICY_DIGEST) {
+        ![DEFAULT_DECISION_POLICY_DIGEST, LEGACY_DECISION_POLICY_DIGEST].includes(audit.previousPolicyDigest)) {
       throw new Error("Protected decision policy genesis provenance does not match the engine default.");
     }
   } else {
@@ -4627,13 +4628,13 @@ export const validateProtectedDecisionPolicy = (document, projectRoot) => {
 };
 
 const trustedPolicyFor = async (projectRoot) => {
-  // Only Linux has the fixed root-owned trust store; elsewhere keep the strict default.
+  // The optional protected opt-up is Linux-specific; STANDARD_LOCAL works everywhere.
   if (process.platform !== "linux") return null;
   for (const directory of ["/", "/etc", path.dirname(PROTECTED_DECISION_POLICY_FILE)]) {
     let details;
     try { details = await lstat(directory); }
     catch (error) {
-      if (error.code === "ENOENT" && directory !== "/etc") return null;
+      if (error.code === "ENOENT") return null;
       throw error;
     }
     if (!details.isDirectory() || details.uid !== 0 || (details.mode & 0o022)) {
@@ -4666,12 +4667,12 @@ export const resolveRequiredPrincipal = async (kind, projectRoot) => {
     throw new Error("A canonical absolute project root is required for decision policy.");
   }
   const canonicalRoot = path.resolve(projectRoot);
-  const policy = await trustedPolicyFor(canonicalRoot);
+  const policy = await trustedPolicyFor(canonicalRoot) ?? STANDARD_LOCAL;
   return {
     projectRoot: canonicalRoot,
-    policyId: policy?.policyId ?? DEFAULT_DECISION_POLICY_ID,
-    policyDigest: policy?.policyDigest ?? DEFAULT_DECISION_POLICY_DIGEST,
-    requiredPrincipal: policy?.rules[kind] ?? "HUMAN_ATTESTED",
+    policyId: policy.policyId,
+    policyDigest: policy.policyDigest ?? DEFAULT_DECISION_POLICY_DIGEST,
+    requiredPrincipal: policyPrincipal(policy, kind),
   };
 };
 
@@ -4680,13 +4681,16 @@ export const resolveHistoricalRequiredPrincipal = async (kind, projectRoot, poli
     throw new Error("A known decision kind and canonical absolute project root are required.");
   }
   if (policyId === DEFAULT_DECISION_POLICY_ID && policyDigest === DEFAULT_DECISION_POLICY_DIGEST) {
+    return policyPrincipal(STANDARD_LOCAL, kind);
+  }
+  if (policyId === LEGACY_DECISION_POLICY_ID && policyDigest === LEGACY_DECISION_POLICY_DIGEST) {
     return "HUMAN_ATTESTED";
   }
   let policy = await trustedPolicyFor(path.resolve(projectRoot));
   while (policy) {
     const current = policy.policy ?? policy;
     if (current.policyId === policyId && policy.policyDigest === policyDigest) {
-      return current.rules[kind] ?? "HUMAN_ATTESTED";
+      return policyPrincipal(current, kind);
     }
     policy = policy.previous;
   }
@@ -5200,9 +5204,12 @@ const applicableDecisionOutcome = ({
     // own earlier decision over superseded evidence, and saying so is the
     // difference between a usable refusal and a mysterious one.
     const stale = decisions.find(
-      (line) => line?.v === 2 && line.kind === authority.kind &&
-        line.subject?.type === authority.subject.type && line.subject?.path === authority.subject.path &&
-        line.boundTo?.module === authority.boundTo.module,
+      (line) => line?.v === 2 && line.boundTo?.module === authority.boundTo.module &&
+        ((line.kind === authority.kind && line.subject?.type === authority.subject.type &&
+          line.subject?.path === authority.subject.path) ||
+          (!group && line.kind === DECISION_GROUP_KIND && line.boundTo?.members?.some((member) =>
+            member.kind === authority.kind && member.subject?.type === authority.subject.type &&
+            member.subject?.path === authority.subject.path))),
     );
     return stale
       ? {
@@ -14352,12 +14359,11 @@ export const pendingFormatUpgrade = async (
   { identityBlocker = null, adoptDirectLedger = false } = {},
 ) => {
   const recordFormat = state?.formatVersion ?? 1;
-  // The ordinary cursor runs to the *active* format, not the supported one, so
-  // a format-18 record owes nothing and no advance walks it to 19. Only an
-  // explicit adoption request raises the ceiling, and only for that call.
+  // Creation defaults do not upgrade historical authority. Only explicit
+  // adoption raises the existing-record cursor beyond required observations.
   const runtimeFormat = adoptDirectLedger
     ? MIGRATION_FORMAT_SUPPORTED
-    : FORMAT_ACTIVE_FOR_NEW_MIGRATIONS;
+    : REQUIRED_OBSERVATIONS_FORMAT;
   const increment = nextIncrement(
     FORMAT_UPGRADERS,
     recordFormat,
@@ -14606,7 +14612,7 @@ export const assertNoPendingFormatUpgrade = (state, name, action) => {
   const increment = nextIncrement(
     FORMAT_UPGRADERS,
     state?.formatVersion ?? 1,
-    MIGRATION_FORMAT_VERSION,
+    REQUIRED_OBSERVATIONS_FORMAT,
     FORMAT_UPGRADE_FLOOR,
   );
   if (!increment) return;
@@ -14634,8 +14640,7 @@ export const commitFormatUpgrade = async ({
   moduleName,
   confirmationDigest = null,
   // The explicit module-19 selection, and the only way to reach the 18 -> 19
-  // row. Absent, this is exactly the pre-existing command: it can commit no
-  // increment above `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS`.
+  // row for an existing record. New creation defaults never raise this cursor.
   adoptDirectLedger = false,
   hooks,
 }) => {
@@ -15671,7 +15676,7 @@ const bootstrapUnderLock = async ({
   const createdAt = now();
   const state = {
     contractVersion: RESUMABLE_CONTRACT_VERSION,
-    formatVersion: MIGRATION_FORMAT_VERSION,
+    formatVersion: FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
     workflowVersion: WORKFLOW_VERSION,
     migrationId: resolved.canonical,
     legacyModule: legacySources[0],

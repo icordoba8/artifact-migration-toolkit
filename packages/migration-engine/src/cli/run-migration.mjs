@@ -47,7 +47,6 @@ import { runAdvanceCli } from "./advance-migration.mjs";
 import { runArtifactCli } from "../artifact/run-artifact.mjs";
 import {
   approveWithOperator,
-  artifactApprover,
   moduleApprover,
   recorderFor,
 } from "../operator-approval.mjs";
@@ -259,8 +258,6 @@ export const runMigration = async (
   { stdout = process.stdout, recordTrustedDecision } = {},
 ) => {
   const options = parseRunArguments(arguments_);
-  const recorder = recorderFor({ recordTrustedDecision, mode: options.mode });
-  const approver = moduleApprover(recorder, options.moduleName);
   // The most recent persisted record this iteration saw. It is only ever read
   // to project progress from -- `finish` never writes it and never consults it
   // to decide anything -- so an iteration that failed before reaching a record
@@ -353,42 +350,32 @@ export const runMigration = async (
       slice: options.slice,
       mode: options.mode,
     });
-    if (delegated.nextWorkKind === "RUN_ARTIFACT") {
+    if (delegated.nextWorkKind === "RUN_ARTIFACT" || delegated.outcome === "OPERATOR_DECISION") {
       const binding = delegated.artifactMigration;
       nextWork = { kind: "RUN_ARTIFACT", artifactMigration: binding };
-      if (options.mode === "step") {
+      if (options.mode === "step" && delegated.nextWorkKind === "RUN_ARTIFACT") {
         stdout.write(`Artifact prerequisite: ${binding.command}\n`);
         return finish("CONTINUE", { reason: delegated.reason });
       }
       const child = await runArtifactCli(binding.arguments, {
         stdout,
         emitDirective: false,
+        recordTrustedDecision,
       });
+      decisionReferences.push(...(child.decisionReferences ?? []));
       if (child.outcome === "BLOCKED" || child.outcome === "FAILED") {
         return finish("BLOCKED", {
           reason: `Artifact prerequisite '${binding.artifactId}' failed: ${child.reason}`,
+          ...(child.decisionProjection ? { decisionProjection: child.decisionProjection } : {}),
         });
       }
       if (child.outcome === "OPERATOR_DECISION") {
-        const candidates = (child.pendingDecisions ?? []).map((decision) => ({
-          id: decision.candidateId,
-          kind: "ARTIFACT_DECISION",
-          subject: { type: "ARTIFACT_DECISION", path: decision.id },
-          command: decision.command,
-        }));
-        const recorded = await approveWithOperator(
-          candidates,
-          artifactApprover(recorder, binding),
-          stdout,
-          decisionReferences,
-        );
-        if (recorded.length < candidates.length) {
-          return finish("OPERATOR_DECISION", {
-            reason: `${recordedPrefix(recorded)}${candidates.length - recorded.length} artifact operator decision(s) are still pending, each requiring its own operator approval in a new iteration.`,
-            pendingDecisions: child.pendingDecisions,
-            operatorApproval: operatorApproval(candidates.slice(recorded.length)),
-          });
-        }
+        return finish("OPERATOR_DECISION", {
+          reason: child.reason,
+          pendingDecisions: child.pendingDecisions,
+          operatorApproval: child.operatorApproval,
+          ...(child.decisionProjection ? { decisionProjection: child.decisionProjection } : {}),
+        });
       }
       return finish("CONTINUE", {
         reason:
@@ -396,31 +383,8 @@ export const runMigration = async (
             ? "Artifact prerequisite reached COMPLETE; re-enter the parent."
             : child.reason,
         request: child.request ?? null,
+        ...(child.decisionProjection ? { decisionProjection: child.decisionProjection } : {}),
       });
-    }
-    if (delegated.outcome === "OPERATOR_DECISION") {
-      const binding = delegated.artifactMigration;
-      const candidates = (delegated.pendingDecisions ?? []).map((decision) => ({
-        id: decision.candidateId,
-        kind: "ARTIFACT_DECISION",
-        subject: { type: "ARTIFACT_DECISION", path: decision.id },
-        command: decision.command,
-      }));
-      const recorded = await approveWithOperator(
-        candidates,
-        artifactApprover(recorder, binding),
-        stdout,
-        decisionReferences,
-      );
-      return recorded.length === candidates.length
-        ? finish("CONTINUE", {
-            reason: "Artifact operator decisions recorded.",
-          })
-        : finish("OPERATOR_DECISION", {
-            reason: `${recordedPrefix(recorded)}${candidates.length - recorded.length} artifact operator decision(s) are still pending, each requiring its own operator approval in a new iteration.`,
-            pendingDecisions: delegated.pendingDecisions,
-            operatorApproval: operatorApproval(candidates.slice(recorded.length)),
-          });
     }
     if (delegated.outcome === "BLOCKED") {
       return finish("BLOCKED", { reason: delegated.reason });
@@ -485,7 +449,11 @@ export const runMigration = async (
         process.stderr.write(`${narrowing.message}\n`);
       }
       const approvable = candidates.filter((candidate) => candidate.approvable);
+      if (directLedger && decisions?.state === "REJECTED") {
+        return finish("BLOCKED", { reason: error.message, next: step });
+      }
       if (approvable.length > 0) {
+        const approver = moduleApprover(recorderFor({ recordTrustedDecision, mode: options.mode, directLedger }), options.moduleName);
         if (directLedger && (group?.blocked ?? approvable[0].blocked)) {
           const review = group?.review ?? approvable[0].review;
           const blocked = group?.blocked ?? approvable[0].blocked;
@@ -521,6 +489,9 @@ export const runMigration = async (
           decisions = fresh.decisions;
           remaining = fresh.candidates.filter((candidate) => candidate.approvable);
           group = fresh.group;
+          if (decisions.state === "REJECTED") {
+            return finish("BLOCKED", { reason: "The current candidate was explicitly REJECTED.", next: step });
+          }
         }
         if (remaining.length > 0) {
           return finish("OPERATOR_DECISION", {

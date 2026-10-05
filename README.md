@@ -29,6 +29,26 @@ commit, version, and content hash in `release-manifest.json` and
 
 ## Architecture
 
+Core functionality must be self-contained and infrastructure-independent.
+External services or privileged infrastructure may only provide optional
+enhancements and must never be required for normal migration creation,
+decision completion, format activation, testing, installation, or release.
+
+New modules default to **format 19** (supported: 19); new standalone and
+delegated artifacts default to **format 14** (supported: 14). Existing Module 18
+and Artifact 13 records retain their historical semantics and explicit upgrades.
+
+The built-in, versioned `STANDARD_LOCAL` policy records explicit operator
+`APPROVE` / `REJECT` decisions as **AGENT_RELAYED**, directly in the hash-chained
+ledger. The installed toolkit, repository runtime and current provider/terminal
+are sufficient: no signer, protected policy, activation manifest, service,
+hardware authenticator or network is required for standard decisions.
+
+Optional protected high-assurance policy can require **HUMAN_ATTESTED** through
+the retained WebAuthn signer and protected activation/store. That requirement
+fails closed when unavailable, without a relayed fallback. Standard relayed
+decisions never claim cryptographic human attestation.
+
 | Concern | Owner |
 | --- | --- |
 | Module migration protocol | `skills/start-migration/**` |
@@ -158,8 +178,8 @@ Later phases stamp the resolved toolkit identity (name, version, commit,
 content hash) into each record and refuse to mutate a record whose pinned
 identity differs from the running toolkit; until then, pin by commit yourself.
 
-Toolkit version and migration format version are independent. Formats 4–17
-(module) and 13 (artifact) are properties of the record; the toolkit version is
+Toolkit version and migration format version are independent. Formats 4–19
+(module) and 13–14 (artifact) are properties of the record; the toolkit version is
 a property of the implementation.
 
 ## Tests

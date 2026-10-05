@@ -36,6 +36,7 @@ import {
   resolutionFor,
 } from "./approval.fixture.mjs";
 import { enrolledSigner, ORIGIN, RP_ID } from "../support/signer-fixture.mjs";
+import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../src");
 const CLASSIFICATION = "inventories/module-classification.json";
@@ -56,7 +57,8 @@ const withRecord = async (classification, run, { group = false } = {}) => {
       await atDirectLedgerCompleteness(fixture, classification);
     }
     const target = await moduleTarget(fixture);
-    return await run({ fixture, target, ...signed });
+    return await withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }),
+      () => run({ fixture, target, ...signed }));
   } finally {
     process.exitCode = 0;
     await signed.cleanup();
@@ -284,6 +286,7 @@ test("companion: HTTPS-only, session-bound, CSRF-checked, inert, stale-aware; ap
   const storeDirectory = await mkdtemp(path.join(os.tmpdir(), "amt-signer-"));
   let clock = Date.now();
   let companion;
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }), async () => {
   try {
     const { chmod } = await import("node:fs/promises");
     await chmod(storeDirectory, 0o700);
@@ -418,6 +421,7 @@ test("companion: HTTPS-only, session-bound, CSRF-checked, inert, stale-aware; ap
   }
   // Signer down: nothing listens, and the CLI path still reports SIGNER_UNAVAILABLE.
   await assert.rejects(new Promise((resolve, reject) => https.get({ host: "127.0.0.1", port, rejectUnauthorized: false }, resolve).on("error", reject)), /ECONNREFUSED/);
+  });
 });
 
 test("provider, TTY and MCP surfaces cannot attest, even beside an active protected verifier", async () => {

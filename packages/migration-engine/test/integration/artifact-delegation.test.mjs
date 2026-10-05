@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -253,8 +254,8 @@ test("AUTO runs one child iteration without mutating parent state", async () => 
       assert.equal(child.outcome, "CONTINUE");
       const status = await getArtifactStatus(work.artifactMigration);
       assert.equal(status.status, "ACTIVE");
-      // Delegated creation stays 13; a module-19 parent never selects 14.
-      assert.equal(status.state.formatVersion, 13);
+      // Delegated children use the active default independently of the parent.
+      assert.equal(status.state.formatVersion, 14);
       assert.deepEqual(parent, before);
       assert.doesNotMatch(output.join(""), /loop:/);
     } finally {
@@ -278,7 +279,7 @@ test("STEP exposes the child command without creating child state", async () => 
     const driver = await readFile(path.join(scriptsRoot, "cli/run-migration.mjs"), "utf8");
     assert.match(
       driver,
-      /if \(options\.mode === "step"\)[\s\S]*return finish\("CONTINUE"/,
+      /if \(options\.mode === "step" && delegated\.nextWorkKind === "RUN_ARTIFACT"\)[\s\S]*return finish\("CONTINUE"/,
     );
   } finally {
     await current.cleanup();
@@ -459,7 +460,7 @@ test("independent prerequisites follow module declaration order without inventin
   }
 });
 
-test("MCP exposes no artifact tool and trusted decisions are transport-bound", async () => {
+test("MCP artifact iteration uses the shared recorder and exposes no approval tool", async () => {
   const mcp = await readFile(path.join(scriptsRoot, "mcp-server.mjs"), "utf8");
   const driver = await readFile(path.join(scriptsRoot, "cli/run-migration.mjs"), "utf8");
   const artifact = await readFile(
@@ -470,7 +471,8 @@ test("MCP exposes no artifact tool and trusted decisions are transport-bound", a
     path.join(scriptsRoot, "operator-approval.mjs"),
     "utf8",
   );
-  assert.doesNotMatch(mcp, /name:\s*["']artifact_/);
+  assert.match(mcp, /name:\s*["']artifact_run/);
+  assert.doesNotMatch(mcp, /name:\s*["']artifact_approve/);
   assert.match(mcp, /recordTrustedDecision/);
   assert.match(driver, /recordTrustedDecision/);
   assert.match(driver, /from "\.\.\/operator-approval\.mjs"/);
@@ -491,6 +493,7 @@ test("OPERATOR-CHILD uses the trusted recorder and rejects wrong or replayed cha
     };
     const bootstrapped = await runArtifact(options);
     const root = artifactRoot(current.targetRoot, bootstrapped.artifactId);
+    await historicalBootstrap(root, 13);
     await writeJson(path.join(root, "inventories/source.json"), {
       version: 1,
       artifactId: bootstrapped.artifactId,
@@ -577,9 +580,8 @@ test("OPERATOR-CHILD uses the trusted recorder and rejects wrong or replayed cha
 test("OPERATOR-MCP routes parent and child decisions through one host recorder", async () => {
   const mcp = await readFile(path.join(scriptsRoot, "mcp-server.mjs"), "utf8");
   const driver = await readFile(path.join(scriptsRoot, "cli/run-migration.mjs"), "utf8");
-  assert.equal((mcp.match(/recordTrustedDecision:/g) ?? []).length, 1);
+  assert.equal((mcp.match(/recordTrustedDecision:/g) ?? []).length, 2);
   assert.match(mcp, /trustedDecisionRecorder\(session, buffer\)/);
-  assert.match(driver, /artifactApprover\(recorder, binding\)/);
-  assert.match(driver, /approveWithOperator\([\s\S]*artifactApprover/);
-  assert.doesNotMatch(mcp, /artifact.*inputSchema/i);
+  assert.match(driver, /runArtifactCli\(binding\.arguments,[\s\S]*recordTrustedDecision/);
+  assert.doesNotMatch(mcp, /name:\s*["']artifact_approve/);
 });

@@ -12,6 +12,7 @@
  */
 
 import assert from "node:assert/strict";
+import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -415,6 +416,7 @@ test("one explicit group approval appends every member atomically", async () => 
 
 test("a format-19 group shows one complete review and refuses host/terminal attestation", async () => {
   const fixture = await createFixture();
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }), async () => {
   try {
     const names = extraFileNames(BATCH_SIZE - 1);
     await addLegacyFiles(fixture, names);
@@ -459,12 +461,14 @@ test("a format-19 group shows one complete review and refuses host/terminal atte
     process.exitCode = 0;
     await fixture.cleanup();
   }
+  });
 });
 
 test("a format-19 single candidate cannot write v1, attest via host/TTY/argv, or downgrade to AUTO", async () => {
   const fixture = await createFixture();
   const previousCwd = process.cwd();
   const previousExitCode = process.exitCode;
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }), async () => {
   try {
     await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
     process.chdir(fixture.root);
@@ -519,6 +523,7 @@ test("a format-19 single candidate cannot write v1, attest via host/TTY/argv, or
     process.exitCode = previousExitCode;
     await fixture.cleanup();
   }
+  });
 });
 
 /* -- Authority ------------------------------------------------------------- */
@@ -884,6 +889,9 @@ test("R-W2-e: no argv option, environment variable, or tool argument can produce
     "migration_status",
     "migration_scan",
     "migration_pending_decisions",
+    "migration_run",
+    "artifact_run",
+    "artifact_status",
   ]) {
     assert.equal(approvalShapedArgument({ module: "auth" }, name), null);
     assert.equal(
@@ -895,13 +903,6 @@ test("R-W2-e: no argv option, environment variable, or tool argument can produce
       "approveCandidate",
     );
   }
-  // `migration_run` is the sole exemption: it is the only caller of the trusted
-  // recorder, and even there the phrase is compared against a candidate
-  // recomputed under the module lock.
-  assert.equal(
-    approvalShapedArgument({ module: "auth", confirmation: "x" }, "migration_run"),
-    null,
-  );
 
   const refused = await handleMessage(
     {

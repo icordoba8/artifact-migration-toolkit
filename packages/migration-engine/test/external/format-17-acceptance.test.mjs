@@ -26,7 +26,7 @@ import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 import { createUnstampedRecord } from "../support/consumer-fixture.mjs";
 import { downgradeToV4, readTree } from "../support/downgrade-v4.mjs";
 import { stopChild } from "../support/portability.mjs";
-import { MIGRATION_FORMAT_VERSION } from "../../src/resumable-migration.mjs";
+import { MIGRATION_FORMAT_VERSION, REQUIRED_OBSERVATIONS_FORMAT } from "../../src/resumable-migration.mjs";
 import { validateToolkitIdentity } from "../../src/toolkit-identity.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -779,7 +779,7 @@ test("E2E-A: an installed toolkit upgrades a visible-UI format-17 record using o
   );
 
   const after = await consumer.snapshot();
-  assert.equal(after.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(after.state.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
   assert.equal(after.state.revision, before.state.revision + 1);
   assert.equal(after.journal, null, "the upgrade left its journal behind");
   assert.equal(after.integrity.revision, after.state.revision);
@@ -788,7 +788,7 @@ test("E2E-A: an installed toolkit upgrades a visible-UI format-17 record using o
   assert.equal(events.length, 1, "exactly one increment, exactly one canonical event");
   assert.equal(events[0].transition, "UI_OBSERVATIONS_ADOPTED");
   assert.equal(events[0].fromFormat, 17);
-  assert.equal(events[0].toFormat, MIGRATION_FORMAT_VERSION);
+  assert.equal(events[0].toFormat, REQUIRED_OBSERVATIONS_FORMAT);
   assert.equal(events[0].domain, "TRANSFORM");
   assert.deepEqual(events[0].upgrader, { id: "UI_OBSERVATIONS_ADOPTED", version: 1 });
   assert.equal(
@@ -816,7 +816,7 @@ test("E2E-A: an installed toolkit upgrades a visible-UI format-17 record using o
   );
   assert.match(resumed.output, /Current checkpoint: DISCOVERY_COMPLETENESS/);
   const resumedState = await consumer.snapshot();
-  assert.equal(resumedState.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(resumedState.state.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
   assert.equal(formatUpgradeEvents(resumedState).length, 1, "the increment re-applied");
 
   const status = JSON.parse(
@@ -849,7 +849,7 @@ test("E2E-B: a format-17 record whose legacy authority declares no visible UI co
   assert.match(upgraded.output, /loop: CONTINUE next=\/start-migration auth/);
 
   const after = await consumer.snapshot();
-  assert.equal(after.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(after.state.formatVersion, REQUIRED_OBSERVATIONS_FORMAT);
   assert.equal(after.state.revision, before.state.revision + 1);
   assert.equal(after.journal, null);
   const events = formatUpgradeEvents(after);
@@ -893,9 +893,9 @@ test("E2E-C: reading the status of a pending format upgrade through the installa
 
   // The structured projection is present and complete.
   assert.equal(read.formatUpgrade.recordFormat, 17);
-  assert.equal(read.formatUpgrade.runtimeFormat, MIGRATION_FORMAT_VERSION);
+  assert.equal(read.formatUpgrade.runtimeFormat, REQUIRED_OBSERVATIONS_FORMAT);
   assert.equal(read.formatUpgrade.from, 17);
-  assert.equal(read.formatUpgrade.to, MIGRATION_FORMAT_VERSION);
+  assert.equal(read.formatUpgrade.to, REQUIRED_OBSERVATIONS_FORMAT);
   assert.deepEqual(read.formatUpgrade.upgrader, {
     id: "UI_OBSERVATIONS_ADOPTED",
     version: 1,
@@ -939,7 +939,7 @@ test("E2E-D: the built bundle states both engines' upgrade floors and registries
     { from: 18, to: 19, id: "DIRECT_LEDGER_DECISIONS_ADOPTED", version: 1 },
   ]);
 
-  assert.equal(supports.artifactFormat, 13);
+  assert.equal(supports.artifactFormat, 14);
   assert.equal(supports.artifactFormatSupported, 14);
   assert.equal(supports.artifactFormatUpgradeFloor, 13);
   assert.deepEqual(supports.artifactFormatUpgraders, [

@@ -12,12 +12,12 @@ import path from "node:path";
 
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
 
 import {
   advanceMigration,
   assertExecutionConfirmation,
   bootstrapMigration,
-  commitFormatUpgrade,
   previewAdvance,
   previewMigrationExecution,
   resolveRegistryPath,
@@ -133,7 +133,7 @@ const resolutionFor = async (fixture) => {
 };
 
 /** MCP never bootstraps (D6-3), so fixtures reach their first checkpoint here. */
-const initialize = async (fixture, { ponytail } = {}) => {
+const initialize = async (fixture, { ponytail, currentFormat = false } = {}) => {
   const resolution = await resolutionFor(fixture);
   const preview = await previewMigrationExecution({
     ...resolution,
@@ -142,7 +142,7 @@ const initialize = async (fixture, { ponytail } = {}) => {
     ponytail,
   });
   assertExecutionConfirmation(preview, preview.confirmationId);
-  return bootstrapMigration({
+  const result = await bootstrapMigration({
     ...resolution,
     moduleName: "auth",
     openSpecProposal: preview.openSpecProposal,
@@ -150,6 +150,8 @@ const initialize = async (fixture, { ponytail } = {}) => {
     registryBinding: preview.registryBinding,
     boundInputs: preview.boundInputs,
   });
+  if (!currentFormat) result.state = await historicalBootstrap(fixture.migrationRoot, 18);
+  return result;
 };
 
 const advanceDirect = async (fixture, options = {}) => {
@@ -433,26 +435,14 @@ const directLedgerClassification = (classification) => ({
 /**
  * The same position as `atDiscoveryCompleteness`, on a real format-19 record.
  *
- * The 18 -> 19 transition is taken the only way it can be taken -- explicitly,
- * before any decision-bearing artifact is pinned, through the journalled
- * upgrade -- so nothing here reinterprets an existing approval or hand-edits a
- * stamp into `state.json`.
+ * Uses production creation defaults, with no pilot or protected policy.
  */
 const atDirectLedgerCompleteness = async (
   fixture,
   classification,
   base = MODULE_CLASSIFICATION,
 ) => {
-  await initialize(fixture);
-  const resolution = await resolutionFor(fixture);
-  const upgraded = await commitFormatUpgrade({
-    ...resolution,
-    moduleName: "auth",
-    adoptDirectLedger: true,
-  });
-  if (upgraded.to !== 19) {
-    throw new Error(`fixture expected format 19, got ${upgraded.to}`);
-  }
+  await initialize(fixture, { currentFormat: true });
   await authorDiscoverLegacy(fixture, directLedgerClassification(base));
   await advanceDirect(fixture);
   await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");

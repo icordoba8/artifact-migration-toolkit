@@ -9,6 +9,7 @@
  */
 
 import assert from "node:assert/strict";
+import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
 import { execFile } from "node:child_process";
 import {
   access,
@@ -184,13 +185,15 @@ const initialize = async (fixture) => {
     openSpecProposal: SPEC,
   });
   assertExecutionConfirmation(preview, preview.confirmationId);
-  return bootstrapMigration({
+  const result = await bootstrapMigration({
     ...resolution,
     moduleName: "auth",
     openSpecProposal: preview.openSpecProposal,
     registryBinding: preview.registryBinding,
     boundInputs: preview.boundInputs,
   });
+  result.state = await historicalBootstrap(fixture.migrationRoot, 18);
+  return result;
 };
 
 const advanceDirect = async (fixture, options = {}) => {

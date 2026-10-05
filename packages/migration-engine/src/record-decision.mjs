@@ -34,9 +34,9 @@
  * `accept` can authorize multiple ledger lines without an operator. The
  * comparison below is the whole gate and nothing may shortcut it.
  *
- * Format 19 never treats either channel as human attestation. Without a
- * signer it blocks; a protected AGENT_RELAYED policy can authorize only v2
- * AGENT_RELAYED lines. The TTY/challenge contract below is legacy only.
+ * Module 19 and artifact 14 relay explicit APPROVE/REJECT under STANDARD_LOCAL.
+ * Only a protected high-assurance policy requires the optional signer.
+ * The TTY/challenge contract below is legacy only.
  *
  * ponytail: a TTY gate plus one in-process channel for legacy, not cryptography.
  * An operator's own terminal can always forge a line -- that is the operator's
@@ -259,8 +259,7 @@ const operatorIdentity = () =>
  */
 export const rationaleDigestOf = decisionRationaleDigest;
 
-// ponytail: the signer is absent; keep this typed refusal in the projection until
-// a separately reviewed companion can supply replay-verifiable authority.
+// The local recorder never substitutes for the optional protected signer.
 export const SIGNER_UNAVAILABLE = "SIGNER_UNAVAILABLE";
 
 const blockedFor = (candidate) => candidate.requiredPrincipal === "AGENT_RELAYED"
@@ -828,8 +827,8 @@ const moduleRecompute =
 
 /**
  * Record one new-format decision group against its persisted format and trusted
- * policy. Without a signer the default HUMAN_ATTESTED requirement blocks before
- * any prompt; explicitly permitted AGENT_RELAYED uses one v2 group line.
+ * policy. STANDARD_LOCAL uses one AGENT_RELAYED v2 group line; a protected
+ * HUMAN_ATTESTED requirement blocks this local channel before any prompt.
  *
  * Reachable from no argv option, exactly like the rest of the recorder: the
  * TTY/`ask` refusal below is the same one `runRecordDecisionCli` applies.
@@ -910,20 +909,21 @@ const withOperatorApproval = async ({
       process.exitCode = BLOCKED_EXIT_CODE;
       return { blocked };
     }
-    // A host reply is only a relayed statement, never attestation. The trusted
-    // policy has already explicitly authorized this weaker principal.
+    // The explicit result comes only from this review's operator channel.
+    // A bare accept, auto-permission or inferred intent is never a decision.
     const answer = ask
       ? await ask({ candidate: selected, review, summary: renderDecisionReview(review) })
       : await (async () => {
           const reader = createInterface({ input: stdin, output: stdout });
-          try { return await reader.question("Relay Approve? (yes to approve; anything else cancels)\n> "); }
+          try { return await reader.question("Choose APPROVE or REJECT (anything else cancels)\n> "); }
           finally { reader.close(); }
         })();
-    if (answer !== "yes" && answer !== "accept") {
-      stdout.write("No relayed approval received. Nothing was written.\n");
+    if (typeof answer !== "string" || !["APPROVE", "REJECT"].includes(answer)) {
+      stdout.write("No explicit operator decision received. Nothing was written.\n");
       process.exitCode = BLOCKED_EXIT_CODE;
       return { blocked: { state: "CANCELLED", reason: "No decision was recorded." } };
     }
+    const result = answer === "APPROVE" ? "APPROVED" : "REJECTED";
     return withModuleLock(targetRoot, lockName, async () => {
       const locked = await recompute();
       assertRecordToolkitIdentity(locked.state, locked.recordName, "Recording an operator decision", locked.recordKind);
@@ -934,7 +934,7 @@ const withOperatorApproval = async ({
       if (current.requiredPrincipal !== "AGENT_RELAYED") {
         throw new Error(`Candidate '${selected.id}' changed while its review was open. Nothing was written.`);
       }
-      return onApproved(current, locked);
+      return onApproved(current, locked, result);
     });
   }
   // Ahead of the summary, the challenge and the lock, because it is not a
@@ -1159,7 +1159,7 @@ const appendGroupDecisions = async ({ group, locked, ask, stdout }) => {
  * property, which is why it stays behind its own gate rather than being
  * rewritten.
  */
-const appendNewFormatGroupDecision = async ({ group, locked, ask, stdout }) => {
+const appendNewFormatGroupDecision = async ({ group, locked, ask, stdout, result }) => {
   const candidateDigest = candidateDigestOf(group);
   // Under the lock, and before writing: a second line over the same reviewed
   // group would make its outcome ambiguous, and `resolveGroupDecision` would
@@ -1183,13 +1183,13 @@ const appendNewFormatGroupDecision = async ({ group, locked, ask, stdout }) => {
     kind: group.kind,
     subjectType: group.subject.type,
     subject: group.subject.path,
-    statement: `AGENT_RELAYED approval of decision group ${group.id} over ${group.boundTo.members.length} ${group.groupMembers[0].kind} candidate(s).`,
+    statement: `AGENT_RELAYED ${result} of decision group ${group.id} over ${group.boundTo.members.length} ${group.groupMembers[0].kind} candidate(s).`,
     rationale: group.rationale,
     candidateId: group.id,
     targets: group.targets,
     boundTo: group.boundTo,
     principal: "AGENT_RELAYED",
-    result: "APPROVED",
+    result,
     candidateDigest,
     policyId: group.policyId,
     policyDigest: group.policyDigest,
@@ -1227,7 +1227,7 @@ const approveDecisionGroup = async ({ group, ...gate }) =>
     // a caller: only `createNewFormatDecisionGroup` produces a policy-bound
     // group, and only a policy-bound group gets the single-line v2 append. An
     // old-format group keeps its exact existing serialization.
-    onApproved: (lockedGroup, locked) =>
+    onApproved: (lockedGroup, locked, result) =>
       (lockedGroup.policyId === undefined
         ? appendGroupDecisions
         : appendNewFormatGroupDecision)({
@@ -1235,6 +1235,7 @@ const approveDecisionGroup = async ({ group, ...gate }) =>
         locked,
         ask: gate.ask,
         stdout: gate.stdout,
+        result,
       }),
   });
 
@@ -1258,7 +1259,7 @@ const approveCandidate = async ({
   return withOperatorApproval({
     ...gate,
     selected,
-    onApproved: async (lockedCandidate, locked) => {
+    onApproved: async (lockedCandidate, locked, result) => {
       if (lockedCandidate.policyId !== undefined) {
         const { decisions } = await readRecordedDecisions(locked.root);
         const digest = candidateDigestOf(lockedCandidate);
@@ -1269,10 +1270,10 @@ const approveCandidate = async ({
         const decision = buildDecision({
           previous, idPrefix, kind: lockedCandidate.kind,
           subjectType: lockedCandidate.subject.type, subject: lockedCandidate.subject.path,
-          statement: `Relayed approval of candidate ${lockedCandidate.id}.`,
+          statement: `AGENT_RELAYED ${result} of candidate ${lockedCandidate.id}.`,
           rationale: lockedCandidate.rationale, candidateId: lockedCandidate.id,
           targets: lockedCandidate.targets, boundTo: lockedCandidate.boundTo,
-          principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: digest,
+          principal: "AGENT_RELAYED", result, candidateDigest: digest,
           policyId: lockedCandidate.policyId, policyDigest: lockedCandidate.policyDigest,
         });
         await appendDecisions(locked, [decision], gate.stdout);

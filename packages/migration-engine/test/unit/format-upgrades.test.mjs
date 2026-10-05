@@ -23,7 +23,6 @@ import {
   FORMAT_UPGRADE_FLOOR,
   FORMAT_UPGRADERS,
   MIGRATION_FORMAT_SUPPORTED,
-  MIGRATION_FORMAT_VERSION,
   NON_PROMOTING_FORMAT_VERSIONS,
   REQUIRED_OBSERVATIONS_FORMAT,
   VISUAL_ACCEPTANCE_FORMAT,
@@ -99,14 +98,12 @@ test("the shipped module registry covers every increment from the floor", () => 
       runtimeFormat: MIGRATION_FORMAT_SUPPORTED,
     }),
   );
-  // And the two controls really are different numbers, which is the whole
-  // reason an 18 record is never walked into 19 by an ordinary advance.
-  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, REQUIRED_OBSERVATIONS_FORMAT);
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, DIRECT_LEDGER_DECISIONS_FORMAT);
   assert.equal(MIGRATION_FORMAT_SUPPORTED, DIRECT_LEDGER_DECISIONS_FORMAT);
   assert.throws(
     coverage(FORMAT_UPGRADERS, {
       floor: FORMAT_UPGRADE_FLOOR,
-      runtimeFormat: FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+      runtimeFormat: REQUIRED_OBSERVATIONS_FORMAT,
     }),
     /above the runtime format/,
   );
@@ -429,8 +426,8 @@ test("upgradeProjection carries the contract and none of the internals", () => {
 
 // --- the artifact engine's adapter, and the release gate over both ----------
 
-test("the artifact engine supports 14, creates 13 and registers exactly one adjacent upgrade", () => {
-  assert.equal(ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 13);
+test("the artifact engine supports and creates 14 and retains the explicit adjacent upgrade", () => {
+  assert.equal(ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 14);
   assert.equal(ARTIFACT_FORMAT_SUPPORTED, ARTIFACT_FORMAT_VERSION);
   assert.equal(ARTIFACT_FORMAT_VERSION, 14);
   assert.equal(ARTIFACT_FORMAT_UPGRADE_FLOOR, 13);
@@ -476,7 +473,7 @@ test("the release gate runs for both engines and the manifest states both regist
   // deciding whether it can read a record wants the ceiling.
   assert.equal(supports.moduleFormat, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
   assert.equal(supports.moduleFormatSupported, MIGRATION_FORMAT_SUPPORTED);
-  assert.notEqual(supports.moduleFormat, supports.moduleFormatSupported);
+  assert.equal(supports.moduleFormat, supports.moduleFormatSupported);
   assert.equal(supports.artifactFormat, ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
   assert.equal(supports.artifactFormatSupported, ARTIFACT_FORMAT_SUPPORTED);
   assert.equal(supports.artifactFormatUpgradeFloor, 13);

@@ -54,9 +54,9 @@ const autoDecisionRecorder = Object.assign(
  * that happens to have a terminal attached must not behave differently from one
  * that does not. `step` keeps the old behaviour exactly: a TTY, or nothing.
  */
-export const recorderFor = ({ recordTrustedDecision, mode } = {}) => {
+export const recorderFor = ({ recordTrustedDecision, mode, directLedger = false } = {}) => {
   if (typeof recordTrustedDecision === "function") return recordTrustedDecision;
-  if (isAutoAuthority(mode)) return autoDecisionRecorder;
+  if (!directLedger && isAutoAuthority(mode)) return autoDecisionRecorder;
   if (recordTrustedDecision !== undefined) return recordTrustedDecision;
   return process.stdin.isTTY && process.stdout.isTTY
     ? terminalDecisionRecorder

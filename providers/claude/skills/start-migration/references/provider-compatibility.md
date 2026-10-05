@@ -15,18 +15,23 @@ canonical documents. `skills/` is the source the generator reads; it is not a
 skill path any provider is configured with. Each adapter installs its generated
 tree into the root its own host supports.
 
-For supported module format 19, provider UI only presents the engine's
-candidate-bound review and fresh decision projection. A native button, MCP
-elicitation or terminal input does not attest HUMAN authority. Without the
-separately deferred production signer/companion, a default `HUMAN_ATTESTED`
-request is explicitly blocked (`SIGNER_UNAVAILABLE`); no host path may
-downgrade it to `AGENT_RELAYED`. Module 18 remains the creation default, and
-artifact 13 remains the active creation format, including delegated children;
-artifact 14 is supported only by explicit pilot selection or the one explicit
-pristine 13 -> 14 adoption, with direct-ledger authority for `ARTIFACT_DECISION`
-and `VISUAL_UNBACKED` only (no `GROUP_APPROVAL`; `EXCEPTION_RECORDED` unchanged)
-and the same `HUMAN_ATTESTED` block. Historical module ≤18 and artifact-13
-citation/challenge flows retain their format-gated compatibility behavior.
+Module default/supported = 19; Artifact default/supported = 14, including
+delegated children. All four providers use the engine-owned `STANDARD_LOCAL`
+policy and candidate-bound review. The operator explicitly selects `APPROVE` or
+`REJECT`, relayed as `AGENT_RELAYED` into the direct ledger. Status/pending/run
+reread the projection immediately. No ID transcription, challenge phrase,
+service, signer, protected policy, authenticator or external network is required.
+Use `migration_run` / `artifact_run` with elicitation, or the ordinary installed
+command in the operator's terminal. A missing response, cancellation, dismissal,
+timeout or transport failure appends nothing; auto-permission, model reasoning,
+prior conversation and arbitrary tool payloads never authorize a decision.
+
+The optional protected WebAuthn signer provides `HUMAN_ATTESTED`. An explicit
+protected high-assurance policy fails closed without valid signer activation;
+`AGENT_RELAYED` never satisfies it or gets relabeled. Artifact 14 covers only
+`ARTIFACT_DECISION` and `VISUAL_UNBACKED` (no `GROUP_APPROVAL`;
+`EXCEPTION_RECORDED` unchanged). Historical Module ≤18 and Artifact 13 records
+retain their citation/challenge flows and explicit upgrade behavior.
 
 Provider wrappers contain no workflow logic. They load the generated skill and
 forward invocation text, preventing four copies of the workflow from drifting.

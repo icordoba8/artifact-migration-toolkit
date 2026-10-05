@@ -259,17 +259,16 @@ The artifact record's format axis is its own: contract `1`, workflow `1.0`,
 independent of the module engine's numbers.
 
 ```text
-ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = 13
+ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = 14
 ARTIFACT_FORMAT_SUPPORTED                 = 14   (= ARTIFACT_FORMAT_VERSION)
 ARTIFACT_FORMAT_UPGRADE_FLOOR             = 13
 ARTIFACT_FORMAT_UPGRADERS                 = [13 -> 14 PRISTINE_ARTIFACT_ADOPTED v1]
 ```
 
 Every ordinary record, including one delegated by a module parent, is created
-at 13. Format 14 is a supported pilot, not a default: it is selected only by an
-explicit `--pilot-format 14` at creation, previewed and then confirmed with
-`--confirm-format <id>`, and is never inferred from the supported ceiling or
-from a module-19 parent. The persisted `formatVersion` alone selects decision
+at 14. No pilot flag, protected policy or signer is required. The old explicit
+`--pilot-format 14` selection remains compatible but is unnecessary for normal
+creation. The persisted `formatVersion` alone selects decision
 semantics for the record's whole life.
 
 A 13 record is current, not behind: its status reports the 13 -> 14 row as
@@ -280,13 +279,13 @@ with only `RESOLVE` completed, the bootstrap history event alone, canonical
 bootstrap bytes, no authored inventory or matrix, no ledger line and no pending
 journal -- as one journalled `FORMAT_UPGRADED` event. Any other record is
 refused with `LEGACY_COMPATIBILITY_ACTION_REQUIRED` and left byte-identical;
-start a fresh explicit pilot instead. There is no historical 12 -> 13
+start a fresh record instead. There is no historical 12 -> 13
 upgrader: 12, and anything above 14, is refused as it always has been.
 
 `assertRegistryCoverage({floor, runtimeFormat, registry})` runs from the
 format-upgrade suite and from the release gate before staging; a self-healing
 or promoting declaration buys no pass. The release manifest records
-`artifactFormat` (the active creation format, 13), `artifactFormatSupported`
+`artifactFormat` (the active creation format, 14), `artifactFormatSupported`
 (14), `artifactFormatUpgradeFloor` and `artifactFormatUpgraders`.
 
 ## Artifact 14 Decisions
@@ -308,15 +307,17 @@ source `operatorDecisions` (`ARTIFACT_DECISION`) and visual `unbacked` states
   lines, v1 lines and AUTO lines are never authority.
 - Decisions are individual. A `GROUP_APPROVAL` line is not artifact-14
   authority.
-- The default policy requires `HUMAN_ATTESTED`, which no writer in this toolkit
-  can produce: such a candidate reports `blocked: SIGNER_UNAVAILABLE` and
-  nothing is written. Only an explicit protected operator/admin policy can
-  permit `AGENT_RELAYED`; repository files, state, providers, MCP and
-  `--mode auto` cannot downgrade it.
+- The engine-owned `STANDARD_LOCAL` policy requires `AGENT_RELAYED` for both
+  decision kinds. The operator explicitly chooses `APPROVE` or `REJECT` in the
+  engine review, relayed through the provider/terminal without infrastructure.
+  Cancellation, timeout, dismissal, missing response or transport failure
+  appends nothing. Only an optional protected high-assurance policy requires
+  `HUMAN_ATTESTED`; its protected WebAuthn signer fails closed when unavailable
+  or activation is invalid, with no downgrade or relabeling.
 - `--status`, `artifact-migration-decision --artifact <source> --type <type> --pending`
   and the bare command read the same fresh projection; the bare command
-  revalidates it under the lock. Record with `--approve <id>` from a trusted
-  channel; never copy an id into JSON.
+  revalidates it under the lock. `artifact_run` or the ordinary terminal command
+  selects the current review without ID transcription; never copy an id into JSON.
 - The advance that passes the gate journals each consumed
   `{candidateDigest, decisionId, decisionDigest, policyId, policyDigest, principal, result}`
   once, with the verified ledger prefix, in its transaction and hashed history
@@ -328,6 +329,8 @@ Artifact 13 is unchanged: rows keep `decisionId` citations and
 `recordedDecisionId`/`decisionReferences` receipts, v1 and AUTO lines keep their
 historical meaning, and its transactions and history carry no consumed
 identities.
+
+`EXCEPTION_RECORDED` retains its existing semantics and is outside direct-ledger authority.
 
 ## Transaction Journal And Recovery
 

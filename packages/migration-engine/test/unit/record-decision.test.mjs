@@ -595,7 +595,7 @@ test("new-format judgment uses only the engine policy; weak principals never sat
   });
   assert.deepEqual(
     [candidate.requiredPrincipal, candidate.policyId, candidate.policyDigest],
-    ["HUMAN_ATTESTED", DEFAULT_DECISION_POLICY_ID, DEFAULT_DECISION_POLICY_DIGEST],
+    ["AGENT_RELAYED", DEFAULT_DECISION_POLICY_ID, DEFAULT_DECISION_POLICY_DIGEST],
   );
   assert.equal(principalSatisfiesRequirement("AGENT_RELAYED", "HUMAN_ATTESTED"), false);
   assert.equal(principalSatisfiesRequirement("AUTO", "HUMAN_ATTESTED"), false);
@@ -608,7 +608,7 @@ test("new-format judgment uses only the engine policy; weak principals never sat
     principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
     policyId: candidate.policyId, policyDigest: candidate.policyDigest,
   });
-  assert.equal(decisionAppliesToCandidate(relayed, candidate), false);
+  assert.equal(decisionAppliesToCandidate(relayed, candidate), true);
   assert.equal(decisionAppliesToCandidate({ ...relayed, principal: "AUTO" }, candidate), false);
   assert.equal(decisionAppliesToCandidate({ ...relayed, policyDigest: "sha256:" + "0".repeat(64) }, candidate), false);
   assert.equal(decisionAppliesToCandidate({ ...relayed, policyId: "other" }, candidate), false);
@@ -799,18 +799,6 @@ const newFormatGroup = (candidates) =>
     projectRoot: GROUP_ROOT,
   });
 
-/**
- * The same group under a trusted admin policy that allows AGENT_RELAYED, so
- * applicability is observable in this build. The engine default is
- * HUMAN_ATTESTED and HUMAN_ATTESTED is not writable, which is the asserted
- * production state -- it is not a statement about what the resolver does once
- * a principal does satisfy the requirement.
- */
-const relayableGroup = (group) => {
-  const bound = { ...group, requiredPrincipal: "AGENT_RELAYED" };
-  return { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
-};
-
 const groupLine = (group, previous = null, overrides = {}) =>
   buildDecision({
     previous,
@@ -850,7 +838,7 @@ test("a new-format group is one candidate binding its complete ordered member se
     members.map((member) => member.boundTo.pathDigest),
   );
   // One policy binding, resolved from the engine default for the members' kind.
-  assert.equal(group.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.equal(group.requiredPrincipal, "AGENT_RELAYED");
   assert.equal(group.policyId, DEFAULT_DECISION_POLICY_ID);
   assert.equal(group.policyDigest, DEFAULT_DECISION_POLICY_DIGEST);
   assert.equal(group.id, `APP-${candidateDigestOf(group).slice(7, 27)}`);
@@ -892,14 +880,14 @@ test("the engine review uses the authoritative group digest and renders proposed
   assert.equal(review.candidateDigest, candidateDigestOf(group));
   assert.equal(review.policy.policyId, group.policyId);
   assert.equal(review.policy.policyDigest, group.policyDigest);
-  assert.equal(review.policy.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.equal(review.policy.requiredPrincipal, "AGENT_RELAYED");
   assert.deepEqual(review.members.map((member) => member.id), group.boundTo.members.map((member) => member.id));
   assert.deepEqual(review.members.map((member) => member.evidence), group.groupMembers.map((member) => member.boundTo));
   assert.deepEqual(review.targets, members.flatMap((member) => member.targets));
   const text = renderDecisionReview(review);
   assert.ok(text.includes(group.id));
   assert.ok(text.includes(candidateDigestOf(group)));
-  assert.match(text, /Required principal: HUMAN_ATTESTED/);
+  assert.match(text, /Required principal: AGENT_RELAYED/);
   assert.match(text, /Ordered group members:/);
   assert.match(text, /Approve: Authorize the complete ordered member set/);
   assert.match(text, /Reject: Record a candidate-bound REJECTED outcome/);
@@ -936,7 +924,7 @@ test("an authored decision id cannot forge engine-owned review lines", () => {
 
 test("one reviewed group resolves to one authoritative entry, never one per member", async () => {
   const members = memberCandidates(4);
-  const group = relayableGroup(await newFormatGroup(members));
+  const group = await newFormatGroup(members);
   const approved = groupLine(group);
 
   assert.equal(decisionAppliesToCandidate(approved, group), true);
@@ -973,7 +961,7 @@ test("one reviewed group resolves to one authoritative entry, never one per memb
       },
     ],
   ]) {
-    const other = relayableGroup(await newFormatGroup(candidates));
+    const other = await newFormatGroup(candidates);
     assert.equal(decisionAppliesToCandidate(approved, other), false);
     assert.deepEqual(resolveGroupDecision([approved], other), {
       decision: null,
@@ -982,13 +970,13 @@ test("one reviewed group resolves to one authoritative entry, never one per memb
     });
   }
 
-  // The engine default refuses it outright: AGENT_RELAYED cannot satisfy the
-  // HUMAN_ATTESTED judgment requirement, and HUMAN_ATTESTED is not writable.
+  // The standard default accepts relayed authority, but its writer cannot
+  // mint attestation or AUTO lines.
   const defaulted = await newFormatGroup(members);
-  assert.equal(defaulted.requiredPrincipal, "HUMAN_ATTESTED");
+  assert.equal(defaulted.requiredPrincipal, "AGENT_RELAYED");
   assert.equal(
     resolveGroupDecision([groupLine(defaulted)], defaulted).applicable,
-    false,
+    true,
   );
   assert.throws(
     () => groupLine(defaulted, null, { principal: "HUMAN_ATTESTED" }),
@@ -998,7 +986,7 @@ test("one reviewed group resolves to one authoritative entry, never one per memb
 });
 
 test("duplicate and conflicting group outcomes fail closed instead of picking a line", async () => {
-  const group = relayableGroup(await newFormatGroup(memberCandidates(3)));
+  const group = await newFormatGroup(memberCandidates(3));
   const approved = groupLine(group);
   const second = groupLine(group, approved);
   for (const pair of [
@@ -1029,7 +1017,7 @@ test("duplicate and conflicting group outcomes fail closed instead of picking a 
 });
 
 test("a torn group append is refused whole, and recovery drops it without partial authority", async () => {
-  const group = relayableGroup(await newFormatGroup(memberCandidates(5)));
+  const group = await newFormatGroup(memberCandidates(5));
   const [legacy] = chain(["first"]);
   const complete = groupLine(group, legacy);
   const ledger = await withLedger("decisions/operator-decisions.ndjson", [

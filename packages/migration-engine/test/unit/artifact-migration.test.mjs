@@ -11,7 +11,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createRequire as requireFrom, syncBuiltinESMExports } from "node:module";
+import { createRequire as requireFrom } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -20,6 +20,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
 import { comparisonPath } from "../support/portability.mjs";
+import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
+import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 
 import {
   FINAL_GATES,
@@ -27,13 +29,13 @@ import {
   parserResolutionError,
   runDiscoveryScan,
 } from "../../src/core.mjs";
-import { artifactPrerequisiteWork, candidateDigestOf, createNewFormatDecisionGroup, DEFAULT_DECISION_POLICY_DIGEST,
-  validateProtectedDecisionPolicy } from "../../src/resumable-migration.mjs";
+import { artifactPrerequisiteWork, candidateDigestOf, createNewFormatDecisionGroup } from "../../src/resumable-migration.mjs";
 import { assertReviewedCandidateCurrent, beginAttestedDecision, buildDecision, completeAttestedDecision, runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { ATTESTED_ARTIFACT_KINDS } from "../../src/operator-webauthn.mjs";
 import { attestationVerifierScope } from "../../src/resumable-migration.mjs";
 import { enrolledSigner } from "../support/signer-fixture.mjs";
 import { lockPathFor } from "../../src/module-lock.mjs";
+import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import {
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
   ARTIFACT_FORMAT_SUPPORTED,
@@ -417,9 +419,11 @@ const targetEvidence = async (fixture, relative = fixture.options.target) => ({
 });
 
 const bootstrap = async (fixture, extra = {}) => {
+  const existing = await exists(path.join(fixture.artifactRoot, "state.json"));
   const result = await runArtifact({ ...fixture.options, ...extra });
   assert.equal(result.outcome, "CONTINUE");
   assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+  if (!existing) await historicalBootstrap(fixture.artifactRoot, 13);
 };
 
 test("A-02 artifact invocation mismatch emits canonical BLOCKED progress and recovery", async () => {
@@ -1521,7 +1525,7 @@ test("a pending recoverable transaction reports ACTIVE from --status and is reco
   }
 });
 
-test("the artifact engine keeps 13 active and refuses unsupported old and future formats", async () => {
+test("the artifact engine creates 14 by default and refuses unsupported old and future formats", async () => {
   const fixture = await createFixture();
   try {
     assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
@@ -1536,9 +1540,8 @@ test("the artifact engine keeps 13 active and refuses unsupported old and future
 
     const status = await getArtifactStatus(fixture.options);
     assert.equal(status.status, "ACTIVE", status.reason);
-    assert.equal(status.formatUpgrade.to, 14);
-    assert.equal(status.formatUpgrade.state, "INACTIVE");
-    assert.equal(status.formatUpgrade.active, false);
+    assert.equal(state.formatVersion, 14);
+    assert.equal(status.formatUpgrade, null);
     assert.equal(status.state.revision, state.revision);
     assert.deepEqual(
       await Promise.all(
@@ -1566,7 +1569,7 @@ test("pilot creation requires an explicit 14 selection, preview and confirmation
   try {
     assert.equal(parseArtifactArguments(["widget", "--pilot-format", "14"]).pilotFormat, 14);
     assert.throws(() => parseArtifactArguments(["widget", "--pilot-format", "13"]), /only 14/);
-    await assert.rejects(runArtifact({ ...fixture.options, formatVersion: 14 }), /Unsupported artifact migration format/);
+    await assert.rejects(runArtifact({ ...fixture.options, formatVersion: 15 }), /Unsupported artifact migration format/);
     const options = { ...fixture.options, pilotFormat: 14 };
     const preview = await previewArtifact(options);
     assert.equal(preview.formatVersion, 14);
@@ -1622,12 +1625,12 @@ test("pilot 14 reports source decisions without accepting legacy citations", asy
     assert.equal(status.decisionProjection.checkpointAdvanced, false);
     assert.equal(result.decisionProjection.state, status.decisionProjection.state);
     assert.equal(result.outcome, "OPERATOR_DECISION");
-    assert.equal(result.pendingDecisions[0].blocked.state, "SIGNER_UNAVAILABLE");
-    assert.equal(status.decisionProjection.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(result.pendingDecisions[0].blocked, null);
+    assert.equal(status.decisionProjection.blocked, null);
     // A module-19 parent surfaces the child's own blocked candidate; it supplies no authority.
     const parent = await parentWork(fixture, 19);
     assert.equal(parent.outcome, "OPERATOR_DECISION");
-    assert.equal(parent.pendingDecisions[0].blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(parent.pendingDecisions[0].blocked, null);
     assert.deepEqual(parent, await parentWork(fixture, 18));
     const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
     for (const field of ["decisionId", "decisionDigest", "recordedDecisionId"]) {
@@ -1644,6 +1647,7 @@ test("pilot 14 reports source decisions without accepting legacy citations", asy
 
 test("pilot 14 status, pending and locked run re-read weak and stale source authority", async () => {
   const fixture = await createFixture();
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { ARTIFACT_DECISION: "HUMAN_ATTESTED" }), async () => {
   try {
     const options = { ...fixture.options, pilotFormat: 14 };
     const preview = await previewArtifact(options);
@@ -1684,37 +1688,18 @@ test("pilot 14 status, pending and locked run re-read weak and stale source auth
   } finally {
     await fixture.cleanup();
   }
+  });
 });
 
-test("pilot 14 uses current approved v2 authority without receipts for source and visual gates", async () => {
-  const filesystem = requireFrom(import.meta.url)("node:fs/promises");
-  const originalLstat = filesystem.lstat;
-  const originalOpen = filesystem.open;
-  const policyPath = "/etc/artifact-migration-tools/decision-policy.json";
-  let policyDocument;
-  filesystem.lstat = (file, ...args) => file === path.dirname(policyPath)
-    ? originalLstat("/etc", ...args) : originalLstat(file, ...args);
-  filesystem.open = (file, ...args) => file === policyPath
-    ? Promise.resolve({ stat: () => originalLstat("/etc/hosts"),
-      readFile: async () => JSON.stringify(policyDocument), close: async () => {} })
-    : originalOpen(file, ...args);
-  syncBuiltinESMExports();
-  try {
+test("no infrastructure: default 14 explicitly approves/rejects source and visual decisions, consumes and recovers", async () => {
+  return withDecisionPolicy(null, async () => {
     for (const visual of [false, true]) for (const decisionResult of ["APPROVED", "REJECTED", "GROUP"]) {
       const fixture = await createFixture();
       try {
-        const policy = { policyId: "admin/artifact", projectRoot: fixture.targetRoot, revision: 1,
-          rules: { ARTIFACT_DECISION: "AGENT_RELAYED", VISUAL_UNBACKED: "AGENT_RELAYED" } };
-        policyDocument = { policy,
-          policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`,
-          provenance: { action: "OPERATOR_ADMIN_POLICY_CHANGE", actor: "admin",
-            at: "2026-10-02T00:00:00.000Z", reason: "Explicit artifact policy",
-            previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST } };
-        validateProtectedDecisionPolicy(policyDocument, fixture.targetRoot);
-        const options = { ...fixture.options, pilotFormat: 14,
+        const options = { ...fixture.options,
           ...(visual ? { designSource: "legacy-runtime" } : {}) };
-        const preview = await previewArtifact(options);
-        await runArtifact({ ...options, confirmationId: preview.confirmationId });
+        await runArtifact(options);
+        assert.equal((await stateOf(fixture)).formatVersion, 14);
         if (visual) {
           await advanceDiscovery(fixture, { ui: true });
           await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
@@ -1757,13 +1742,16 @@ test("pilot 14 uses current approved v2 authority without receipts for source an
           assert.doesNotMatch(await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"), /consumedDecisions/);
           continue;
         }
-        const approved = buildDecision({ previous: null, kind: candidate.kind,
-          subjectType: candidate.subject.type, subject: candidate.subject.path,
-          statement: "Relayed approval", rationale: candidate.rationale,
-          candidateId: candidate.id, targets: candidate.targets, boundTo: candidate.boundTo,
-          principal: "AGENT_RELAYED", result: decisionResult, candidateDigest: candidateDigestOf(candidate),
-          policyId: candidate.policyId, policyDigest: candidate.policyDigest });
-        await appendFile(ledger, `${JSON.stringify(approved)}\n`);
+        const { decision: approved } = await runRecordDecisionCli([...args.slice(0, -1), "--approve", candidate.id], {
+          stdout: { write: () => {} }, ask: ({ review }) => {
+            assert.equal(review.policy.requiredPrincipal, "AGENT_RELAYED");
+            assert.equal(review.policy.policyId, "engine/STANDARD_LOCAL/v1");
+            return decisionResult === "APPROVED" ? "APPROVE" : "REJECT";
+          },
+        });
+        assert.equal(approved.principal, "AGENT_RELAYED");
+        assert.equal(approved.result, decisionResult);
+        assert.equal(await readFile(ledger, "utf8"), `${JSON.stringify(approved)}\n`);
         const status = await getArtifactStatus(fixture.options);
         const pending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
         const run = await runArtifact({ ...fixture.options, mode: "step" });
@@ -1864,11 +1852,7 @@ test("pilot 14 uses current approved v2 authority without receipts for source an
         await fixture.cleanup();
       }
     }
-  } finally {
-    filesystem.lstat = originalLstat;
-    filesystem.open = originalOpen;
-    syncBuiltinESMExports();
-  }
+  });
 });
 
 test("pilot 14 derives a policy-bound source candidate from current evidence", async () => {
@@ -1880,7 +1864,7 @@ test("pilot 14 derives a policy-bound source candidate from current evidence", a
     await authorSource(fixture, { pendingDecision: true });
     const first = (await artifactOperatorDecisions(fixture.options)).decisions[0].candidate;
     assert.equal(first.kind, "ARTIFACT_DECISION");
-    assert.equal(first.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(first.requiredPrincipal, "AGENT_RELAYED");
     assert.deepEqual(first.boundTo.artifactHashes, (await stateOf(fixture)).artifactHashes);
     assert.match(first.policyDigest, /^sha256:[a-f0-9]{64}$/);
     const relative = "inventories/source.json";
@@ -1912,6 +1896,7 @@ test("pilot 14 recorder reviews current evidence and cannot mint attestation", a
   const fixture = await createFixture();
   const previousExitCode = process.exitCode;
   const previousPrincipal = process.env.ARTIFACT_DECISION_PRINCIPAL;
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { ARTIFACT_DECISION: "HUMAN_ATTESTED" }), async () => {
   try {
     const options = { ...fixture.options, pilotFormat: 14 };
     const preview = await previewArtifact(options);
@@ -1957,6 +1942,7 @@ test("pilot 14 recorder reviews current evidence and cannot mint attestation", a
     process.exitCode = previousExitCode;
     await fixture.cleanup();
   }
+  });
 });
 
 test("pilot 14 rejects a reviewed source candidate when current evidence or policy changes", async () => {
@@ -1979,7 +1965,7 @@ test("pilot 14 rejects a reviewed source candidate when current evidence or poli
     assert.throws(() => assertReviewedCandidateCurrent(reviewed, current.candidates), /changed while its review was open/);
     assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, policyId: "forged" }, pending.candidates), /changed while its review was open/);
     assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, policyDigest: "sha256:forged" }, pending.candidates), /changed while its review was open/);
-    assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, requiredPrincipal: "AGENT_RELAYED" }, pending.candidates), /changed while its review was open/);
+    assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, requiredPrincipal: "HUMAN_ATTESTED" }, pending.candidates), /changed while its review was open/);
     await assert.rejects(readFile(path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson")), { code: "ENOENT" });
   } finally {
     await fixture.cleanup();
@@ -2023,6 +2009,7 @@ test("pilot 14 rejects forged visual receipts without bypassing visual checks", 
 test("pilot 14 visual projections re-read the ledger and stale evidence without advancing", async () => {
   const fixture = await createFixture();
   const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
+  return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { VISUAL_UNBACKED: "HUMAN_ATTESTED" }), async () => {
   try {
     const preview = await previewArtifact(options);
     await runArtifact({ ...options, confirmationId: preview.confirmationId });
@@ -2069,6 +2056,7 @@ test("pilot 14 visual projections re-read the ledger and stale evidence without 
   } finally {
     await fixture.cleanup();
   }
+  });
 });
 
 test("pilot 14 derives a policy-bound visual candidate from current evidence", async () => {
@@ -2089,7 +2077,7 @@ test("pilot 14 derives a policy-bound visual candidate from current evidence", a
     matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", reason: "No complete capture" }];
     await writeJson(fixture.artifactRoot, relative, matrix);
     const first = (await artifactOperatorDecisions(fixture.options)).decisions.find((row) => row.candidate.kind === "VISUAL_UNBACKED")?.candidate;
-    assert.equal(first.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(first.requiredPrincipal, "AGENT_RELAYED");
     assert.deepEqual(first.boundTo.artifactHashes, (await stateOf(fixture)).artifactHashes);
     assert.match(first.policyDigest, /^sha256:[a-f0-9]{64}$/);
     const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
@@ -2099,7 +2087,7 @@ test("pilot 14 derives a policy-bound visual candidate from current evidence", a
     assert.equal(visual.kind, "VISUAL_UNBACKED");
     assert.equal(visual.review.candidateDigest, candidateDigestOf(first));
     assert.equal(visual.review.evidence.visualMatrixDigest, first.boundTo.visualMatrixDigest);
-    assert.equal(visual.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(visual.blocked, null);
     matrix.unbacked[0].reason = "Capture unavailable for this state";
     await writeJson(fixture.artifactRoot, relative, matrix);
     const next = (await artifactOperatorDecisions(fixture.options)).decisions.find((row) => row.candidate.kind === "VISUAL_UNBACKED")?.candidate;
@@ -2116,7 +2104,7 @@ test("pilot 14 derives a policy-bound visual candidate from current evidence", a
   }
 });
 
-test("delegated child arguments create format 13 without inheriting a parent's format", async () => {
+test("delegated child arguments create default format 14 without a pilot flag", async () => {
   const fixture = await createFixture();
   try {
     const args = artifactArgumentsFor({
@@ -2127,11 +2115,69 @@ test("delegated child arguments create format 13 without inheriting a parent's f
     assert.equal(args.includes("--pilot-format"), false);
     const parsed = parseArtifactArguments(args);
     assert.equal((await runArtifact(parsed)).outcome, "CONTINUE");
-    assert.equal((await stateOf(fixture)).formatVersion, 13);
+    assert.equal((await stateOf(fixture)).formatVersion, 14);
   } finally {
     await fixture.cleanup();
   }
 });
+
+for (const provider of ["claude", "codex", "copilot", "opencode"]) {
+  test(`${provider}: standalone artifact MCP defaults to 14 and relays explicit decisions without infrastructure`, async (t) => {
+    t.mock.method(globalThis, "fetch", () => assert.fail("Standard artifact decisions must not use the network"));
+    const fixture = await createFixture();
+    try {
+      await withDecisionPolicy(null, async () => {
+        let response = { action: "cancel" };
+        const session = createSession({ request: (method, params) => {
+          assert.equal(method, "elicitation/create");
+          assert.match(params.message, /AGENT_RELAYED/);
+          assert.deepEqual(params.requestedSchema.properties.decision.enum, ["APPROVE", "REJECT"]);
+          return response;
+        } });
+        await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+          clientInfo: { name: provider }, capabilities: { elicitation: {} },
+        } }, session);
+        const call = async (name, extra = {}) => {
+          const reply = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+            name, arguments: { ...fixture.options, cwd: fixture.root, ...extra },
+          } }, session);
+          assert.equal(reply.error, undefined, JSON.stringify(reply));
+          return reply.result.structuredContent;
+        };
+        assert.equal((await call("artifact_run")).outcome, "CONTINUE");
+        assert.equal((await stateOf(fixture)).formatVersion, 14);
+        await authorSource(fixture, { pendingDecision: true });
+        assert.equal((await call("artifact_run")).outcome, "OPERATOR_DECISION");
+        assert.equal(await artifactLedger(fixture), "");
+        response = { action: "accept", content: { decision: "APPROVE" } };
+        const approved = await call("artifact_run", { mode: "step" });
+        assert.equal(approved.decisionProjection.state, "APPROVED_APPLICABLE");
+        assert.equal((await call("artifact_status")).decisionProjection.state, "APPROVED_APPLICABLE");
+        const first = JSON.parse((await artifactLedger(fixture)).trim());
+        assert.equal(first.principal, "AGENT_RELAYED");
+        assert.equal(first.webauthn, undefined);
+        const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+        source.operatorDecisions[0].subject += " revised";
+        await writeJson(fixture.artifactRoot, "inventories/source.json", source);
+        assert.equal((await call("artifact_status")).decisionProjection.state, "STALE");
+        response = { action: "accept", content: { decision: "REJECT" } };
+        const rejected = await call("artifact_run");
+        assert.equal(rejected.outcome, "BLOCKED");
+        assert.equal(rejected.decisionProjection.state, "REJECTED");
+        assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+        source.operatorDecisions[0].subject += " revised again";
+        await writeJson(fixture.artifactRoot, "inventories/source.json", source);
+        response = { action: "accept", content: { decision: "APPROVE" } };
+        assert.equal((await call("artifact_run")).outcome, "CONTINUE");
+        const lines = (await artifactLedger(fixture)).trim().split("\n").map(JSON.parse);
+        assert.deepEqual(lines.map((line) => line.result), ["APPROVED", "REJECTED", "APPROVED"]);
+        const history = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8")).trim().split("\n").map(JSON.parse);
+        assert.equal(history.at(-1).consumedDecisions[0].decisionId, lines[2].id);
+        assert.equal(history.at(-1).consumedDecisions[0].principal, "AGENT_RELAYED");
+      });
+    } finally { process.exitCode = 0; await fixture.cleanup(); }
+  });
+}
 
 test("only a pristine 13 bootstrap upgrades, with an explicit byte-bound confirmation", async () => {
   const fixture = await createFixture();
@@ -5701,8 +5747,7 @@ test("pilot 14 signer: signed VISUAL_UNBACKED uses the same protocol; artifact 1
     assert.equal(done.decision.principal, "HUMAN_ATTESTED");
 
     // Artifact 13 keeps its historical recorder; the signer refuses it.
-    const legacyPreview = await previewArtifact(legacy.options);
-    await runArtifact({ ...legacy.options, confirmationId: legacyPreview.confirmationId });
+    await bootstrap(legacy);
     await authorSource(legacy, { pendingDecision: true });
     const [row] = (await artifactOperatorDecisions(legacy.options)).decisions;
     await assert.rejects(beginAttestedDecision({ ...signed, target: signerTarget(legacy), candidateId: row.candidate.id, result: "APPROVED" }),

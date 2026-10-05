@@ -105,9 +105,9 @@ const LEGACY_INVENTORY = {
 };
 
 const MODULE_CLASSIFICATION = {
-  version: 1,
+  version: 2,
   algorithmVersion: 1,
-  moduleRoots: [{ path: "auth", reason: "The module's own slice.", decisionId: null }],
+  moduleRoots: [{ path: "auth", reason: "The module's own slice." }],
   declaredEntryPoints: [],
   files: [
     {

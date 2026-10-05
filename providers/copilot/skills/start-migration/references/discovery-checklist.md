@@ -266,8 +266,9 @@ Do not enter `ASSESS_TARGET` when any of these remains:
 - a non-literal `import()`/`require()` or `new URL(expr, import.meta.url)`
   without one or more concrete tracked targets and an `EDGE_RESOLUTION`
   candidate authorized under the record's format-specific decision policy.
-  Prose and approval alone never resolve a module edge; a missing module-19
-  signer blocks `HUMAN_ATTESTED` rather than accepting provider interaction;
+   Prose and approval alone never resolve a module edge. STANDARD_LOCAL uses
+   explicit AGENT_RELAYED decisions; only a protected HUMAN_ATTESTED policy
+   blocks when its optional signer is unavailable;
 - an i18n namespace without a proven governing mapping to a tracked runtime
   resource;
 - a `legacy.json` evidence location outside `OWNED`, typed `SUPPORTING`,

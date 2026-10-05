@@ -1,5 +1,9 @@
 # Operator Signer — Protected Deployment Contract
 
+This deployment is an **optional high-assurance enhancement**. Normal Module 19
+and Artifact 14 migrations use engine-owned `STANDARD_LOCAL` / `AGENT_RELAYED`
+authority, with explicit operator decisions and no signer infrastructure.
+
 This is a generic contract for a managed Linux host. It is not a machine configuration. HUMAN_ATTESTED writes remain **OFF** in this build. This document describes what a deployment must provide before real-host acceptance (gate 2) and protected activation (gate 3) can even be attempted.
 
 ## Identities
@@ -30,4 +34,8 @@ Run as `amt-signer` with a pinned Node ≥ 22.13 (for `node:sqlite`) and the ins
 - `reconcile <nonce> <admin> <reason>`: a `CLAIMED` nonce becomes `COMMITTED` only if its exact durable line replay-verifies. Otherwise it becomes `ABANDONED` (spent forever). A torn ledger is refused and needs an explicitly authorized, non-destructive repair.
 - `serve` refuses with `SIGNER_UNAVAILABLE` until gate 3 is performed by a later, separately approved release.
 
-The migration CLI, MCP server and provider adapters expose none of these operations. They report `SIGNER_UNAVAILABLE` and can never attest.
+The migration CLI, MCP server and provider adapters expose none of these admin
+operations. An explicit protected HUMAN_ATTESTED requirement reports
+`SIGNER_UNAVAILABLE` without activated infrastructure, with no relayed fallback.
+Absent that opt-up, standard operation is self-contained and signer availability
+is irrelevant. Provider/terminal relays never claim cryptographic human attestation.

@@ -1,5 +1,10 @@
 # Auto-mode autonomy — findings, plan, and progress
 
+> Historical work log. Current Module 19 and Artifact 14 judgment decisions
+> require explicit operator APPROVE/REJECT under STANDARD_LOCAL even in auto
+> mode; AUTO cannot supply or impersonate AGENT_RELAYED authority. See the
+> [current architecture](../README.md#architecture).
+
 > **STATUS 2026-09-22 — IN PROGRESS, NOT RELEASED.** Phase 1 complete. Phase 2
 > engine work is written but unverified; the test suite has not been reconciled
 > and nothing is committed or published. Resume at §5.

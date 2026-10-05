@@ -60,6 +60,7 @@ import {
   recorderFor,
 } from "../operator-approval.mjs";
 import { nextIncrement, upgradeProjection } from "../format-upgrade.mjs";
+import { reviewFor } from "../record-decision.mjs";
 
 // Re-export for tests that need to verify the structural census directly.
 export { structuralUnitsRaw as structuralUnits };
@@ -125,7 +126,7 @@ const EXTERNAL_ELEMENT = /^EXTERNAL (.+)$/;
 export const ARTIFACT_CONTRACT_VERSION = 1;
 export const ARTIFACT_FORMAT_VERSION = 14;
 export const ARTIFACT_FORMAT_SUPPORTED = ARTIFACT_FORMAT_VERSION;
-export const ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = 13;
+export const ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = 14;
 export const ARTIFACT_WORKFLOW_VERSION = "1.0";
 export const ARTIFACT_RESOLUTIONS = Object.freeze([
   "TARGET_REUSE",
@@ -1908,11 +1909,14 @@ const validateTransactionInput = (input, label) => {
       input,
       label,
       ["kind", "artifactType", "source", "target"],
-      ["designSource", "figmaSources", "sourcePaths", "ponytail", "pilotFormat"],
+      ["designSource", "figmaSources", "sourcePaths", "ponytail", "pilotFormat", "formatVersion"],
     );
     assertSafeName(input.artifactType, `${label}.artifactType`);
     if (input.pilotFormat !== undefined && input.pilotFormat !== 14) {
       throw new Error(`${label}.pilotFormat must be 14.`);
+    }
+    if (input.formatVersion !== undefined && input.formatVersion !== 14) {
+      throw new Error(`${label}.formatVersion must be 14.`);
     }
     for (const key of ["source", "target"]) {
       exactObject(input[key], `${label}.${key}`, ["root", "path"]);
@@ -2073,8 +2077,10 @@ const assertKnownRecoveryPhase = async (root, transaction, prefixContent) => {
 // bindings, reproduces the exact persisted proposal.
 const proveBootstrapTransaction = async (root, transaction) => {
   const { input, state } = transaction;
-  if ((state.formatVersion === 14) !== (input.pilotFormat === 14)) {
-    throw new Error("Recovered artifact bootstrap has no explicit pilot format selection.");
+  // Historical journals without a format binding remain format 13; never
+  // reinterpret them through today's creation default.
+  if (state.formatVersion !== (input.formatVersion ?? input.pilotFormat ?? 13)) {
+    throw new Error("Recovered artifact bootstrap does not match its format binding.");
   }
   const resolved = {
     id: state.artifactId,
@@ -2486,7 +2492,7 @@ const createArtifactRecord = async (resolved, options, confirmExecution) => {
       source: resolved.source,
       ...(resolved.sourcePaths.length > 1 ? { sourcePaths: resolved.sourcePaths } : {}),
       target: resolved.target,
-      ...(resolved.formatVersion === 14 ? { pilotFormat: 14 } : {}),
+      ...(resolved.formatVersion === 14 ? { formatVersion: 14 } : {}),
       designSource: resolved.designSource,
       figmaSources: resolved.figmaSources,
       ...(resolved.ponytail ? { ponytail: resolved.ponytail } : {}),
@@ -3955,11 +3961,11 @@ export const reconcileArtifactDecisions = (state, decisions) => {
           ? { state: "SIGNER_UNAVAILABLE", requiredPrincipal: "HUMAN_ATTESTED" } : null,
         decisions: decisions.map((row) => row.projection),
       },
-      candidates: undecided.map((row) => ({ ...row.candidate, approvable: true, blockers: [], command: commandFor(row.candidate) })),
+      candidates: undecided.map((row) => ({ ...row.candidate, approvable: true, blockers: [], review: reviewFor(row.candidate) })),
       pendingDecisions: undecided.map((row) => ({ id: row.id, subject: row.subject, candidateId: row.candidate.id,
         state: row.projection.state, blocked: row.candidate.requiredPrincipal === "HUMAN_ATTESTED"
           ? { state: "SIGNER_UNAVAILABLE", requiredPrincipal: "HUMAN_ATTESTED" } : null,
-        command: commandFor(row.candidate) })),
+        review: reviewFor(row.candidate) })),
     };
   }
   const approvable = pending.filter((row) => !row.recorded);
@@ -4670,7 +4676,9 @@ export const runArtifact = async (
   options = {},
   { recordTrustedDecision } = {},
 ) => {
-  const recorder = recorderFor({ recordTrustedDecision, mode: options.mode });
+  let result = await runArtifactIteration(options);
+  const recorder = recorderFor({ recordTrustedDecision, mode: options.mode,
+    directLedger: Boolean(result.decisionProjection) });
   const approver = recorder
     ? artifactApprover(recorder, {
         source: options.source,
@@ -4685,7 +4693,6 @@ export const runArtifact = async (
   // checkpoints themselves: each pass must record at least one decision or the
   // loop ends, so it can neither spin nor outlive the record's own lifecycle.
   const passes = approver?.channel === "AUTO" ? CHECKPOINT_DECISION_PASSES : 1;
-  let result = await runArtifactIteration(options);
   for (let pass = 0; pass < passes; pass += 1) {
     if (result.outcome !== "OPERATOR_DECISION") return result;
     const candidates = result.operatorApproval?.candidates ?? [];

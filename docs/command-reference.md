@@ -4,6 +4,16 @@ Run these skills from the repository being migrated. Use `migrate-artifact` for 
 
 The examples use Claude Code slash commands. [Provider invocation](#provider-invocation) shows equivalent syntax in other hosts.
 
+New modules use format **19** (supported: 19); standalone and delegated artifacts
+use **14** (supported: 14). Standard decisions use built-in `STANDARD_LOCAL`:
+review the current candidate and explicitly choose `APPROVE` or `REJECT`, relayed
+as `AGENT_RELAYED` into the direct ledger. No signer, protected policy, activation
+manifest, external service or authenticator is needed. Cancellation records
+nothing. Auto mode never supplies a judgment decision on the operator's behalf.
+Existing Module 18 and Artifact 13 records retain their explicit upgrade paths.
+An optional protected high-assurance policy requires the retained WebAuthn
+`HUMAN_ATTESTED` signer and fails closed without it, with no silent downgrade.
+
 ## migrate-artifact arguments
 
 | Argument | What it does | When to use it | Default / requirement |

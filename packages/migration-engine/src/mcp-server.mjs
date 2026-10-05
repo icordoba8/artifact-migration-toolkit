@@ -2,9 +2,8 @@
 
 /**
  * The MCP adapter (Plan 06). A typed transport over the same core the CLI uses,
- * and nothing else: three of its four tools are literal re-exports of read-only
- * core readers, and the fourth calls `runMigration` -- the same driver
- * `run-migration.mjs` runs -- with a capture buffer instead of `process.stdout`.
+ * and nothing else: module/artifact readers and the same iteration drivers
+ * the CLI runs, with capture buffers instead of transport stdout.
  *
  * It is not a second migration engine. It owns no rule, no sequence, and no
  * exit-code table; it never maps, prunes, or renames a field the core returned
@@ -32,7 +31,7 @@
  * resources, no prompts, no progress notifications, and no protocol-version
  * negotiation beyond echoing a version we recognize. Upgrade path: adopt
  * @modelcontextprotocol/sdk the day a consumer needs any of the rest -- the
- * four tool bodies are core calls and are unaffected by a transport swap.
+ * tool bodies are core calls and are unaffected by a transport swap.
  */
 
 import path from "node:path";
@@ -56,6 +55,7 @@ import {
 } from "./core.mjs";
 import { runRecordDecisionCli } from "./record-decision.mjs";
 import { runMigration } from "./cli/run-migration.mjs";
+import { getArtifactStatus, runArtifact } from "./artifact/artifact-migration.mjs";
 
 const SERVER_NAME = "start-migration";
 
@@ -138,6 +138,25 @@ const RUN_INPUT_SCHEMA = {
   },
 };
 
+const ARTIFACT_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    source: { type: "string", description: "Primary artifact source path." },
+    sources: { type: "array", items: { type: "string" } },
+    type: { type: "string" }, target: { type: "string" },
+    sourceRoot: { type: "string" }, targetRoot: { type: "string" },
+    ...Object.fromEntries(["cwd", "mode", "slice", "designSource", "figma", "ponytail"]
+      .map((key) => [key, RUN_INPUT_SCHEMA.properties[key]])),
+  },
+  required: ["source"],
+  additionalProperties: false,
+};
+
+// Explicit fields only: a tool payload can select work, never supply authority.
+const artifactOptions = ({ source, sources, type, target, sourceRoot, targetRoot,
+  mode, slice, designSource, figma, ponytail }) =>
+  ({ source, sources, type, target, sourceRoot, targetRoot, mode, slice, designSource, figma, ponytail });
+
 /**
  * D6-3. The refused set is derived, not chosen: `01` D1's five operator acts
  * plus the two sequencers `run` already performs. A future tool request is
@@ -177,16 +196,12 @@ const REFUSED_TOOLS = {
 /**
  * W2-3. `REFUSED_TOOLS` refuses by name, which only works for names that exist.
  * This refuses by *shape*: any argument key that reads as an approval, a
- * confirmation, a decision, or a challenge, on any tool other than the one that
- * legitimately carries a human phrase. A channel nobody enumerated could
+ * confirmation, a decision, or a challenge, on any tool. A channel nobody enumerated could
  * otherwise hand the recorder a token; an enumeration of the known
  * shapes closes the class, not just the instance.
  */
 const APPROVAL_SHAPED_KEY = /approv|confirm|decision|challenge/i;
-const APPROVAL_ARGUMENT_EXEMPT_TOOLS = new Set(["migration_run"]);
-
-export const approvalShapedArgument = (arguments_, toolName) => {
-  if (APPROVAL_ARGUMENT_EXEMPT_TOOLS.has(toolName)) return null;
+export const approvalShapedArgument = (arguments_) => {
   if (!arguments_ || typeof arguments_ !== "object") return null;
   return (
     Object.keys(arguments_).find((key) => APPROVAL_SHAPED_KEY.test(key)) ?? null
@@ -324,7 +339,8 @@ const trustedDecisionRecorder = (session, stdout) => (arguments_) =>
           message: `Working directory: ${process.cwd()}\n${summary}` +
             (review ? "\nThis host response is AGENT_RELAYED only, never HUMAN_ATTESTED." : `\nConfirmation phrase: ${challenge}`),
           requestedSchema: review ? {
-            type: "object", properties: { decision: { type: "string", enum: ["Approve"] } }, required: ["decision"],
+            type: "object", properties: { decision: { type: "string", enum: ["APPROVE", "REJECT"],
+              description: "Choose explicitly after reviewing. No default; cancellation records nothing." } }, required: ["decision"],
           } : CONFIRMATION_SCHEMA,
         })),
         new Promise((_, reject) => {
@@ -332,8 +348,10 @@ const trustedDecisionRecorder = (session, stdout) => (arguments_) =>
         }),
       ]).finally(() => clearTimeout(timer));
       if (response?.action === "cancel") return "cancel";
-      if (review) return response?.action === "accept" && response.content?.decision === "Approve"
-        ? "accept" : "";
+      if (review) return response?.action === "accept" &&
+        ["APPROVE", "REJECT"].includes(response.content?.decision) &&
+        Object.keys(response.content).length === 1
+        ? response.content.decision : "";
       // The human's own text, or nothing. Never `challenge`.
       return response?.action === "accept" &&
         typeof response.content?.confirmation === "string" &&
@@ -407,6 +425,29 @@ const runTool = async (arguments_, session) => {
 
 const TOOLS = [
   {
+    name: "artifact_status",
+    description: "Read an artifact record and its current direct-ledger decision projection. Writes nothing.",
+    inputSchema: ARTIFACT_INPUT_SCHEMA,
+    call: (arguments_) => getArtifactStatus(artifactOptions(arguments_)),
+  },
+  {
+    name: "artifact_run",
+    description: "Run one artifact iteration. Pending decisions use the engine review and explicit operator APPROVE/REJECT through elicitation; tool arguments never authorize decisions.",
+    inputSchema: ARTIFACT_INPUT_SCHEMA,
+    sessionAware: true,
+    call: async (arguments_, session) => {
+      const log = [];
+      const stdout = { write: (chunk) => (log.push(String(chunk)), true) };
+      const previousExitCode = process.exitCode;
+      try {
+        const result = await runArtifact(artifactOptions(arguments_), {
+          recordTrustedDecision: session?.elicitation ? trustedDecisionRecorder(session, stdout) : null,
+        });
+        return { ...result, log: log.join("") };
+      } finally { process.exitCode = previousExitCode; }
+    },
+  },
+  {
     name: "migration_status",
     description:
       "Read a migration record's persisted status. Writes nothing and takes no lock.",
@@ -423,7 +464,7 @@ const TOOLS = [
   {
     name: "migration_pending_decisions",
     description:
-      "List pending decisions and their engine-owned reviews. Format-19 human decisions require an unavailable independent signer; host responses are presentation only and never human attestation. Legacy records retain their terminal/host interaction.",
+      "List pending decisions and engine-owned reviews. STANDARD_LOCAL relays explicit APPROVE/REJECT as AGENT_RELAYED; only protected high-assurance policy requires HUMAN_ATTESTED. Legacy records retain their terminal/host interaction.",
     inputSchema: INPUT_SCHEMA,
     call: readOnly(pendingDecisionCandidates),
   },
@@ -494,7 +535,7 @@ const callToolInContext = async (id, parameters, session) => {
       const pending = await registryFor(parameters.arguments)
         .then(pendingDecisionCandidates).catch(() => null);
       if (pending?.decisions?.directLedger) {
-        return "Format-19 decisions require the engine-owned review and its trusted policy. No MCP tool or host response attests HUMAN authority; the signer is unavailable.";
+        return "Format-19 decisions require an explicit APPROVE/REJECT through the engine-owned review, never a tool argument. STANDARD_LOCAL records AGENT_RELAYED; protected HUMAN_ATTESTED policy requires the optional signer.";
       }
     }
     return `Run it as an operator: ${REFUSED_TOOLS.migration_approve(module)}`;
@@ -511,10 +552,8 @@ const callToolInContext = async (id, parameters, session) => {
   // The named list above covers the tools that were asked for by name. This
   // covers the ones nobody has named yet: an approval smuggled in as an
   // argument to some future tool is the same act under a different label, and a
-  // list of names cannot refuse a name it has never seen. `migration_run` is the
-  // sole exception because it is the only caller of the trusted recorder, and
-  // even there the phrase is compared against a candidate recomputed under the
-  // module lock -- the argument never becomes the verdict.
+  // list of names cannot refuse a name it has never seen. The iteration tools
+  // obtain a response through elicitation, never through a tool argument.
   const smuggled = approvalShapedArgument(parameters?.arguments, name);
   if (smuggled) {
     return failure(
@@ -528,8 +567,13 @@ const callToolInContext = async (id, parameters, session) => {
     return failure(id, JSON_RPC_METHOD_NOT_FOUND, `Unknown tool '${name}'.`);
   }
   const arguments_ = parameters?.arguments ?? {};
-  if (typeof arguments_.module !== "string" || !arguments_.module) {
-    return failure(id, JSON_RPC_INVALID_REQUEST, "'module' is required.");
+  for (const key of tool.inputSchema.required) {
+    if (typeof arguments_[key] !== "string" || !arguments_[key]) {
+      return failure(id, JSON_RPC_INVALID_REQUEST, `'${key}' is required.`);
+    }
+  }
+  if (Object.keys(arguments_).some((key) => !Object.hasOwn(tool.inputSchema.properties, key))) {
+    return failure(id, JSON_RPC_INVALID_REQUEST, "Unknown tool argument; decision results must come from the explicit operator review.");
   }
   try {
     const structuredContent = await tool.call(

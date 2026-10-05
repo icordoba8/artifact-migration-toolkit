@@ -122,23 +122,23 @@ the upgrade floor forward, a registered upgrader is the sole promoter of that
 cursor, one adjacent increment at a time, each in its own journalled
 transaction.
 
-Module 19 is supported for explicit selection, but normal module creation and
-ordinary resume target active format 18. The 18→19 increment is an explicit,
+Module 19 is the active/default and supported creation format. Existing module
+records retain the ordinary upgrade cursor through 18. The 18→19 increment is an explicit,
 previewed/confirmed, journalled pre-pin adoption for an eligible unfinished
 record, never a self-healing or default transition. Ineligible records keep
 their historical citation path or report `LEGACY_COMPATIBILITY_ACTION_REQUIRED`.
-Artifact 13 remains the active format for every new artifact record, including
-a delegated child; artifact 14 (direct-ledger artifact decisions) is supported
-only through explicit pilot selection or explicit pristine adoption and is never
-inferred from module 19. See `migrate-artifact/references/artifact-contract.md`.
+Artifact 14 is the active/default and supported format for new standalone and
+delegated records. Existing Artifact 13 records stay historical; only explicit
+pristine adoption changes them. See `migrate-artifact/references/artifact-contract.md`.
 
 ```text
 FORMAT_UPGRADE_FLOOR          = 17   (module engine)
 ARTIFACT_FORMAT_UPGRADE_FLOOR = 13   (artifact engine)
 ```
 
-- **At or above the floor**: `state.formatVersion < active format` means an
-  ordinary increment is owed. Each adjacent `N → N+1` increment through the
+- **At or above the floor**: module records below the historical upgrade ceiling
+  (18) owe an ordinary increment. Creation defaults never silently upgrade
+  historical authority. Each adjacent `N → N+1` increment through the
   supported ceiling has one registered
   upgrader. While its declared old-format prerequisite is absent it is
   `INACTIVE`: the format stays at N and the historical lifecycle may produce
@@ -488,13 +488,23 @@ only that candidate and does not advance a checkpoint; rejection blocks until
 evidence changes. Status, pending decisions and run consume the same fresh,
 read-only projection (`checkpointAdvanced` is separate), so a newly appended
 decision is visible in the same session without a restart or copied receipt.
-The provider displays the review only. A native button, terminal or MCP answer
-cannot mint `HUMAN_ATTESTED`, and `AGENT_RELAYED` cannot meet an attested
-requirement. Judgment defaults to attested authority; an explicitly trusted,
-protected operator/admin policy can permit a relayed principal, but repository
-files, state, provider capabilities and `--mode auto` cannot weaken it. No
-production signer/companion or WebAuthn verifier exists in this milestone:
-missing signer yields `SIGNER_UNAVAILABLE` and writes nothing. Artifact 13
+The built-in `STANDARD_LOCAL` policy (`engine/STANDARD_LOCAL/v1`, revision 1,
+digest `sha256:f38ec59bad6a56b15e7c5c1a87f9a003591644de0203bd5a7ff91df82af81042`)
+requires `AGENT_RELAYED` for judgment decisions, including complete module groups.
+It is deterministic and independent of repository files, environment, argv,
+provider capabilities and the signer. Missing protected policy means this
+standard policy. The operator explicitly chooses `APPROVE` or `REJECT` through
+the current engine review; missing response, cancellation, dismissal, timeout or
+transport failure appends nothing. Model reasoning, prior conversation,
+auto-permission and tool arguments are never operator decisions.
+
+Optional protected policy can require `HUMAN_ATTESTED`; the retained protected
+WebAuthn signer must cryptographically verify it. Missing signer or invalid
+activation yields `SIGNER_UNAVAILABLE`, without downgrade. Relayed decisions
+never claim human attestation. The former `engine/judgment/v1` pin and existing
+protected-policy histories keep their historical principal semantics; a policy
+change changes the candidate digest and makes outstanding decisions `STALE`.
+Artifact 13
 retains the historical citation path; artifact 14 resolves individual artifact
 decisions the same direct way and accepts no group approval.
 

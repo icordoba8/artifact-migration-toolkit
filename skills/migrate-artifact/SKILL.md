@@ -37,9 +37,10 @@ artifact-migrate <primary-source> \
 
 `/migrate-artifact <source>` is the provider-facing equivalent. Defaults are
 `--type artifact`, both roots at the current directory, and `--mode auto`.
-New records are artifact format 13. Use `--pilot-format 14` or
-`--upgrade-format 14` (each confirmed with `--confirm-format <id>`) only when
-the operator explicitly asks for the format-14 pilot; see
+New standalone and delegated records default to artifact format 14 (supported:
+14), without a pilot flag or signer. Existing Artifact 13 records remain 13.
+Use `--upgrade-format 14`, confirmed with `--confirm-format <id>`, only for an
+explicit pristine historical-record upgrade; see
 `references/artifact-contract.md#format-axis-and-upgrades`.
 The primary source identifies the artifact. Repeat `--source` for additional
 exact files; the source binding contains only those paths. With matching roots
@@ -65,6 +66,10 @@ persists the selected mode and checks the evidence described under
    bare command runs those checks.
 2. Run the bare command and read its typed `outcome`, `request`, and canonical
    `progress`. One invocation performs at most one transition.
+   When MCP is connected, use `artifact_status` and `artifact_run` with `source`,
+   `type`, `sourceRoot`, `targetRoot` and the current absolute `cwd` (plus supplied
+   options). The engine uses the same explicit review/elicitation path on every
+   provider; a tool argument never supplies a decision.
 3. Author only the paths named by `request.artifacts`, using
    `references/artifact-contract.md`. With Ponytail enabled, also author its
    review and audit evidence under the artifact record before `FINALIZE`.
@@ -101,11 +106,16 @@ fresh references to those records at `FINALIZE`. Each visible behavior declares
 its required `runtimeStates`, and each runtime record carries an `origin`
 (`LEGACY` or `TARGET`); the logical slot `origin::behavior::state` is captured
 once. Provider/session labels are metadata, not freshness inputs. This workflow
-can report pending operator decisions but intentionally exposes no approval API:
+uses engine-owned reviews for explicit operator `APPROVE` / `REJECT` decisions:
 an operator decision is satisfied only by a matching line in the artifact's
-append-only ledger, recorded through
-`artifact-migration-decision --artifact <source> --type <type> --approve <id>` from a
-trusted terminal or host elicitation — never by editing authored JSON. At
+append-only ledger, recorded through the engine-owned review in `artifact_run`
+or the ordinary `artifact-migrate` command in the operator's terminal — no ID
+transcription, challenge phrase or ledger editing. `STANDARD_LOCAL` records
+`AGENT_RELAYED`; no service, protected policy, signer or hardware authenticator
+is required. Cancellation, dismissal, timeout or missing response writes nothing.
+Only an explicit protected high-assurance policy requires `HUMAN_ATTESTED` and
+fails closed with `SIGNER_UNAVAILABLE` when its signer is absent; never downgrade.
+At
 format 13 the authored row cites that line; at format 14 the engine resolves the
 verified line directly and authored receipts are refused
 (`references/artifact-contract.md#artifact-14-decisions`).
@@ -135,7 +145,7 @@ with its own command afterwards.
 ## Responsibility boundary
 
 This engine owns exactly four things: its own lifecycle, its own inventories,
-its own gates, and its own format axis (contract 1 / active format 13 /
+its own gates, and its own format axis (contract 1 / active format 14 /
 supported format 14 / workflow 1.0,
 deliberately independent of the module engine's).
 
@@ -158,7 +168,7 @@ and must never be reimplemented here:
 ### Format upgrades on this axis
 
 The artifact engine declares the same format-upgrade contract the module engine
-does, on its own axis: floor 13, active creation format 13, supported runtime
+does, on its own axis: floor 13, active creation format 14, supported runtime
 format 14, and exactly one registered adjacent upgrader, 13 -> 14
 `PRISTINE_ARTIFACT_ADOPTED`. A 13 record is not owed that increment and never
 promotes on its own; only an explicit, previewed and confirmed

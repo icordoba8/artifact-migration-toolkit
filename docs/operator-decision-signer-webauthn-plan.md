@@ -1,5 +1,12 @@
 # Production Signer / WebAuthn — Operator Decision Architecture
 
+> The signer is now an optional high-assurance enhancement. Module 19 and
+> Artifact 14 are active defaults using self-contained STANDARD_LOCAL /
+> AGENT_RELAYED decisions. Earlier default-policy and pilot restrictions below
+> are historical; see the [current architecture](../README.md#architecture).
+> Protected HUMAN_ATTESTED verification and activation requirements still apply
+> whenever an explicit high-assurance policy requires them.
+
 ## Current baseline and implementation status
 
 > Statements below that say artifact 14 is unavailable, or that artifact 13 is the only supported artifact format, are **stale baseline text** from before v1.3.7. They are kept as a historical record; the security invariants, proof design, nonce lifecycle, protected-store requirements, browser isolation, crash semantics and activation gates remain the design of record.

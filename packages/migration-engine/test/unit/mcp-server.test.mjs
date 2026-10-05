@@ -142,7 +142,7 @@ test("an unknown protocol version falls back instead of failing", async () => {
 
 // --- §11.2 the tool set ------------------------------------------------------
 
-test("tools/list is exactly the four tools of D6-2", async () => {
+test("tools/list exposes module and artifact iteration/read tools, never approval tools", async () => {
   const response = await only(null, {
     jsonrpc: "2.0",
     id: 2,
@@ -151,13 +151,15 @@ test("tools/list is exactly the four tools of D6-2", async () => {
   const tools = response.result.tools;
 
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    "artifact_run",
+    "artifact_status",
     "migration_pending_decisions",
     "migration_run",
     "migration_scan",
     "migration_status",
   ]);
   const run = tools.find((tool) => tool.name === "migration_run");
-  const readOnlyTools = tools.filter((tool) => tool !== run);
+  const readOnlyTools = tools.filter((tool) => tool !== run && tool.name.startsWith("migration_"));
   for (const tool of readOnlyTools) {
     assert.equal(typeof tool.description, "string");
     assert.deepEqual(tool.inputSchema.required, ["module"]);
@@ -383,7 +385,7 @@ test("a malformed frame is a parse error and the connection survives", async () 
   assert.equal(raw.length, 2);
   assert.equal(raw[0].error.code, -32700);
   assert.equal(raw[0].id, null);
-  assert.equal(raw[1].result.tools.length, 4);
+  assert.equal(raw[1].result.tools.length, 6);
 });
 
 // --- §11.6 no approval path --------------------------------------------------
@@ -1092,12 +1094,9 @@ test("a model-supplied challenge approves nothing when the human declines", asyn
       () => ({ result: { action: "decline" } }),
     );
 
-    // The server still asked a human, and the human said no.
-    assert.equal(originated.length, 1);
-    assert.equal(originated[0].method, "elicitation/create");
-    const run = structured(raw.find((frame) => frame.id === 2));
-    assert.equal(run.outcome, "OPERATOR_DECISION");
-    assert.equal(run.exitCode, exitCodeFor("OPERATOR_DECISION"));
+    // Invalid tool arguments are refused before opening an operator review.
+    assert.equal(originated.length, 0);
+    assert.equal(raw.find((frame) => frame.id === 2).error.code, -32600);
     // D6-3 still holds: there is no approval tool to call at all.
     const refused = raw.find((frame) => frame.id === 3);
     assert.equal(refused.error.code, -32601);
@@ -1161,7 +1160,7 @@ test("an unresponsive MCP provider times out, cleans pending, and ignores a late
     await serving;
     assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
     assert.match(frames.find((frame) => frame.id === 2).result.structuredContent.reason, /timed out/);
-    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 4);
+    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 6);
     assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
     assert.equal(await decisionLedger(fixture), null);
   } finally {

@@ -215,12 +215,14 @@ installed CLI. Neither front end can attest a module-19 decision.
     For module format 19, status, pending decisions and run use the same fresh,
     read-only decision projection. Its full candidate-bound review is for
     presentation, not an instruction to transcribe IDs, digests or a challenge.
-    A provider prompt/button is never HUMAN authority. The default judgment
-    policy requires `HUMAN_ATTESTED`, which is not writable: without a trusted
-    signer/companion the result is explicitly `SIGNER_UNAVAILABLE`, not an
-    approval through elicitation or a weaker principal. Only a protected,
-    verified operator/admin policy may explicitly allow `AGENT_RELAYED`; a host
-    reply under that policy remains relayed, not attested. A recorded decision
+     The engine-owned `STANDARD_LOCAL` policy requires `AGENT_RELAYED`: the
+     operator explicitly selects `APPROVE` or `REJECT` through this review.
+     Cancellation, dismissal, timeout, missing response and transport failure
+     append nothing. No tool argument, auto-permission, inferred intent or prior
+     conversation may answer the review. A provider response never attests a
+     human. Only an optional protected high-assurance policy requires
+     `HUMAN_ATTESTED`; missing or invalid signer activation then fails closed
+     with `SIGNER_UNAVAILABLE`, without downgrade. A recorded decision
     becomes visible to the next status/pending/run call in this same session;
     no restart and no model-carried receipt are required.
     For module formats ≤18 and artifact 13 only, the historical elicitation or
@@ -241,8 +243,10 @@ Either way the directive's `next=` repeats the iteration; obey it literally
 through the same front end.
 
 **Whenever an iteration ends at `OPERATOR_DECISION`**, follow the typed result.
-For module 19, inspect the engine review and `blocked` state; never request
-transcription or infer approval from host interaction. For historical formats,
+For module 19, present the engine review for explicit `APPROVE` or `REJECT`.
+If elicitation is unavailable, the operator runs the ordinary migration command
+in their terminal and chooses the action there; no ID transcription or challenge.
+Inspect `blocked` for an explicit protected high-assurance requirement. For historical formats,
 `reason` names any recorded line and `decisionReferences` carries its citation;
 further pending decisions remain unapproved. Never call a host decline a human
 rejection: no applicable approval arrived.
@@ -253,7 +257,8 @@ already holds, records every such decision in its own
 `decisions/auto-decisions.ndjson` ledger under its own hash chain, and may never
 write, forge or impersonate a line in the human `decisions/operator-decisions.ndjson`.
 A judgment needing a person is not AUTO's to make: legacy records stop for
-the historical operator act, while module 19 blocks if the signer is absent.
+the historical operator act, while module 19 requires an explicit operator
+decision even in auto mode. Standard decisions need no signer.
 A reported remainder stays unapproved; `--mode step` does not supply attestation.
 
 For historical module formats ≤18 and artifact 13, `operatorApproval` carries
@@ -396,8 +401,8 @@ constants by a contract test — the table cannot drift from the code.
 
 | Persisted source       | Result                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| contract 5, format 19  | supported for explicit test/pilot selection, with direct-ledger module decisions; not the production creation default; unavailable signer blocks `HUMAN_ATTESTED` |
-| contract 5, format 18  | active production creation default; executes with historical citation decisions and frozen `requiredObservations`     |
+| contract 5, format 19  | active production creation default and supported ceiling; direct-ledger `STANDARD_LOCAL` decisions use explicit `AGENT_RELAYED` authority |
+| contract 5, format 18  | remains readable/resumable with historical citation decisions and frozen `requiredObservations`; explicit 18→19 upgrade only |
 | contract 5, format 17  | owes 17→18; DISCOVER_LEGACY may first validate and pin the legacy inventory, after which the upgrade freezes the lifecycle until it commits (see Format upgrades) |
 | contract 5, format 16  | executes the full lifecycle with controlled same-slice rework and unclaimed-drift refusal at FINALIZE; never promoted to 17 |
 | contract 5, format 15  | executes the full lifecycle with multi-source/brownfield targets; self-heals to 16 on the next advance                |
@@ -411,15 +416,15 @@ constants by a contract test — the table cannot drift from the code.
 | contract 2 or 3        | refused as unsupported; files are never touched                                                                       |
 | newer than supported   | refused; update start-migration first                                                                                 |
 
-Module 19 support is not activation: normal module creation stays at 18.
-Artifact support is likewise not activation: artifact 13 stays the active
-format for ordinary and delegated creation, and artifact 14 is supported only
-by explicit pilot selection or the one explicit, fail-closed pristine 13 -> 14
+Module default/active = 19; supported = 19. Artifact default/active = 14;
+supported = 14, including delegated children. No pilot flag, signer or protected
+policy is required. Existing records never silently upgrade: module 18 uses the
+explicit pre-pin 18 -> 19 path; artifact 13 uses the explicit pristine 13 -> 14
 adoption; non-pristine 13 records are never promoted. Artifact 14 direct-ledger
 authority covers `ARTIFACT_DECISION` and `VISUAL_UNBACKED` only; not
-`GROUP_APPROVAL`, and `EXCEPTION_RECORDED` is unchanged. `HUMAN_ATTESTED` writes,
-the production signer, real-host acceptance and production-default activation
-are deferred separately.
+`GROUP_APPROVAL`, and `EXCEPTION_RECORDED` is unchanged. The retained WebAuthn
+signer provides optional protected `HUMAN_ATTESTED` authority; its deployment and
+activation requirements never gate standard migration operation.
 
 ### Format bump policy
 
@@ -469,8 +474,8 @@ back.
 
 | Engine | Floor | Registry |
 | --- | --- | --- |
-| module | `FORMAT_UPGRADE_FLOOR = 17` | adjacent upgraders through supported 19; normal creation/advance targets active 18, with 18→19 only by explicit eligible adoption |
-| artifact | `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13` | empty; supported and active format is 13, not 14 |
+| module | `FORMAT_UPGRADE_FLOOR = 17` | active/default and supported 19; historical upgrade cursor stops at 18, with 18→19 only by explicit eligible adoption |
+| artifact | `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13` | active/default and supported 14; explicit pristine 13→14 upgrader; existing 13 records stay historical |
 
 Below the module floor nothing here applies: formats 4–16 keep their existing
 compatibility behavior (self-healing where the bump was additive, running the
@@ -501,7 +506,7 @@ automatically mean frozen: only an ACTIVE increment is exclusive.
 ### The typed `formatUpgrade` result
 
 `migration_status` and active-upgrade preflight carry a structured `formatUpgrade`
-(`null` for a record at the active format, unless explicit adoption was selected), reporting `recordFormat`,
+(`null` for a module record at 18 or 19, unless explicit adoption was selected), reporting `recordFormat`,
 `runtimeFormat`, `from`/`to`, `upgrader {id, version}`, `active`, `state`,
 `prerequisite`, `domain`, `requiredInput`, `blockers` and `nextAction`. Read that object; do not
 rediscover which transition is required.
@@ -824,8 +829,9 @@ Full JSON schemas for every artifact below live in
    `EXCLUDED_APPROVED` with a decision authorized under the record's policy. That
     happens one decision per iteration. Module 19 validates a policy-bound
     decision directly against the verified ledger; no challenge or receipt
-    fields are authored in classification version 2. With no signer, a default
-    `HUMAN_ATTESTED` request is blocked, not implicitly approved. Historical
+     fields are authored in classification version 2. `STANDARD_LOCAL` requires
+     explicit `AGENT_RELAYED` approval; only protected high-assurance policy
+     requires a signer and blocks without one. Historical
     module formats ≤18 instead retain the terminal/elicitation challenge and
     require the cited `decisionId` and `decisionDigest` in the classification
     row after recording. A stale decision cannot authorize the current candidate.
@@ -1202,7 +1208,7 @@ against a candidate recomputed under the module lock. A front end that returns
 anything it composed itself has approved nothing — it has moved the forgery one
 file over.
 
-The elicitation schema is a **required free-text field**, never an enum. This
+For historical formats, the elicitation schema is a **required free-text field**, never an enum. This
 is load-bearing. An `enum: ["Approve","Decline"]` is answerable from the schema
 alone: `{"action":"accept","content":{"decision":"Approve"}}` is a frame a host
 can synthesize with no dialog and no person, authorizing multiple lines without
@@ -1221,9 +1227,10 @@ challenge does not mint `HUMAN_ATTESTED`. Module 19 instead requires a verified
 ledger line bound to the current full candidate and trusted policy. Status,
 pending and run share its fresh projection; a valid append is immediately
 visible without advancing a checkpoint or restarting the session. The
-production signer/WebAuthn verifier is not implemented, so attested writes are
-unavailable and a missing signer is explicitly blocked. Native provider UI is
-presentation only; `AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`.
+standard `APPROVE`/`REJECT` review records `AGENT_RELAYED` without infrastructure.
+The optional protected signer/WebAuthn verifier is retained. An explicit
+high-assurance requirement blocks when its signer is unavailable or activation
+invalid; `AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`.
 
 `artifact-migration-decision <module> --verify` audits a record read-only: it takes no
 lock, re-derives every `prevDigest` itself, reports the first chain break, flags

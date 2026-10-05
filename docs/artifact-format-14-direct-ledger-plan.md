@@ -1,5 +1,10 @@
 # Artifact Format 14: Direct-Ledger Artifact Decision Authority
 
+> Historical implementation plan. Current defaults are Module 19 and Artifact 14,
+> with self-contained STANDARD_LOCAL / AGENT_RELAYED decisions. Pilot-only and
+> mandatory-signer statements below describe the earlier milestone and are
+> superseded by the [current architecture](../README.md#architecture).
+
 ## 1. Goal and non-goals
 
 Implement a deliberately selected, supported artifact format 14 with the same decision security boundary as module format 19 where the semantics are shared: current artifact candidate -> complete engine-owned review -> trusted policy -> verified ledger result -> fresh projection -> artifact validation -> identities consumed by a journalled checkpoint. Cover both source-inventory `operatorDecisions` and visual `VISUAL_UNBACKED` exceptions. An approval does not itself advance a checkpoint or replace structural, source, visual, runtime, or target verification.

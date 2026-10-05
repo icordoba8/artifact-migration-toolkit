@@ -11,6 +11,7 @@
 // the real repository or any real migration.
 
 import assert from "node:assert/strict";
+import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import {
@@ -154,6 +155,7 @@ import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs
 import { exitCodeFor, maySelfConfirm } from "../../src/migration-policy.mjs";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import {
+  artifactRoot,
   getArtifactStatus,
   runArtifact,
 } from "../../src/artifact/artifact-migration.mjs";
@@ -386,6 +388,7 @@ const initialize = async (fixture, overrides = {}) => {
     boundInputs: preview.boundInputs,
     ...overrides,
   });
+  result.state = await historicalBootstrap(fixture.migrationRoot, 18);
   return { resolution, preview, result };
 };
 
@@ -3713,7 +3716,7 @@ test("repository, migration state, MCP arguments, provider claims and mode canno
     const expected = await createNewFormatDecisionCandidate(candidate);
     assert.deepEqual(await resolveRequiredPrincipal("EXCLUSION", fixture.targetRoot), {
       projectRoot: fixture.targetRoot,
-      requiredPrincipal: "HUMAN_ATTESTED", policyId: DEFAULT_DECISION_POLICY_ID,
+      requiredPrincipal: "AGENT_RELAYED", policyId: DEFAULT_DECISION_POLICY_ID,
       policyDigest: DEFAULT_DECISION_POLICY_DIGEST,
     });
     for (const attempt of [
@@ -3725,7 +3728,7 @@ test("repository, migration state, MCP arguments, provider claims and mode canno
       assert.deepEqual(await createNewFormatDecisionCandidate({ ...candidate, ...attempt }), expected);
     }
     assert.notEqual(expected.id, createDecisionCandidate(candidate).id);
-    assert.equal(expected.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(expected.requiredPrincipal, "AGENT_RELAYED");
   } finally {
     await fixture.cleanup();
   }
@@ -3983,7 +3986,7 @@ test("an isolated clean roles fixture completes DISCOVERY_COMPLETENESS without a
       STEP_DOC("02", "Discover legacy"),
     );
     await writeJson(path.join(fixture.migrationRoot, CLASSIFICATION_PATH), {
-      version: 1,
+      version: 2,
       algorithmVersion: 2,
       moduleRoots: [
         {
@@ -4002,7 +4005,7 @@ test("an isolated clean roles fixture completes DISCOVERY_COMPLETENESS without a
       moduleName: "roles",
     });
     const classification = {
-      version: 1,
+      version: 2,
       algorithmVersion: 2,
       moduleRoots: [
         {
@@ -4252,7 +4255,7 @@ test("a runtime redirect over a destructured parameter base creates no EDGE_RESO
       STEP_DOC("02", "Discover legacy"),
     );
     await writeJson(path.join(fixture.migrationRoot, CLASSIFICATION_PATH), {
-      version: 1,
+      version: 2,
       algorithmVersion: 2,
       moduleRoots: [
         {
@@ -5132,7 +5135,7 @@ test("a fully classified module advances, pins the digest, and records the scan"
       "DISCOVER_LEGACY",
       "DISCOVERY_COMPLETENESS",
     ]);
-    assert.equal(after.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(after.formatVersion, 18);
 
     const scan = await readJson(
       path.join(fixture.migrationRoot, "inventories/discovery-scan.json"),
@@ -5246,7 +5249,7 @@ test("an existing format-10 discovery pin without a ledger field remains valid",
       ...resolution,
       moduleName: "auth",
     });
-    assert.equal(status.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(status.formatVersion, 18);
     assert.equal(status.currentStep, "ASSESS_TARGET");
   } finally {
     await fixture.cleanup();
@@ -7326,7 +7329,7 @@ test("a record newer than the supported format is refused cleanly, touching noth
     await driveTo(fixture, "DISCOVERY_COMPLETENESS");
     assert.equal(
       (await state(fixture)).formatVersion,
-      MIGRATION_FORMAT_VERSION,
+      18,
     );
     // Exactly what pre-change code does when it meets a current-format record:
     // the same guard, one version past the *supported* ceiling. The record was
@@ -9859,7 +9862,7 @@ const stagedDelegatedSlice = async (fixture) => {
   });
   await advance(fixture);
   const current = await state(fixture);
-  assert.equal(current.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(current.formatVersion, 18);
   assert.equal(current.currentStep, "IMPLEMENT_SLICES");
   assert.equal(current.activeSlice, "shared-001");
   return current;
@@ -9967,6 +9970,7 @@ test("AUTO drives the delegated artifact through `run`, leaving the parent recor
 });
 
 test("a delegated artifact decision is recorded through one migration_run elicitation", async () => {
+  for (const childFormat of [13, 14]) {
   const fixture = await createFixture();
   try {
     const before = await stagedDelegatedSlice(fixture);
@@ -9974,6 +9978,7 @@ test("a delegated artifact decision is recorded through one migration_run elicit
     // Bootstrap the child, then author the inventory that makes it stop on an
     // operator decision -- the state a parent `run` has to route, not swallow.
     await runArtifact(binding);
+    if (childFormat === 13) await historicalBootstrap(artifactRoot(fixture.targetRoot, binding.artifactId), 13);
     const ledgerPath = await authorChildDecision(fixture, binding);
     assert.deepEqual(await artifactLedger(ledgerPath), []);
 
@@ -9982,15 +9987,11 @@ test("a delegated artifact decision is recorded through one migration_run elicit
       request: async (method, parameters) => {
         assert.equal(method, "elicitation/create");
         asked.push(parameters.message);
-        // The human transcribes the phrase the request displayed. A host that
-        // answers from the schema instead approves nothing -- proven for the
-        // delegated half in the test below this one.
+        if (childFormat === 14) assert.match(parameters.message, /Required principal: AGENT_RELAYED/);
         return {
           action: "accept",
-          content: {
-            confirmation: /^Confirmation phrase: (.+)$/m.exec(
-              parameters.message,
-            )[1],
+          content: childFormat === 14 ? { decision: "APPROVE" } : {
+            confirmation: /^Confirmation phrase: (.+)$/m.exec(parameters.message)[1],
           },
         };
       },
@@ -10014,13 +10015,22 @@ test("a delegated artifact decision is recorded through one migration_run elicit
     // The human decision crossed the transport and the ledger line is the child's,
     // written by `record-decision.mjs` under the artifact lock.
     assert.equal((await artifactLedger(ledgerPath)).length, 1);
+    const line = JSON.parse((await artifactLedger(ledgerPath))[0]);
+    if (childFormat === 14) {
+      assert.equal(line.principal, "AGENT_RELAYED");
+      assert.deepEqual(result.decisionReferences, []);
+    } else {
+      assert.equal(line.v, undefined);
+      assert.equal(result.decisionReferences[0].decisionId, line.id);
+    }
     assert.equal((await state(fixture)).revision, before.revision);
   } finally {
     await fixture.cleanup();
   }
+  }
 });
 
-test("without elicitation the same migration_run decides as AUTO and writes no human artifact line", async () => {
+test("without elicitation the same migration_run awaits an explicit standard artifact decision", async () => {
   const fixture = await createFixture();
   try {
     await stagedDelegatedSlice(fixture);
@@ -10031,9 +10041,7 @@ test("without elicitation the same migration_run decides as AUTO and writes no h
     const response = await rpc(fixture, runCall(1), createSession());
 
     const result = response.result.structuredContent;
-    // AUTO is a principal, not a simulated human: it may continue, but the
-    // human artifact ledger must be untouched.
-    assert.notEqual(result.outcome, "OPERATOR_DECISION");
+    assert.equal(result.outcome, "OPERATOR_DECISION");
     assert.deepEqual(await artifactLedger(ledgerPath), []);
   } finally {
     await fixture.cleanup();
@@ -10782,7 +10790,7 @@ test("figma-mcp: designSource and figmaSources are persisted and rendered at RES
     await initFigma(fixture);
     const persisted = await state(fixture);
     assert.equal(persisted.designSource, "figma-mcp");
-    assert.equal(persisted.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(persisted.formatVersion, 18);
     assert.deepEqual(persisted.figmaSources, [
       {
         fileKey: "ABC123def",
@@ -11009,7 +11017,7 @@ test("figma-mcp: --reopen-ui keeps the stamped format version and the figma pin"
     await driveFigmaToComplete(fixture);
     const before = await state(fixture);
     assert.equal(before.status, "COMPLETE");
-    assert.equal(before.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(before.formatVersion, 18);
     const pin = before.artifactHashes["inventories/figma-context.json"];
     assert.ok(pin, "figma-context.json is pinned at COMPLETE");
 
@@ -11032,7 +11040,7 @@ test("figma-mcp: --reopen-ui keeps the stamped format version and the figma pin"
     // figma pin stayed in artifactHashes, and the exact-set check would refuse
     // every later read of the record.
     const after = await state(fixture);
-    assert.equal(after.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(after.formatVersion, 18);
     assert.equal(after.designSource, "figma-mcp");
     assert.equal(after.artifactHashes["inventories/figma-context.json"], pin);
     assert.equal(after.currentStep, "VERIFY_SLICES");
@@ -12210,7 +12218,7 @@ test("unbacked-17: without authoritative design only a live operator decision co
     await advance(fixture);
     const persisted = await state(fixture);
     assert.ok(persisted.completedSteps.includes("BUILD_BASELINE"));
-    assert.equal(persisted.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(persisted.formatVersion, 18);
   } finally {
     await fixture.cleanup();
   }
@@ -13616,7 +13624,7 @@ test("format 15 keys the record on the target and derives the source order", asy
 
     // A new record bootstraps at the current format, which is at or above the
     // one that introduced multi-source.
-    assert.equal(persisted.formatVersion, MIGRATION_FORMAT_VERSION);
+    assert.equal(persisted.formatVersion, 18);
     assert.ok(persisted.formatVersion >= MULTI_SOURCE_FORMAT_VERSION);
     assert.deepEqual(persisted.legacySources, ["auth-core", "auth-ui"]);
     // migrationId is the target, which is what the record directory and the
@@ -15695,12 +15703,10 @@ test("R-W10-e: a format newer than supported is refused with the update message"
   }
 });
 
-test("ODA-1: format 19 is supported, 18 stays the creation default, and nothing promotes into 19", () => {
-  // Support and activation are two controls, and the whole compatibility
-  // boundary rests on them being different numbers here.
+test("ODA-1: format 19 is supported and active; historical records never silently promote", () => {
   assert.equal(MIGRATION_FORMAT_SUPPORTED, DIRECT_LEDGER_DECISIONS_FORMAT);
-  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 18);
-  assert.notEqual(MIGRATION_FORMAT_SUPPORTED, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 19);
+  assert.equal(MIGRATION_FORMAT_SUPPORTED, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
   assert.equal(formatIsSupported(19), true);
   assert.equal(formatIsSupported(20), false);
   assert.equal(usesDirectLedgerDecisions({ formatVersion: 19 }), true);
@@ -15722,10 +15728,10 @@ test("ODA-1: format 19 is supported, 18 stays the creation default, and nothing 
   assert.equal(row.to, 19);
   assert.equal(row.id, "DIRECT_LEDGER_DECISIONS_ADOPTED");
 
-  // The ordinary cursor runs to the *active* format, so an 18 record owes no
+  // The ordinary historical cursor stops at 18, so an 18 record owes no
   // increment and is neither frozen behind one nor walked into 19.
   assert.equal(
-    nextIncrement(FORMAT_UPGRADERS, 18, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, FORMAT_UPGRADE_FLOOR),
+    nextIncrement(FORMAT_UPGRADERS, 18, REQUIRED_OBSERVATIONS_FORMAT, FORMAT_UPGRADE_FLOOR),
     null,
   );
   assert.doesNotThrow(() =>
@@ -16124,7 +16130,7 @@ test("R-W10-b / R-W10-d: a format-15 record runs the full lifecycle unchanged an
     try {
       const { sliceId } = await atFailedVerification(modern);
       const reworked = (await rework(modern, sliceId)).state;
-      assert.equal(reworked.formatVersion, MIGRATION_FORMAT_VERSION);
+      assert.equal(reworked.formatVersion, 18);
       assert.equal(reworked.sliceReworks[sliceId], 1);
       assert.ok(
         Object.keys(reworked.artifactHashes).some((relative) =>
@@ -18190,7 +18196,7 @@ const assertActiveReopenThenComplete = async (fixture) => {
   ]);
   assert.deepEqual(after.sliceReworks ?? {}, before.sliceReworks ?? {});
   assert.equal(after.formatVersion, before.formatVersion);
-  assert.equal(MIGRATION_FORMAT_VERSION, 18);
+  assert.equal(REQUIRED_OBSERVATIONS_FORMAT, 18);
   // Only the named evidence and FINALIZE's own pins are released; discovery,
   // baseline, plan, implementation and remediation pins are untouched.
   for (const [relative, pin] of Object.entries(before.artifactHashes)) {
@@ -18630,7 +18636,7 @@ test("format 18: requiredObservations schema rejects every malformed shape", () 
 });
 
 test("format 18 is non-promoting; an old UI record adopts before a new PASS", async () => {
-  assert.equal(MIGRATION_FORMAT_VERSION, 18);
+  assert.equal(REQUIRED_OBSERVATIONS_FORMAT, 18);
   assert.ok(NON_PROMOTING_FORMAT_VERSIONS.includes(18));
   assert.equal(formatIsPromoting(18), false);
   assert.equal(formatIsSupported(17), true);
@@ -20101,9 +20107,7 @@ test("ODA-6: a grouped member view points at one group entry and is never its ow
 
   // Three member views, one authority: each finds the same single group entry
   // and names the same group candidate, and none of them is its own authority.
-  // The state is `AWAITING_HUMAN_DECISION` because the default policy requires
-  // HUMAN_ATTESTED and this build cannot write it -- the member set is still
-  // resolved through the one entry, which is what must never split.
+  // STANDARD_LOCAL accepts the relayed group through that one entry.
   for (const member of members) {
     const view = await project([groupLine], member);
     assert.equal(view.group.id, group.id);
@@ -20111,16 +20115,16 @@ test("ODA-6: a grouped member view points at one group entry and is never its ow
     assert.notEqual(view.group.candidateDigest, candidateDigestOf(member));
     assert.equal(view.decisionId, groupLine.id);
     assert.equal(view.result, "APPROVED");
-    assert.equal(view.state, "AWAITING_HUMAN_DECISION");
-    assert.match(view.reason, /weaker principal|requires 'HUMAN_ATTESTED'/);
-    assert.equal(view.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(view.state, "APPROVED_APPLICABLE");
+    assert.equal(view.reason, null);
+    assert.equal(view.requiredPrincipal, "AGENT_RELAYED");
   }
 
   // A line over a single member is not the group's act: no group covers the
-  // member, and the member-only line is not bound to the member either.
+  // member; a separately decided member has its own authority.
   const alone = await project([lineFor(members[0])], members[0]);
   assert.equal(alone.group, null);
-  assert.equal(alone.state, "AWAITING_HUMAN_DECISION");
+  assert.equal(alone.state, "APPROVED_APPLICABLE");
 
   // Changed membership is reflected consistently rather than partially: a member
   // whose evidence moved fails the group's own binding instead of resolving

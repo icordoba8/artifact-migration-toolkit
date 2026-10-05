@@ -11,6 +11,8 @@ import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+// @ts-expect-error -- test-only historical record constructor.
+import { historicalBootstrap } from "../../support/historical-bootstrap.mjs";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error -- untyped production JS module, consumed directly for real behavior.
@@ -104,7 +106,7 @@ const captureTransaction = async (
     input.kind === "BOOTSTRAP"
       ? {
         kind: "BOOTSTRAP" as const, artifactType: state.artifactType, source: state.source, target: state.target,
-        ...(state.formatVersion === 14 ? { pilotFormat: 14 } : {})
+        ...(state.formatVersion === 14 ? { formatVersion: 14 } : {})
       }
       : input.kind === "FORMAT_UPGRADE"
         ? { kind: "FORMAT_UPGRADE" as const, from: 13, to: 14, confirmationId: input.confirmationId }
@@ -118,6 +120,11 @@ const captureTransaction = async (
 };
 
 type Phase = "JOURNAL_ONLY" | "HISTORY_APPENDED" | "STATE_REPLACED" | "INTEGRITY_REPLACED";
+
+const bootstrapLegacy = async (fixture: Fixture) => {
+  await bootstrap(fixture);
+  await historicalBootstrap(fixture.artifactRoot, 13);
+};
 
 // The crash-window table: which of {state, integrity, history} still show the
 // previous value vs. the proposed one at each durable boundary between journal
@@ -306,34 +313,38 @@ describe("crash windows: bootstrap", () => {
   }
 });
 
-describe("crash windows: explicit pilot bootstrap", () => {
+describe("crash windows: default format-14 bootstrap and historical pilot journals", () => {
   for (const phase of PHASES) {
     it(`replays a confirmed format-14 bootstrap once after ${phase}`, async () => {
       const fixture = await tracked();
-      const options = { ...fixture.options, pilotFormat: 14 };
+      const options = fixture.options;
       const preview = await previewArtifact(options);
       const { pre, post, transaction } = await captureTransaction(
         fixture,
         () => runArtifact({ ...options, confirmationId: preview.confirmationId }),
         { kind: "BOOTSTRAP" },
       );
-      await applyPhase(fixture, pre, post, phase, transaction);
-      expect((await runArtifact(fixture.options)).outcome).toBe("CONTINUE");
-      expect((await stateOf(fixture)).formatVersion).toBe(14);
-      expect(await snapshot(fixture)).toEqual(post);
+      for (const historicalPilot of [false, true]) {
+        const journal = historicalPilot ? { ...transaction,
+          input: { ...transaction.input, formatVersion: undefined, pilotFormat: 14 } } : transaction;
+        await applyPhase(fixture, pre, post, phase, journal);
+        expect((await runArtifact(fixture.options)).outcome).toBe("CONTINUE");
+        expect((await stateOf(fixture)).formatVersion).toBe(14);
+        expect(await snapshot(fixture)).toEqual(post);
+      }
     });
   }
 
-  it("refuses a format-14 bootstrap journal with no pilot selection", async () => {
+  it("refuses a format-14 bootstrap journal with no format binding", async () => {
     const fixture = await tracked();
-    const options = { ...fixture.options, pilotFormat: 14 };
+    const options = fixture.options;
     const preview = await previewArtifact(options);
     const { pre, post, transaction } = await captureTransaction(
       fixture,
       () => runArtifact({ ...options, confirmationId: preview.confirmationId }),
       { kind: "BOOTSTRAP" },
     );
-    const { pilotFormat: _pilotFormat, ...input } = transaction.input as Record<string, unknown>;
+    const { formatVersion: _formatVersion, ...input } = transaction.input as Record<string, unknown>;
     await applyPhase(fixture, pre, post, "JOURNAL_ONLY", { ...transaction, input });
     const before = await snapshot(fixture);
     expect((await runArtifact(fixture.options)).outcome).toBe("BLOCKED");
@@ -517,6 +528,7 @@ describe("format-14 consumed decision recovery", () => {
 });
 
 describe("crash windows: explicit pristine 13 -> 14 upgrade", () => {
+  const bootstrap = bootstrapLegacy;
   for (const phase of PHASES) {
     it(`replays the exact format upgrade once after ${phase}`, async () => {
       const fixture = await tracked();
@@ -845,6 +857,7 @@ describe("cross-record and stale journals are refused before any mutation", () =
 });
 
 describe("legacy (version 1) journals", () => {
+  const bootstrap = bootstrapLegacy;
   it("a fully-applied version-1 bootstrap journal remains recoverable (base regression)", async () => {
     const fixture = await tracked();
     await bootstrap(fixture);
