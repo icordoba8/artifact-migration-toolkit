@@ -21,6 +21,7 @@ import {
   createDecisionCandidate,
   decisionAppliesToCandidate,
   decisionLineDigest,
+  decisionRationaleDigest,
   dirtyManifest,
   exitCodeFor,
   FINAL_GATES,
@@ -40,7 +41,12 @@ import {
   compareVisualFact,
   compareVisualEvidence,
   createNewFormatDecisionCandidate,
+  DECISION_GROUP_KIND,
+  DECISIONS_FILE,
+  AUTO_DECISIONS_FILE,
   pendingVisualUnbackedCandidates,
+  projectModuleDecision,
+  resolveHistoricalRequiredPrincipal,
   TARGET_VERIFICATION_ROLE,
   validateVisualAcceptance,
   visualAuthorityOf,
@@ -1511,7 +1517,9 @@ const historyEventExtraKeys = (event) =>
   event === "BOOTSTRAPPED"
     ? ["toolkitIdentity"]
     : event === "ADVANCED"
-      ? ["visualComparison"]
+      ? ["visualComparison", "consumedDecisions", "decisionLedgerPrefixes"]
+    : event === "COMPLETED"
+      ? ["consumedDecisions", "decisionLedgerPrefixes"]
     : TOOLKIT_IDENTITY_EVENTS.includes(event)
       ? ["previous", "next"]
       : [];
@@ -1595,6 +1603,121 @@ const integrityFor = (state, historyContent) => ({
   artifactHashesSha256: sha256(canonical(state.artifactHashes)),
 });
 
+const ledgerPrefixesFor = async (root) => Object.fromEntries(await Promise.all(
+  [["operator", DECISIONS_FILE], ["auto", AUTO_DECISIONS_FILE]].map(async ([key, file]) => {
+    const content = await readFile(path.join(root, file), "utf8").catch((error) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    return [key, { bytes: Buffer.byteLength(content), sha256: sha256(content) }];
+  }),
+));
+
+// Artifact 14 authority is individual only: a group line never projects onto an artifact candidate.
+const projectArtifactDecision = (input) => projectModuleDecision({
+  ...input, decisions: input.decisions.filter((line) => line?.kind !== DECISION_GROUP_KIND),
+});
+
+const consumedFrom = (rows) => rows.filter((row) => row.satisfied).map(({ projection }) => ({
+  candidateDigest: projection.candidateDigest,
+  decisionId: projection.decisionId,
+  decisionDigest: projection.decisionDigest,
+  policyId: projection.policyId,
+  policyDigest: projection.policyDigest,
+  principal: projection.principal,
+  result: projection.result,
+})).sort((left, right) => left.decisionId.localeCompare(right.decisionId));
+
+const verifyConsumedHistory = async (root, state, history) => {
+  const consumedEvents = history.events.filter((event) => Object.hasOwn(event, "consumedDecisions"));
+  if (state.formatVersion !== 14) {
+    if (consumedEvents.length || history.events.some((event) => Object.hasOwn(event, "decisionLedgerPrefixes"))) {
+      throw new Error("Artifact 13 history cannot contain consumed decisions.");
+    }
+    return;
+  }
+  if (history.events.some((event) => Object.hasOwn(event, "decisionLedgerPrefixes") !==
+      Object.hasOwn(event, "consumedDecisions"))) {
+    throw new Error("Consumed decision history is missing its identity or ledger prefix.");
+  }
+  for (const [step, file, key] of [
+    ["DISCOVER_LEGACY", "inventories/source.json", "operatorDecisions"],
+    ["BUILD_BASELINE", VISUAL_ACCEPTANCE_FILE, "unbacked"],
+  ]) {
+    const event = history.events.find((entry) => entry.from === step && entry.event === "ADVANCED");
+    if (!event) continue;
+    if (step === "BUILD_BASELINE" && !Object.hasOwn(state.artifactHashes, file)) {
+      if (event.consumedDecisions?.length) throw new Error("Unpinned visual evidence cannot consume decisions.");
+      continue;
+    }
+    const document = await readJsonAt(root, file, `${step} decision evidence`);
+    if (!Array.isArray(document[key]) || document[key].length !== (event.consumedDecisions?.length ?? 0)) {
+      throw new Error(`${step} committed history is missing consumed decision identities.`);
+    }
+  }
+  if (!consumedEvents.length) return;
+  const ledgers = await readRecordedDecisions(root);
+  for (const event of consumedEvents) {
+    const previous = history.events[event.seq - 2];
+    if (!["DISCOVER_LEGACY", "BUILD_BASELINE"].includes(event.from) ||
+        event.event !== "ADVANCED" ||
+        event.to !== (event.from === "DISCOVER_LEGACY" ? "DISCOVERY_COMPLETENESS" : "PLAN") ||
+        previous?.to !== event.from || previous.revision !== event.revision - 1) {
+      throw new Error("Consumed decisions belong only to a decision-bearing checkpoint.");
+    }
+    const prefixes = event.decisionLedgerPrefixes;
+    exactObject(prefixes, "decision ledger prefixes", ["operator", "auto"]);
+    const accepted = {};
+    for (const [key, file] of [["operator", DECISIONS_FILE], ["auto", AUTO_DECISIONS_FILE]]) {
+      const prefix = prefixes[key];
+      exactObject(prefix, `${key} ledger prefix`, ["bytes", "sha256"]);
+      if (!Number.isSafeInteger(prefix.bytes) || prefix.bytes < 0 || !/^[a-f0-9]{64}$/.test(prefix.sha256)) {
+        throw new Error("Consumed decision ledger prefix is malformed.");
+      }
+      const content = await readFile(path.join(root, file), "utf8").catch((error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      });
+      const bytes = Buffer.from(content);
+      if (bytes.length < prefix.bytes || sha256(bytes.subarray(0, prefix.bytes)) !== prefix.sha256 ||
+          (prefix.bytes && bytes[prefix.bytes - 1] !== 10)) {
+        throw new Error("Consumed decision ledger prefix/head no longer matches.");
+      }
+      accepted[key] = new Set(bytes.subarray(0, prefix.bytes).toString("utf8")
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line).id));
+    }
+    const identities = arrayOf(event.consumedDecisions, "consumedDecisions");
+    if (!identities.length || ![...identities.map((item) => item.decisionId)].every((id, index, ids) =>
+      typeof id === "string" && (index === 0 || ids[index - 1] < id))) {
+      throw new Error("Consumed decisions must be nonempty, unique and ordered.");
+    }
+    for (const identity of identities) {
+      exactObject(identity, "consumed decision", ["candidateDigest", "decisionId", "decisionDigest", "policyId", "policyDigest", "principal", "result"]);
+      const line = ledgers.byId.get(identity.decisionId);
+      const requiredPrincipal = line && await resolveHistoricalRequiredPrincipal(
+        line.kind, state.target.root, line.policyId, line.policyDigest);
+      const historicalCandidate = line && {
+        id: line.candidateId, kind: line.kind, subject: line.subject,
+        rationaleDigest: line.rationaleDigest, targets: line.targets, boundTo: line.boundTo,
+        projectRoot: state.target.root, policyId: line.policyId, policyDigest: line.policyDigest,
+        requiredPrincipal,
+      };
+      if (!line || !accepted.operator.has(identity.decisionId) || line.v !== 2 ||
+          line.result !== "APPROVED" || identity.result !== "APPROVED" ||
+          !requiredPrincipal || !decisionAppliesToCandidate(line, historicalCandidate) ||
+          identity.candidateDigest !== line.candidateDigest ||
+          identity.decisionDigest !== decisionLineDigest(line) ||
+          identity.policyId !== line.policyId || identity.policyDigest !== line.policyDigest ||
+          identity.principal !== line.principal ||
+          line.boundTo?.artifactId !== state.artifactId || line.boundTo?.formatVersion !== 14 ||
+          line.boundTo?.currentStep !== event.from || line.boundTo?.revision !== event.revision - 1 ||
+          line.kind !== (event.from === "DISCOVER_LEGACY" ? "ARTIFACT_DECISION" : "VISUAL_UNBACKED")) {
+        throw new Error("Consumed decision identity is not proven by its accepted ledger prefix.");
+      }
+    }
+  }
+};
+
 const revalidatePins = async (root, state) => {
   for (const [key, digest] of Object.entries(state.artifactHashes)) {
     if ((await pinDigest(root, key)) !== digest) throw new Error(`Completed artifact changed: ${key}.`);
@@ -1612,6 +1735,7 @@ const validateIntegrity = async (root, state) => {
   if (toolkitIdentityKey(replayToolkitIdentity(history.events)) !== toolkitIdentityKey(state.toolkitIdentity ?? null)) {
     throw new Error("Artifact state toolkitIdentity is not the identity its append-only history proves.");
   }
+  await verifyConsumedHistory(root, state, history);
   await revalidatePins(root, state);
 };
 
@@ -1664,6 +1788,14 @@ const eventFor = (history, state, event) => {
     ),
   };
   return { ...body, digest: sha256(canonical(body)) };
+};
+
+const consumedAtCheckpoint = async (root, step) => {
+  const history = await readHistory(root);
+  const event = history.events.find((entry) => entry.from === step &&
+    (entry.event === "ADVANCED" || entry.event === "COMPLETED"));
+  if (!event) throw new Error(`No committed ${step} checkpoint proves consumed decisions.`);
+  return event.consumedDecisions ?? [];
 };
 
 // The shared deterministic bootstrap constructor: normal execution and
@@ -1835,8 +1967,16 @@ const validateTransactionInput = (input, label) => {
 // mandates first.
 const assertTransactionReplayable = async (root, transaction) => {
   if (transaction.version === TRANSACTION_VERSION) {
-    exactObject(transaction, "artifact transaction", ["version", "previousState", "previousIntegrity", "input", "state", "event"]);
+    const directAdvance = transaction.state?.formatVersion === 14 && transaction.input?.kind === "ADVANCE";
+    exactObject(transaction, "artifact transaction", ["version", "previousState", "previousIntegrity", "input", "state", "event"],
+      directAdvance ? ["consumedDecisions", "decisionLedgerPrefixes"] : []);
     validateTransactionInput(transaction.input, "artifact transaction.input");
+    if (directAdvance) {
+      if (canonical(transaction.consumedDecisions ?? []) !== canonical(transaction.event.consumedDecisions ?? []) ||
+          canonical(transaction.decisionLedgerPrefixes ?? null) !== canonical(transaction.event.decisionLedgerPrefixes ?? null)) {
+        throw new Error("Artifact transaction and history disagree on consumed decision authority.");
+      }
+    }
     if (transaction.input.kind === "BOOTSTRAP") {
       if (transaction.previousState !== null || transaction.previousIntegrity !== null) {
         throw new Error("Bootstrap transaction must not carry a previous state.");
@@ -2009,6 +2149,9 @@ const proveAdvanceTransaction = async (root, transaction) => {
     throw new Error("Recovered transaction previous integrity does not match retained history.");
   }
   const prefixEvents = history.events.slice(0, previousIntegrity.historyEvents);
+  if (previousState.formatVersion === 14) {
+    await verifyConsumedHistory(root, previousState, { events: prefixEvents });
+  }
   if (history.events.length !== prefixEvents.length && history.events.length !== prefixEvents.length + 1) {
     throw new Error("Recovered transaction history has diverged from its recorded prefix.");
   }
@@ -2027,6 +2170,15 @@ const proveAdvanceTransaction = async (root, transaction) => {
   if (preview.outcome !== "CONTINUE" || (preview.validation && !preview.validation.ready)) {
     throw new Error(`Recovered transaction cannot be reproved: ${preview.reason ?? preview.outcome}.`);
   }
+  if (previousState.formatVersion === 14) {
+    const expectedConsumed = preview.validation.consumedDecisions ?? [];
+    if (canonical(expectedConsumed) !== canonical(transaction.consumedDecisions ?? [])) {
+      throw new Error("Recovered transaction cannot reprove the same consumed decision identities.");
+    }
+    if (expectedConsumed.length && canonical(await ledgerPrefixesFor(root)) !== canonical(transaction.decisionLedgerPrefixes)) {
+      throw new Error("Recovered transaction cannot reprove its consumed decision ledger prefix/head.");
+    }
+  }
   const proposed = await nextState(root, previousState, preview.validation, preview.fresh, input.selectedSlice);
   const expectedState = { ...proposed, updatedAt: transaction.state.updatedAt };
   if (canonical(expectedState) !== canonical(transaction.state)) {
@@ -2037,6 +2189,9 @@ const proveAdvanceTransaction = async (root, transaction) => {
     from: previousState.currentStep,
     to: expectedState.currentStep,
     slice: previousState.activeSlice,
+    ...(previousState.formatVersion === 14 && preview.validation.consumedDecisions?.length
+      ? { consumedDecisions: preview.validation.consumedDecisions, decisionLedgerPrefixes: transaction.decisionLedgerPrefixes }
+      : {}),
   });
   if (canonical(expectedEvent) !== canonical(transaction.event)) {
     throw new Error("Recovered transaction event does not reproduce the persisted proposal.");
@@ -2239,11 +2394,14 @@ const buildAdvanceTransaction = async (root, previousState, preview, selectedSli
   const previousIntegrity = integrityFor(previousState, history.content);
   const proposed = await nextState(root, previousState, preview.validation, preview.fresh, selectedSlice);
   const state = { ...proposed, updatedAt: new Date().toISOString() };
+  const consumedDecisions = previousState.formatVersion === 14 ? preview.validation.consumedDecisions ?? [] : [];
+  const decisionLedgerPrefixes = consumedDecisions.length ? await ledgerPrefixesFor(root) : null;
   const event = eventFor(history, state, {
     event: state.status === "COMPLETE" ? "COMPLETED" : "ADVANCED",
     from: previousState.currentStep,
     to: state.currentStep,
     slice: previousState.activeSlice,
+    ...(consumedDecisions.length ? { consumedDecisions, decisionLedgerPrefixes } : {}),
     ...(previousState.currentStep === "VERIFY_SLICES" && preview.validation.result.visualComparison?.length
       ? { visualComparison: preview.validation.result.visualComparison }
       : {}),
@@ -2253,6 +2411,7 @@ const buildAdvanceTransaction = async (root, previousState, preview, selectedSli
     previousState,
     previousIntegrity,
     input: { kind: "ADVANCE", selectedSlice: selectedSlice ?? null },
+    ...(consumedDecisions.length ? { consumedDecisions, decisionLedgerPrefixes } : {}),
     state,
     event,
   };
@@ -2439,7 +2598,7 @@ const validateSourceEvidenceFile = async (state, evidence, label) => {
   return relative;
 };
 
-const validateSourceInventory = async (root, state, { forRecorder = false } = {}) => {
+const validateSourceInventory = async (root, state) => {
   const relative = "inventories/source.json";
   const document = await readJsonAt(root, relative, "source inventory");
   exactObject(document, "source inventory", [
@@ -2455,9 +2614,6 @@ const validateSourceInventory = async (root, state, { forRecorder = false } = {}
   versionOne(document.version, "source inventory");
   if (document.artifactId !== state.artifactId) throw new Error("source inventory artifactId does not match state.");
   boolean(document.hasVisibleUi, "source inventory.hasVisibleUi");
-  if (state.formatVersion === 14 && !forRecorder && arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").length > 0) {
-    throw new Error("Artifact 14 decision authority is unavailable; legacy citations cannot authorize this record.");
-  }
   const sourceFiles = arrayOf(document.sourceFiles, "source inventory.sourceFiles").map((file) =>
     normalizeRelative(file, "source inventory source file"),
   );
@@ -2517,20 +2673,21 @@ const validateSourceInventory = async (root, state, { forRecorder = false } = {}
     }
   }
   unique(visualIds, "feature-local visual ids");
-  // A decision is satisfied only by a matching line in one of the artifact's
-  // append-only ledgers, recorded through record-decision.mjs --artifact by a
-  // human under a TTY/elicitation or by the AUTO principal under --mode auto.
-  // An agent can never mint approval by editing this JSON, and the two ledgers
-  // stay separate files -- this reads them, it does not merge them.
+  // The authored row proposes a decision; only the verified ledger can satisfy it.
   const { byId, decisions: ledger } = await readRecordedDecisions(root);
+  const historical = state.formatVersion === 14 && state.currentStep !== "DISCOVER_LEGACY"
+    ? await consumedAtCheckpoint(root, "DISCOVER_LEGACY") : null;
   const decisions = [];
+  if (historical && historical.length !== document.operatorDecisions.length) {
+    throw new Error("Consumed source decisions do not match the committed source inventory.");
+  }
   for (const [index, row] of arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").entries()) {
     exactObject(row, `source inventory.operatorDecisions[${index}]`, ["id", "subject"], state.formatVersion === 14 ? [] : ["decisionId"]);
     const id = nonEmpty(row.id, `operator decision[${index}].id`);
     nonEmpty(row.subject, `operator decision '${id}' subject`);
     const decisionId = row.decisionId ?? null;
     if (decisionId !== null) nonEmpty(decisionId, `operator decision '${id}' decisionId`);
-    const candidate = state.formatVersion === 14
+    const candidate = historical ? null : state.formatVersion === 14
       ? await createNewFormatDecisionCandidate({
           projectRoot: state.target.root,
           kind: "ARTIFACT_DECISION",
@@ -2544,13 +2701,29 @@ const validateSourceInventory = async (root, state, { forRecorder = false } = {}
           },
         })
       : artifactDecisionCandidate(state, row);
-    const satisfied = decisionId !== null && decisionAppliesToCandidate(byId.get(decisionId), candidate);
+    const projection = historical ? null : state.formatVersion === 14
+      ? await projectArtifactDecision({ decisions: ledger, candidate, label: `operator decision '${id}'`, row })
+      : null;
+    const consumed = historical?.filter((identity) => {
+      const line = byId.get(identity.decisionId);
+      return line?.kind === "ARTIFACT_DECISION" && line.subject?.path === id;
+    });
+    if (historical && (consumed.length !== 1 ||
+        canonical(byId.get(consumed[0].decisionId)?.boundTo?.sourceDecision) !== canonical(row) ||
+        byId.get(consumed[0].decisionId)?.rationaleDigest !== decisionRationaleDigest(row.subject) ||
+        byId.get(consumed[0].decisionId)?.boundTo?.sourceInventoryDigest !== `sha256:${sha256(canonical(document))}` ||
+        canonical(byId.get(consumed[0].decisionId)?.boundTo?.sourceBinding) !== canonical(state.bindings.source))) {
+      throw new Error(`operator decision '${id}' has no provable consumed identity at DISCOVER_LEGACY.`);
+    }
+    const satisfied = historical ? true : projection
+      ? projection.state === "APPROVED_APPLICABLE"
+      : decisionId !== null && decisionAppliesToCandidate(byId.get(decisionId), candidate);
     // The receipt for an approval already in the ledger but not yet cited --
     // what a terminal approval leaves behind. Bound by the same predicate that
     // decides `satisfied`, so it can only ever name a line this candidate owns;
     // finding one is never itself satisfaction, only the id to cite.
-    const recorded = ledger.find((line) => decisionAppliesToCandidate(line, candidate)) ?? null;
-    decisions.push({ id, subject: row.subject, decisionId, candidate, satisfied, recorded });
+    const recorded = candidate ? ledger.find((line) => decisionAppliesToCandidate(line, candidate)) ?? null : null;
+    decisions.push({ id, subject: row.subject, decisionId, candidate, satisfied, recorded, ...(projection ? { projection } : {}) });
   }
   unique(decisions.map((row) => row.id), "operator decision ids");
   return { relative, document, behaviorIds, contractIds, visualIds, decisions };
@@ -2934,21 +3107,24 @@ const artifactUiInventory = (source) => ({
 });
 
 const artifactVisualAcceptance = async (root, state, source, target) => {
-  if (state.formatVersion === 14) {
-    const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
-    if (Array.isArray(matrix.unbacked) && matrix.unbacked.length > 0) {
-      throw new Error("Artifact 14 visual decision authority is unavailable; legacy citations cannot authorize this record.");
-    }
-  }
+  const decisions = state.formatVersion === 14
+    ? await artifactVisualDecisions(root, state, source) : [];
   return validateVisualAcceptance(
     root,
     strictVisualState(state),
     artifactUiInventory(source),
     { uiMismatches: [] },
+    undefined,
+    state.formatVersion === 14 ? { resolveUnbacked: (item, label) => {
+      const decision = decisions.find((row) => row.subject === `${item.uiBehaviorId}::${item.state}`);
+      if (decision?.projection.state !== "APPROVED_APPLICABLE") {
+        throw new Error(decision?.projection.reason ?? `${label} has no current artifact decision candidate.`);
+      }
+    } } : undefined,
   );
 };
 
-const artifactVisualDecisions = async (root, state, source, { forRecorder = false } = {}) => {
+const artifactVisualDecisions = async (root, state, source) => {
   if (!visualAuthorityOf(strictVisualState(state))) return [];
   const candidates = await pendingVisualUnbackedCandidates(
     root,
@@ -2956,11 +3132,14 @@ const artifactVisualDecisions = async (root, state, source, { forRecorder = fals
     source ? artifactUiInventory(source) : undefined,
   );
   if (candidates.length === 0) return [];
-  if (state.formatVersion === 14 && !forRecorder) {
-    throw new Error("Artifact 14 visual decision authority is unavailable; legacy citations cannot authorize this record.");
-  }
   const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
+  const { byId, decisions } = await readRecordedDecisions(root);
   if (state.formatVersion === 14) {
+    const historical = state.currentStep !== "BUILD_BASELINE"
+      ? await consumedAtCheckpoint(root, "BUILD_BASELINE") : null;
+    if (historical && historical.length !== candidates.length) {
+      throw new Error("Consumed visual decisions do not match the committed visual matrix.");
+    }
     unique(
       arrayOf(matrix.unbacked ?? [], "Visual acceptance unbacked").map((item) =>
         `${item.uiBehaviorId}::${item.state}`),
@@ -2976,6 +3155,18 @@ const artifactVisualDecisions = async (root, state, source, { forRecorder = fals
         behavior.id === item.uiBehaviorId && behavior.runtimeStates?.includes(item.state))) {
         throw new Error(`Visual acceptance unbacked '${legacy.subject.path}' does not name a source UI state.`);
       }
+      if (historical) {
+        const matched = historical.filter((identity) => byId.get(identity.decisionId)?.subject?.path === legacy.subject.path);
+        const line = byId.get(matched[0]?.decisionId);
+        if (matched.length !== 1 || line?.kind !== "VISUAL_UNBACKED" ||
+            canonical(line.boundTo?.visualUnbacked) !== canonical(item) ||
+            line.boundTo?.visualMatrixDigest !== `sha256:${sha256(canonical(matrix))}` ||
+            canonical(line.boundTo?.sourceBinding) !== canonical(state.bindings.source)) {
+          throw new Error(`Visual acceptance unbacked '${legacy.subject.path}' has no provable consumed identity.`);
+        }
+        return { id: legacy.id, subject: legacy.subject.path, decisionId: null, candidate: null,
+          satisfied: true, recorded: null, projection: { state: "APPROVED_APPLICABLE" } };
+      }
       const candidate = await createNewFormatDecisionCandidate({
         projectRoot: state.target.root,
         kind: legacy.kind,
@@ -2990,10 +3181,11 @@ const artifactVisualDecisions = async (root, state, source, { forRecorder = fals
           visualUnbacked: item,
         },
       });
-      return { id: candidate.id, subject: candidate.subject.path, decisionId: null, candidate, satisfied: false, recorded: null };
+      const projection = await projectArtifactDecision({ decisions, candidate, label: `Visual acceptance unbacked '${legacy.subject.path}'`, row: item });
+      return { id: candidate.id, subject: candidate.subject.path, decisionId: null, candidate,
+        satisfied: projection.state === "APPROVED_APPLICABLE", recorded: null, projection };
     }));
   }
-  const { byId, decisions } = await readRecordedDecisions(root);
   return candidates.map((candidate) => {
     const item = (matrix.unbacked ?? []).find(
       (row) => `${row.uiBehaviorId}::${row.state}` === candidate.subject.path,
@@ -3746,6 +3938,30 @@ export const reconcileArtifactDecisions = (state, decisions) => {
       candidate.id,
     );
   const pending = decisions.filter((row) => !row.satisfied);
+  if (state.formatVersion === 14) {
+    const undecided = pending.filter((row) => row.projection.state !== "REJECTED");
+    return {
+      approvable: undecided,
+      citable: [],
+      references: [],
+      citations: [],
+      projection: {
+        state: pending.some((row) => row.projection.state === "REJECTED") ? "REJECTED"
+          : undecided.some((row) => row.projection.state === "STALE") ? "STALE"
+          : undecided.length ? "AWAITING_HUMAN_DECISION"
+          : decisions.length ? "APPROVED_APPLICABLE" : "READY_TO_ADVANCE",
+        checkpointAdvanced: false,
+        blocked: undecided.some((row) => row.candidate.requiredPrincipal === "HUMAN_ATTESTED")
+          ? { state: "SIGNER_UNAVAILABLE", requiredPrincipal: "HUMAN_ATTESTED" } : null,
+        decisions: decisions.map((row) => row.projection),
+      },
+      candidates: undecided.map((row) => ({ ...row.candidate, approvable: true, blockers: [], command: commandFor(row.candidate) })),
+      pendingDecisions: undecided.map((row) => ({ id: row.id, subject: row.subject, candidateId: row.candidate.id,
+        state: row.projection.state, blocked: row.candidate.requiredPrincipal === "HUMAN_ATTESTED"
+          ? { state: "SIGNER_UNAVAILABLE", requiredPrincipal: "HUMAN_ATTESTED" } : null,
+        command: commandFor(row.candidate) })),
+    };
+  }
   const approvable = pending.filter((row) => !row.recorded);
   const citable = pending.filter((row) => row.recorded);
   return {
@@ -3782,6 +3998,9 @@ const runCheckpointValidation = async (root, state, capability) => {
       case "DISCOVER_LEGACY": {
         const result = await validateSourceInventory(root, state);
         const reconciled = reconcileArtifactDecisions(state, result.decisions);
+        if (state.formatVersion === 14 && reconciled.projection.state === "REJECTED") {
+          return { ready: false, outcome: "BLOCKED", reason: "Current source decision is REJECTED.", decisionProjection: reconciled.projection };
+        }
         if (reconciled.approvable.length > 0) {
           return {
             ready: false,
@@ -3790,6 +4009,7 @@ const runCheckpointValidation = async (root, state, capability) => {
             pendingDecisions: reconciled.pendingDecisions,
             decisionReferences: reconciled.references,
             operatorApproval: { cwd: process.cwd(), candidates: reconciled.candidates },
+            ...(reconciled.projection ? { decisionProjection: reconciled.projection } : {}),
           };
         }
         if (reconciled.citable.length > 0) {
@@ -3801,7 +4021,9 @@ const runCheckpointValidation = async (root, state, capability) => {
             citations: reconciled.citations,
           };
         }
-        return { ready: true, result };
+        return { ready: true, result,
+          ...(state.formatVersion === 14 && capability.execution ? { consumedDecisions: consumedFrom(result.decisions) } : {}),
+          ...(reconciled.projection ? { decisionProjection: reconciled.projection } : {}) };
       }
       case "DISCOVERY_COMPLETENESS": return { ready: true, result: await validateCompleteness(root, state) };
       case "ASSESS_TARGET": {
@@ -3818,14 +4040,15 @@ const runCheckpointValidation = async (root, state, capability) => {
         return { ready: true, result };
       }
       case "BUILD_BASELINE": {
-        const visual = reconcileArtifactDecisions(
+        const visualDecisions = await artifactVisualDecisions(
+          root,
           state,
-          await artifactVisualDecisions(
-            root,
-            state,
-            await validateSourceInventory(root, state),
-          ),
+          await validateSourceInventory(root, state),
         );
+        const visual = reconcileArtifactDecisions(state, visualDecisions);
+        if (state.formatVersion === 14 && visual.projection.state === "REJECTED") {
+          return { ready: false, outcome: "BLOCKED", reason: "Current visual decision is REJECTED.", decisionProjection: visual.projection };
+        }
         if (visual.approvable.length > 0) {
           return {
             ready: false,
@@ -3834,6 +4057,7 @@ const runCheckpointValidation = async (root, state, capability) => {
             pendingDecisions: visual.pendingDecisions,
             decisionReferences: visual.references,
             operatorApproval: { cwd: process.cwd(), candidates: visual.candidates },
+            ...(visual.projection ? { decisionProjection: visual.projection } : {}),
           };
         }
         if (visual.citable.length > 0) {
@@ -3844,7 +4068,9 @@ const runCheckpointValidation = async (root, state, capability) => {
             decisionReferences: visual.references,
           };
         }
-        return { ready: true, result: await validateBaseline(root, state) };
+        return { ready: true, result: await validateBaseline(root, state),
+          ...(state.formatVersion === 14 && capability.execution ? { consumedDecisions: consumedFrom(visualDecisions) } : {}),
+          ...(visual.projection ? { decisionProjection: visual.projection } : {}) };
       }
       case "PLAN": return { ready: true, result: await validatePlan(root, state) };
       case "IMPLEMENT_SLICES": return { ready: true, result: await validateImplementation(root, state, capability) };
@@ -4087,7 +4313,8 @@ const readArtifactStatus = async (options = {}) => {
   // An engine fault blocks `run`, so it must block `--status` too.
   if (validation?.outcome === "BLOCKED") {
     return {
-      ...outcomeResult(state, "BLOCKED", validation.reason, null, { exists: true, root: location.root, validation }),
+      ...outcomeResult(state, "BLOCKED", validation.reason, null, { exists: true, root: location.root, validation,
+        ...(validation.decisionProjection ? { decisionProjection: validation.decisionProjection } : {}) }),
       status: "BLOCKED",
     };
   }
@@ -4118,6 +4345,7 @@ const readArtifactStatus = async (options = {}) => {
     state,
     root: location.root,
     validation,
+    ...(validation?.decisionProjection ? { decisionProjection: validation.decisionProjection } : {}),
     progress,
     progressChecklist: renderProgress(progress),
     // Same protocol as a module migration's `formatUpgrade`, and read-only like
@@ -4245,7 +4473,16 @@ const previewAdvance = async (root, state, options) => {
   if (validation && validation.executed !== true) {
     throw new Error("An artifact transition cannot be derived from a read-only checkpoint validation.");
   }
-  if (validation && !validation.ready) return { state, validation, outcome: validation.outcome, reason: validation.reason };
+  if (validation && !validation.ready) {
+    if (state.formatVersion === 14) {
+      const fresh = await freshness(root, state, validation);
+      if (fresh.stale) return {
+        state, validation, fresh, outcome: "BLOCKED",
+        reason: `Relevant artifact drift detected (source: ${fresh.sourceDrift.join(", ") || "none"}; target: ${fresh.targetDrift.join(", ") || "none"}).`,
+      };
+    }
+    return { state, validation, outcome: validation.outcome, reason: validation.reason };
+  }
   if (state.currentStep === "PLAN" && options.slice) {
     const selected = validation.result.document.slices.find((slice) => slice.id === options.slice);
     if (selected?.dependsOn.some((dependency) => !state.completedSlices.includes(dependency))) {
@@ -4385,21 +4622,26 @@ const runArtifactIteration = async (options = {}) => {
         pendingDecisions: preview.validation.pendingDecisions,
         decisionReferences: preview.validation.decisionReferences,
         operatorApproval: preview.validation.operatorApproval,
+        ...(preview.validation.decisionProjection ? { decisionProjection: preview.validation.decisionProjection } : {}),
       });
     }
-    if (preview.outcome === "BLOCKED") return outcomeResult(state, "BLOCKED", preview.reason, mode, {}, preview.fresh?.stale ? "STALE" : state.status);
+    if (preview.outcome === "BLOCKED") return outcomeResult(state, "BLOCKED", preview.reason, mode,
+      preview.validation?.decisionProjection ? { decisionProjection: preview.validation.decisionProjection } : {},
+      preview.fresh?.stale ? "STALE" : state.status);
     if (!preview.validation.ready) {
       return outcomeResult(state, "CONTINUE", preview.reason, mode, {
         request: requestFor(state, preview.reason),
         pendingDecisions: preview.validation.pendingDecisions,
         decisionReferences: preview.validation.decisionReferences,
         citations: preview.validation.citations,
+        ...(preview.validation.decisionProjection ? { decisionProjection: preview.validation.decisionProjection } : {}),
       });
     }
     if (mode === "step" && options.confirmationId !== preview.confirmationId) {
       return outcomeResult(state, "AWAITING_CONFIRMATION", "Checkpoint confirmation is pending; nothing was written.", mode, {
         confirmationId: preview.confirmationId,
         request: requestFor(state, "Checkpoint artifacts validate."),
+        ...(preview.validation.decisionProjection ? { decisionProjection: preview.validation.decisionProjection } : {}),
       });
     }
     if (mode !== "auto" && options.confirmationId !== preview.confirmationId) {
@@ -4561,11 +4803,11 @@ export const artifactOperatorDecisions = async (options = {}) => {
       throw new Error("Artifact decision evidence is stale; no current candidate can be recorded.");
     }
   }
-  const source = await validateSourceInventory(location.root, state, { forRecorder: true });
+  const source = await validateSourceInventory(location.root, state);
   const sourceDecisions = state.formatVersion !== 14 || state.currentStep === "DISCOVER_LEGACY"
     ? source.decisions : [];
   const visual = state.formatVersion !== 14 || state.currentStep === "BUILD_BASELINE"
-    ? await artifactVisualDecisions(location.root, state, source, { forRecorder: true }) : [];
+    ? await artifactVisualDecisions(location.root, state, source) : [];
   const decisions = [...sourceDecisions, ...visual];
   return {
     state,

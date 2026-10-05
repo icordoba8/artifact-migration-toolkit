@@ -4652,7 +4652,8 @@ const trustedPolicyFor = async (projectRoot) => {
     if (!details.isFile() || details.uid !== 0 || (details.mode & 0o022)) {
       throw new Error("Untrusted protected decision policy file ownership or permissions.");
     }
-    return validateProtectedDecisionPolicy(JSON.parse(await handle.readFile("utf8")), projectRoot);
+    const document = JSON.parse(await handle.readFile("utf8"));
+    return { ...validateProtectedDecisionPolicy(document, projectRoot), previous: document.previous };
   } finally {
     await handle.close();
   }
@@ -4672,6 +4673,24 @@ export const resolveRequiredPrincipal = async (kind, projectRoot) => {
     policyDigest: policy?.policyDigest ?? DEFAULT_DECISION_POLICY_DIGEST,
     requiredPrincipal: policy?.rules[kind] ?? "HUMAN_ATTESTED",
   };
+};
+
+export const resolveHistoricalRequiredPrincipal = async (kind, projectRoot, policyId, policyDigest) => {
+  if (!JUDGMENT_KINDS.has(kind) || typeof projectRoot !== "string" || !path.isAbsolute(projectRoot)) {
+    throw new Error("A known decision kind and canonical absolute project root are required.");
+  }
+  if (policyId === DEFAULT_DECISION_POLICY_ID && policyDigest === DEFAULT_DECISION_POLICY_DIGEST) {
+    return "HUMAN_ATTESTED";
+  }
+  let policy = await trustedPolicyFor(path.resolve(projectRoot));
+  while (policy) {
+    const current = policy.policy ?? policy;
+    if (current.policyId === policyId && policy.policyDigest === policyDigest) {
+      return current.rules[kind] ?? "HUMAN_ATTESTED";
+    }
+    policy = policy.previous;
+  }
+  return null;
 };
 
 /** Why a line's principal/result cannot be trusted, or null. Fail-closed. */
@@ -5130,7 +5149,7 @@ const applicableDecisionOutcome = ({
     );
   }
   const [decision] = matching;
-  if (decision?.result === "REJECTED") {
+  if (decision?.result === "REJECTED" && decisionAppliesToCandidate({ ...decision, result: "APPROVED" }, authority)) {
     return {
       state: "REJECTED",
       decision,
@@ -5144,7 +5163,9 @@ const applicableDecisionOutcome = ({
     // own earlier decision over superseded evidence, and saying so is the
     // difference between a usable refusal and a mysterious one.
     const stale = decisions.find(
-      (line) => line?.v === 2 && line.candidateId === authority.id,
+      (line) => line?.v === 2 && line.kind === authority.kind &&
+        line.subject?.type === authority.subject.type && line.subject?.path === authority.subject.path &&
+        line.boundTo?.module === authority.boundTo.module,
     );
     return stale
       ? {
@@ -9830,7 +9851,7 @@ export const validateVisualAcceptance = async (
   // `createNewFormatDecisionCandidate` refuses rather than defaulting. The
   // artifact engine calls this through `strictVisualState`, which pins format
   // 17, so artifact-13 behavior is untouched.
-  { projectRoot } = {},
+  { projectRoot, resolveUnbacked } = {},
 ) => {
   const authority = visualAuthorityOf(state);
   const frames = await authority.validateContext(
@@ -10122,20 +10143,25 @@ export const validateVisualAcceptance = async (
       : legacyCandidate;
     if (
       !usesDirectLedgerDecisions(state) &&
+      !resolveUnbacked &&
       (typeof item.decisionId !== "string" || !item.decisionId)
     ) {
       throw new Error(
         `VISUAL_UNBACKED_REQUIRES_OPERATOR: ${label} leaves '${candidate.subject.path}' without Figma visual acceptance. No agent may waive a visual state: an operator must approve candidate '${candidate.id}' (record-decision.mjs <module> --pending, then --approve at a terminal), and the entry must cite its decisionId and decisionDigest.`,
       );
     }
-    await requireModuleDecision({
-      state,
-      byId: decisions.byId,
-      decisions: decisions.decisions,
-      row: item,
-      label,
-      candidate,
-    });
+    if (resolveUnbacked) {
+      await resolveUnbacked(item, label);
+    } else {
+      await requireModuleDecision({
+        state,
+        byId: decisions.byId,
+        decisions: decisions.decisions,
+        row: item,
+        label,
+        candidate,
+      });
+    }
   }
   const mismatchByBehavior = new Map(
     target.uiMismatches.map((row) => [row.uiBehaviorId, row]),

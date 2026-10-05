@@ -7,13 +7,18 @@
 // (`runArtifact`, `getArtifactStatus`) only -- no private function is exposed
 // just to unit-test duplicated logic.
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error -- untyped production JS module, consumed directly for real behavior.
-import { getArtifactStatus, previewArtifact, previewArtifactFormatUpgrade, runArtifact, upgradeArtifactFormat } from "../../../src/artifact/artifact-migration.mjs";
+import { artifactOperatorDecisions, getArtifactStatus, previewArtifact, previewArtifactFormatUpgrade, runArtifact, upgradeArtifactFormat } from "../../../src/artifact/artifact-migration.mjs";
+// @ts-expect-error -- untyped production JS modules.
+import { candidateDigestOf, decisionAppliesToCandidate, decisionLineDigest, DEFAULT_DECISION_POLICY_DIGEST, resolveHistoricalRequiredPrincipal, validateProtectedDecisionPolicy } from "../../../src/resumable-migration.mjs";
+// @ts-expect-error -- untyped production JS module.
+import { buildDecision } from "../../../src/record-decision.mjs";
 
 import {
   advanceAssessment,
@@ -104,7 +109,11 @@ const captureTransaction = async (
       : input.kind === "FORMAT_UPGRADE"
         ? { kind: "FORMAT_UPGRADE" as const, from: 13, to: 14, confirmationId: input.confirmationId }
         : { kind: "ADVANCE" as const, selectedSlice: input.selectedSlice ?? null };
-  const transaction = { version: 2, previousState, previousIntegrity, input: resolvedInput, state, event };
+  const transaction = {
+    version: 2, previousState, previousIntegrity, input: resolvedInput,
+    ...(event.consumedDecisions ? { consumedDecisions: event.consumedDecisions, decisionLedgerPrefixes: event.decisionLedgerPrefixes } : {}),
+    state, event
+  };
   return { pre, post, transaction };
 };
 
@@ -145,6 +154,92 @@ const rehashEvent = (event: Record<string, unknown>) => {
 };
 
 const PHASES: Phase[] = ["JOURNAL_ONLY", "HISTORY_APPENDED", "STATE_REPLACED", "INTEGRITY_REPLACED"];
+
+const withRelayPolicy = async (fixture: Fixture, action: (rotatePolicy: () => string) => Promise<void>) => {
+  const filesystem = createRequire(import.meta.url)("node:fs/promises");
+  const originalLstat = filesystem.lstat;
+  const originalOpen = filesystem.open;
+  const policyPath = "/etc/artifact-migration-tools/decision-policy.json";
+  const policy = {
+    policyId: "admin/artifact", projectRoot: fixture.targetRoot, revision: 1,
+    rules: { ARTIFACT_DECISION: "AGENT_RELAYED", VISUAL_UNBACKED: "AGENT_RELAYED" }
+  };
+  let document = {
+    policy,
+    policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`,
+    provenance: {
+      action: "OPERATOR_ADMIN_POLICY_CHANGE", actor: "admin",
+      at: "2026-10-02T00:00:00.000Z", reason: "Explicit artifact policy",
+      previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST
+    }
+  };
+  validateProtectedDecisionPolicy(document, fixture.targetRoot);
+  const rotatePolicy = () => {
+    const previous = document;
+    const nextPolicy = {
+      ...previous.policy, revision: 2,
+      rules: { ...previous.policy.rules, ARTIFACT_DECISION: "HUMAN_ATTESTED" }
+    };
+    document = {
+      policy: nextPolicy,
+      policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(nextPolicy)).digest("hex")}`,
+      provenance: { ...previous.provenance, previousPolicyDigest: previous.policyDigest },
+      previous
+    };
+    validateProtectedDecisionPolicy(document, fixture.targetRoot);
+    return document.policyDigest;
+  };
+  filesystem.lstat = (file: string, ...args: unknown[]) => file === path.dirname(policyPath)
+    ? originalLstat("/etc", ...args) : originalLstat(file, ...args);
+  filesystem.open = (file: string, ...args: unknown[]) => file === policyPath
+    ? Promise.resolve({
+      stat: () => originalLstat("/etc/hosts"),
+      readFile: async () => JSON.stringify(document), close: async () => { }
+    })
+    : originalOpen(file, ...args);
+  syncBuiltinESMExports();
+  try { await action(rotatePolicy); }
+  finally {
+    filesystem.lstat = originalLstat;
+    filesystem.open = originalOpen;
+    syncBuiltinESMExports();
+  }
+};
+
+const approveCurrentCandidate = async (fixture: Fixture) => {
+  const [row] = (await artifactOperatorDecisions(fixture.options)).decisions;
+  const candidate = row.candidate;
+  const decision = buildDecision({
+    previous: null, kind: candidate.kind,
+    subjectType: candidate.subject.type, subject: candidate.subject.path,
+    statement: "Relayed approval", rationale: candidate.rationale,
+    candidateId: candidate.id, targets: candidate.targets, boundTo: candidate.boundTo,
+    principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
+    policyId: candidate.policyId, policyDigest: candidate.policyDigest
+  });
+  const ledger = path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson");
+  await mkdir(path.dirname(ledger), { recursive: true });
+  await appendFile(ledger, `${JSON.stringify(decision)}\n`);
+  return { decision, ledger };
+};
+
+const approvedSourceAdvance = async (fixture: Fixture) => {
+  const options = { ...fixture.options, pilotFormat: 14 };
+  const preview = await previewArtifact(options);
+  await runArtifact({ ...options, confirmationId: preview.confirmationId });
+  const source = await authorSource(fixture);
+  source.operatorDecisions = [{ id: "DEC-1", subject: "Deliberate source disposition" }];
+  await writeJson(fixture.artifactRoot, "inventories/source.json", source);
+  const { decision, ledger } = await approveCurrentCandidate(fixture);
+  const beforeRead = await snapshot(fixture);
+  expect((await getArtifactStatus(fixture.options)).decisionProjection.state).toBe("APPROVED_APPLICABLE");
+  expect(await snapshot(fixture)).toEqual(beforeRead);
+  const advance = await captureTransaction(fixture, () => runArtifact(fixture.options), { kind: "ADVANCE", selectedSlice: null });
+  expect(advance.transaction.event.consumedDecisions).toHaveLength(1);
+  expect(advance.transaction.event.consumedDecisions[0].decisionId).toBe(decision.id);
+  expect(advance.transaction.consumedDecisions).toEqual(advance.transaction.event.consumedDecisions);
+  return { ...advance, ledger };
+};
 
 describe("shared production canonicalization (forgery-test sanity check)", () => {
   it("locally reproduces a real captured event digest byte for byte", async () => {
@@ -270,6 +365,155 @@ describe("crash windows: advance", () => {
       expect(finalSnapshot["history/history.ndjson"]).toBe(post["history/history.ndjson"]);
     });
   }
+});
+
+describe("format-14 consumed decision recovery", () => {
+  for (const phase of PHASES) {
+    it(`replays the identical decision identity once after ${phase}`, async () => {
+      const fixture = await tracked();
+      await withRelayPolicy(fixture, async () => {
+        const { pre, post, transaction } = await approvedSourceAdvance(fixture);
+        await applyPhase(fixture, pre, post, phase, transaction);
+        const interrupted = await snapshot(fixture);
+        expect((await getArtifactStatus(fixture.options)).outcome).toBe("CONTINUE");
+        expect(await snapshot(fixture)).toEqual(interrupted);
+        expect((await runArtifact(fixture.options)).outcome).toBe("CONTINUE");
+        expect(await snapshot(fixture)).toEqual(post);
+        expect((await runArtifact(fixture.options)).outcome).toBe("CONTINUE");
+        expect(await snapshot(fixture)).toEqual(post);
+      });
+    });
+  }
+
+  it("keeps consumed authority on its verified policy revision after a stricter rotation", async () => {
+    const fixture = await tracked();
+    await withRelayPolicy(fixture, async (rotatePolicy) => {
+      const { transaction } = await approvedSourceAdvance(fixture);
+      const identity = transaction.event.consumedDecisions[0];
+      const currentDigest = rotatePolicy();
+      expect(await resolveHistoricalRequiredPrincipal("ARTIFACT_DECISION", fixture.targetRoot,
+        identity.policyId, identity.policyDigest)).toBe("AGENT_RELAYED");
+      expect(await resolveHistoricalRequiredPrincipal("ARTIFACT_DECISION", fixture.targetRoot,
+        identity.policyId, currentDigest)).toBe("HUMAN_ATTESTED");
+      expect(await resolveHistoricalRequiredPrincipal("ARTIFACT_DECISION", fixture.targetRoot,
+        identity.policyId, `sha256:${"0".repeat(64)}`)).toBeNull();
+      expect((await getArtifactStatus(fixture.options)).outcome).toBe("CONTINUE");
+      expect((await runArtifact(fixture.options)).outcome).toBe("CONTINUE");
+    });
+  });
+
+  it("rejects a rehashed consumed line that assumes a weaker historical policy rule", async () => {
+    const fixture = await tracked();
+    await withRelayPolicy(fixture, async () => {
+      const { post, ledger } = await approvedSourceAdvance(fixture);
+      const line = JSON.parse((await readFile(ledger, "utf8")).trim());
+      const falseCandidate = {
+        id: "", kind: line.kind, subject: line.subject, rationaleDigest: line.rationaleDigest,
+        targets: line.targets, boundTo: line.boundTo, projectRoot: fixture.targetRoot,
+        policyId: line.policyId, policyDigest: line.policyDigest, requiredPrincipal: "AUTO"
+      };
+      falseCandidate.id = `APP-${candidateDigestOf(falseCandidate).slice(7, 27)}`;
+      line.candidateId = falseCandidate.id;
+      line.candidateDigest = candidateDigestOf(falseCandidate);
+      expect(decisionAppliesToCandidate(line, falseCandidate)).toBe(true);
+      const content = `${JSON.stringify(line)}\n`;
+      await writeFile(ledger, content);
+
+      const events = historyEvents(post["history/history.ndjson"]);
+      const event = events.at(-1);
+      event.consumedDecisions[0].candidateDigest = line.candidateDigest;
+      event.consumedDecisions[0].decisionDigest = decisionLineDigest(line);
+      event.decisionLedgerPrefixes.operator = { bytes: Buffer.byteLength(content), sha256: localSha256(content) };
+      events[events.length - 1] = rehashEvent(event);
+      const history = `${events.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+      const integrity = readJson(post, "integrity.json");
+      integrity.historyBytes = Buffer.byteLength(history);
+      integrity.historySha256 = localSha256(history);
+      await writeFile(path.join(fixture.artifactRoot, "history/history.ndjson"), history);
+      await writeFile(path.join(fixture.artifactRoot, "integrity.json"), `${JSON.stringify(integrity, null, 2)}\n`);
+      const before = await snapshot(fixture);
+      const status = await getArtifactStatus(fixture.options);
+      expect(status.outcome).toBe("BLOCKED");
+      expect(status.reason).toMatch(/Consumed decision identity is not proven/);
+      expect(await snapshot(fixture)).toEqual(before);
+    });
+  });
+
+  it("refuses missing, forged and mismatched journal identities before publication", async () => {
+    const fixture = await tracked();
+    await withRelayPolicy(fixture, async () => {
+      const { pre, post, transaction } = await approvedSourceAdvance(fixture);
+      const variants = [
+        (entry: Record<string, unknown>) => { delete entry.consumedDecisions; },
+        (entry: Record<string, unknown>) => { (entry.consumedDecisions as Record<string, unknown>[])[0].decisionId = "forged"; },
+        (entry: Record<string, unknown>) => { (entry.consumedDecisions as Record<string, unknown>[])[0].candidateDigest = "sha256:" + "0".repeat(64); },
+        (entry: Record<string, unknown>) => { (entry.consumedDecisions as Record<string, unknown>[])[0].decisionDigest = "sha256:" + "0".repeat(64); },
+        (entry: Record<string, unknown>) => { (entry.consumedDecisions as Record<string, unknown>[])[0].policyId = "forged"; },
+        (entry: Record<string, unknown>) => { (entry.decisionLedgerPrefixes as Record<string, { sha256: string }>).operator.sha256 = "0".repeat(64); },
+      ];
+      for (const mutate of variants) {
+        const forged = structuredClone(transaction) as Record<string, unknown>;
+        const event = forged.event as Record<string, unknown>;
+        mutate(event);
+        forged.event = rehashEvent(event);
+        forged.consumedDecisions = event.consumedDecisions;
+        forged.decisionLedgerPrefixes = event.decisionLedgerPrefixes;
+        await applyPhase(fixture, pre, post, "JOURNAL_ONLY", forged);
+        const before = await snapshot(fixture);
+        expect((await runArtifact(fixture.options)).outcome).toBe("BLOCKED");
+        expect(await snapshot(fixture)).toEqual(before);
+      }
+    });
+  });
+
+  it("rejects forged committed history and modified decision lines", async () => {
+    const fixture = await tracked();
+    await withRelayPolicy(fixture, async () => {
+      const { post, ledger } = await approvedSourceAdvance(fixture);
+      const variants = [
+        (event: Record<string, unknown>) => { delete event.consumedDecisions; },
+        (event: Record<string, unknown>) => { (event.consumedDecisions as Record<string, unknown>[])[0].decisionId = "forged"; },
+        (event: Record<string, unknown>) => { (event.consumedDecisions as Record<string, unknown>[])[0].candidateDigest = "sha256:" + "0".repeat(64); },
+        (event: Record<string, unknown>) => { (event.consumedDecisions as Record<string, unknown>[])[0].decisionDigest = "sha256:" + "0".repeat(64); },
+        (event: Record<string, unknown>) => { (event.consumedDecisions as Record<string, unknown>[])[0].policyDigest = "sha256:" + "0".repeat(64); },
+        (event: Record<string, unknown>) => { (event.decisionLedgerPrefixes as Record<string, { sha256: string }>).operator.sha256 = "0".repeat(64); },
+      ];
+      for (const mutate of variants) {
+        await restore(fixture, post);
+        const events = historyEvents(post["history/history.ndjson"]);
+        const forged = structuredClone(events.at(-1));
+        mutate(forged);
+        events[events.length - 1] = rehashEvent(forged);
+        const history = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+        const integrity = readJson(post, "integrity.json");
+        integrity.historyBytes = Buffer.byteLength(history);
+        integrity.historySha256 = localSha256(history);
+        await writeFile(path.join(fixture.artifactRoot, "history/history.ndjson"), history);
+        await writeFile(path.join(fixture.artifactRoot, "integrity.json"), `${JSON.stringify(integrity, null, 2)}\n`);
+        const before = await snapshot(fixture);
+        expect((await getArtifactStatus(fixture.options)).outcome).toBe("BLOCKED");
+        expect(await snapshot(fixture)).toEqual(before);
+      }
+      await restore(fixture, post);
+      const line = JSON.parse((await readFile(ledger, "utf8")).trim());
+      line.statement = "Tampered after consumption";
+      await writeFile(ledger, `${JSON.stringify(line)}\n`);
+      expect((await getArtifactStatus(fixture.options)).outcome).toBe("BLOCKED");
+      await expect(runArtifact(fixture.options)).rejects.toThrow(/ledger prefix\/head no longer matches/);
+    });
+  });
+
+  it("a consumed approval never overrides subsequent source drift", async () => {
+    const fixture = await tracked();
+    await withRelayPolicy(fixture, async () => {
+      const { post } = await approvedSourceAdvance(fixture);
+      await writeFile(path.join(fixture.sourceRoot, "widget/source.ts"), "export const source = false;\n");
+      expect((await getArtifactStatus(fixture.options)).outcome).toBe("BLOCKED");
+      const result = await runArtifact(fixture.options);
+      expect(result.outcome).toBe("BLOCKED");
+      expect(await snapshot(fixture)).toEqual(post);
+    });
+  });
 });
 
 describe("crash windows: explicit pristine 13 -> 14 upgrade", () => {

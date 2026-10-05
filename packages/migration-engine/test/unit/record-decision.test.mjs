@@ -39,6 +39,8 @@ import {
   readAutoDecisions,
   readOperatorDecisions,
   principalSatisfiesRequirement,
+  projectModuleDecision,
+  readRecordedDecisions,
   resolveGroupDecision,
   validateProtectedDecisionPolicy,
 } from "../../src/resumable-migration.mjs";
@@ -713,6 +715,55 @@ test("validated admin policy permits artifact kinds through the existing relayed
       const { decisions: [written] } = await readOperatorDecisions(ledger.root);
       assert.equal(decisionAppliesToCandidate(written, candidate), true);
       assert.equal(decisionAppliesToCandidate({ ...written, policyDigest: DEFAULT_DECISION_POLICY_DIGEST }, candidate), false);
+    } finally {
+      await ledger.cleanup();
+    }
+  }
+});
+
+test("artifact candidates share policy-aware approval, rejection, stale and duplicate projection", async () => {
+  const projectRoot = path.resolve(os.tmpdir(), "trusted-artifact-policy-project");
+  const policy = { policyId: "admin/artifact", projectRoot, revision: 1,
+    rules: { ARTIFACT_DECISION: "AGENT_RELAYED", VISUAL_UNBACKED: "AGENT_RELAYED" } };
+  const verified = validateProtectedDecisionPolicy({ policy,
+    policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`,
+    provenance: { action: "OPERATOR_ADMIN_POLICY_CHANGE", actor: "admin",
+      at: "2026-10-02T00:00:00.000Z", reason: "Explicit artifact policy",
+      previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST } }, projectRoot);
+  for (const kind of ["ARTIFACT_DECISION", "VISUAL_UNBACKED"]) {
+    const base = createDecisionCandidate({ kind, subjectType: kind, subjectPath: "artifact-state",
+      rationale: "Review evidence", targets: ["src/widget.ts"], boundTo: v2Candidate.boundTo });
+    const bound = { ...base, projectRoot, policyId: verified.policyId,
+      policyDigest: verified.policyDigest, requiredPrincipal: verified.rules[kind] };
+    const candidate = { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
+    const line = (previous = null, overrides = {}) => buildDecision({
+      previous, kind, subjectType: candidate.subject.type, subject: candidate.subject.path,
+      statement: "Relayed decision", rationale: candidate.rationale, candidateId: candidate.id,
+      targets: candidate.targets, boundTo: candidate.boundTo, principal: "AGENT_RELAYED",
+      result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
+      policyId: candidate.policyId, policyDigest: candidate.policyDigest, ...overrides,
+    });
+    const label = `${kind} artifact-state`;
+    const project = (decisions, current = candidate, row = null) =>
+      projectModuleDecision({ decisions, candidate: current, label, row });
+    const approved = line();
+    const ledger = await withDecisions([JSON.stringify(approved)]);
+    try {
+      const { decisions } = await readRecordedDecisions(ledger.root);
+      assert.equal((await project(decisions)).state, "APPROVED_APPLICABLE");
+      assert.equal((await project([line(null, { result: "REJECTED" })])).state, "REJECTED");
+      const changed = { ...candidate, boundTo: { ...candidate.boundTo, discoveryDigest: "sha256:changed" } };
+      changed.id = `APP-${candidateDigestOf(changed).slice(7, 27)}`;
+      assert.equal((await project(decisions, changed)).state, "STALE");
+      assert.notEqual((await project(decisions, changed)).state, "APPROVED_APPLICABLE");
+      assert.notEqual((await project([line(null, { policyId: "admin/wrong" })])).state, "APPROVED_APPLICABLE");
+      const stronger = { ...candidate, requiredPrincipal: "HUMAN_ATTESTED" };
+      stronger.id = `APP-${candidateDigestOf(stronger).slice(7, 27)}`;
+      assert.notEqual((await project(decisions, stronger)).state, "APPROVED_APPLICABLE");
+      assert.notEqual((await project([line(null, { result: "REJECTED", policyId: "admin/wrong" })])).state, "REJECTED");
+      await assert.rejects(project([approved, line(approved)]), /Duplicate or conflicting outcomes/);
+      await assert.rejects(project([approved, line(approved, { result: "REJECTED" })]), /Duplicate or conflicting outcomes/);
+      await assert.rejects(project(decisions, candidate, { recordedDecisionId: "DEC-forged", decisionId: "DEC-forged" }), /decisionId/);
     } finally {
       await ledger.cleanup();
     }

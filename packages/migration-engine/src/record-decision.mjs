@@ -1314,6 +1314,7 @@ const deriveArtifactDecisions = async (artifact) => {
     .filter(
       (row) =>
         !row.satisfied &&
+        (context.state.formatVersion !== 14 || row.projection.state !== "REJECTED") &&
         !decisions.some((decision) =>
           decisionAppliesToCandidate(decision, row.candidate),
         ),
@@ -1329,15 +1330,19 @@ const deriveArtifactDecisions = async (artifact) => {
         ...(context.state.formatVersion === 14 ? {
           review: reviewFor(row.candidate),
           blocked: blockedFor(row.candidate),
+          projection: row.projection,
         } : {}),
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));
-  return { engine, context, candidates };
+  return { engine, context, candidates,
+    ...(context.state.formatVersion === 14 ? {
+      decisionProjection: engine.reconcileArtifactDecisions(context.state, context.decisions).projection,
+    } : {}) };
 };
 
 const runArtifactDecisionCli = async (options, { stdin, stdout, ask }) => {
-  const { context, candidates } = await deriveArtifactDecisions(options.artifact);
+  const { context, candidates, decisionProjection } = await deriveArtifactDecisions(options.artifact);
 
   if (options.verify) {
     const report = await verifyRecord(context.root);
@@ -1354,9 +1359,9 @@ const runArtifactDecisionCli = async (options, { stdin, stdout, ask }) => {
   }
   if (options.pending) {
     stdout.write(
-      `${JSON.stringify({ artifactId: context.id, candidates }, null, 2)}\n`,
+      `${JSON.stringify({ artifactId: context.id, candidates, ...(decisionProjection ? { decisionProjection } : {}) }, null, 2)}\n`,
     );
-    return { artifactId: context.id, candidates };
+    return { artifactId: context.id, candidates, ...(decisionProjection ? { decisionProjection } : {}) };
   }
 
   return approveCandidate({

@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   access,
+  appendFile,
   chmod,
   mkdir,
   mkdtemp,
@@ -10,7 +11,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createRequire as requireFrom } from "node:module";
+import { createRequire as requireFrom, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -26,8 +27,9 @@ import {
   parserResolutionError,
   runDiscoveryScan,
 } from "../../src/core.mjs";
-import { artifactPrerequisiteWork, candidateDigestOf } from "../../src/resumable-migration.mjs";
-import { assertReviewedCandidateCurrent, runRecordDecisionCli } from "../../src/record-decision.mjs";
+import { artifactPrerequisiteWork, candidateDigestOf, createNewFormatDecisionGroup, DEFAULT_DECISION_POLICY_DIGEST,
+  validateProtectedDecisionPolicy } from "../../src/resumable-migration.mjs";
+import { assertReviewedCandidateCurrent, buildDecision, runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { lockPathFor } from "../../src/module-lock.mjs";
 import {
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
@@ -645,7 +647,7 @@ const advancePlan = async (fixture, resolution) => {
   const result = await runArtifact(fixture.options);
   assert.equal(result.outcome, "CONTINUE", result.reason);
   const state = await stateOf(fixture);
-  assert.equal(state.currentStep, "IMPLEMENT_SLICES");
+  assert.equal(state.currentStep, "IMPLEMENT_SLICES", result.reason);
   assert.equal(state.activeSlice, "slice-1");
 };
 
@@ -1597,18 +1599,258 @@ test("the CLI confirms a pilot and an explicit upgrade without changing ordinary
   }
 });
 
-test("pilot 14 never accepts format-13 cited source decisions as authority", async () => {
+test("pilot 14 reports source decisions without accepting legacy citations", async () => {
   const fixture = await createFixture();
   try {
     const options = { ...fixture.options, pilotFormat: 14 };
     const preview = await previewArtifact(options);
     await runArtifact({ ...options, confirmationId: preview.confirmationId });
     await authorSource(fixture, { pendingDecision: true });
-    const result = await runArtifact(fixture.options);
-    assert.match(result.reason, /Artifact 14 decision authority is unavailable/);
+    const status = await getArtifactStatus(fixture.options);
+    const result = await runArtifact({ ...fixture.options, mode: "step" });
+    assert.equal(status.decisionProjection.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(status.decisionProjection.checkpointAdvanced, false);
+    assert.equal(result.decisionProjection.state, status.decisionProjection.state);
+    assert.equal(result.outcome, "OPERATOR_DECISION");
+    assert.equal(result.pendingDecisions[0].blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(status.decisionProjection.blocked.state, "SIGNER_UNAVAILABLE");
+    const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+    for (const field of ["decisionId", "decisionDigest", "recordedDecisionId"]) {
+      source.operatorDecisions[0][field] = "DEC-forged";
+      await writeJson(fixture.artifactRoot, "inventories/source.json", source);
+      assert.match((await runArtifact({ ...fixture.options, mode: "step" })).reason, /unexpected|decisionId|decisionDigest|recordedDecisionId/i);
+      delete source.operatorDecisions[0][field];
+    }
     assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("pilot 14 status, pending and locked run re-read weak and stale source authority", async () => {
+  const fixture = await createFixture();
+  try {
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await authorSource(fixture, { pendingDecision: true });
+    const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+      "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot, "--pending"];
+    const before = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const [candidate] = before.candidates;
+    assert.equal(candidate.blocked.state, "SIGNER_UNAVAILABLE");
+    const weak = buildDecision({ previous: null, kind: candidate.kind,
+      subjectType: candidate.subject.type, subject: candidate.subject.path,
+      statement: "Relayed but insufficient", rationale: candidate.rationale,
+      candidateId: candidate.id, targets: candidate.targets, boundTo: candidate.boundTo,
+      principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
+      policyId: candidate.policyId, policyDigest: candidate.policyDigest });
+    const ledger = path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson");
+    await mkdir(path.dirname(ledger), { recursive: true });
+    await appendFile(ledger, `${JSON.stringify(weak)}\n`);
+    const status = await getArtifactStatus(fixture.options);
+    const pending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const run = await runArtifact({ ...fixture.options, mode: "step" });
+    assert.equal(status.decisionProjection.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(pending.decisionProjection.state, status.decisionProjection.state);
+    assert.equal(run.decisionProjection.state, status.decisionProjection.state);
+    assert.equal(run.outcome, "OPERATOR_DECISION");
+    const inventory = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+    inventory.operatorDecisions[0].subject += " changed";
+    await writeJson(fixture.artifactRoot, "inventories/source.json", inventory);
+    const staleStatus = await getArtifactStatus(fixture.options);
+    const stalePending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const staleRun = await runArtifact({ ...fixture.options, mode: "step" });
+    assert.equal(staleStatus.decisionProjection.state, "STALE");
+    assert.equal(stalePending.decisionProjection.state, "STALE");
+    assert.equal(staleRun.decisionProjection.state, "STALE");
+    assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+    assert.doesNotMatch(await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"), /consumedDecisions/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("pilot 14 uses current approved v2 authority without receipts for source and visual gates", async () => {
+  const filesystem = requireFrom(import.meta.url)("node:fs/promises");
+  const originalLstat = filesystem.lstat;
+  const originalOpen = filesystem.open;
+  const policyPath = "/etc/artifact-migration-tools/decision-policy.json";
+  let policyDocument;
+  filesystem.lstat = (file, ...args) => file === path.dirname(policyPath)
+    ? originalLstat("/etc", ...args) : originalLstat(file, ...args);
+  filesystem.open = (file, ...args) => file === policyPath
+    ? Promise.resolve({ stat: () => originalLstat("/etc/hosts"),
+      readFile: async () => JSON.stringify(policyDocument), close: async () => {} })
+    : originalOpen(file, ...args);
+  syncBuiltinESMExports();
+  try {
+    for (const visual of [false, true]) for (const decisionResult of ["APPROVED", "REJECTED", "GROUP"]) {
+      const fixture = await createFixture();
+      try {
+        const policy = { policyId: "admin/artifact", projectRoot: fixture.targetRoot, revision: 1,
+          rules: { ARTIFACT_DECISION: "AGENT_RELAYED", VISUAL_UNBACKED: "AGENT_RELAYED" } };
+        policyDocument = { policy,
+          policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`,
+          provenance: { action: "OPERATOR_ADMIN_POLICY_CHANGE", actor: "admin",
+            at: "2026-10-02T00:00:00.000Z", reason: "Explicit artifact policy",
+            previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST } };
+        validateProtectedDecisionPolicy(policyDocument, fixture.targetRoot);
+        const options = { ...fixture.options, pilotFormat: 14,
+          ...(visual ? { designSource: "legacy-runtime" } : {}) };
+        const preview = await previewArtifact(options);
+        await runArtifact({ ...options, confirmationId: preview.confirmationId });
+        if (visual) {
+          await advanceDiscovery(fixture, { ui: true });
+          await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+          await writeLegacyRuntimeContext(fixture);
+          assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+          await writeBaseline(fixture, "TARGET_REUSE");
+          await writeLegacyVisualAcceptance(fixture);
+          const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, "matrices/visual-acceptance.json"), "utf8"));
+          matrix.rows = [];
+          matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", reason: "No complete capture" }];
+          await writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", matrix);
+        } else {
+          await authorSource(fixture, { pendingDecision: true });
+        }
+        const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+          "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot, "--pending"];
+        const [candidate] = (await runRecordDecisionCli(args, { stdout: { write: () => {} } })).candidates;
+        assert.equal(candidate.requiredPrincipal, "AGENT_RELAYED");
+        assert.equal(candidate.blocked, null);
+        const ledger = path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson");
+        await mkdir(path.dirname(ledger), { recursive: true });
+        if (decisionResult === "GROUP") {
+          // A well-formed group whose member projection matches this candidate is still not artifact authority.
+          const group = await createNewFormatDecisionGroup({ projectRoot: fixture.targetRoot, lifecycle: "artifact",
+            candidates: [{ ...candidate, approvable: true }, { ...candidate, id: "APP-sibling", approvable: true }] });
+          await appendFile(ledger, `${JSON.stringify(buildDecision({ previous: null, kind: group.kind,
+            subjectType: group.subject.type, subject: group.subject.path, statement: "Relayed group approval",
+            rationale: group.rationale, candidateId: group.id, targets: group.targets, boundTo: group.boundTo,
+            principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(group),
+            policyId: group.policyId, policyDigest: group.policyDigest }))}\n`);
+          const before = await stateOf(fixture);
+          for (const projection of [(await getArtifactStatus(fixture.options)).decisionProjection,
+            (await runRecordDecisionCli(args, { stdout: { write: () => {} } })).decisionProjection]) {
+            assert.equal(projection.state, "AWAITING_HUMAN_DECISION");
+          }
+          const run = await runArtifact({ ...fixture.options, mode: "step" });
+          assert.notEqual(run.decisionProjection?.state, "APPROVED_APPLICABLE");
+          assert.equal(run.confirmationId, undefined);
+          assert.deepEqual(await stateOf(fixture), before);
+          assert.doesNotMatch(await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"), /consumedDecisions/);
+          continue;
+        }
+        const approved = buildDecision({ previous: null, kind: candidate.kind,
+          subjectType: candidate.subject.type, subject: candidate.subject.path,
+          statement: "Relayed approval", rationale: candidate.rationale,
+          candidateId: candidate.id, targets: candidate.targets, boundTo: candidate.boundTo,
+          principal: "AGENT_RELAYED", result: decisionResult, candidateDigest: candidateDigestOf(candidate),
+          policyId: candidate.policyId, policyDigest: candidate.policyDigest });
+        await appendFile(ledger, `${JSON.stringify(approved)}\n`);
+        const status = await getArtifactStatus(fixture.options);
+        const pending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+        const run = await runArtifact({ ...fixture.options, mode: "step" });
+        if (decisionResult === "REJECTED") {
+          assert.equal(status.decisionProjection.state, "REJECTED");
+          assert.equal(pending.decisionProjection.state, "REJECTED");
+          assert.equal(run.decisionProjection.state, "REJECTED");
+          assert.equal(run.outcome, "BLOCKED");
+          assert.deepEqual(pending.candidates, []);
+          if (visual) {
+            const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, "matrices/visual-acceptance.json"), "utf8"));
+            matrix.unbacked[0].reason += " changed";
+            await writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", matrix);
+          } else {
+            const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+            source.operatorDecisions[0].subject += " changed";
+            await writeJson(fixture.artifactRoot, "inventories/source.json", source);
+          }
+          assert.equal((await getArtifactStatus(fixture.options)).decisionProjection.state, "STALE");
+          assert.equal((await runRecordDecisionCli(args, { stdout: { write: () => {} } })).decisionProjection.state, "STALE");
+          assert.equal((await runArtifact({ ...fixture.options, mode: "step" })).decisionProjection.state, "STALE");
+          assert.equal((await stateOf(fixture)).currentStep, visual ? "BUILD_BASELINE" : "DISCOVER_LEGACY");
+          assert.doesNotMatch(await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"), /consumedDecisions/);
+          continue;
+        }
+        assert.ok(status.decisionProjection, JSON.stringify({ visual, reason: status.validation?.reason,
+          outcome: status.validation?.outcome, status: status.status }));
+        assert.equal(status.decisionProjection.state, "APPROVED_APPLICABLE");
+        assert.equal(status.validation?.consumedDecisions, undefined);
+        assert.equal(pending.decisionProjection.state, status.decisionProjection.state);
+        assert.ok(run.decisionProjection, JSON.stringify({ visual, run }, null, 2));
+        assert.equal(run.decisionProjection.state, status.decisionProjection.state);
+        assert.equal(status.decisionProjection.checkpointAdvanced, false);
+        assert.deepEqual(pending.candidates, []);
+        assert.equal(run.outcome, "AWAITING_CONFIRMATION", run.reason);
+        assert.equal((await stateOf(fixture)).currentStep, visual ? "BUILD_BASELINE" : "DISCOVER_LEGACY");
+        assert.doesNotMatch(await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"), /consumedDecisions/);
+        const journalFiles = ["state.json", "integrity.json", "history/history.ndjson"];
+        const beforeVisual = visual ? await Promise.all(journalFiles.map((file) =>
+          readFile(path.join(fixture.artifactRoot, file), "utf8"))) : null;
+        const advanced = await runArtifact({ ...fixture.options, mode: "step", confirmationId: run.confirmationId });
+        assert.equal(advanced.outcome, "CONTINUE", advanced.reason);
+        if (!visual) {
+          const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+          await writeJson(fixture.artifactRoot, "inventories/completeness.json", {
+            version: 1, sourceFiles: source.sourceFiles,
+            units: FIXTURE_CENSUS.map((path_) => ({ path: path_, disposition: "DO_NOT_MIGRATE", ref: "DEC-1" })),
+            requirements: [],
+          });
+          const downstream = await runArtifact({ ...fixture.options, mode: "step" });
+          assert.equal(downstream.outcome, "AWAITING_CONFIRMATION", downstream.reason);
+        }
+        const history = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"))
+          .trim().split("\n").map(JSON.parse);
+        if (decisionResult === "APPROVED") {
+          const [event] = history.filter((item) => item.consumedDecisions?.length);
+          assert.equal(event?.consumedDecisions.length, 1);
+          assert.deepEqual(event.consumedDecisions[0], {
+            candidateDigest: candidateDigestOf(candidate), decisionId: approved.id,
+            decisionDigest: `sha256:${createHash("sha256").update(JSON.stringify(approved)).digest("hex")}`,
+            policyId: candidate.policyId, policyDigest: candidate.policyDigest,
+            principal: "AGENT_RELAYED", result: "APPROVED",
+          });
+          assert.equal(event.decisionLedgerPrefixes.operator.sha256,
+            createHash("sha256").update(await readFile(ledger)).digest("hex"));
+          assert.equal(history.filter((item) => item.consumedDecisions?.length).length, 1);
+          if (visual) {
+            const afterVisual = await Promise.all(journalFiles.map((file) =>
+              readFile(path.join(fixture.artifactRoot, file), "utf8")));
+            const transaction = {
+              version: 2, previousState: JSON.parse(beforeVisual[0]), previousIntegrity: JSON.parse(beforeVisual[1]),
+              input: { kind: "ADVANCE", selectedSlice: null },
+              consumedDecisions: event.consumedDecisions, decisionLedgerPrefixes: event.decisionLedgerPrefixes,
+              state: JSON.parse(afterVisual[0]), event,
+            };
+            for (const phase of [0, 1, 2, 3]) {
+              const files = [phase < 2 ? beforeVisual[0] : afterVisual[0],
+                phase < 3 ? beforeVisual[1] : afterVisual[1],
+                phase === 0 ? beforeVisual[2] : afterVisual[2]];
+              await Promise.all(journalFiles.map((file, index) =>
+                writeFile(path.join(fixture.artifactRoot, file), files[index])));
+              await writeJson(fixture.artifactRoot, "transaction.json", transaction);
+              assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+              assert.deepEqual(await Promise.all(journalFiles.map((file) =>
+                readFile(path.join(fixture.artifactRoot, file), "utf8"))), afterVisual);
+              assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
+              await runArtifact(fixture.options);
+              assert.equal(await readFile(path.join(fixture.artifactRoot, journalFiles[2]), "utf8"), afterVisual[2]);
+            }
+            await advancePlan(fixture, "TARGET_REUSE");
+          }
+        } else {
+          assert.ok(history.every((item) => !item.consumedDecisions?.length));
+        }
+      } finally {
+        await fixture.cleanup();
+      }
+    }
+  } finally {
+    filesystem.lstat = originalLstat;
+    filesystem.open = originalOpen;
+    syncBuiltinESMExports();
   }
 });
 
@@ -1727,7 +1969,7 @@ test("pilot 14 rejects a reviewed source candidate when current evidence or poli
   }
 });
 
-test("pilot 14 cannot accept cited visual exceptions through the legacy adapter", async () => {
+test("pilot 14 rejects forged visual receipts without bypassing visual checks", async () => {
   const fixture = await createFixture();
   const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
   try {
@@ -1741,10 +1983,71 @@ test("pilot 14 cannot accept cited visual exceptions through the legacy adapter"
     await writeLegacyVisualAcceptance(fixture);
     const relative = "matrices/visual-acceptance.json";
     const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
-    matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", decisionId: "APP-legacy" }];
+    matrix.rows = [];
+    matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", reason: "No complete capture" }];
     await writeJson(fixture.artifactRoot, relative, matrix);
-    const result = await runArtifact(fixture.options);
-    assert.match(result.reason, /Artifact 14 visual decision authority is unavailable/);
+    const status = await getArtifactStatus(fixture.options);
+    const result = await runArtifact({ ...fixture.options, mode: "step" });
+    assert.equal(status.decisionProjection.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(result.decisionProjection.state, status.decisionProjection.state);
+    assert.equal(result.outcome, "OPERATOR_DECISION");
+    for (const field of ["decisionId", "decisionDigest", "recordedDecisionId"]) {
+      matrix.unbacked[0][field] = "DEC-forged";
+      await writeJson(fixture.artifactRoot, relative, matrix);
+      assert.match((await runArtifact({ ...fixture.options, mode: "step" })).reason, /unexpected|decisionId|decisionDigest|recordedDecisionId/i);
+      delete matrix.unbacked[0][field];
+    }
+    assert.equal((await stateOf(fixture)).currentStep, "BUILD_BASELINE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("pilot 14 visual projections re-read the ledger and stale evidence without advancing", async () => {
+  const fixture = await createFixture();
+  const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
+  try {
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    await writeLegacyRuntimeContext(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeLegacyVisualAcceptance(fixture);
+    const relative = "matrices/visual-acceptance.json";
+    const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+    matrix.rows = [];
+    matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", reason: "No complete capture" }];
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+      "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot, "--pending"];
+    const pending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const [candidate] = pending.candidates;
+    assert.equal(candidate.blocked.state, "SIGNER_UNAVAILABLE");
+    const weak = buildDecision({ previous: null, kind: candidate.kind,
+      subjectType: candidate.subject.type, subject: candidate.subject.path,
+      statement: "Relayed but insufficient", rationale: candidate.rationale,
+      candidateId: candidate.id, targets: candidate.targets, boundTo: candidate.boundTo,
+      principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
+      policyId: candidate.policyId, policyDigest: candidate.policyDigest });
+    const ledger = path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson");
+    await mkdir(path.dirname(ledger), { recursive: true });
+    await appendFile(ledger, `${JSON.stringify(weak)}\n`);
+    const status = await getArtifactStatus(fixture.options);
+    const current = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const run = await runArtifact({ ...fixture.options, mode: "step" });
+    assert.equal(status.decisionProjection.state, "AWAITING_HUMAN_DECISION");
+    assert.equal(current.decisionProjection.state, status.decisionProjection.state);
+    assert.equal(run.decisionProjection.state, status.decisionProjection.state);
+    matrix.unbacked[0].reason = "Capture no longer available";
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    const staleStatus = await getArtifactStatus(fixture.options);
+    const stalePending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const staleRun = await runArtifact({ ...fixture.options, mode: "step" });
+    assert.equal(staleStatus.decisionProjection.state, "STALE");
+    assert.equal(stalePending.decisionProjection.state, "STALE");
+    assert.equal(staleRun.decisionProjection.state, "STALE");
     assert.equal((await stateOf(fixture)).currentStep, "BUILD_BASELINE");
   } finally {
     await fixture.cleanup();
