@@ -26,5 +26,9 @@
   {
     "version": "1.3.6",
     "contentHash": "sha256:a8cdba4b188c5dcd64f7555ce18f5a9b1947a8e7ea78673e2a391e67c3221b34"
+  },
+  {
+    "version": "1.3.7",
+    "contentHash": "sha256:683779bafe310d6f483a2e1d703633e9a81317e7a5329eed45a88ed6709b3e46"
   }
 ]
