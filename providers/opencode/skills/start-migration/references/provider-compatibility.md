@@ -21,9 +21,12 @@ elicitation or terminal input does not attest HUMAN authority. Without the
 separately deferred production signer/companion, a default `HUMAN_ATTESTED`
 request is explicitly blocked (`SIGNER_UNAVAILABLE`); no host path may
 downgrade it to `AGENT_RELAYED`. Module 18 remains the creation default, and
-artifact 13 remains the only supported/active artifact format; artifact 14 is
-unavailable. Historical module ≤18 and artifact-13 citation/challenge flows
-retain their format-gated compatibility behavior.
+artifact 13 remains the active creation format, including delegated children;
+artifact 14 is supported only by explicit pilot selection or the one explicit
+pristine 13 -> 14 adoption, with direct-ledger authority for `ARTIFACT_DECISION`
+and `VISUAL_UNBACKED` only (no `GROUP_APPROVAL`; `EXCEPTION_RECORDED` unchanged)
+and the same `HUMAN_ATTESTED` block. Historical module ≤18 and artifact-13
+citation/challenge flows retain their format-gated compatibility behavior.
 
 Provider wrappers contain no workflow logic. They load the generated skill and
 forward invocation text, preventing four copies of the workflow from drifting.

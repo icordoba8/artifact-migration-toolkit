@@ -127,8 +127,10 @@ ordinary resume target active format 18. The 18→19 increment is an explicit,
 previewed/confirmed, journalled pre-pin adoption for an eligible unfinished
 record, never a self-healing or default transition. Ineligible records keep
 their historical citation path or report `LEGACY_COMPATIBILITY_ACTION_REQUIRED`.
-Artifact 13 remains the only active and supported artifact format; artifact 14
-and direct-ledger artifact decisions are unavailable.
+Artifact 13 remains the active format for every new artifact record, including
+a delegated child; artifact 14 (direct-ledger artifact decisions) is supported
+only through explicit pilot selection or explicit pristine adoption and is never
+inferred from module 19. See `migrate-artifact/references/artifact-contract.md`.
 
 ```text
 FORMAT_UPGRADE_FLOOR          = 17   (module engine)
@@ -493,7 +495,8 @@ protected operator/admin policy can permit a relayed principal, but repository
 files, state, provider capabilities and `--mode auto` cannot weaken it. No
 production signer/companion or WebAuthn verifier exists in this milestone:
 missing signer yields `SIGNER_UNAVAILABLE` and writes nothing. Artifact 13
-retains the historical citation path; artifact 14 is not implemented.
+retains the historical citation path; artifact 14 resolves individual artifact
+decisions the same direct way and accepts no group approval.
 
 For historical module formats ≤18, a row citing an algorithm-2 scanner decision
 must satisfy all of: the decision exists
@@ -1826,6 +1829,15 @@ At format 13, `artifactMigration` contains exactly `source`, `type`, and
 lowercase name, and `target` is target-root-relative and equals `targetOwner`
 or lies below it. The artifact id is derived from `{source,type}`; no child
 lifecycle state is persisted in this matrix.
+
+The parent observes a child only through the child's own status, whatever the
+parent's module format. Only a valid `COMPLETE` child satisfies the
+prerequisite; an approved child decision does not. Pending child decisions
+belong to the child and are recorded on its own ledger with `--artifact`. A
+parent never reinterprets an artifact-13 child's citations as v2 authority,
+never asks it for copied v2 receipts, never supplies or overrides an
+artifact-14 child's authority, and never creates a child at 14 or upgrades a
+shared child.
 
 `architectureAuthorities` entries must resolve like any other evidence, so a
 document the repository does not have cannot be cited as if it did. A genuinely

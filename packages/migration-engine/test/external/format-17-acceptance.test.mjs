@@ -940,8 +940,11 @@ test("E2E-D: the built bundle states both engines' upgrade floors and registries
   ]);
 
   assert.equal(supports.artifactFormat, 13);
+  assert.equal(supports.artifactFormatSupported, 14);
   assert.equal(supports.artifactFormatUpgradeFloor, 13);
-  assert.deepEqual(supports.artifactFormatUpgraders, []);
+  assert.deepEqual(supports.artifactFormatUpgraders, [
+    { from: 13, to: 14, id: "PRISTINE_ARTIFACT_ADOPTED", version: 1 },
+  ]);
 
   // Identity only. A manifest states which increments a bundle can walk, never
   // how -- and a serialized `domain`/`plan`/`commit` would be both a leak and a

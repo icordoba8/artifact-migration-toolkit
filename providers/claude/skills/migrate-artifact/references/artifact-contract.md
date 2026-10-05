@@ -29,12 +29,13 @@ also declares its required `runtimeStates` (a subset of the engine's
 uses `{id, kind, sourcePath, consumers}`; all consumers must later appear in
 the global-contract matrix. Feature-local visual IDs are forbidden there.
 
-Each `operatorDecisions` row is `{id, subject, decisionId?}`. It has no `status`
+Each artifact-13 `operatorDecisions` row is `{id, subject, decisionId?}`. It has no `status`
 field: a row is satisfied only when its `decisionId` names a ledger line in
 `decisions/operator-decisions.ndjson` whose recomputed candidate matches the
 row's subject and the current source binding. Record one with
 `record-decision.mjs --artifact <source> --type <type> --approve <candidate-id>`;
-editing this JSON never approves anything.
+editing this JSON never approves anything. An artifact-14 row is exactly
+`{id, subject}`; see [Artifact 14 Decisions](#artifact-14-decisions).
 
 `completeness.json` is `{version, sourceFiles, units, requirements}`. All four
 keys are required; `sourceFiles` repeats the source inventory exactly.
@@ -254,46 +255,79 @@ The engine owns `state.json`, `integrity.json`, append-only
 
 ## Format Axis And Upgrades
 
-The artifact record's format axis is its own: contract `1`, format `13`,
-workflow `1.0`, independent of the module engine's numbers.
+The artifact record's format axis is its own: contract `1`, workflow `1.0`,
+independent of the module engine's numbers.
 
 ```text
-ARTIFACT_FORMAT_VERSION            = 13
-ARTIFACT_FORMAT_UPGRADE_FLOOR      = 13
-ARTIFACT_FORMAT_UPGRADERS          = []      (correctly empty)
+ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = 13
+ARTIFACT_FORMAT_SUPPORTED                 = 14   (= ARTIFACT_FORMAT_VERSION)
+ARTIFACT_FORMAT_UPGRADE_FLOOR             = 13
+ARTIFACT_FORMAT_UPGRADERS                 = [13 -> 14 PRISTINE_ARTIFACT_ADOPTED v1]
 ```
 
-The upgrade floor is declared, not derived, and today it equals the runtime
-format. No persisted format can therefore be both at or above the floor and
-behind the runtime, so the registry has nothing to hold and the `formatUpgrade`
-field an artifact status returns is always `null`. **Format 13 performs no
-upgrade.** There is
-no historical 12→13 upgrader and none is invented: a record persisted at 12 is
-refused exactly as it always has been.
+Every ordinary record, including one delegated by a module parent, is created
+at 13. Format 14 is a supported pilot, not a default: it is selected only by an
+explicit `--pilot-format 14` at creation, previewed and then confirmed with
+`--confirm-format <id>`, and is never inferred from the supported ceiling or
+from a module-19 parent. The persisted `formatVersion` alone selects decision
+semantics for the record's whole life.
 
-Admission is the only thing the floor changes, and it changes nothing today. A
-persisted format is readable when it is the runtime format, or when it sits at or
-above the floor, behind the runtime, and every increment from there to the
-runtime has a registered upgrader. Anything else — below the floor, newer than
-the runtime, or a gap in the path — stays refused with the message it has always
-been refused with. With an empty registry that admits nothing new.
+A 13 record is current, not behind: its status reports the 13 -> 14 row as
+`INACTIVE` and the lifecycle continues under 13. Normal execution never
+promotes. `--upgrade-format 14` previews, and with `--confirm-format <id>`
+commits, the transition only for a pristine bootstrap record -- `DISCOVER_LEGACY`
+with only `RESOLVE` completed, the bootstrap history event alone, canonical
+bootstrap bytes, no authored inventory or matrix, no ledger line and no pending
+journal -- as one journalled `FORMAT_UPGRADED` event. Any other record is
+refused with `LEGACY_COMPATIBILITY_ACTION_REQUIRED` and left byte-identical;
+start a fresh explicit pilot instead. There is no historical 12 -> 13
+upgrader: 12, and anything above 14, is refused as it always has been.
 
-The rule is prospective and enforced by the engine, not by convention. The first
-artifact bump, 13→14, must ship with exactly one registered adjacent upgrader:
 `assertRegistryCoverage({floor, runtimeFormat, registry})` runs from the
-format-upgrade suite and from the release gate before staging, and refuses a
-runtime format with no registered path from the floor. Declaring the new format
-self-healing or promoting buys no pass. When that row exists, an owed increment
-must explicitly declare `activation: null` for immediate activation or an
-activation predicate with an old-format `prerequisite {kind, path, description}`.
-An owed but INACTIVE increment leaves normal lifecycle progress live until that
-prerequisite is validated and pinned; an ACTIVE one freezes it. `requiredInput`
-is new material for an already-active upgrader. The typed `formatUpgrade`
-projection then reports INACTIVE or the active states `NEEDS_INPUT` | `READY` |
-`BLOCKED`, with `TRANSFORM` | `NO_OP` domain when classified. An ACTIVE upgrader
-commits exactly one increment per invocation through the journal above. The release manifest
-records `artifactFormatUpgradeFloor` and `artifactFormatUpgraders` so a bundle's
-upgrade path is inspectable from the bundle itself.
+format-upgrade suite and from the release gate before staging; a self-healing
+or promoting declaration buys no pass. The release manifest records
+`artifactFormat` (the active creation format, 13), `artifactFormatSupported`
+(14), `artifactFormatUpgradeFloor` and `artifactFormatUpgraders`.
+
+## Artifact 14 Decisions
+
+Format 14 replaces citation authority with direct verified-ledger authority for
+source `operatorDecisions` (`ARTIFACT_DECISION`) and visual `unbacked` states
+(`VISUAL_UNBACKED`):
+
+- Authored rows only propose questions. A `decisionId`, `decisionDigest` or
+  `recordedDecisionId` on a source decision row or a visual `unbacked` row is
+  refused.
+- The engine derives one policy-bound candidate per row from the current
+  source/target bindings, the row and, for a visual state, its visual evidence,
+  and resolves exactly one applicable v2 ledger line for that full candidate
+  digest. `APPROVED_APPLICABLE` satisfies that decision only: it does not
+  advance the checkpoint (`checkpointAdvanced` is reported separately) or
+  replace any structural, source or visual check. `REJECTED` blocks; changed
+  evidence or policy makes an older line `STALE`. Duplicate or conflicting
+  lines, v1 lines and AUTO lines are never authority.
+- Decisions are individual. A `GROUP_APPROVAL` line is not artifact-14
+  authority.
+- The default policy requires `HUMAN_ATTESTED`, which no writer in this toolkit
+  can produce: such a candidate reports `blocked: SIGNER_UNAVAILABLE` and
+  nothing is written. Only an explicit protected operator/admin policy can
+  permit `AGENT_RELAYED`; repository files, state, providers, MCP and
+  `--mode auto` cannot downgrade it.
+- `--status`, `artifact-migration-decision --artifact <source> --type <type> --pending`
+  and the bare command read the same fresh projection; the bare command
+  revalidates it under the lock. Record with `--approve <id>` from a trusted
+  channel; never copy an id into JSON.
+- The advance that passes the gate journals each consumed
+  `{candidateDigest, decisionId, decisionDigest, policyId, policyDigest, principal, result}`
+  once, with the verified ledger prefix, in its transaction and hashed history
+  event, and recovery reproves the same set. Later checkpoints prove the gate
+  from that history; a historical decision is never a current approval for
+  changed facts.
+
+Artifact 13 is unchanged: rows keep `decisionId` citations and
+`recordedDecisionId`/`decisionReferences` receipts, v1 and AUTO lines keep their
+historical meaning, and its transactions and history carry no consumed
+identities.
 
 ## Transaction Journal And Recovery
 

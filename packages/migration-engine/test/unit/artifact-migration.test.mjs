@@ -927,42 +927,48 @@ test("artifact Ponytail full-audit requires Review then Audit before PRECOMMIT_G
   }
 });
 
-test("E/F: completed standalone artifacts are reused by multiple parents without mutation", async () => {
-  const fixture = await createFixture();
-  try {
-    await driveToComplete(fixture);
-    const row = {
+const parentWork = (fixture, formatVersion, legacyModule = "feature") => artifactPrerequisiteWork(
+  { formatVersion, legacyModule, activeSlice: "shared" },
+  { legacyRoot: fixture.sourceRoot, targetRoot: fixture.targetRoot },
+  {
+    capabilityRows: [{
       id: "CAP-S",
       classification: "SHARED_PREREQUISITE",
       targetOwner: "src",
-      artifactMigration: {
-        source: fixture.options.source,
-        type: fixture.options.type,
-        target: fixture.options.target,
-      },
-    };
-    const slices = [{ id: "shared", capabilityIds: [row.id], dependencies: [] }];
-    const before = await Promise.all(
-      ["state.json", "integrity.json", "history/history.ndjson"].map((relative) =>
-        readFile(path.join(fixture.artifactRoot, relative), "utf8"),
-      ),
-    );
-    for (const legacyModule of ["feature-a", "feature-b"]) {
-      const work = await artifactPrerequisiteWork(
-        { formatVersion: 13, legacyModule, activeSlice: "shared" },
-        { legacyRoot: fixture.sourceRoot, targetRoot: fixture.targetRoot },
-        { capabilityRows: [row], slices },
+      artifactMigration: { source: fixture.options.source, type: fixture.options.type, target: fixture.options.target },
+    }],
+    slices: [{ id: "shared", capabilityIds: ["CAP-S"], dependencies: [] }],
+  },
+);
+
+test("E/F: completed standalone artifacts are reused by multiple parents without mutation", async () => {
+  for (const childFormat of [13, 14]) {
+    const fixture = await createFixture();
+    try {
+      if (childFormat === 14) {
+        const options = { ...fixture.options, pilotFormat: 14 };
+        await runArtifact({ ...options, confirmationId: (await previewArtifact(options)).confirmationId });
+      }
+      await driveToComplete(fixture);
+      assert.equal((await stateOf(fixture)).formatVersion, childFormat);
+      const before = await Promise.all(
+        ["state.json", "integrity.json", "history/history.ndjson"].map((relative) =>
+          readFile(path.join(fixture.artifactRoot, relative), "utf8"),
+        ),
       );
-      assert.deepEqual(work, { outcome: "COMPLETE" });
+      // Module <=18 and 19 parents observe the same completed child; none upgrades it.
+      for (const [legacyModule, formatVersion] of [["feature-a", 13], ["feature-b", 18], ["feature-c", 19]]) {
+        assert.deepEqual(await parentWork(fixture, formatVersion, legacyModule), { outcome: "COMPLETE" });
+      }
+      const after = await Promise.all(
+        ["state.json", "integrity.json", "history/history.ndjson"].map((relative) =>
+          readFile(path.join(fixture.artifactRoot, relative), "utf8"),
+        ),
+      );
+      assert.deepEqual(after, before);
+    } finally {
+      await fixture.cleanup();
     }
-    const after = await Promise.all(
-      ["state.json", "integrity.json", "history/history.ndjson"].map((relative) =>
-        readFile(path.join(fixture.artifactRoot, relative), "utf8"),
-      ),
-    );
-    assert.deepEqual(after, before);
-  } finally {
-    await fixture.cleanup();
   }
 });
 
@@ -1614,6 +1620,11 @@ test("pilot 14 reports source decisions without accepting legacy citations", asy
     assert.equal(result.outcome, "OPERATOR_DECISION");
     assert.equal(result.pendingDecisions[0].blocked.state, "SIGNER_UNAVAILABLE");
     assert.equal(status.decisionProjection.blocked.state, "SIGNER_UNAVAILABLE");
+    // A module-19 parent surfaces the child's own blocked candidate; it supplies no authority.
+    const parent = await parentWork(fixture, 19);
+    assert.equal(parent.outcome, "OPERATOR_DECISION");
+    assert.equal(parent.pendingDecisions[0].blocked.state, "SIGNER_UNAVAILABLE");
+    assert.deepEqual(parent, await parentWork(fixture, 18));
     const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
     for (const field of ["decisionId", "decisionDigest", "recordedDecisionId"]) {
       source.operatorDecisions[0][field] = "DEC-forged";
@@ -1784,6 +1795,8 @@ test("pilot 14 uses current approved v2 authority without receipts for source an
         assert.equal(status.decisionProjection.checkpointAdvanced, false);
         assert.deepEqual(pending.candidates, []);
         assert.equal(run.outcome, "AWAITING_CONFIRMATION", run.reason);
+        // An applicable child approval is not child completion.
+        assert.equal((await parentWork(fixture, 19)).nextWorkKind, "RUN_ARTIFACT");
         assert.equal((await stateOf(fixture)).currentStep, visual ? "BUILD_BASELINE" : "DISCOVER_LEGACY");
         assert.doesNotMatch(await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"), /consumedDecisions/);
         const journalFiles = ["state.json", "integrity.json", "history/history.ndjson"];

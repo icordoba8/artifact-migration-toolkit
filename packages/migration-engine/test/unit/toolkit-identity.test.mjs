@@ -50,7 +50,7 @@ import {
   RESUMABLE_CONTRACT_VERSION,
   WORKFLOW_VERSION,
 } from "../../src/resumable-migration.mjs";
-import { ARTIFACT_FORMAT_VERSION } from "../../src/artifact/artifact-migration.mjs";
+import { ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, ARTIFACT_FORMAT_VERSION } from "../../src/artifact/artifact-migration.mjs";
 import { buildRelease, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
 import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 import { renderedCommandPattern } from "../support/portability.mjs";
@@ -306,7 +306,8 @@ test("a release bundle carries no mutable reference an installer could follow", 
   const manifest = JSON.parse(await readFile(path.join(bundle, "release-manifest.json"), "utf8"));
   validateToolkitIdentity(manifest.toolkit);
   assert.equal(manifest.supports.moduleFormat, MIGRATION_FORMAT_VERSION);
-  assert.equal(manifest.supports.artifactFormat, ARTIFACT_FORMAT_VERSION);
+  assert.equal(manifest.supports.artifactFormat, ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
+  assert.equal(manifest.supports.artifactFormatSupported, ARTIFACT_FORMAT_VERSION);
   assert.ok(
     Object.keys(manifest.files).every((file) => !file.split("/").includes(".bin")),
     "release payload must not contain package-manager launch shims",

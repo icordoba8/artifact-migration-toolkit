@@ -411,8 +411,12 @@ constants by a contract test — the table cannot drift from the code.
 | newer than supported   | refused; update start-migration first                                                                                 |
 
 Module 19 support is not activation: normal module creation stays at 18.
-Artifact 13 is the only supported and active artifact format; artifact 14 is
-unavailable, with no artifact direct-ledger authority. `HUMAN_ATTESTED` writes,
+Artifact support is likewise not activation: artifact 13 stays the active
+format for ordinary and delegated creation, and artifact 14 is supported only
+by explicit pilot selection or the one explicit, fail-closed pristine 13 -> 14
+adoption; non-pristine 13 records are never promoted. Artifact 14 direct-ledger
+authority covers `ARTIFACT_DECISION` and `VISUAL_UNBACKED` only; not
+`GROUP_APPROVAL`, and `EXCEPTION_RECORDED` is unchanged. `HUMAN_ATTESTED` writes,
 the production signer, real-host acceptance and production-default activation
 are deferred separately.
 

@@ -238,26 +238,29 @@ test("a missing prerequisite becomes RUN_ARTIFACT work", async () => {
 });
 
 test("AUTO runs one child iteration without mutating parent state", async () => {
-  const current = await fixture();
-  try {
-    const parent = state();
-    const before = structuredClone(parent);
-    const work = await artifactPrerequisiteWork(parent, current, plan());
-    const output = [];
-    const child = await runArtifactCli(work.artifactMigration.arguments, {
-      stdout: { write: (chunk) => (output.push(String(chunk)), true) },
-      emitDirective: false,
-    });
-    assert.equal(child.outcome, "CONTINUE");
-    assert.equal(
-      (await getArtifactStatus(work.artifactMigration)).status,
-      "ACTIVE",
-    );
-    assert.deepEqual(parent, before);
-    assert.doesNotMatch(output.join(""), /loop:/);
-  } finally {
-    process.exitCode = 0;
-    await current.cleanup();
+  for (const formatVersion of [13, 19]) {
+    const current = await fixture();
+    try {
+      const parent = state({ formatVersion });
+      const before = structuredClone(parent);
+      const work = await artifactPrerequisiteWork(parent, current, plan());
+      assert.ok(!work.artifactMigration.arguments.includes("--pilot-format"));
+      const output = [];
+      const child = await runArtifactCli(work.artifactMigration.arguments, {
+        stdout: { write: (chunk) => (output.push(String(chunk)), true) },
+        emitDirective: false,
+      });
+      assert.equal(child.outcome, "CONTINUE");
+      const status = await getArtifactStatus(work.artifactMigration);
+      assert.equal(status.status, "ACTIVE");
+      // Delegated creation stays 13; a module-19 parent never selects 14.
+      assert.equal(status.state.formatVersion, 13);
+      assert.deepEqual(parent, before);
+      assert.doesNotMatch(output.join(""), /loop:/);
+    } finally {
+      process.exitCode = 0;
+      await current.cleanup();
+    }
   }
 });
 
@@ -550,6 +553,12 @@ test("OPERATOR-CHILD uses the trusted recorder and rejects wrong or replayed cha
       ask: async ({ challenge }) => challenge,
     });
     assert.ok(recorded.decision);
+    assert.notEqual(recorded.decision.v, 2);
+    // A module-19 parent observes the 13 child exactly as a legacy parent does.
+    assert.deepEqual(
+      await artifactPrerequisiteWork(state({ formatVersion: 19 }), current, plan()),
+      await artifactPrerequisiteWork(state(), current, plan()),
+    );
     assert.equal((await readFile(ledger, "utf8")).trim().split("\n").length, 1);
     await assert.rejects(
       runRecordDecisionCli(decisionArguments, {

@@ -38,6 +38,10 @@ artifact-migrate <primary-source> \
 
 `/migrate-artifact <source>` is the provider-facing equivalent. Defaults are
 `--type artifact`, both roots at the current directory, and `--mode auto`.
+New records are artifact format 13. Use `--pilot-format 14` or
+`--upgrade-format 14` (each confirmed with `--confirm-format <id>`) only when
+the operator explicitly asks for the format-14 pilot; see
+`references/artifact-contract.md#format-axis-and-upgrades`.
 The primary source identifies the artifact. Repeat `--source` for additional
 exact files; the source binding contains only those paths. With matching roots
 and no remapping, the target binding starts with the same path set. The source
@@ -102,7 +106,10 @@ can report pending operator decisions but intentionally exposes no approval API:
 an operator decision is satisfied only by a matching line in the artifact's
 append-only ledger, recorded through
 `artifact-migration-decision --artifact <source> --type <type> --approve <id>` from a
-trusted terminal or host elicitation — never by editing authored JSON.
+trusted terminal or host elicitation — never by editing authored JSON. At
+format 13 the authored row cites that line; at format 14 the engine resolves the
+verified line directly and authored receipts are refused
+(`references/artifact-contract.md#artifact-14-decisions`).
 
 Do not hand-edit `state.json`, `integrity.json`, or `history/history.ndjson`.
 
@@ -129,7 +136,8 @@ with its own command afterwards.
 ## Responsibility boundary
 
 This engine owns exactly four things: its own lifecycle, its own inventories,
-its own gates, and its own format axis (contract 1 / format 13 / workflow 1.0,
+its own gates, and its own format axis (contract 1 / active format 13 /
+supported format 14 / workflow 1.0,
 deliberately independent of the module engine's).
 
 Everything else is **imported from the module core**
@@ -151,23 +159,16 @@ and must never be reimplemented here:
 ### Format upgrades on this axis
 
 The artifact engine declares the same format-upgrade contract the module engine
-does, on its own axis: `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13`, which is exactly
-the current `ARTIFACT_FORMAT_VERSION`. Because the floor *is* the runtime
-format, no format is both at or above the floor and behind the runtime, so
-`ARTIFACT_FORMAT_UPGRADERS` is legitimately empty and the `formatUpgrade` field
-an artifact status returns is always `null` today. **Nothing about artifact behavior changes**: an artifact record at
-format 13 performs no upgrade, and there is no historical 12→13 upgrader —
-inventing one would claim a path this toolkit has never been able to walk.
-
-The rule is prospective. The first artifact format bump — 13→14 — must ship with
-exactly one registered adjacent upgrader, and the engine's own release gate owns
-that requirement: `assertRegistryCoverage` fails the release until the row
-exists, and no self-healing or promoting declaration buys a pass. Each future
-artifact upgrader must explicitly declare `activation: null` when immediately
-active, or an activation predicate and old-format prerequisite. An owed but
-INACTIVE increment leaves normal lifecycle execution live until its prerequisite
-is validated and pinned; an ACTIVE increment freezes it. `requiredInput` names
-new material only after activation. The agent still never selects the transition.
+does, on its own axis: floor 13, active creation format 13, supported runtime
+format 14, and exactly one registered adjacent upgrader, 13 -> 14
+`PRISTINE_ARTIFACT_ADOPTED`. A 13 record is not owed that increment and never
+promotes on its own; only an explicit, previewed and confirmed
+`--upgrade-format 14` moves a pristine bootstrap record, and any other record is
+refused with `LEGACY_COMPATIBILITY_ACTION_REQUIRED`. There is no historical
+12→13 upgrader — inventing one would claim a path this toolkit has never been
+able to walk. `assertRegistryCoverage` keeps the release gate failing for any
+future runtime format without a registered path from the floor; no self-healing
+or promoting declaration buys a pass. The agent never selects a transition.
 
 A rule with two definition sites has two answers, and the second one is the one
 nobody re-reads. This engine once carried its own loop renderer and could emit
