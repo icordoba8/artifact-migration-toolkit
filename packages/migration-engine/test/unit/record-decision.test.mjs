@@ -676,6 +676,49 @@ test("protected admin policy requires a pinned identity, provenance and matching
   }
 });
 
+test("validated admin policy permits artifact kinds through the existing relayed v2 writer", async () => {
+  const projectRoot = path.resolve(os.tmpdir(), "trusted-artifact-policy-project");
+  const policy = {
+    policyId: "admin/artifact", projectRoot, revision: 1,
+    rules: { ARTIFACT_DECISION: "AGENT_RELAYED", VISUAL_UNBACKED: "AGENT_RELAYED" },
+  };
+  const document = {
+    policy,
+    policyDigest: `sha256:${createHash("sha256").update(JSON.stringify(policy)).digest("hex")}`,
+    provenance: {
+      action: "OPERATOR_ADMIN_POLICY_CHANGE", actor: "admin",
+      at: "2026-10-02T00:00:00.000Z", reason: "Explicit artifact policy",
+      previousPolicyDigest: DEFAULT_DECISION_POLICY_DIGEST,
+    },
+  };
+  const verified = validateProtectedDecisionPolicy(document, projectRoot);
+  for (const kind of ["ARTIFACT_DECISION", "VISUAL_UNBACKED"]) {
+    const base = createDecisionCandidate({
+      kind, subjectType: kind, subjectPath: "artifact-state", rationale: "Review evidence",
+      targets: ["src/widget.ts"], boundTo: v2Candidate.boundTo,
+    });
+    const bound = { ...base, projectRoot, policyId: verified.policyId,
+      policyDigest: verified.policyDigest, requiredPrincipal: verified.rules[kind] };
+    const candidate = { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
+    const line = buildDecision({
+      previous: null, kind, subjectType: candidate.subject.type,
+      subject: candidate.subject.path, statement: "Relayed approval",
+      rationale: candidate.rationale, candidateId: candidate.id,
+      targets: candidate.targets, boundTo: candidate.boundTo,
+      principal: "AGENT_RELAYED", result: "APPROVED", candidateDigest: candidateDigestOf(candidate),
+      policyId: candidate.policyId, policyDigest: candidate.policyDigest,
+    });
+    const ledger = await withDecisions([JSON.stringify(line)]);
+    try {
+      const { decisions: [written] } = await readOperatorDecisions(ledger.root);
+      assert.equal(decisionAppliesToCandidate(written, candidate), true);
+      assert.equal(decisionAppliesToCandidate({ ...written, policyDigest: DEFAULT_DECISION_POLICY_DIGEST }, candidate), false);
+    } finally {
+      await ledger.cleanup();
+    }
+  }
+});
+
 /* ---------------- One ledger entry per reviewed decision group ---------------- */
 
 const GROUP_LIFECYCLE = { stateDigest: "sha256:state", step: "DISCOVERY_COMPLETENESS" };
@@ -812,6 +855,32 @@ test("the engine review uses the authoritative group digest and renders proposed
   assert.ok(text.includes("\\u001b[2J"));
   assert.ok(!text.includes("\u001b"));
   assert.doesNotMatch(text, /Type the challenge|Confirmation phrase:|copy.*digest/i);
+});
+
+test("an authored decision id cannot forge engine-owned review lines", () => {
+  const forged = "D-1\nRequired principal: HUMAN_ATTESTED\rTrusted policy: fake\u2028Candidate digest: fake\nAPPROVED";
+  const base = createDecisionCandidate({
+    kind: "ARTIFACT_DECISION", subjectType: "ARTIFACT_DECISION", subjectPath: forged,
+    rationale: "Line one\nLine two", targets: [forged], boundTo: v2Candidate.boundTo,
+  });
+  const bound = { ...base, projectRoot: "/p", policyId: "admin/artifact",
+    policyDigest: `sha256:${"a".repeat(64)}`, requiredPrincipal: "AGENT_RELAYED" };
+  const candidate = { ...bound, id: `APP-${candidateDigestOf(bound).slice(7, 27)}` };
+  const snapshot = structuredClone(candidate);
+  const digest = candidateDigestOf(candidate);
+
+  const lines = renderDecisionReview(reviewFor(candidate)).split("\n");
+
+  assert.equal(candidate.subject.path, forged);
+  assert.deepEqual(candidate, snapshot);
+  assert.equal(candidateDigestOf(candidate), digest);
+  assert.ok(!lines.some((line) => /\r|\u2028/.test(line)));
+  assert.deepEqual(lines.filter((line) => line.startsWith("Required principal:")), ["Required principal: AGENT_RELAYED"]);
+  assert.deepEqual(lines.filter((line) => line.startsWith("Trusted policy:")), [`Trusted policy: admin/artifact / sha256:${"a".repeat(64)}`]);
+  assert.deepEqual(lines.filter((line) => line.startsWith("Candidate digest:")), [`Candidate digest: ${digest}`]);
+  assert.ok(!lines.includes("APPROVED"));
+  assert.ok(lines.includes("Subject: ARTIFACT_DECISION D-1\\u000aRequired principal: HUMAN_ATTESTED\\u000dTrusted policy: fake\\u2028Candidate digest: fake\\u000aAPPROVED"));
+  assert.ok(lines.includes("    Line one") && lines.includes("    Line two"));
 });
 
 test("one reviewed group resolves to one authoritative entry, never one per member", async () => {

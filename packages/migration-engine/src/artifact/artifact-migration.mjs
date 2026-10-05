@@ -39,6 +39,7 @@ import {
 import {
   compareVisualFact,
   compareVisualEvidence,
+  createNewFormatDecisionCandidate,
   pendingVisualUnbackedCandidates,
   TARGET_VERIFICATION_ROLE,
   validateVisualAcceptance,
@@ -1206,6 +1207,21 @@ export const artifactDecisionCandidate = (state, row) =>
     targets: [],
     boundTo: artifactDecisionBoundTo(state),
   });
+
+const artifactCandidateEvidence = (state, inventory) => ({
+  ...artifactDecisionBoundTo(state),
+  artifactId: state.artifactId,
+  formatVersion: state.formatVersion,
+  status: state.status,
+  currentStep: state.currentStep,
+  revision: state.revision,
+  source: state.source,
+  target: state.target,
+  sourceBinding: state.bindings.source,
+  targetBinding: state.bindings.target,
+  artifactHashes: state.artifactHashes,
+  sourceInventoryDigest: `sha256:${sha256(canonical(inventory))}`,
+});
 
 const assertDirectory = async (root, label) => {
   const details = await lstat(root).catch((error) => {
@@ -2423,7 +2439,7 @@ const validateSourceEvidenceFile = async (state, evidence, label) => {
   return relative;
 };
 
-const validateSourceInventory = async (root, state) => {
+const validateSourceInventory = async (root, state, { forRecorder = false } = {}) => {
   const relative = "inventories/source.json";
   const document = await readJsonAt(root, relative, "source inventory");
   exactObject(document, "source inventory", [
@@ -2439,7 +2455,7 @@ const validateSourceInventory = async (root, state) => {
   versionOne(document.version, "source inventory");
   if (document.artifactId !== state.artifactId) throw new Error("source inventory artifactId does not match state.");
   boolean(document.hasVisibleUi, "source inventory.hasVisibleUi");
-  if (state.formatVersion === 14 && arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").length > 0) {
+  if (state.formatVersion === 14 && !forRecorder && arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").length > 0) {
     throw new Error("Artifact 14 decision authority is unavailable; legacy citations cannot authorize this record.");
   }
   const sourceFiles = arrayOf(document.sourceFiles, "source inventory.sourceFiles").map((file) =>
@@ -2509,12 +2525,25 @@ const validateSourceInventory = async (root, state) => {
   const { byId, decisions: ledger } = await readRecordedDecisions(root);
   const decisions = [];
   for (const [index, row] of arrayOf(document.operatorDecisions, "source inventory.operatorDecisions").entries()) {
-    exactObject(row, `source inventory.operatorDecisions[${index}]`, ["id", "subject"], ["decisionId"]);
+    exactObject(row, `source inventory.operatorDecisions[${index}]`, ["id", "subject"], state.formatVersion === 14 ? [] : ["decisionId"]);
     const id = nonEmpty(row.id, `operator decision[${index}].id`);
     nonEmpty(row.subject, `operator decision '${id}' subject`);
     const decisionId = row.decisionId ?? null;
     if (decisionId !== null) nonEmpty(decisionId, `operator decision '${id}' decisionId`);
-    const candidate = artifactDecisionCandidate(state, row);
+    const candidate = state.formatVersion === 14
+      ? await createNewFormatDecisionCandidate({
+          projectRoot: state.target.root,
+          kind: "ARTIFACT_DECISION",
+          subjectType: "ARTIFACT_DECISION",
+          subjectPath: row.id,
+          rationale: row.subject,
+          targets: state.bindings.target.paths,
+          boundTo: {
+            ...artifactCandidateEvidence(state, document),
+            sourceDecision: row,
+          },
+        })
+      : artifactDecisionCandidate(state, row);
     const satisfied = decisionId !== null && decisionAppliesToCandidate(byId.get(decisionId), candidate);
     // The receipt for an approval already in the ledger but not yet cited --
     // what a terminal approval leaves behind. Bound by the same predicate that
@@ -2919,7 +2948,7 @@ const artifactVisualAcceptance = async (root, state, source, target) => {
   );
 };
 
-const artifactVisualDecisions = async (root, state, source) => {
+const artifactVisualDecisions = async (root, state, source, { forRecorder = false } = {}) => {
   if (!visualAuthorityOf(strictVisualState(state))) return [];
   const candidates = await pendingVisualUnbackedCandidates(
     root,
@@ -2927,10 +2956,43 @@ const artifactVisualDecisions = async (root, state, source) => {
     source ? artifactUiInventory(source) : undefined,
   );
   if (candidates.length === 0) return [];
-  if (state.formatVersion === 14) {
+  if (state.formatVersion === 14 && !forRecorder) {
     throw new Error("Artifact 14 visual decision authority is unavailable; legacy citations cannot authorize this record.");
   }
   const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
+  if (state.formatVersion === 14) {
+    unique(
+      arrayOf(matrix.unbacked ?? [], "Visual acceptance unbacked").map((item) =>
+        `${item.uiBehaviorId}::${item.state}`),
+      "Visual acceptance unbacked states",
+    );
+    return Promise.all(candidates.map(async (legacy) => {
+      const item = (matrix.unbacked ?? []).find(
+        (row) => `${row.uiBehaviorId}::${row.state}` === legacy.subject.path,
+      );
+      exactObject(item, `Visual acceptance unbacked '${legacy.subject.path}'`, ["uiBehaviorId", "state", "reason"]);
+      nonEmpty(item.reason, `Visual acceptance unbacked '${legacy.subject.path}' reason`);
+      if (!source.document.behaviors.some((behavior) =>
+        behavior.id === item.uiBehaviorId && behavior.runtimeStates?.includes(item.state))) {
+        throw new Error(`Visual acceptance unbacked '${legacy.subject.path}' does not name a source UI state.`);
+      }
+      const candidate = await createNewFormatDecisionCandidate({
+        projectRoot: state.target.root,
+        kind: legacy.kind,
+        subjectType: legacy.subject.type,
+        subjectPath: legacy.subject.path,
+        rationale: legacy.rationale,
+        targets: state.bindings.target.paths,
+        boundTo: {
+          ...legacy.boundTo,
+          ...artifactCandidateEvidence(state, source.document),
+          visualMatrixDigest: `sha256:${sha256(canonical(matrix))}`,
+          visualUnbacked: item,
+        },
+      });
+      return { id: candidate.id, subject: candidate.subject.path, decisionId: null, candidate, satisfied: false, recorded: null };
+    }));
+  }
   const { byId, decisions } = await readRecordedDecisions(root);
   return candidates.map((candidate) => {
     const item = (matrix.unbacked ?? []).find(
@@ -4488,16 +4550,30 @@ export const artifactOperatorDecisions = async (options = {}) => {
   const location = locate(options);
   const state = await readArtifactState(location.targetRoot, location.id);
   assertInvocationMatches(state, options);
-  const source = await validateSourceInventory(location.root, state);
-  const visual = await artifactVisualDecisions(location.root, state, source);
-  const decisions = [...source.decisions, ...visual];
+  if (state.formatVersion === 14) {
+    const current = await freshness(location.root, state);
+    if (current.stale || current.source.revision !== state.bindings.source.revision ||
+        current.source.dirtyDigest !== state.bindings.source.dirtyDigest ||
+      current.source.digest !== state.bindings.source.digest ||
+      current.target.revision !== state.bindings.target.revision ||
+      current.target.dirtyDigest !== state.bindings.target.dirtyDigest ||
+      current.target.digest !== state.bindings.target.digest) {
+      throw new Error("Artifact decision evidence is stale; no current candidate can be recorded.");
+    }
+  }
+  const source = await validateSourceInventory(location.root, state, { forRecorder: true });
+  const sourceDecisions = state.formatVersion !== 14 || state.currentStep === "DISCOVER_LEGACY"
+    ? source.decisions : [];
+  const visual = state.formatVersion !== 14 || state.currentStep === "BUILD_BASELINE"
+    ? await artifactVisualDecisions(location.root, state, source, { forRecorder: true }) : [];
+  const decisions = [...sourceDecisions, ...visual];
   return {
     state,
     root: location.root,
     targetRoot: location.targetRoot,
     id: location.id,
     decisions,
-    reconciled: reconcileArtifactDecisions(state, decisions),
+    ...(state.formatVersion === 14 ? {} : { reconciled: reconcileArtifactDecisions(state, decisions) }),
   };
 };
 

@@ -26,8 +26,8 @@ import {
   parserResolutionError,
   runDiscoveryScan,
 } from "../../src/core.mjs";
-import { artifactPrerequisiteWork } from "../../src/resumable-migration.mjs";
-import { runRecordDecisionCli } from "../../src/record-decision.mjs";
+import { artifactPrerequisiteWork, candidateDigestOf } from "../../src/resumable-migration.mjs";
+import { assertReviewedCandidateCurrent, runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { lockPathFor } from "../../src/module-lock.mjs";
 import {
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
@@ -40,6 +40,7 @@ import {
   artifactEvidenceDigest,
   artifactIdFor,
   artifactRoot,
+  artifactOperatorDecisions,
   getArtifactStatus,
   previewArtifact,
   previewArtifactFormatUpgrade,
@@ -1611,6 +1612,121 @@ test("pilot 14 never accepts format-13 cited source decisions as authority", asy
   }
 });
 
+test("pilot 14 derives a policy-bound source candidate from current evidence", async () => {
+  const fixture = await createFixture();
+  try {
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await authorSource(fixture, { pendingDecision: true });
+    const first = (await artifactOperatorDecisions(fixture.options)).decisions[0].candidate;
+    assert.equal(first.kind, "ARTIFACT_DECISION");
+    assert.equal(first.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.deepEqual(first.boundTo.artifactHashes, (await stateOf(fixture)).artifactHashes);
+    assert.match(first.policyDigest, /^sha256:[a-f0-9]{64}$/);
+    const relative = "inventories/source.json";
+    const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+    source.operatorDecisions[0].subject += " changed";
+    await writeJson(fixture.artifactRoot, relative, source);
+    const next = (await artifactOperatorDecisions(fixture.options)).decisions[0].candidate;
+    assert.notEqual(candidateDigestOf(first), candidateDigestOf(next));
+    source.behaviors[0].description += " with changed evidence";
+    await writeJson(fixture.artifactRoot, relative, source);
+    const changedEvidence = (await artifactOperatorDecisions(fixture.options)).decisions[0].candidate;
+    assert.notEqual(candidateDigestOf(first), candidateDigestOf(changedEvidence));
+    source.operatorDecisions[0].decisionId = "DEC-forged";
+    await writeJson(fixture.artifactRoot, relative, source);
+    await assert.rejects(artifactOperatorDecisions(fixture.options), /decisionId|unexpected/i);
+    delete source.operatorDecisions[0].decisionId;
+    await writeJson(fixture.artifactRoot, relative, source);
+    await writeFile(path.join(fixture.sourceRoot, "unrelated.txt"), "new source change\n");
+    await assert.rejects(artifactOperatorDecisions(fixture.options), /evidence is stale/);
+    await rm(path.join(fixture.sourceRoot, "unrelated.txt"));
+    await writeFile(path.join(fixture.targetRoot, "unrelated.txt"), "new target change\n");
+    await assert.rejects(artifactOperatorDecisions(fixture.options), /evidence is stale/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("pilot 14 recorder reviews current evidence and cannot mint attestation", async () => {
+  const fixture = await createFixture();
+  const previousExitCode = process.exitCode;
+  const previousPrincipal = process.env.ARTIFACT_DECISION_PRINCIPAL;
+  try {
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await authorSource(fixture, { pendingDecision: true });
+    const inventoryPath = path.join(fixture.artifactRoot, "inventories/source.json");
+    const inventory = JSON.parse(await readFile(inventoryPath, "utf8"));
+    inventory.operatorDecisions[0].subject += "\u001b[2J\nApprove: forged";
+    await writeJson(fixture.artifactRoot, "inventories/source.json", inventory);
+    const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+      "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot];
+    const output = [];
+    const terminal = { isTTY: true, write: (text) => output.push(text) };
+    const pending = await runRecordDecisionCli([...args, "--pending"], { stdout: terminal });
+    const [candidate] = pending.candidates;
+    assert.equal(candidate.kind, "ARTIFACT_DECISION");
+    assert.equal(candidate.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.equal(candidate.blocked.state, "SIGNER_UNAVAILABLE");
+    assert.equal(candidate.review.candidateDigest, candidateDigestOf(candidate));
+    assert.equal(candidate.review.policy.policyDigest, candidate.policyDigest);
+    assert.deepEqual(candidate.review.targets, candidate.targets);
+    assert.equal(candidate.review.evidence.sourceInventoryDigest, candidate.boundTo.sourceInventoryDigest);
+    assert.match(output.join(""), /"policyDigest": "sha256:/);
+    process.env.ARTIFACT_DECISION_PRINCIPAL = "AGENT_RELAYED";
+    for (const ask of [null, () => "yes", () => "accept", Object.assign(() => "yes", { channel: "AUTO" })]) {
+      output.length = 0;
+      const result = await runRecordDecisionCli([...args, "--approve", candidate.id], {
+        stdin: { isTTY: true }, stdout: terminal, ask,
+      });
+      assert.equal(result.blocked.state, "SIGNER_UNAVAILABLE");
+      assert.match(output.join(""), new RegExp(candidateDigestOf(candidate)));
+      assert.match(output.join(""), /Required principal: HUMAN_ATTESTED/);
+      assert.match(output.join(""), /sourceInventoryDigest/);
+      assert.doesNotMatch(output.join(""), /\u001b/);
+      assert.match(output.join(""), /\\u001b/);
+    }
+    await assert.rejects(readFile(path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson")), { code: "ENOENT" });
+    await assert.rejects(runRecordDecisionCli([...args, "--approve", candidate.id, "--principal", "HUMAN_ATTESTED"]), /Unknown option/);
+    await assert.rejects(runRecordDecisionCli([...args, "--approve", candidate.id, "--mode", "auto"]), /Unknown option/);
+  } finally {
+    if (previousPrincipal === undefined) delete process.env.ARTIFACT_DECISION_PRINCIPAL;
+    else process.env.ARTIFACT_DECISION_PRINCIPAL = previousPrincipal;
+    process.exitCode = previousExitCode;
+    await fixture.cleanup();
+  }
+});
+
+test("pilot 14 rejects a reviewed source candidate when current evidence or policy changes", async () => {
+  const fixture = await createFixture();
+  try {
+    const options = { ...fixture.options, pilotFormat: 14 };
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await authorSource(fixture, { pendingDecision: true });
+    const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+      "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot, "--pending"];
+    const pending = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    const [reviewed] = pending.candidates;
+    assert.equal(assertReviewedCandidateCurrent(reviewed, pending.candidates), reviewed);
+    const relative = "inventories/source.json";
+    const inventory = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+    inventory.behaviors[0].description += " revised";
+    await writeJson(fixture.artifactRoot, relative, inventory);
+    const current = await runRecordDecisionCli(args, { stdout: { write: () => {} } });
+    assert.throws(() => assertReviewedCandidateCurrent(reviewed, current.candidates), /changed while its review was open/);
+    assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, policyId: "forged" }, pending.candidates), /changed while its review was open/);
+    assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, policyDigest: "sha256:forged" }, pending.candidates), /changed while its review was open/);
+    assert.throws(() => assertReviewedCandidateCurrent({ ...reviewed, requiredPrincipal: "AGENT_RELAYED" }, pending.candidates), /changed while its review was open/);
+    await assert.rejects(readFile(path.join(fixture.artifactRoot, "decisions/operator-decisions.ndjson")), { code: "ENOENT" });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("pilot 14 cannot accept cited visual exceptions through the legacy adapter", async () => {
   const fixture = await createFixture();
   const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
@@ -1630,6 +1746,51 @@ test("pilot 14 cannot accept cited visual exceptions through the legacy adapter"
     const result = await runArtifact(fixture.options);
     assert.match(result.reason, /Artifact 14 visual decision authority is unavailable/);
     assert.equal((await stateOf(fixture)).currentStep, "BUILD_BASELINE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("pilot 14 derives a policy-bound visual candidate from current evidence", async () => {
+  const fixture = await createFixture();
+  const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
+  try {
+    const preview = await previewArtifact(options);
+    await runArtifact({ ...options, confirmationId: preview.confirmationId });
+    await advanceDiscovery(fixture, { ui: true });
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_REUSE"));
+    await writeLegacyRuntimeContext(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await writeBaseline(fixture, "TARGET_REUSE");
+    await writeLegacyVisualAcceptance(fixture);
+    const relative = "matrices/visual-acceptance.json";
+    const matrix = JSON.parse(await readFile(path.join(fixture.artifactRoot, relative), "utf8"));
+    matrix.rows = [];
+    matrix.unbacked = [{ uiBehaviorId: "B-1", state: "DEFAULT", reason: "No complete capture" }];
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    const first = (await artifactOperatorDecisions(fixture.options)).decisions.find((row) => row.candidate.kind === "VISUAL_UNBACKED")?.candidate;
+    assert.equal(first.requiredPrincipal, "HUMAN_ATTESTED");
+    assert.deepEqual(first.boundTo.artifactHashes, (await stateOf(fixture)).artifactHashes);
+    assert.match(first.policyDigest, /^sha256:[a-f0-9]{64}$/);
+    const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+      "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot];
+    const pending = await runRecordDecisionCli([...args, "--pending"], { stdout: { write: () => {} } });
+    const [visual] = pending.candidates;
+    assert.equal(visual.kind, "VISUAL_UNBACKED");
+    assert.equal(visual.review.candidateDigest, candidateDigestOf(first));
+    assert.equal(visual.review.evidence.visualMatrixDigest, first.boundTo.visualMatrixDigest);
+    assert.equal(visual.blocked.state, "SIGNER_UNAVAILABLE");
+    matrix.unbacked[0].reason = "Capture unavailable for this state";
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    const next = (await artifactOperatorDecisions(fixture.options)).decisions.find((row) => row.candidate.kind === "VISUAL_UNBACKED")?.candidate;
+    assert.notEqual(candidateDigestOf(first), candidateDigestOf(next));
+    matrix.unbacked[0].decisionId = "DEC-forged";
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    await assert.rejects(artifactOperatorDecisions(fixture.options), /decisionId|unexpected/i);
+    delete matrix.unbacked[0].decisionId;
+    matrix.unbacked.push({ ...matrix.unbacked[0] });
+    await writeJson(fixture.artifactRoot, relative, matrix);
+    await assert.rejects(artifactOperatorDecisions(fixture.options), /repeats/i);
   } finally {
     await fixture.cleanup();
   }

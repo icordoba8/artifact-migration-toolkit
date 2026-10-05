@@ -314,11 +314,12 @@ export const reviewFor = (candidate) => ({
   })) ?? [],
 });
 
+// Single-line by construction: authored text can never start a new review line.
 const inertText = (value) => String(value).replace(
-  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g,
+  /[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
   (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
 );
-const indentReview = (value) => inertText(value).split("\n").map((line) => `    ${line}`).join("\n");
+const indentReview = (value) => String(value).split("\n").map((line) => `    ${inertText(line)}`).join("\n");
 const renderEvidence = (value, indent = "  ") =>
   Object.entries(value ?? {}).map(([name, field]) =>
     field && typeof field === "object"
@@ -924,10 +925,11 @@ const withOperatorApproval = async ({
     return withModuleLock(targetRoot, lockName, async () => {
       const locked = await recompute();
       assertRecordToolkitIdentity(locked.state, locked.recordName, "Recording an operator decision", locked.recordKind);
-      assertNoPendingFormatUpgrade(locked.state, locked.recordName, "Recording an operator decision");
-      const current = locked.candidates.find((candidate) => candidate.id === selected.id);
-      if (!current || !current.approvable || JSON.stringify(current) !== JSON.stringify(selected) ||
-          current.requiredPrincipal !== "AGENT_RELAYED") {
+      if (locked.recordKind !== "artifact") {
+        assertNoPendingFormatUpgrade(locked.state, locked.recordName, "Recording an operator decision");
+      }
+      const current = assertReviewedCandidateCurrent(selected, locked.candidates);
+      if (current.requiredPrincipal !== "AGENT_RELAYED") {
         throw new Error(`Candidate '${selected.id}' changed while its review was open. Nothing was written.`);
       }
       return onApproved(current, locked);
@@ -1194,6 +1196,14 @@ const appendNewFormatGroupDecision = async ({ group, locked, ask, stdout }) => {
   return { decisions: [decision], group: group.id };
 };
 
+export const assertReviewedCandidateCurrent = (selected, candidates) => {
+  const current = candidates.find((candidate) => candidate.id === selected.id);
+  if (!current || !current.approvable || JSON.stringify(current) !== JSON.stringify(selected)) {
+    throw new Error(`Candidate '${selected.id}' changed while its review was open. Nothing was written.`);
+  }
+  return current;
+};
+
 const approveDecisionGroup = async ({ group, ...gate }) =>
   withOperatorApproval({
     ...gate,
@@ -1316,6 +1326,10 @@ const deriveArtifactDecisions = async (artifact) => {
         ...row.candidate,
         approvable: blockers.length === 0,
         blockers,
+        ...(context.state.formatVersion === 14 ? {
+          review: reviewFor(row.candidate),
+          blocked: blockedFor(row.candidate),
+        } : {}),
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));
