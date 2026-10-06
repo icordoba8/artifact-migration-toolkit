@@ -104,20 +104,118 @@ pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit \
   --skill migrate-artifact
 ```
 
-On first use, the installed skill's small `scripts/runtime.mjs` preflight
-resolves the latest stable immutable GitHub Release, verifies its asset digest,
-tag commit, manifest, `SHA256SUMS`, files and toolkit identity, then delegates
-installation and MCP registration to the release's provider adapter. The exact
-release is retained outside the consumer repository. Later invocations validate
-and reuse that receipt without network access. `skills add` remains the sole
-owner of skill discovery and installation.
+### What selects the runtime
 
-For an exact admin/CI selection, invoke the installed preflight with
-`--version X.Y.Z` or set `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z`. The explicit
-provider installer documented below remains available for local bundles,
-updates and rollback; it is not the normal skill-install UX.
+**The installed skill's exact identity decides which toolkit release runs.**
+Each installed skill carries a `release-identity.json` stating
+`{name, version, skill, computedHash, source}` — plus `commit` and
+`contentHash` when the skill itself came out of a release artifact. `version`
+selects a candidate release; `computedHash` is the canonical digest of the
+skill's own semantics (`SKILL.md`, `references/**`, `scripts/runtime.mjs`) and
+is what *proves* the candidate carries them.
+
+A release is acceptable only when all of these hold:
+
+1. its manifest names `artifact-migration-tools`;
+2. its `toolkit.version` equals the skill's `version`;
+3. its `skills.skills[<skill>].computedHash` equals the skill's `computedHash`;
+4. for `source: "release"`, its `toolkit.commit` and `toolkit.contentHash`
+   equal the skill's.
+
+**Matching SemVer is never sufficient on its own.** Installing a skill from a
+repository checkout copies whatever is on that branch under an
+already-published version string, so version equality proves nothing about
+bytes. Rule 3 is mandatory in every case, and the only way to select a release
+without it is an explicit `--version`, which is reported as
+`skillIdentity: "unverified"`.
+
+Because `skills add` is the sole owner of skill installation, that one action
+also governs the engine, the MCP registration and every absolute runtime path —
+verifiably, and with no second command to remember.
+
+### Local first, offline first
+
+The preflight consults four **local** sources before any network call, each
+verified against its pinned `release-manifest.json` and then filtered by the
+predicate above: the current receipt, the releases the receipt still retains for
+rollback, sibling provider receipts in the same consumer, and the release store.
+The predicate is fully checkable offline, so a mismatch never needs the network
+to be *detected* — only to be fixed.
+
+- A receipt that satisfies the installed skill is reused with **zero** network
+  requests (`bootstrapped: false`, `network: false`). This is the steady state.
+- A different required identity that exists in any local source converges
+  **offline** (`network: false`).
+- Only when the exact required release exists nowhere locally is the network
+  used, and then only as the exact tag `v<version>`. The preflight never
+  resolves `releases/latest`, and never installs a release other than the one
+  the installed skill requires.
+
+Resolution verifies the asset digest, the tag's single commit, the release
+manifest, `SHA256SUMS`, every file and the toolkit identity before anything is
+installed, and the exact release is retained outside the consumer repository.
+
+### When the preflight refuses
+
+Every refusal is typed, names both sides, and leaves the receipt, the release
+store, the provider configuration and the MCP registration byte-identical. The
+code is printed on stderr as JSON alongside the message.
+
+| Code | Meaning |
+| --- | --- |
+| `SKILL_IDENTITY_MISSING` | The skill carries no usable `release-identity.json`, so no release can be proven to contain its semantics. |
+| `SKILL_IDENTITY_LEGACY` | The stamp predates exact identity binding and states no `computedHash`. |
+| `SKILL_IDENTITY_UNRELEASED` | The release at the required version proves a different digest for this skill — the skill's bytes were never published under that version. |
+| `RELEASE_NOT_PUBLISHED` | No immutable release carries the required version. Never falls back to `latest` or to a previous version. |
+| `RUNTIME_UPDATE_REQUIRED_OFFLINE` | The installed runtime does not satisfy the installed skill, the exact target is not available locally, and the network is unreachable. |
+| `SKILL_SET_INCOHERENT` | Two installed skills require different releases of one provider's runtime. Refused rather than rewriting the runtime on alternating invocations. |
+
+Every one of these is cleared by a first-class command, never by editing or
+deleting a file: `skills add` for each skill, one connected run, or an explicit
+`--version`. **Receipts under `.artifact-migration-tools/` are never meant to be
+hand-edited or deleted**, and a hand-edited one is rejected rather than trusted.
+An interrupted installation also recovers on its own: the install lock records
+its owner, and a lock whose owner is provably dead on the same host is reclaimed
+once and the installation re-verified from scratch. Anything ambiguous — a live
+owner, another host, unreadable contents — still fails closed.
+
+`.artifact-migration-tools/<provider>.json` records exactly this and nothing
+else: installed-runtime state, the runtime-side skill identity, provider/MCP
+ownership, rollback history, an optional rollback pin, and the skill
+requirements already satisfied.
+
+### Explicit selection and rollback
+
+`--version X.Y.Z` on the installed preflight, and
+`ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z`, are **one-invocation** admin/CI/
+development overrides. They select that exact immutable release, deliberately
+bypass the identity proof, report `selection: "explicit"` with
+`skillIdentity: "unverified"`, and **persist nothing** — the next ordinary
+invocation converges back to what the installed skill requires. A CI job that
+wants a fixed version passes it on every run.
+
+The explicit provider installer documented below remains available for local
+bundles, updates and rollback; it is not the normal skill-install UX. Its
+`rollback` is the **only** action that persists intent: it records
+`pinned {version, by: "rollback", at, againstSkill}`, holds across ordinary
+invocations while reporting `selection: "pinned"` every time, and is superseded
+automatically when `skills add` changes an installed skill's `computedHash`.
+That is also how a pin is cleared — there is no JSON to edit.
+
+Nothing here depends on Docker, a virtual machine, a privileged service, an
+external signer, a hardware authenticator or always-on network access. A
+verified local runtime that satisfies its skill works offline indefinitely.
 
 ### Development checkout
+
+A bare repository checkout has no installed skill stamp beside
+`scripts/runtime-bootstrap.mjs`, so `ensure` with no arguments fails closed with
+`SKILL_IDENTITY_MISSING` rather than resolving an arbitrary release. The two
+supported paths are `--version X.Y.Z`, or the local-bundle installer
+`node providers/<provider>/install.mjs install --bundle <path>`. The same
+applies while editing a skill: until those bytes are published, the preflight
+refuses to pair them with an older release (`SKILL_IDENTITY_UNRELEASED`), and
+`--version` is the documented way through.
 
 Requires Node >= 22 and pnpm 11.21.0.
 

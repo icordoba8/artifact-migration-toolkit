@@ -257,11 +257,29 @@ export const releaseCheck = async (root = repositoryRoot) => {
   // derived from it, so the two could never be reconciled after the fact.
   // Byte equality against a freshly generated stamp is the whole check: it
   // catches a stale version, a hand-edit and a leftover placeholder alike.
+  // The staged stamp is `{...committed, source, commit, contentHash}` and the
+  // manifest's `skills` document is `skills-lock.json` verbatim, so comparing
+  // the committed stamp against the lock here is the same assertion the bundle
+  // would carry -- a release can never ship a stamp and a manifest that
+  // disagree about the same skill's digest, which is the binding selection
+  // relies on.
+  const lock = await readJson(path.join(root, "skills-lock.json")).catch(() => null);
   for (const name of await canonicalSkillNames(root)) {
     const committed = await readFile(identityPath(root, name), "utf8").catch(() => null);
     if (committed !== (await identityDocument(root, name))) {
       blockers.push(
         `skills/${name}/${IDENTITY_BASENAME} does not match version ${versions.root}. Run 'pnpm skills:lock' and 'pnpm providers:sync'.`,
+      );
+    }
+    // Parsed defensively: this function collects every blocker rather than
+    // throwing one, so an unreadable stamp has to report as a mismatch like any
+    // other, not escape the gate.
+    let stamped = null;
+    try { stamped = JSON.parse(committed).computedHash ?? null; } catch { stamped = null; }
+    const locked = lock?.skills?.[name]?.computedHash;
+    if (stamped !== locked) {
+      blockers.push(
+        `skills/${name}/${IDENTITY_BASENAME} computedHash ${stamped} does not match skills-lock.json ${locked}. Run 'pnpm skills:lock' and 'pnpm providers:sync'.`,
       );
     }
   }

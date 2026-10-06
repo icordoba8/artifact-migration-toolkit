@@ -20,12 +20,28 @@ node <skill-directory>/scripts/runtime.mjs ensure --provider <claude|codex|openc
 ```
 
 Use the provider running this invocation. This preflight is the only normal
-runtime installer: it reuses a valid pinned receipt without network access, it
+runtime installer, and **this skill's own exact identity is what selects the
+runtime**: the `release-identity.json` beside this file states the toolkit
+version it needs *and* the canonical digest of its own semantics, and only a
+release whose manifest proves that digest may run it. Matching version numbers
+alone are never enough.
+
+It consults four local sources before any network call — the current receipt,
+the releases that receipt retains, sibling provider receipts in this consumer,
+and the release store — each verified against its pinned release manifest. A
+receipt that satisfies this skill is reused with zero network requests, and it
 reuses a verified runtime another provider already installed in this same
-consumer without network access, or it installs the latest stable immutable
-GitHub Release into the user release store. Then it registers MCP and runs both
-doctors. Switching providers never redownloads a runtime this consumer already
-has.
+consumer without network access; a different required identity found locally
+converges offline; only an exact release that exists nowhere locally is fetched,
+and then only as the exact tag `v<version>`. The preflight never resolves `releases/latest` and never installs
+a release other than the one this skill requires. Then it registers MCP and runs
+both doctors. Switching providers never redownloads a runtime this consumer
+already has, and never adopts a sibling whose skill identity differs.
+
+The JSON result names which rule fired: `selection` is `skill` (normal),
+`pinned` (an explicit rollback is in force) or `explicit` (a one-invocation
+`--version`); `skillIdentity` is `required`, `pinned` or `unverified`; and
+`network` says whether anything was fetched.
 
 It also re-validates the MCP registration it owns on every run. A registration
 that is absent — a consumer tool regenerated the provider configuration, for
@@ -43,10 +59,41 @@ commands as the fallback for the rest of this invocation when it is not —
 must stop. Stop on preflight failure; never fall back to a checkout, branch,
 `latest` URL, package-manager install, or ambient `PATH`.
 
+When the preflight returns `bootstrapped: true` because the required identity
+changed, run `artifact-migration-toolkit status` before resuming an existing
+migration, so a record still stamped with the previous toolkit identity surfaces
+as a decision rather than mid-checkpoint. The preflight itself never reads or
+writes any record's `toolkitIdentity`.
+
+### Preflight refusals
+
+Every refusal is typed, names both sides, and leaves the receipt, the release
+store, the provider configuration and the MCP registration unchanged. Report the
+code and its remedy; do not work around it.
+
+| Code | Remedy to report |
+| --- | --- |
+| `SKILL_IDENTITY_MISSING` | This skill carries no usable `release-identity.json`. Reinstall it with `skills add`. |
+| `SKILL_IDENTITY_LEGACY` | The stamp predates exact identity binding. Reinstall it with `skills add`. |
+| `SKILL_IDENTITY_UNRELEASED` | This skill's bytes were never published under the version it names. Install it from a published release with `skills add`. |
+| `RELEASE_NOT_PUBLISHED` | No immutable release carries the required version. Install a published release with `skills add`. |
+| `RUNTIME_UPDATE_REQUIRED_OFFLINE` | The required release is not available locally. One connected run clears it. |
+| `SKILL_SET_INCOHERENT` | Two installed skills require different releases. Run `skills add` for both so they match. |
+
+Never suggest editing or deleting `.artifact-migration-tools/<provider>.json`,
+any provider MCP configuration, or the install lock. None of them is a repair
+step, and a hand-edited receipt is rejected rather than trusted. An interrupted
+installation recovers on its own when its owner process is provably gone.
+
 `--version X.Y.Z` and `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z` are explicit
-admin/CI overrides. They select another immutable release but never update a
-migration record's `toolkitIdentity`; use the engine's explicit toolkit
-update/rollback operation separately when intended.
+admin/CI overrides for **one invocation only**. They select another immutable
+release, bypass the identity proof (reported as `skillIdentity: "unverified"`),
+persist nothing, and the next ordinary invocation converges back. Only an
+explicit `rollback` through the provider installer persists a pin, which is
+reported as `selection: "pinned"` on every invocation and is superseded when
+`skills add` changes this skill's digest. Neither ever updates a migration
+record's `toolkitIdentity`; use the engine's explicit toolkit update/rollback
+operation separately when intended.
 
 ## Runtime requirements
 

@@ -81,6 +81,34 @@ One installation is authoritative per consumer, and its CLI and its MCP server
 must resolve to the same toolkit. User and project scope may coexist on a
 machine; one consumer's configuration selects exactly one.
 
+## Provider convergence
+
+All four providers run the identical runtime preflight and differ only in their
+install layout and their MCP server shape. So all four derive the **same**
+required identity from the installed skill, and all four converge on one
+release. No provider-specific selection logic exists.
+
+Candidate runtimes a sibling provider already installed in the same consumer are
+filtered by the full acceptance predicate — version *and* the skill's canonical
+digest, plus commit and content hash for a released-source skill — never by
+version alone.
+
+| Sibling state | Behavior |
+| --- | --- |
+| Satisfies the required identity | Reused offline; reported as `reusedFrom: <provider>` |
+| On another release, whether siblings agree with each other or not | **Not candidates. Ignored, never an error.** The requirement is met from retained releases, the store, or the network |
+| Same version, different skill digest | Not a candidate. Version equality is not identity |
+| On a newer release than required | Not a candidate. The installed skill is the authority; a provider being ahead does not drag another forward |
+| Retains the required release for rollback | A valid candidate, verified identically |
+| Carries a rollback pin | Irrelevant. A pin is per-receipt intent and is never inherited across providers |
+| Two candidates satisfying the same requirement with different immutable identities | **Fails closed.** Only reachable under tampering or a release-discipline breach |
+
+A successful update converges the receipt, the installed commands, the
+provider-owned MCP registration, every absolute engine path and every owned file
+under one install lock per consumer root — all of it, or none of it. No
+provider-owned path referring to the previous release survives, and unrelated
+MCP servers and unrelated provider settings are preserved rather than rewritten.
+
 ## MCP registration policy
 
 Every provider MCP template registers one `start-migration` server that launches

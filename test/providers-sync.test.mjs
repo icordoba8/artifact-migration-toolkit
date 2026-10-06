@@ -1070,6 +1070,88 @@ test("skills-lock.json matches the canonical skill bytes, and the hash tracks bo
   assert.notEqual(await computeSkillHash(root, "start-migration"), afterEdit);
 });
 
+/**
+ * T16. The digest is the stamp's own release binding, so the stamp cannot be an
+ * input to it -- and what remains covered is exactly skill semantics. Both
+ * halves matter: excluding too much would let real drift through, and excluding
+ * nothing at all is the cycle that kept the digest out of the stamp until now.
+ */
+test("computeSkillHash covers skill semantics and excludes the identity stamp it feeds", async () => {
+  const root = await createFixture();
+  await writeText(root, "package.json", `${JSON.stringify({ name: "artifact-migration-tools", version: "9.9.9" }, null, 2)}\n`);
+
+  const before = await computeSkillHash(root, "start-migration");
+  const stamp = await identityDocument(root, "start-migration");
+  assert.equal(JSON.parse(stamp).computedHash, before, "the stamp must carry the digest of the skill it stamps");
+
+  // Writing the stamp -- the whole file, with the digest inside it -- does not
+  // move the digest. Without this, the field could not exist at all.
+  await writeFile(identityPath(root, "start-migration"), stamp);
+  assert.equal(await computeSkillHash(root, "start-migration"), before);
+
+  // And a version bump rewrites the stamp without touching skill semantics.
+  await writeText(root, "package.json", `${JSON.stringify({ name: "artifact-migration-tools", version: "9.9.10" }, null, 2)}\n`);
+  const bumped = await identityDocument(root, "start-migration");
+  await writeFile(identityPath(root, "start-migration"), bumped);
+  assert.notEqual(bumped, stamp);
+  assert.equal(await computeSkillHash(root, "start-migration"), before);
+  assert.equal(JSON.parse(bumped).computedHash, before);
+
+  // Every other canonical file still moves it: protocol semantics, references
+  // and the shared bootstrap alike.
+  for (const [relative, content] of [
+    ["skills/start-migration/SKILL.md", `${await readText(root, "skills/start-migration/SKILL.md")}\nDrift.\n`],
+    ["skills/start-migration/references/contract.md", "Different contract.\n"],
+    ["skills/start-migration/scripts/runtime.mjs", "export const drifted = true;\n"],
+  ]) {
+    const previous = await computeSkillHash(root, "start-migration");
+    await writeText(root, relative, content);
+    assert.notEqual(await computeSkillHash(root, "start-migration"), previous, `${relative} is outside the digest`);
+  }
+
+  // Order-independent: the lock and the stamps agree however they are written.
+  const { writeSkillsLock, lockPath } = await import("../scripts/skills-lock.mjs");
+  const first = await writeSkillsLock(root);
+  const stamps = await Promise.all((await canonicalSkillNames(root)).map((name) => readText(root, `skills/${name}/${IDENTITY_BASENAME}`)));
+  const second = await writeSkillsLock(root);
+  assert.deepEqual(second, first);
+  assert.deepEqual(
+    await Promise.all((await canonicalSkillNames(root)).map((name) => readText(root, `skills/${name}/${IDENTITY_BASENAME}`))),
+    stamps,
+  );
+  const locked = JSON.parse(await readFile(lockPath(root), "utf8"));
+  for (const name of await canonicalSkillNames(root)) {
+    assert.equal(locked.skills[name].computedHash, JSON.parse(await readText(root, `skills/${name}/${IDENTITY_BASENAME}`)).computedHash);
+  }
+});
+
+/**
+ * The release gate for the same binding: a stamp and a manifest that disagree
+ * about one skill's digest can never ship, because selection reads the stamp
+ * and proves it against the manifest.
+ */
+test("a staged stamp whose computedHash disagrees with skills-lock.json blocks the release", async () => {
+  const live = await releaseCheck(repositoryRoot);
+  assert.deepEqual(live.blockers.filter((blocker) => /computedHash/.test(blocker)), []);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "stamp-manifest-"));
+  fixtureRoots.add(root);
+  for (const relative of await payloadPaths(repositoryRoot)) {
+    const destination = path.join(root, relative);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await cp(path.join(repositoryRoot, relative), destination);
+  }
+  const lock = JSON.parse(await readText(root, "skills-lock.json"));
+  lock.skills["start-migration"].computedHash = "0".repeat(64);
+  await writeText(root, "skills-lock.json", `${JSON.stringify(lock, null, 2)}\n`);
+
+  const drifted = await releaseCheck(root);
+  const blockers = drifted.blockers.filter((blocker) => /computedHash/.test(blocker));
+  assert.equal(blockers.length, 1, drifted.blockers.join("; "));
+  assert.match(blockers[0], /skills\/start-migration/);
+  assert.match(blockers[0], /skills-lock\.json/);
+});
+
 test("a standard tree install carries the real toolkit version, with no placeholder to resolve", async () => {
   const manifest = JSON.parse(await readText(repositoryRoot, "package.json"));
 
@@ -1090,8 +1172,14 @@ test("a standard tree install carries the real toolkit version, with no placehol
       name: manifest.name,
       version: manifest.version,
       skill,
+      // The release binding. `version` selects a candidate release; this proves
+      // the candidate carries the semantics actually installed, which version
+      // equality alone cannot -- `skills add <repo>` installs current `main`
+      // under an already-published version string.
+      computedHash: await computeSkillHash(repositoryRoot, skill),
       source: "repository",
     });
+    assert.match(identity.computedHash, /^[a-f0-9]{64}$/);
     assert.match(identity.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
     assert.ok(
       !canonical.toString("utf8").includes("{{"),

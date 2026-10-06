@@ -41,11 +41,19 @@ export const identityPath = (root, skillName) =>
  * read from the root manifest rather than restated here, a second copy of it
  * being exactly the drift this file exists to remove.
  *
+ * `version` *selects* a candidate release; `computedHash` *proves* that the
+ * release carries the skill semantics actually installed. Version equality alone
+ * never establishes compatibility: `skills add <repo>` installs current `main`
+ * under an already-published version string, so the digest is the only field
+ * that distinguishes those bytes from the published ones. It is the release
+ * binding, and it is acyclic because `computeSkillHash` excludes this file.
+ *
  * Commit and content hash are *absent*, not placeheld, and have to be: the commit
  * containing this file, and the hash this file feeds, are both unknowable while
  * writing it. `scripts/release.mjs` adds them to the staged copy only, which is
  * what keeps the release content hash acyclic. `source` is what lets an operator
- * tell the two apart in an installed tree without running the engine.
+ * tell the two apart in an installed tree without running the engine, and what
+ * says whether commit/contentHash are also part of the binding.
  */
 export const identityDocument = async (root, skillName) => {
   const manifest = JSON.parse(
@@ -56,6 +64,7 @@ export const identityDocument = async (root, skillName) => {
       name: manifest.name,
       version: manifest.version,
       skill: skillName,
+      computedHash: await computeSkillHash(root, skillName),
       source: "repository",
     },
     null,
@@ -89,11 +98,21 @@ export const canonicalSkillNames = async (root = repositoryRoot) =>
  * Path and bytes both feed the digest: renaming a file has to change the hash as
  * surely as editing one does, or a downstream target comparing one string would
  * miss a moved reference.
+ *
+ * `release-identity.json` is the one exclusion, and it is what makes the digest
+ * usable as the stamp's own release binding: the stamp carries the hash, so the
+ * hash cannot cover the stamp. What remains is exactly skill semantics --
+ * `SKILL.md`, `references/**`, `scripts/runtime.mjs` -- which is this file's
+ * stated subject anyway. The deliberate consequence is that a release touching
+ * only the engine leaves the digest stable, and that is correct: the skill
+ * semantics really are identical, and the version in the stamp still forces the
+ * engine to be the one the skill names.
  */
 export const computeSkillHash = async (root, skillName) => {
   const skillRoot = path.join(root, "skills", skillName);
   const digest = createHash("sha256");
   for (const relative of (await walk(skillRoot)).sort()) {
+    if (relative === IDENTITY_BASENAME) continue;
     digest.update(relative);
     digest.update("\0");
     digest.update(await readFile(path.join(skillRoot, relative)));
@@ -116,8 +135,10 @@ export const skillLockEntries = async (root = repositoryRoot) =>
   );
 
 export const writeSkillsLock = async (root = repositoryRoot) => {
-  // Stamped before the hashes are taken, so the lock covers the identity it just
-  // wrote rather than the previous version's.
+  // Order-independent: the stamp is not an input to its own digest, so writing
+  // it before or after the lock produces the same two numbers. Both are read
+  // from the same `computeSkillHash`, so the lock and every stamp agree by
+  // construction rather than by sequencing.
   for (const name of await canonicalSkillNames(root)) {
     await writeFile(identityPath(root, name), await identityDocument(root, name));
   }

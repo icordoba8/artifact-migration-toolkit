@@ -1,6 +1,7 @@
 // Shared adapter file/config operations only. Migration rules live in the engine.
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -221,8 +222,23 @@ function ownedPath(relative, provider, layout) {
 async function validateSelection(receipt, provider, layout) {
   const expectedRelease = path.join(receipt.store, `${receipt.toolkit?.version}-${receipt.pin?.slice(7)}`);
   if (receipt.release !== expectedRelease) throw new Error('Installation release path conflict');
-  const manifest = await verifyBundle(receipt.release, receipt.pin);
+  // A pinned store release that is simply *gone* -- pruned, a cleaned cache, a
+  // restored consumer on a new machine -- is an absent local candidate, not a
+  // tampered one. Nothing the receipt claims about itself is contradicted (the
+  // path still proves version+pin above), so the exact required release can be
+  // reinstalled deterministically instead of the receipt being unusable. Only
+  // ENOENT: a checksum, identity or ownership failure still fails closed, so an
+  // integrity failure is never downgraded to a cache miss.
+  const manifest = await verifyBundle(receipt.release, receipt.pin)
+    .catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (manifest === null) return;
   if (!same(manifest.toolkit, receipt.toolkit)) throw new Error('Installation identity conflict');
+  // The receipt's copy of the release's skill digests is a convenience for
+  // offline selection, never a second authority: the pinned manifest is the
+  // release-pinned artifact, so a hand-edited receipt cannot fake the binding
+  // in either direction. Absent is tolerated -- receipts predating the field
+  // are proven from the manifest alone -- but present and disagreeing is not.
+  if (receipt.skills !== undefined && !same(receipt.skills, manifest.skills)) throw new Error('Installation skill identity conflict');
   const pkg = JSON.parse(await readFile(path.join(receipt.release, 'packages/migration-engine/package.json')));
   const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(receipt.release, 'packages/migration-engine', entry)]]));
   if (!same(receipt.commands, commands)) throw new Error('Installation CLI selection conflict');
@@ -240,7 +256,7 @@ async function validateSelection(receipt, provider, layout) {
   if (!same(Object.keys(receipt.files).sort(), expectedFiles.sort())) throw new Error('Invalid ownership manifest');
 }
 
-async function applyAdapter(provider, { action = 'install', scope, root, store, bundle, pin, runtimeOnly = false } = {}) {
+async function applyAdapter(provider, { action = 'install', scope, root, store, bundle, pin, runtimeOnly = false, pinned, requiredBy } = {}) {
   const layout = layouts[provider]?.[scope];
   if (!layout || !root || !store) throw new Error('Supported scope, explicit root and external store are required');
   root = path.resolve(root); store = path.resolve(store);
@@ -320,7 +336,29 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
       writes.set(destination, Buffer.from(text));
     }
     if (provider === 'claude' && mode !== 'runtime') writes.set('.claude-plugin/plugin.json', Buffer.from(json({ name: 'artifact-migration-tools', version: manifest.toolkit.version, description: 'Pinned migration skills and MCP engine' })));
+    // Rollback is the one action that *creates* intent: it is an explicit,
+    // out-of-band operator decision about the skill set in place at the time,
+    // and it would be meaningless if the next ordinary invocation undid it. The
+    // skill identities it was taken against are recorded with it, so a later
+    // `skills add` -- a newer deliberate action -- supersedes it without an
+    // operator ever editing or deleting a receipt. Every other action only
+    // *carries* a pin the caller already decided to keep.
+    //
+    // `againstSkill` is the whole recorded requirement set, not one pair: both
+    // skills share one receipt, so a pin that named only one of them would be
+    // superseded by the other skill's very next invocation and the runtime
+    // would alternate -- the exact outcome `requiredBy` exists to prevent.
+    const intent = action === 'rollback'
+      ? { version: manifest.toolkit.version, by: 'rollback', at: new Date().toISOString(), againstSkill: previous.requiredBy ?? null }
+      : pinned;
     receipt = { provider, scope, mode, root, store, toolkit: manifest.toolkit, skills: manifest.skills, release, pin, commands, mcp: server, files: Object.fromEntries([...writes].map(([name, bytes]) => [name, digest(bytes)])), releases: [...(previous?.releases ?? []).filter(item => item.release !== release), { release, pin }] };
+    // Both are selection *intent*, recorded so that two installed skills cannot
+    // silently flip the active runtime back and forth between invocations, and
+    // so a rollback survives one. Omitted rather than written null when absent,
+    // so a receipt that was never pinned stays byte-identical in shape to one
+    // written before the fields existed.
+    if (intent) receipt.pinned = intent;
+    if (requiredBy ?? previous?.requiredBy) receipt.requiredBy = requiredBy ?? previous.requiredBy;
     // Check ownership/config before staging any release or changing a consumer.
   }
   const merged = mergeConfig(rawConfig, layout, previous?.configOwned, server, historical);
@@ -362,20 +400,58 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   return receipt ?? { provider, removed: true };
 }
 
+const LOCKED = 'Installation locked; inspect interrupted installation before retrying';
+
+/**
+ * Is the recorded lock owner provably dead on this host?
+ *
+ * Only `ESRCH` -- no such process -- proves it. `EPERM` means the pid exists
+ * and belongs to someone else, an unparseable file means nothing is known, and
+ * a different hostname means the pid number says nothing about that machine's
+ * process table. Every one of those is ambiguous, and ambiguity fails closed:
+ * reclaiming a live installer's lock would run two config writers at once.
+ */
+const lockOwnerDead = async (lock) => {
+  let owner;
+  try { owner = JSON.parse(await readFile(lock, 'utf8')); } catch { return false; }
+  if (!owner || typeof owner !== 'object' || owner.hostname !== os.hostname() || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  try { process.kill(owner.pid, 0); return false; }
+  catch (error) { return error.code === 'ESRCH'; }
+};
+
 // Doctor repairs a missing registration, so it is a config writer too and takes
 // the same single lock per host root instead of racing an install.
 export async function adapter(provider, options = {}) {
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
   const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
   await mkdir(path.dirname(lock), { recursive: true });
-  // One config writer per host root. A killed installer leaves the lock behind
-  // and fails closed; do not guess whether a partially applied install is safe.
-  const handle = await open(lock, 'wx').catch(error => {
-    if (error.code === 'EEXIST') throw new Error('Installation locked; inspect interrupted installation before retrying');
-    throw error;
-  });
-  try { return await applyAdapter(provider, options); }
-  finally { await handle.close(); await rm(lock); }
+  // One config writer per host root, still the same `wx` open, so mutual
+  // exclusion is unchanged. The file now says who holds it, which is what turns
+  // a killed installer from "delete this by hand, forever" into one reclaim --
+  // and reclaiming assumes nothing about consistency: `applyAdapter`'s first act
+  // on an existing receipt is `validateSelection` + `verifyBundle` + per-file
+  // digest checks, so a half-applied install is re-proven, not trusted.
+  const claim = () => open(lock, 'wx').then(
+    handle => handle.writeFile(json({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString(), action: options.action ?? 'install', provider })).then(() => handle),
+    error => { if (error.code === 'EEXIST') return null; throw error; },
+  );
+  let handle = await claim();
+  let recoveredLock = false;
+  if (!handle && await lockOwnerDead(lock)) {
+    // One `rm` then one `wx` open: a second installer that also saw the dead pid
+    // loses the race with EEXIST and fails closed with the existing message.
+    await rm(lock, { force: true });
+    handle = await claim();
+    recoveredLock = handle !== null;
+  }
+  if (!handle) throw new Error(LOCKED);
+  try {
+    const result = await applyAdapter(provider, options);
+    // Reported, not persisted: the receipt records what is installed, and a
+    // reclaimed lock is a fact about this invocation.
+    return recoveredLock ? { ...result, recoveredLock } : result;
+  }
+  finally { await handle.close(); await rm(lock, { force: true }); }
 }
 
 export async function main(provider) {

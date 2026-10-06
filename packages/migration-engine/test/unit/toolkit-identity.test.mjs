@@ -257,6 +257,7 @@ test("release identity is derived from the payload and is checksum-verifiable", 
   // staged copy is derived from the committed one -- so the two cannot name
   // different releases. Every provider projection is the same bytes: which
   // provider installed a skill cannot change what it says it is.
+  const lock = JSON.parse(await readFile(path.join(root, "skills-lock.json"), "utf8"));
   for (const skill of ["start-migration", "migrate-artifact"]) {
     const committedText = await readFile(
       path.join(root, `skills/${skill}/release-identity.json`),
@@ -268,10 +269,16 @@ test("release identity is derived from the payload and is checksum-verifiable", 
       `${skill} must not carry the hash or commit it contributes to`,
     );
     const committed = JSON.parse(committedText);
+    // `computedHash` is acyclic by the same omission rule: it is the digest of
+    // the skill tree *excluding this file*, which is what lets the stamp carry
+    // the one number that proves which release contains these exact semantics.
+    // Version equality alone cannot, because a repository install copies
+    // whatever is on the branch under an already-published version string.
     assert.deepEqual(committed, {
       name: "artifact-migration-tools",
       version: check.version,
       skill,
+      computedHash: lock.skills[skill].computedHash,
       source: "repository",
     });
 
@@ -280,10 +287,15 @@ test("release identity is derived from the payload and is checksum-verifiable", 
       name: committed.name,
       version: committed.version,
       skill: committed.skill,
+      computedHash: committed.computedHash,
       source: "release",
       commit: check.commit,
       contentHash: check.contentHash,
     });
+    // And the release it names must *prove* it: the bundle manifest's `skills`
+    // document is the release-pinned half of the binding selection checks.
+    const bundleManifest = JSON.parse(await readFile(path.join(bundle, "release-manifest.json"), "utf8"));
+    assert.equal(bundleManifest.skills.skills[skill].computedHash, committed.computedHash);
     for (const provider of ["claude", "codex", "opencode", "copilot"]) {
       const projected = await readFile(
         path.join(bundle, `providers/${provider}/skills/${skill}/release-identity.json`),

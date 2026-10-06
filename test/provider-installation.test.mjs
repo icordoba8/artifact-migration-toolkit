@@ -141,7 +141,13 @@ for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
           // operator can inspect what is installed without running the runtime --
           // and it says `release`, not `repository`, because this tree was packaged.
           if (relative.endsWith('/release-identity.json')) {
-            assert.deepEqual(JSON.parse(text), { name: receipt.toolkit.name, version: receipt.toolkit.version, skill: skill[1], source: 'release', commit: receipt.toolkit.commit, contentHash: receipt.toolkit.contentHash }, relative);
+            // T19. A released skill names the release it came from *and* proves
+            // which semantics it is: `computedHash` is what the release manifest
+            // must agree with before that release may run this skill, and
+            // commit/contentHash strengthen it to full byte identity because
+            // this tree was packaged rather than copied from a checkout.
+            assert.deepEqual(JSON.parse(text), { name: receipt.toolkit.name, version: receipt.toolkit.version, skill: skill[1], computedHash: canonicalSkills.skills[skill[1]].computedHash, source: 'release', commit: receipt.toolkit.commit, contentHash: receipt.toolkit.contentHash }, relative);
+            assert.equal(JSON.parse(text).computedHash, receipt.skills.skills[skill[1]].computedHash, `${relative} is not proven by the release it names`);
             surfaces.add(`identity:${skill[1]}`);
             continue;
           }
@@ -356,4 +362,31 @@ test('staged release ships the pinned signer runtime closure and no test credent
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)),
     { writes: false, protocol: 'amt.operator-decision.webauthn.assertion.v1', activation: false });
+});
+
+/**
+ * T19. The identity stamp is the one file that must survive provider projection
+ * unchanged: selection reads it to decide which release may run, so a
+ * projection that rewrote it per provider would make "which provider installed
+ * this skill" change what the skill says it is. `providers-sync` rewrites
+ * `SKILL.md` frontmatter and the adapter renders `{{ENGINE_MCP_ENTRY}}`; this
+ * file is neither a frontmatter carrier nor a template, and it has to stay that
+ * way.
+ */
+test('every provider projection of a released skill carries the identical identity stamp', async () => {
+  const b = await bundles();
+  const manifest = JSON.parse(await readFile(path.join(b.first, 'release-manifest.json'), 'utf8'));
+  for (const skill of ['start-migration', 'migrate-artifact']) {
+    const canonical = await readFile(path.join(b.first, `skills/${skill}/release-identity.json`));
+    const identity = JSON.parse(canonical.toString('utf8'));
+    assert.equal(identity.source, 'release');
+    assert.equal(identity.commit, manifest.toolkit.commit);
+    assert.equal(identity.contentHash, manifest.toolkit.contentHash);
+    assert.equal(identity.computedHash, manifest.skills.skills[skill].computedHash);
+    assert.equal(identity.computedHash, canonicalSkills.skills[skill].computedHash);
+    for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
+      const projected = await readFile(path.join(b.first, `providers/${provider}/skills/${skill}/release-identity.json`));
+      assert.ok(projected.equals(canonical), `${provider}/${skill} identity drifted from canonical`);
+    }
+  }
 });

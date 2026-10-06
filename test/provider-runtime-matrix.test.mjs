@@ -141,15 +141,41 @@ async function fixtures() {
   const base = await buildRelease({ root: await candidateReleaseRoot(scratch), force: true });
   const first = await packageRelease('release one', base.stagingRoot, base.identity.version, null);
   const second = await packageRelease('release two', base.stagingRoot, NEXT.version, NEXT);
-  built = { first, second };
+  built = { first, second, digests: base.manifest.skills.skills };
   return built;
 }
 
-async function packageRelease(name, stagingRoot, version, identity) {
+// --- the installed skill's exact identity -----------------------------------
+//
+// Selection reads a requirement from the skill beside the bootstrap, so every
+// scenario states one. Injected through the same `deps` object as
+// `resolve`/`download`; held in one place and set per scenario rather than
+// threaded through every call site. Both synthetic releases publish the same
+// canonical skills, so the version is what distinguishes which one satisfies.
+
+let requiredSkill = null;
+const skillRelease = async () => requiredSkill;
+
+/** Require `version`, proving the staged bundle's real canonical skill digest. */
+async function requiring(version, skill = 'start-migration') {
+  const { digests } = await fixtures();
+  requiredSkill = { name: 'artifact-migration-tools', version, skill, computedHash: digests[skill].computedHash, source: 'repository' };
+  return requiredSkill;
+}
+
+async function packageRelease(name, stagingRoot, version, identity, skillDigest = null) {
   const home = path.join(scratch, name);
   const bundle = path.join(home, `artifact-migration-tools-${version}`);
   await cp(stagingRoot, bundle, { recursive: true });
   const manifest = JSON.parse(await readFile(path.join(bundle, 'release-manifest.json'), 'utf8'));
+  if (skillDigest) {
+    // A release publishing *different* skill semantics. `release-manifest.json`
+    // is not one of its own `files` entries, so only the pin moves: every
+    // per-file checksum and SHA256SUMS line stays valid. That is what makes a
+    // second skill identity expressible without rebuilding the bundle.
+    for (const skill of Object.keys(manifest.skills.skills)) manifest.skills.skills[skill].computedHash = skillDigest;
+    await writeFile(path.join(bundle, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  }
   if (identity) {
     // Synthetic next-release fixture: the same compatible engine under a second
     // exact identity. Not a publishable release and not a claim about a commit.
@@ -186,16 +212,27 @@ async function packageRelease(name, stagingRoot, version, identity) {
 const OFFLINE = {
   resolve: async () => { throw new Error('network used: release resolution attempted'); },
   download: async () => { throw new Error('network used: asset download attempted'); },
+  skillRelease,
 };
 
-const sharedStore = () => path.join(scratch, 'shared release store');
+/**
+ * A store shared between the providers of ONE consumer, derived from its root.
+ *
+ * Deliberately not shared across tests any more: the release store is a
+ * first-class local selection source now, so a store carrying another test's
+ * release would serve an install offline and no test could still assert that
+ * the network path ran. Sibling reuse only ever needed the providers of a
+ * single consumer to agree on a store, which this still gives them.
+ */
+const sharedStore = root => `${root} store`;
 
 /** Install `provider` from the network, asserting exactly one release download. */
 async function install(provider, root, store, release, { version } = {}) {
   let requests = 0;
+  await requiring(release.version);
   const result = await ensureRuntime({ provider, root, store, version }, {
     resolve: async requested => {
-      assert.ok(requested === undefined || requested === release.version, `resolver asked for ${requested}`);
+      assert.equal(requested, release.version, `resolver asked for ${requested}`);
       return release.resolved;
     },
     download: async (resolved, destination) => {
@@ -203,6 +240,7 @@ async function install(provider, root, store, release, { version } = {}) {
       await cp(release.archive, destination);
       await verifyDownloadedAsset(destination, resolved.asset.digest);
     },
+    skillRelease,
   });
   assert.equal(requests, 1, `${provider}: expected exactly one release download`);
   return result;
@@ -405,7 +443,7 @@ for (const source of NAMES) {
     test(`C/${source} -> ${destination}: destination reuses the verified runtime with zero network access`, async () => {
       const { first } = await fixtures();
       const root = await seedConsumer(`reuse ${source} to ${destination}`);
-      const store = sharedStore();
+      const store = sharedStore(root);
 
       await install(source, root, store, first);
       const sourceReceipt = await readReceipt(root, source);
@@ -438,7 +476,7 @@ for (const source of NAMES) {
 test('D1: three agreeing siblings let a fourth provider install entirely offline', async () => {
   const { first } = await fixtures();
   const root = await seedConsumer('siblings agree');
-  const store = sharedStore();
+  const store = sharedStore(root);
   // One network install for the whole consumer; every later provider reuses it.
   await install('claude', root, store, first);
   for (const provider of ['codex', 'opencode', 'copilot']) {
@@ -451,11 +489,43 @@ test('D1: three agreeing siblings let a fourth provider install entirely offline
   for (const identity of identities) assert.deepEqual(identity, identities[0]);
 });
 
+/**
+ * The other half of D1: siblings that all agree with *each other* but do not
+ * satisfy the requirement. Agreement among siblings was never the question --
+ * whether they carry the identity the installed skill requires is. Four
+ * agreeing siblings on the wrong release are four non-candidates, so the
+ * requirement is met normally instead of adopted from them.
+ */
+test('D1b: siblings that agree with each other but do not satisfy the requirement are not candidates', async () => {
+  const { first, second } = await fixtures();
+  const root = await seedConsumer('siblings agree wrongly');
+  const store = sharedStore(root);
+  await install('claude', root, store, first);
+  for (const provider of ['codex', 'opencode']) {
+    assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).bootstrapped, true);
+  }
+  // All three agree on `first`. The skill now requires `second`, which no
+  // sibling has and the store does not hold.
+  await requiring(second.version);
+  const error = await ensureRuntime({ provider: 'copilot', root, store }, OFFLINE).then(() => null, e => e);
+  assert.doesNotMatch(error.message, /disagree/i, 'agreement among siblings is not the question');
+  assert.match(error.message, /network used/);
+  await assert.rejects(stat(receiptFile(root, 'copilot')), { code: 'ENOENT' });
+
+  // Given the network, it installs the required release and does not adopt the
+  // three agreeing siblings' older one.
+  const installed = await install('copilot', root, store, second);
+  assert.equal(installed.toolkit.version, second.version);
+  assert.equal(installed.reusedFrom, undefined);
+  // And the stale siblings are untouched until each converges on its own.
+  assert.equal((await readReceipt(root, 'claude')).toolkit.version, first.version);
+});
+
 test('a provider configuration regenerated from scratch is repaired without adopting anything else', async () => {
   const { first } = await fixtures();
   for (const provider of NAMES) {
     const root = await seedConsumer(`regenerated ${provider}`);
-    const store = sharedStore();
+    const store = sharedStore(root);
     await install(provider, root, store, first);
     const receipt = await readReceipt(root, provider);
 
@@ -464,24 +534,229 @@ test('a provider configuration regenerated from scratch is repaired without adop
     assert.equal(repaired.mcpRepair.repaired, true, provider);
     await assertReceiptOwnsRegistration(root, provider, receipt);
     assert.deepEqual(identityOf(await readReceipt(root, provider)), identityOf(receipt));
+    // The restored path belongs to the release the receipt actually selects.
+    // Restoring `configOwned` is only correct for the *installed* version, and
+    // the receipt now reaches the doctor already converged, so a restored path
+    // is always the current one.
+    const entry = await ownedRegistration(root, provider);
+    assert.ok(JSON.stringify(entry).includes(JSON.stringify(receipt.release).slice(1, -1)), `${provider}: the restored registration does not name the selected release`);
     // Idempotent: the restored file validates as ours on the next run.
     assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null, provider);
   }
 });
 
-test('D2: siblings that disagree on identity fail closed without writing a receipt or touching config', async () => {
+/**
+ * D2, replaced. Siblings on *different releases* used to be a hard error, which
+ * blocked a new provider in any consumer whose existing providers had drifted
+ * apart -- the common real state, and one the user cannot fix without deleting
+ * receipts. They are now simply other releases: filtered out by the acceptance
+ * predicate and ignored, with the requirement met normally.
+ *
+ * The tripwire survives for what it was actually for: two candidates that both
+ * claim to satisfy the *same* requirement while disagreeing on immutable
+ * release identity. That is only reachable under tampering or a
+ * release-discipline breach, and it still fails closed.
+ */
+test('D2a: siblings on different releases are not candidates and do not block a new provider', async () => {
   const { first, second } = await fixtures();
-  const root = await seedConsumer('siblings disagree');
-  const store = sharedStore();
+  const root = await seedConsumer('siblings differ');
+  const store = sharedStore(root);
   await install('claude', root, store, first);
   // An explicit exact version never adopts the sibling's, so this really installs a second identity.
   await install('codex', root, store, second, { version: second.version });
   assert.notEqual((await readReceipt(root, 'claude')).pin, (await readReceipt(root, 'codex')).pin);
 
+  // The requirement names `first`, which exactly one sibling happens to carry.
+  await requiring(first.version);
+  const reused = await ensureRuntime({ provider: 'opencode', root, store }, OFFLINE);
+  assert.equal(reused.reusedFrom, 'claude');
+  assert.deepEqual(identityOf(await readReceipt(root, 'opencode')), identityOf(await readReceipt(root, 'claude')));
+
+  // And a requirement neither sibling satisfies is met from the store, still
+  // offline, still without any complaint about the siblings disagreeing.
+  await requiring(second.version);
+  const converged = await ensureRuntime({ provider: 'copilot', root, store }, OFFLINE);
+  assert.equal(converged.toolkit.version, second.version);
+  assert.equal(converged.network, false);
+});
+
+test('D2b: two candidates claiming one requirement with different release identities fail closed', async () => {
+  const { first } = await fixtures();
+  const root = await seedConsumer('siblings disagree');
+  const store = sharedStore(root);
+  await install('claude', root, store, first);
+  // The store already carries `first`, so codex comes up from the sibling with
+  // no download -- which is the point of C/D1 and is simply the setup here.
+  assert.equal((await ensureRuntime({ provider: 'codex', root, store }, OFFLINE)).toolkit.version, first.version);
+
+  // Forge a second release carrying the same version and the same skill digests
+  // under a different immutable identity, and point one sibling at it. Only
+  // tampering or a discipline breach produces this, and it must never be
+  // resolved by picking a winner.
+  const forged = await packageRelease('forged release', path.join(scratch, 'release one', `artifact-migration-tools-${first.version}`), first.version, { commit: '9'.repeat(40), contentHash: `sha256:${'8'.repeat(64)}` });
+  const staged = path.join(store, `${first.version}-${forged.pin.slice(7)}`);
+  await cp(path.join(scratch, 'forged release', `artifact-migration-tools-${first.version}`), staged, { recursive: true });
+  const receipt = await readReceipt(root, 'codex');
+  await writeFile(receiptFile(root, 'codex'), `${JSON.stringify({ ...receipt, toolkit: forged.identity, release: staged, pin: forged.pin, releases: [{ release: staged, pin: forged.pin }] }, null, 2)}\n`);
+
+  await requiring(first.version);
   const before = await readConfig(root, 'opencode');
   await assert.rejects(ensureRuntime({ provider: 'opencode', root, store }, OFFLINE), /disagree/i);
   await assert.rejects(stat(receiptFile(root, 'opencode')), { code: 'ENOENT' });
   assert.equal(await readConfig(root, 'opencode'), before);
+});
+
+/**
+ * T6. The live regression: two providers stranded on different stale releases,
+ * one required identity. Both converge, neither downgrades, and the sibling
+ * disagreement that used to stop the whole consumer never fires.
+ */
+test('T6: two providers on different stale releases both converge on the required identity', async () => {
+  const { first, second } = await fixtures();
+  const root = await seedConsumer('stale providers converge');
+  const store = sharedStore(root);
+  await install('claude', root, store, first);
+  await install('codex', root, store, second, { version: second.version });
+
+  // The skill requires `second`; claude is behind and codex is already there.
+  await requiring(second.version);
+  const moved = await ensureRuntime({ provider: 'claude', root, store }, OFFLINE);
+  assert.equal(moved.bootstrapped, true);
+  assert.equal(moved.toolkit.version, second.version);
+  assert.equal(moved.network, false);
+  const settled = await ensureRuntime({ provider: 'codex', root, store }, OFFLINE);
+  assert.equal(settled.bootstrapped, false);
+  assert.equal(settled.toolkit.version, second.version);
+
+  for (const provider of ['claude', 'codex']) {
+    const receipt = await readReceipt(root, provider);
+    assert.equal(receipt.toolkit.version, second.version, `${provider} did not converge`);
+    await assertReceiptOwnsRegistration(root, provider, receipt);
+    await assertUnrelatedPreserved(root, provider);
+  }
+  // The release claude came from is retained, so nothing was lost by converging.
+  assert.ok((await readReceipt(root, 'claude')).releases.some(item => item.release.endsWith(`${first.version}-${first.pin.slice(7)}`)));
+});
+
+/**
+ * T22. A sibling at the required *version* whose pinned manifest proves a
+ * different skill digest is not a candidate. This is the case-N guard at the
+ * sibling boundary: without it, a provider switch silently adopts bytes that
+ * are not the ones the installed skill was written against.
+ */
+test('T22: a sibling with the right version but the wrong skill identity cannot satisfy selection', async () => {
+  const { first } = await fixtures();
+  const root = await seedConsumer('sibling wrong identity');
+  const store = sharedStore(root);
+  await install('claude', root, store, first);
+
+  await requiring(first.version);
+  requiredSkill.computedHash = 'c'.repeat(64);
+  // The sibling is at the right version, so a version-only filter would adopt
+  // it. Selection must fall through to the network instead -- and must not
+  // complain that siblings disagree, because they do not.
+  const error = await ensureRuntime({ provider: 'opencode', root, store }, OFFLINE).then(() => null, e => e);
+  assert.doesNotMatch(error.message, /disagree/i);
+  assert.match(error.message, /network used/);
+  await assert.rejects(stat(receiptFile(root, 'opencode')), { code: 'ENOENT' });
+});
+
+/**
+ * T10. A rollback is an explicit operator decision and would be meaningless if
+ * the next ordinary invocation undid it -- so it persists, is reported every
+ * single time, and is superseded by the operator's next deliberate skill
+ * action rather than by editing a receipt.
+ */
+test('T10: an explicit rollback persists a scoped pin that a skill-identity change supersedes', async () => {
+  const { first, second } = await fixtures();
+  const root = await seedConsumer('rollback pin');
+  const store = sharedStore(root);
+  const selection = { scope: 'project', root, store, runtimeOnly: true };
+  await install('codex', root, store, first);
+  const installed = await readReceipt(root, 'codex');
+  await requiring(second.version);
+  await ensureRuntime({ provider: 'codex', root, store }, { ...OFFLINE, resolve: async () => second.resolved, download: async (resolved, destination) => { await cp(second.archive, destination); await verifyDownloadedAsset(destination, resolved.asset.digest); } });
+
+  const rolled = await adapter('codex', { ...selection, action: 'rollback', bundle: installed.release, pin: installed.pin });
+  assert.deepEqual(identityOf(rolled), identityOf(installed));
+  assert.equal(rolled.pinned.by, 'rollback');
+  assert.equal(rolled.pinned.version, first.version);
+  assert.deepEqual(rolled.pinned.againstSkill['start-migration'], { skill: 'start-migration', version: second.version, computedHash: requiredSkill.computedHash });
+
+  // The pin holds across ordinary invocations, reported every time, no network.
+  for (let run = 0; run < 2; run++) {
+    const pinned = await ensureRuntime({ provider: 'codex', root, store }, OFFLINE);
+    assert.equal(pinned.selection, 'pinned');
+    assert.equal(pinned.skillIdentity, 'pinned');
+    assert.equal(pinned.toolkit.version, first.version);
+    assert.equal(pinned.bootstrapped, false);
+  }
+
+  // A newer deliberate skill action -- `skills add` of a release publishing
+  // different skill semantics -- supersedes the pin. The pin was a decision
+  // about the identity in place at the time, not an eternal veto.
+  const third = await packageRelease('release three', path.join(scratch, 'release one', `artifact-migration-tools-${first.version}`), '1.98.0', { version: '1.98.0', commit: '5'.repeat(40), contentHash: `sha256:${'6'.repeat(64)}` }, 'd'.repeat(64));
+  await requiring('1.98.0');
+  requiredSkill.computedHash = 'd'.repeat(64);
+  const converged = await ensureRuntime({ provider: 'codex', root, store }, {
+    resolve: async requested => { assert.equal(requested, '1.98.0'); return third.resolved; },
+    download: async (resolved, destination) => { await cp(third.archive, destination); await verifyDownloadedAsset(destination, resolved.asset.digest); },
+    skillRelease,
+  });
+  assert.equal(converged.selection, 'skill', 'a changed skill identity must supersede the pin');
+  assert.equal(converged.skillIdentity, 'required');
+  assert.equal(converged.toolkit.version, '1.98.0');
+  assert.equal((await readReceipt(root, 'codex')).pinned, undefined, 'a superseded pin must not survive the write');
+
+  // And the supersession is not a downgrade loophole: with the pin gone, the
+  // skill's own requirement is the only authority, so a requirement no release
+  // proves fails closed instead of falling back to the pinned release.
+  await requiring('1.98.0');
+  requiredSkill.computedHash = 'a'.repeat(64);
+  const unproven = await ensureRuntime({ provider: 'codex', root, store }, {
+    resolve: async () => third.resolved,
+    download: async (resolved, destination) => { await cp(third.archive, destination); await verifyDownloadedAsset(destination, resolved.asset.digest); },
+    skillRelease,
+  }).then(() => null, e => e);
+  assert.equal(unproven.code, 'SKILL_IDENTITY_UNRELEASED');
+  assert.equal((await readReceipt(root, 'codex')).toolkit.version, '1.98.0', 'a refusal must not move the receipt');
+});
+
+/**
+ * T13. Every tampering boundary still fails closed, including the new one: the
+ * receipt's copy of the release's skill digests is a convenience, never a
+ * second authority, so hand-editing it cannot fake the binding either way.
+ */
+test('T13: tampering is refused at every boundary, including a hand-edited receipt.skills', async () => {
+  const { first } = await fixtures();
+  const root = await seedConsumer('tampered receipt');
+  const store = sharedStore(root);
+  await install('codex', root, store, first);
+  const receipt = await readReceipt(root, 'codex');
+
+  const forged = structuredClone(receipt);
+  forged.skills.skills['start-migration'].computedHash = 'e'.repeat(64);
+  await writeFile(receiptFile(root, 'codex'), `${JSON.stringify(forged, null, 2)}\n`);
+  await requiring(first.version);
+  await assert.rejects(ensureRuntime({ provider: 'codex', root, store }, OFFLINE), /skill identity conflict/i);
+
+  // A receipt predating the field is proven from the pinned manifest instead,
+  // so the added check invalidates nothing that was already valid.
+  const { skills, ...legacy } = receipt;
+  await writeFile(receiptFile(root, 'codex'), `${JSON.stringify(legacy, null, 2)}\n`);
+  const reused = await ensureRuntime({ provider: 'codex', root, store }, OFFLINE);
+  assert.equal(reused.bootstrapped, false);
+
+  // The pinned manifest itself is still the anchor.
+  await writeFile(receiptFile(root, 'codex'), `${JSON.stringify(receipt, null, 2)}\n`);
+  const manifestFile = path.join(receipt.release, 'release-manifest.json');
+  const valid = await readFile(manifestFile);
+  await writeFile(manifestFile, `${valid.toString('utf8').replace(/\n$/, '')} \n`);
+  try {
+    await assert.rejects(ensureRuntime({ provider: 'codex', root, store }, OFFLINE), /checksum mismatch/i);
+  } finally {
+    await writeFile(manifestFile, valid);
+  }
 });
 
 // --- E. explicit version ----------------------------------------------------
@@ -491,7 +766,7 @@ for (const destination of NAMES) {
   test(`E/${destination}: an exact version is never satisfied by a sibling on another version`, async () => {
     const { first, second } = await fixtures();
     const root = await seedConsumer(`exact version ${destination}`);
-    const store = sharedStore();
+    const store = sharedStore(root);
     await install(siblingA, root, store, first);
 
     // Requested B is not installed here: reuse must be refused and normal
@@ -514,13 +789,35 @@ for (const destination of NAMES) {
 // --- F. provider configuration preservation ---------------------------------
 
 test('F: every provider format survives install, self-heal and removal intact', async () => {
-  const { first } = await fixtures();
+  const { first, second } = await fixtures();
   for (const provider of NAMES) {
     const root = await seedConsumer(`preserve ${provider}`);
-    const store = sharedStore();
+    const store = sharedStore(root);
     const original = await readConfig(root, provider);
     await install(provider, root, store, first);
     await assertUnrelatedPreserved(root, provider);
+
+    // T4/T5, in all four native formats: a converging update rewrites the
+    // provider-owned MCP registration in the same lock, and leaves no owned
+    // path anywhere under the release it just left.
+    const stale = await readReceipt(root, provider);
+    await requiring(second.version);
+    const updated = await ensureRuntime({ provider, root, store }, {
+      resolve: async requested => { assert.equal(requested, second.version); return second.resolved; },
+      download: async (resolved, destination) => { await cp(second.archive, destination); await verifyDownloadedAsset(destination, resolved.asset.digest); },
+      skillRelease,
+    });
+    assert.equal(updated.toolkit.version, second.version, provider);
+    const converged = await readReceipt(root, provider);
+    await assertReceiptOwnsRegistration(root, provider, converged);
+    await assertUnrelatedPreserved(root, provider);
+    for (const relative of [...Object.keys(converged.files), SURFACES[provider].config]) {
+      const text = await readFile(path.join(root, relative), 'utf8');
+      assert.ok(!text.includes(JSON.stringify(stale.release).slice(1, -1)), `${provider}: ${relative} still names the previous release`);
+    }
+    // Converge back so the removal assertion below reads the first release.
+    await requiring(first.version);
+    await ensureRuntime({ provider, root, store }, OFFLINE);
 
     await deleteOwnedRegistration(root, provider);
     const repaired = await ensureRuntime({ provider, root, store }, OFFLINE);

@@ -27,6 +27,50 @@ const PROVIDERS = new Map([
 const sha256 = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const exactVersion = value => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value ?? '');
 const assetName = version => `${TOOLKIT}-v${version}.tar.gz`;
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const IDENTITY_FILE = 'release-identity.json';
+
+/**
+ * The installed skill's exact identity, read from the stamp beside this skill.
+ *
+ * This file is a *requirement*, never a trust anchor: it states which immutable
+ * release carries the skill semantics being executed, and that release still has
+ * to be resolved, digest-verified and made to *prove* the claim. The worst a
+ * tampered stamp can do is demand a release that cannot satisfy it, which fails
+ * closed, or name a different legitimate release -- the same power `--version`
+ * already grants an operator.
+ *
+ * It cannot be recomputed from the installed bytes: installation renders the
+ * engine MCP entry placeholder and every CLI name into absolute paths and
+ * rewrites provider frontmatter, so installed bytes legitimately differ per
+ * provider and per install path. The identity has to be carried.
+ */
+export async function readSkillRelease() {
+  const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', IDENTITY_FILE);
+  try { return JSON.parse(await readFile(file, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+/**
+ * A selection refusal that names both sides and asserts what was not written.
+ *
+ * Every one of these leaves the receipt, the runtime store, the provider
+ * configuration and the MCP registration byte-identical: the failure branches
+ * contain no write and no delete, and the only writer is the adapter, which is
+ * not reached. They are deliberately typed rather than folded into a generic
+ * fallback, because the whole defect class being fixed is a split that stayed
+ * silent.
+ */
+export class RuntimeSelectionError extends Error {
+  constructor(code, message, state = {}) {
+    super(message);
+    this.name = 'RuntimeSelectionError';
+    this.code = code;
+    this.state = { code, ...state, receipt: 'unchanged' };
+  }
+}
+
+const REMEDY = 'Reinstall the skill with `skills add` from a published release, or select a release explicitly with `--version X.Y.Z`.';
 
 const run = async (command, args, options = {}) => {
   try {
@@ -138,13 +182,13 @@ async function adapterRun(provider, release, options) {
 }
 
 /**
- * The exact toolkit identity a `{store, release, pin}` triple actually resolves
- * to on disk, taken from the pinned manifest and never from the store folder
+ * The exact release manifest a `{store, release, pin}` triple actually resolves
+ * to on disk, taken from the pinned bytes and never from the store folder
  * name -- the name is only *checked* against the verified manifest. The release
  * adapter's own `verifyBundle` re-verifies every file before anything installs;
  * this is the cheap identity read that selection needs first.
  */
-async function pinnedToolkit(store, release, pin) {
+async function pinnedManifest(store, release, pin) {
   if (typeof release !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(pin ?? '')) throw new Error('Invalid runtime receipt identity');
   const manifestBytes = await readFile(path.join(release, 'release-manifest.json'));
   if (sha256(manifestBytes) !== pin) throw new Error('Runtime receipt manifest checksum mismatch');
@@ -153,12 +197,66 @@ async function pinnedToolkit(store, release, pin) {
   if (!exactVersion(toolkit?.version) || release !== path.join(store, `${toolkit.version}-${pin.slice(7)}`)) throw new Error('Runtime receipt release path conflict');
   const launcher = await readFile(path.join(release, 'providers/install-support.mjs'));
   if (sha256(launcher) !== manifest.files?.['providers/install-support.mjs']) throw new Error('Runtime installer checksum mismatch');
-  return toolkit;
+  return manifest;
+}
+
+/**
+ * The receipt's own pinned manifest, or `null` when that release is simply not
+ * on this disk any more.
+ *
+ * Only `ENOENT` is absence. A checksum mismatch, a path conflict or an identity
+ * disagreement is tampering or a discipline breach and propagates: an integrity
+ * failure must never be downgraded into a cache miss that silently reinstalls.
+ */
+async function receiptManifest(receipt) {
+  let manifest;
+  try { manifest = await pinnedManifest(receipt.store, receipt.release, receipt.pin); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (!same(manifest.toolkit, receipt.toolkit)) throw new Error('Runtime receipt toolkit identity mismatch');
+  return manifest;
 }
 
 async function validateReceiptLauncher(receipt) {
-  const toolkit = await pinnedToolkit(receipt.store, receipt.release, receipt.pin);
-  if (JSON.stringify(toolkit) !== JSON.stringify(receipt.toolkit)) throw new Error('Runtime receipt toolkit identity mismatch');
+  if (!(await receiptManifest(receipt))) throw new Error(`Runtime receipt release is missing from the store: ${receipt.release}`);
+}
+
+/**
+ * Does a candidate release carry exactly what the selection requires?
+ *
+ * (1)-(2) *select* a candidate; (3) *proves* it carries the skill semantics
+ * installed right now; (4) strengthens the binding to full byte identity when
+ * the skill itself came out of a release artifact. (3) is mandatory in every
+ * case: SemVer equality alone proves nothing about bytes, because `skills add
+ * <repo>` installs current `main` under an already-published version string.
+ *
+ * Checkable entirely offline -- its inputs are the installed stamp and the
+ * hash-verified pinned manifest -- so a mismatch never needs the network to be
+ * detected, only to be *fixed*.
+ */
+const satisfies = (manifest, require) =>
+  manifest?.toolkit?.name === TOOLKIT &&
+  manifest.toolkit.version === require.version &&
+  (require.exact === null || (
+    manifest.skills?.skills?.[require.exact.skill]?.computedHash === require.exact.computedHash &&
+    (require.exact.source !== 'release' || (
+      manifest.toolkit.commit === require.exact.commit &&
+      manifest.toolkit.contentHash === require.exact.contentHash))));
+
+/** A local release that verifies against its pin *and* proves the requirement. */
+async function accept(store, release, pin, require, origin) {
+  let manifest;
+  try { manifest = await pinnedManifest(store, release, pin); } catch { return null; }
+  return satisfies(manifest, require) ? { release, pin, manifest, origin } : null;
+}
+
+/** Releases this receipt still retains for rollback. Never a downgrade: the
+ *  requirement names one exact release, so history can only ever *match* it. */
+async function fromHistory(previous, store, require) {
+  for (const item of previous.releases ?? []) {
+    const found = await accept(store, item.release, item.pin, require, 'history');
+    if (found) return found;
+  }
+  return null;
 }
 
 /**
@@ -166,15 +264,17 @@ async function validateReceiptLauncher(receipt) {
  *
  * Switching providers is not a reason to resolve, download and verify a release
  * that is already present and provably identical. Candidates come only from
- * sibling receipts under the same root and store; each one is re-verified from
- * its pinned manifest, and the five identity fields must agree exactly across
- * all of them. Disagreement fails closed rather than picking a winner.
+ * sibling receipts under the same root and store, and each is filtered by the
+ * *full* requirement rather than by version: a sibling at the right version
+ * whose pinned manifest proves a different skill digest is not a candidate, and
+ * a sibling on another release is simply not one either -- it is some other
+ * release, not a conflict, so it can never block a new provider.
  *
- * An explicit exact version never adopts a sibling's version: it filters to
- * that version alone, and may also select a release the sibling still retains
- * for rollback -- those are receipt-proven and verified the same way.
+ * Disagreement among candidates that all claim to satisfy the *same*
+ * requirement is still fatal. That is only reachable under tampering or a
+ * release-discipline breach, and it stays a tripwire rather than a version guard.
  */
-async function siblingSelection({ provider, root, store, version }) {
+async function fromSiblings({ provider, root, store, require }) {
   const directory = path.join(root, '.artifact-migration-tools');
   let names;
   try { names = await readdir(directory); }
@@ -186,16 +286,40 @@ async function siblingSelection({ provider, root, store, version }) {
     let receipt;
     try { receipt = JSON.parse(await readFile(path.join(directory, name), 'utf8')); } catch { continue; }
     if (receipt?.provider !== sibling || receipt.root !== root || receipt.store !== store) continue;
-    for (const item of [{ release: receipt.release, pin: receipt.pin }, ...(version ? receipt.releases ?? [] : [])]) {
-      let toolkit;
-      try { toolkit = await pinnedToolkit(store, item.release, item.pin); } catch { continue; }
-      if (version && toolkit.version !== version) continue;
-      const identity = { version: toolkit.version, commit: toolkit.commit, contentHash: toolkit.contentHash, release: item.release, pin: item.pin };
-      candidates.set(JSON.stringify(identity), { ...identity, toolkit, provider: sibling });
+    for (const item of [{ release: receipt.release, pin: receipt.pin }, ...(receipt.releases ?? [])]) {
+      const found = await accept(store, item.release, item.pin, require, sibling);
+      if (!found) continue;
+      const { toolkit } = found.manifest;
+      candidates.set(JSON.stringify({ commit: toolkit.commit, contentHash: toolkit.contentHash, release: item.release, pin: item.pin }), found);
     }
   }
   if (candidates.size > 1) throw new Error(`Sibling ${TOOLKIT} receipts disagree on the installed toolkit identity; reinstall or remove the conflicting providers explicitly`);
   return candidates.size === 1 ? [...candidates.values()][0] : null;
+}
+
+/**
+ * The shared release store, as a last local source. The directory name is a
+ * hint and nothing more: the pin it encodes is checked against the verified
+ * manifest by `pinnedManifest`, so a renamed or planted directory cannot smuggle
+ * in a release. This adds a source, not a trust assumption.
+ *
+ * ponytail: no garbage collection of leaked `<release>.<uuid>.tmp` staging dirs
+ * here. The store is shared across consumers but the install lock is per
+ * consumer root, so removing another root's in-flight staging directory would
+ * break a live install to reclaim disk. Upgrade path: an age threshold, once
+ * leaked staging dirs are observed to actually accumulate.
+ */
+async function fromStore(store, require) {
+  let names;
+  try { names = await readdir(store); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  for (const name of names.sort()) {
+    const hex = name.startsWith(`${require.version}-`) && name.slice(require.version.length + 1);
+    if (!/^[a-f0-9]{64}$/.test(hex || '')) continue;
+    const found = await accept(store, path.join(store, name), `sha256:${hex}`, require, 'store');
+    if (found) return found;
+  }
+  return null;
 }
 
 // v1.0.0's engine doctor required `.agents/knowledge/migrations` to already
@@ -248,9 +372,68 @@ async function localPreflight(receipt) {
   return { adapterDoctor, engineDoctor: { ...engineDoctor, outcome: 'OK', blockers: [], waived: engineDoctor.blockers } };
 }
 
+/**
+ * A rollback pin is a decision about the skill set that was in place when it was
+ * taken. It stands across ordinary invocations -- a rollback the next invocation
+ * undoes is not a rollback -- and is superseded as soon as the operator takes a
+ * newer deliberate action (`skills add`) that changes an installed skill's
+ * digest. That is also how a pin is cleared: no new command, no JSON editing.
+ *
+ * `againstSkill` holds the whole recorded requirement set because both skills
+ * share one receipt; a skill with no record there had taken no prior position,
+ * so it does not supersede the pin on its own.
+ */
+const pinStillValid = (pinned, skill) => {
+  if (pinned?.by !== 'rollback' || !exactVersion(pinned.version)) return false;
+  const recorded = skill?.skill ? pinned.againstSkill?.[skill.skill] : null;
+  return !recorded || recorded.computedHash === skill.computedHash;
+};
+
+/** Only a pin that is still the reason for this selection survives the write. */
+const carryPin = (previous, require, skill) =>
+  require.reason === 'skill' ? undefined
+    : pinStillValid(previous?.pinned, skill) ? previous.pinned : undefined;
+
+/** What this skill now requires of the receipt, merged over the other skill's. */
+const recordRequirement = (previous, exact) => exact
+  ? { ...previous?.requiredBy, [exact.skill]: { skill: exact.skill, version: exact.version, computedHash: exact.computedHash } }
+  : previous?.requiredBy;
+
+/**
+ * Another installed skill has already moved this receipt forward past what this
+ * one requires, so honouring this skill would drag the runtime *back* and the
+ * next invocation of the other skill would drag it forward again -- the runtime
+ * and the MCP registration rewritten on alternating invocations. Refusing and
+ * naming both is strictly better than that, and it is the only outcome a user
+ * can act on.
+ *
+ * Deliberately one-directional. A *forward* move is how the normal "update both
+ * skills" flow works: whichever skill runs first converges and records, and the
+ * second then agrees. Flagging disagreement in both directions would refuse that
+ * flow, because the other skill's record is legitimately stale until it runs.
+ *
+ * ponytail: version ordering is used only as this anti-flip-flop ratchet, never
+ * as selection authority -- which stays exact identity.
+ */
+const conflictingRequirement = (requiredBy, exact) => {
+  for (const recorded of Object.values(requiredBy ?? {})) {
+    if (recorded.skill === exact.skill || !exactVersion(recorded.version)) continue;
+    if (recorded.version.localeCompare(exact.version, 'en', { numeric: true }) > 0) return recorded;
+  }
+  return null;
+};
+
+/** A 404 is the only "this release was never published"; anything else is transport. */
+const releaseMissing = error => {
+  for (let current = error; current; current = current.cause) {
+    if (/\b404\b|not found/i.test(String(current.message ?? ''))) return true;
+  }
+  return false;
+};
+
 export async function ensureRuntime(
   { provider, root = process.cwd(), store = defaultStore(), version } = {},
-  { resolve = resolveRelease, download = downloadAsset } = {},
+  { resolve = resolveRelease, download = downloadAsset, skillRelease = readSkillRelease } = {},
 ) {
   provider = PROVIDERS.get(provider);
   if (!provider) throw new Error(`--provider must be one of: ${[...new Set(PROVIDERS.values())].join(', ')}`);
@@ -262,32 +445,106 @@ export async function ensureRuntime(
   let previous = null;
   try { previous = JSON.parse(await readFile(receiptFile, 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
-  if (previous && (previous.provider !== provider || previous.root !== root || previous.store !== store)) throw new Error('Runtime receipt selection conflict');
+  if (previous && (previous.provider !== provider || previous.root !== root || previous.store !== store)) {
+    // Names both sides. The common cause is one repository driven from two
+    // environments -- a Windows checkout and the same tree under WSL resolve a
+    // different store and a different absolute root, so the two are mutually
+    // exclusive over one `.artifact-migration-tools/`. Fail-closed is correct;
+    // an error that named neither cause nor remedy was not.
+    throw new Error(
+      `Runtime receipt selection conflict: this receipt was written for provider "${previous.provider}" / root "${previous.root}" / store "${previous.store}" `
+      + `but this invocation resolved provider "${provider}" / root "${root}" / store "${store}". `
+      + 'Run the toolkit from one environment, or pass --root/--store explicitly.',
+    );
+  }
+
+  // ---- authority: explicit override > valid rollback pin > exact skill identity
+  const skill = await skillRelease();
+  let require;
+  if (version !== undefined) {
+    // Development / admin / CI path. One invocation only, persists no intent,
+    // and deliberately bypasses the identity predicate -- this is the defined
+    // escape for an unreleased or identity-less skill.
+    require = { version, exact: null, reason: 'explicit', skillIdentity: 'unverified' };
+  } else if (pinStillValid(previous?.pinned, skill)) {
+    require = { version: previous.pinned.version, exact: null, reason: 'pinned', skillIdentity: 'pinned' };
+  } else if (!skill || skill.name !== TOOLKIT || !exactVersion(skill.version)) {
+    throw new RuntimeSelectionError('SKILL_IDENTITY_MISSING',
+      `This skill carries no usable ${IDENTITY_FILE}, so the toolkit release containing its semantics cannot be determined. ${REMEDY}`,
+      { required: null });
+  } else if (typeof skill.computedHash !== 'string') {
+    throw new RuntimeSelectionError('SKILL_IDENTITY_LEGACY',
+      `This skill predates exact identity binding and states no computedHash. Reinstall it with \`skills add\` to adopt it, or select a release with \`--version X.Y.Z\`.`,
+      { required: skill.version, skill: skill.skill });
+  } else {
+    require = { version: skill.version, exact: skill, reason: 'skill', skillIdentity: 'required' };
+  }
+
+  const conflict = require.exact && conflictingRequirement(previous?.requiredBy, require.exact);
+  if (conflict) {
+    throw new RuntimeSelectionError('SKILL_SET_INCOHERENT',
+      `Installed skills require different toolkit releases: "${require.exact.skill}" requires ${require.exact.version} (${require.exact.computedHash}) `
+      + `while "${conflict.skill}" already selected ${conflict.version} (${conflict.computedHash}) for this provider. `
+      + 'Install both skills from the same release (`skills add` each).',
+      { required: require.exact.version, installed: conflict.version, reason: require.reason });
+  }
 
   const result = (receipt, extra, doctors) => ({
     outcome: 'OK', toolkit: receipt.toolkit, commands: receipt.commands, mcp: receipt.mcp,
     // Structured repair/restart state. The registration was restored, so this
     // invocation continues on the absolute CLI commands above and the host may
     // need a restart before the MCP server itself is reachable.
-    mcpRepair: doctors.adapterDoctor?.mcpRepair ?? null, ...extra, ...doctors,
+    mcpRepair: doctors.adapterDoctor?.mcpRepair ?? null,
+    selection: require.reason, skillIdentity: require.skillIdentity, ...extra, ...doctors,
   });
 
-  if (previous && (!version || previous.toolkit?.version === version)) {
-    return result(previous, { bootstrapped: false }, await localPreflight(previous));
+  // ---- local sources, strongest first. No network anywhere in this block. ----
+  const installed = previous ? await receiptManifest(previous) : null;
+  if (installed && satisfies(installed, require)) {
+    return result(previous, { bootstrapped: false, network: false }, await localPreflight(previous));
   }
 
-  // Another provider in this consumer may already have a verified runtime. A
-  // provider switch must not require the network to install the same release.
-  const sibling = previous ? null : await siblingSelection({ provider, root, store, version });
-  if (sibling) {
-    const receipt = await adapterRun(provider, sibling.release, {
-      provider, scope: 'project', root, store, action: 'install',
-      bundle: sibling.release, pin: sibling.pin, runtimeOnly: true,
+  let local = previous ? await fromHistory(previous, store, require) : null;
+  local ??= await fromSiblings({ provider, root, store, require });
+  local ??= await fromStore(store, require);
+
+  const converge = async (bundle, pin, extra) => {
+    const receipt = await adapterRun(provider, bundle, {
+      provider, scope: 'project', root, store,
+      action: previous ? 'update' : 'install', bundle, pin,
+      runtimeOnly: previous ? previous.mode === 'runtime' : true,
+      pinned: carryPin(previous, require, skill),
+      requiredBy: recordRequirement(previous, require.exact),
     });
-    return result(receipt, { bootstrapped: true, reusedFrom: sibling.provider }, await localPreflight(receipt));
-  }
+    // One lock: receipt, commands, provider-owned MCP registration and owned
+    // files converge together or every backed-up file is restored.
+    return result(receipt, { bootstrapped: true, ...extra }, await localPreflight(receipt));
+  };
 
-  const resolved = await resolve(version);
+  if (local) return converge(local.release, local.pin, { reusedFrom: local.origin, network: false });
+
+  // ---- network, only now, and always an exact tag; never /releases/latest. ---
+  let resolved;
+  try { resolved = await resolve(require.version); }
+  catch (error) {
+    if (releaseMissing(error)) {
+      throw new RuntimeSelectionError('RELEASE_NOT_PUBLISHED',
+        `No immutable release carries version ${require.version}, which the installed skill requires. ${REMEDY}`,
+        { required: require.version, skill: require.exact?.skill, reason: require.reason, detail: error.message });
+    }
+    if (installed) {
+      throw new RuntimeSelectionError('RUNTIME_UPDATE_REQUIRED_OFFLINE',
+        `The installed runtime ${previous.toolkit.version} does not carry the semantics this skill requires (${require.version}), `
+        + `and the exact release is neither available locally nor reachable. Reconnect once, or select a release with \`--version X.Y.Z\`.`,
+        { installed: previous.toolkit.version, required: require.version, reason: require.reason, detail: error.message });
+    }
+    throw error;
+  }
+  // The resolver is a dependency, so this is a trust boundary: `resolveRelease`
+  // enforces it already, but an injected one that answered with a *different*
+  // version would otherwise fail later as an identity mismatch and name the
+  // digest, which is not what went wrong. Selection resolves one exact tag.
+  if (resolved.version !== require.version) throw new Error(`Release resolution returned v${resolved.version} for required v${require.version}`);
   const temporary = await mkdtemp(path.join(os.tmpdir(), `${TOOLKIT}-`));
   try {
     const archive = path.join(temporary, resolved.asset.name);
@@ -296,14 +553,14 @@ export async function ensureRuntime(
     const manifestBytes = await readFile(path.join(bundle, 'release-manifest.json'));
     const manifest = JSON.parse(manifestBytes);
     if (manifest.toolkit?.name !== TOOLKIT || manifest.toolkit.version !== resolved.version || manifest.toolkit.commit !== resolved.commit) throw new Error('Release manifest identity does not match its immutable GitHub Release');
+    if (!satisfies(manifest, require)) {
+      throw new RuntimeSelectionError('SKILL_IDENTITY_UNRELEASED',
+        `The installed "${require.exact.skill}" skill's semantics are not the semantics published in v${require.version}: `
+        + `the skill requires ${require.exact.computedHash} and that release proves ${manifest.skills?.skills?.[require.exact.skill]?.computedHash ?? 'nothing for this skill'}. ${REMEDY}`,
+        { required: require.exact.computedHash, releaseProves: manifest.skills?.skills?.[require.exact.skill]?.computedHash ?? null, version: require.version, skill: require.exact.skill });
+    }
     await mkdir(store, { recursive: true });
-    const selection = { provider, scope: 'project', root, store };
-    const runtimeOnly = previous ? previous.mode === 'runtime' : true;
-    const receipt = await adapterRun(provider, bundle, {
-      ...selection, action: previous ? 'update' : 'install', bundle,
-      pin: sha256(manifestBytes), runtimeOnly,
-    });
-    return result(receipt, { bootstrapped: true }, await localPreflight(receipt));
+    return await converge(bundle, sha256(manifestBytes), { network: true });
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -319,5 +576,11 @@ async function main(argv) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
+  main(process.argv.slice(2)).catch(error => {
+    // The typed state too, machine-readable, for an MCP caller reading stderr:
+    // a refusal has to be actionable without parsing an English sentence.
+    process.stderr.write(`${error.message}\n`);
+    if (error.state) process.stderr.write(`${JSON.stringify(error.state, null, 2)}\n`);
+    process.exitCode = 1;
+  });
 }

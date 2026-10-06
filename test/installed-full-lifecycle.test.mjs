@@ -75,6 +75,14 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     const bootstrap = path.join(consumer, ".agents/skills/start-migration/scripts/runtime.mjs");
     await mkdir(path.dirname(bootstrap), { recursive: true });
     await cp(path.join(built.stagingRoot, "providers/codex/skills/start-migration/scripts/runtime.mjs"), bootstrap);
+    // The installed skill's identity stamp, exactly where `skills add` puts it.
+    // No `--version` anywhere below: this suite's whole value is that it is the
+    // *normal* path, so selection has to read the real stamp off disk and prove
+    // it against the staged release's own manifest.
+    await cp(
+      path.join(built.stagingRoot, "providers/codex/skills/start-migration/release-identity.json"),
+      path.join(path.dirname(bootstrap), "../release-identity.json"),
+    );
     await mkdir(path.join(legacy, "auth"), { recursive: true });
     await mkdir(path.join(target, "src"), { recursive: true });
     await mkdir(path.dirname(registry), { recursive: true });
@@ -100,15 +108,18 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
       },
     };
     const installed = await runtime.ensureRuntime({ provider: "codex", root: consumer,
-      store, version: built.identity.version }, transport);
+      store }, transport);
     assert.equal(installed.bootstrapped, true);
+    assert.equal(installed.selection, "skill");
+    assert.equal(installed.skillIdentity, "required");
     assert.deepEqual(installed.toolkit, manifest.toolkit);
     const receipt = await json(path.join(consumer, ".artifact-migration-tools/codex.json"));
     assert.deepEqual(receipt.toolkit, manifest.toolkit);
     const ensure = await capture(process.execPath, [bootstrap, "ensure", "--provider", "codex",
-      "--root", consumer, "--store", store, "--version", built.identity.version], consumer);
+      "--root", consumer, "--store", store], consumer);
     assert.equal(ensure.code, 0, ensure.stderr);
     assert.equal(JSON.parse(ensure.stdout).bootstrapped, false);
+    assert.equal(JSON.parse(ensure.stdout).network, false);
     await assert.rejects(readFile(path.join(record, "state.json")), /ENOENT/);
     const command = async (name, args, input) => {
       const [bin, ...prefix] = receipt.commands[name];

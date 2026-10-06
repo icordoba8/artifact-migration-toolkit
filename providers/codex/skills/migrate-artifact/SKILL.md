@@ -17,16 +17,34 @@ runtime preflight:
 node <skill-directory>/scripts/runtime.mjs ensure --provider <claude|codex|opencode|copilot> --root <current-working-directory>
 ```
 
-Use the provider running this invocation. A valid pinned receipt is reused with
-no network access; otherwise the preflight installs and verifies the latest
-stable immutable GitHub Release in the user release store, registers MCP, runs
-the adapter and engine doctors, and returns absolute engine commands. Continue
-this invocation with the returned `artifact-migrate` command (a host restart may
-be needed before newly registered MCP is visible). Stop on preflight failure;
-never use a checkout, branch, mutable `latest` URL, or ambient `PATH` instead.
-An exact admin/CI override is available as `--version X.Y.Z` or
-`ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z`; changing the provider runtime never
-changes a migration record's `toolkitIdentity`.
+Use the provider running this invocation. **This skill's own exact identity
+selects the runtime**: the `release-identity.json` beside this file states the
+toolkit version it needs *and* the canonical digest of its own semantics, and
+only a release whose manifest proves that digest may run it — a matching version
+number alone is never enough. A receipt that satisfies this skill is reused with
+zero network access; a different required identity is taken from the receipt's
+retained releases, a sibling provider's receipt or the release store, still
+offline; only an exact release available nowhere locally is fetched, as the exact
+tag `v<version>` and never as `latest`. Then MCP is registered, both doctors run,
+and absolute engine commands are returned. Continue this invocation with the
+returned `artifact-migrate` command (a host restart may be needed before newly
+registered MCP is visible). The result names which rule fired as `selection`,
+`skillIdentity` and `network`.
+
+Stop on preflight failure; never use a checkout, branch, mutable `latest` URL, or
+ambient `PATH` instead. Refusals are typed — `SKILL_IDENTITY_MISSING`,
+`SKILL_IDENTITY_LEGACY`, `SKILL_IDENTITY_UNRELEASED`, `RELEASE_NOT_PUBLISHED`,
+`RUNTIME_UPDATE_REQUIRED_OFFLINE`, `SKILL_SET_INCOHERENT` — and each leaves every
+file unchanged. Report the code and its remedy: `skills add` for each skill, one
+connected run, or an explicit `--version`. Never suggest editing or deleting a
+receipt, an MCP configuration or the install lock.
+
+`--version X.Y.Z` and `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z` are admin/CI
+overrides for **one invocation only**: they bypass the identity proof, persist
+nothing, and the next ordinary invocation converges back. Only an explicit
+`rollback` through the provider installer persists a pin, and `skills add`
+supersedes it. Changing the provider runtime never changes a migration record's
+`toolkitIdentity`.
 
 ```bash
 artifact-migrate <primary-source> \

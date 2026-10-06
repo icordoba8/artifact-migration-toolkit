@@ -17997,6 +17997,16 @@ test("R3-1: the installed toolkit reopens a COMPLETE record under --mode auto wi
           await writeFile(destination, await readFile(asset.archive));
           await verifyDownloadedAsset(destination, resolved.asset.digest);
         },
+        // The installed skill's exact identity is what selects the runtime, and
+        // this candidate is staged at its own unregistered version -- so the
+        // requirement is the candidate's own stamp, not the checkout's. Read
+        // from the staged bundle, which is the identity `skills add` would have
+        // installed from it, so the binding is really proven rather than bypassed.
+        skillRelease: async () =>
+          JSON.parse(await readFile(
+            path.join(built.stagingRoot, "skills/start-migration/release-identity.json"),
+            "utf8",
+          )),
       },
     );
     assert.equal(runtime.outcome, "OK");
