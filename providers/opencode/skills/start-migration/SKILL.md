@@ -262,10 +262,11 @@ installed CLI. Neither front end can attest a module-19 decision.
     read-only decision projection. Its full candidate-bound review is for
     presentation, not an instruction to transcribe IDs, digests or a challenge.
      The engine-owned `STANDARD_LOCAL` policy requires `AGENT_RELAYED`: the
-     operator explicitly selects `APPROVE` or `REJECT` through this review.
+     operator explicitly selects `APPROVE` or `REJECT` for this review, through
+     native elicitation when the host renders it, otherwise in this conversation.
      Cancellation, dismissal, timeout, missing response and transport failure
-     append nothing. No tool argument, auto-permission, inferred intent or prior
-     conversation may answer the review. A provider response never attests a
+     append nothing and end at `OPERATOR_DECISION`. No auto-permission, inferred
+     intent or prior conversation may answer the review. A provider response never attests a
      human. Only an optional protected high-assurance policy requires
      `HUMAN_ATTESTED`; missing or invalid signer activation then fails closed
      with `SIGNER_UNAVAILABLE`, without downgrade. A recorded decision
@@ -289,10 +290,23 @@ Either way the directive's `next=` repeats the iteration; obey it literally
 through the same front end.
 
 **Whenever an iteration ends at `OPERATOR_DECISION`**, follow the typed result.
-For module 19, present the engine review for explicit `APPROVE` or `REJECT`.
-If elicitation is unavailable, the operator runs the ordinary migration command
-in their terminal and chooses the action there; no ID transcription or challenge.
-Inspect `blocked` for an explicit protected high-assurance requirement. For historical formats,
+For module 19, when `operatorApproval.blocked` is null:
+
+1. Show the user the engine review (`operatorApproval.review`, or the review in
+   `log`), ask them to answer `APPROVE` or `REJECT`, and **end your turn**.
+2. Only when the user's next message is an explicit `APPROVE` or `REJECT`, call
+   the MCP tool `migration_relay_decision` with `module`, `cwd`,
+   `reference` = `operatorApproval.reference` unchanged, and `decision` = that
+   answer. Anything else relays nothing; show the review again if asked.
+3. Then call `migration_run` again; it resumes normally.
+
+Never approve or reject on your own, never in the same turn you asked, and
+never from an earlier message. Never ask the user for IDs, digests, references,
+commands or runtime paths, and never send them to another terminal or a raw
+`node` command. A `STALE_REVIEW` result means the review changed: run
+`migration_run` again and ask about the new review. If `blocked` names a
+required `HUMAN_ATTESTED` principal, report it and stop; the relay refuses it.
+For historical formats,
 `reason` names any recorded line and `decisionReferences` carries its citation;
 further pending decisions remain unapproved. Never call a host decline a human
 rejection: no applicable approval arrived.

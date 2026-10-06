@@ -83,7 +83,8 @@ for (const provider of ["claude", "codex", "copilot", "opencode"]) {
         if (provider === "claude") {
           let late;
           response = new Promise((resolve) => { late = resolve; });
-          assert.equal((await call("migration_run")).outcome, "FAILED");
+          // An unanswered elicitation is no answer: a recoverable OPERATOR_DECISION, not FAILED.
+          assert.equal((await call("migration_run")).outcome, "OPERATOR_DECISION");
           late({ action: "accept", content: { decision: "APPROVE" } });
           assert.equal(await decisionLedger(fixture), null);
           assert.deepEqual(await state(fixture), before);
@@ -134,6 +135,60 @@ for (const provider of ["claude", "codex", "copilot", "opencode"]) {
         assert.equal(consumed[0].candidateDigest, lines[2].candidateDigest);
         assert.equal(consumed[0].principal, "AGENT_RELAYED");
         assert.equal(consumed[0].policyDigest, DEFAULT_DECISION_POLICY_DIGEST);
+      });
+    } finally { process.exitCode = exitCode; await fixture.cleanup(); }
+  });
+}
+
+for (const answer of ["APPROVE", "REJECT"]) {
+  test(`conversational ${answer} relay: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse`, async () => {
+    const fixture = await createFixture();
+    const exitCode = process.exitCode;
+    try {
+      await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+      const call = async (name, extra = {}, session = createSession()) => {
+        const reply = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/call",
+          params: { name, arguments: { module: "auth", cwd: fixture.root, ...extra } } }, session);
+        assert.equal(reply.error, undefined, JSON.stringify(reply));
+        return reply.result.structuredContent;
+      };
+      const failing = createSession({ request: async () => { throw new Error("Elicitation timed out"); } });
+      await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { capabilities: { elicitation: {} } } }, failing);
+      const relay = (reference, decision = answer) => call("migration_relay_decision", { reference, decision });
+      await withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }), async () => {
+        const run = await call("migration_run");
+        assert.equal(run.blocked.requiredPrincipal, "HUMAN_ATTESTED");
+        const refused = await relay(run.operatorApproval.reference, "APPROVE");
+        assert.equal(refused.outcome, "BLOCKED");
+        assert.equal(refused.blocked.state, "SIGNER_UNAVAILABLE");
+        assert.equal(await decisionLedger(fixture), null);
+      });
+      await withDecisionPolicy(null, async () => {
+        const before = await state(fixture);
+        const timedOut = await call("migration_run", {}, failing);
+        const unavailable = await call("migration_run");
+        for (const result of [timedOut, unavailable]) {
+          assert.equal(result.outcome, "OPERATOR_DECISION");
+          assert.equal(result.operatorApproval.review.policy.requiredPrincipal, "AGENT_RELAYED");
+          assert.match(result.operatorApproval.reference, /^review-[0-9a-f]{32}$/);
+        }
+        const { reference } = unavailable.operatorApproval;
+        assert.equal(timedOut.operatorApproval.reference, reference);
+        assert.equal(await decisionLedger(fixture), null);
+        assert.deepEqual(await state(fixture), before);
+
+        assert.equal((await relay(`review-${"0".repeat(32)}`)).blocked.state, "STALE_REVIEW");
+        const recorded = await relay(reference);
+        assert.equal(recorded.outcome, "CONTINUE", recorded.reason);
+        const lines = (await decisionLedger(fixture)).trim().split("\n").map(JSON.parse);
+        assert.deepEqual(lines.map((line) => [line.principal, line.result]),
+          [["AGENT_RELAYED", answer === "APPROVE" ? "APPROVED" : "REJECTED"]]);
+        assert.equal((await relay(reference)).blocked.state, "STALE_REVIEW");
+        assert.equal((await decisionLedger(fixture)).trim().split("\n").length, 1);
+        const resumed = await call("migration_run");
+        assert.equal(resumed.outcome, answer === "APPROVE" ? "CONTINUE" : "BLOCKED", resumed.reason);
+        if (answer === "APPROVE") assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
       });
     } finally { process.exitCode = exitCode; await fixture.cleanup(); }
   });

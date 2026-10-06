@@ -194,11 +194,11 @@ test("inline worktree approval preserves context, rejects invalid answers, and r
       assert.equal(result.operatorApproval.cwd, worktreeRoot, answer);
       assert.equal(result.operatorApproval.candidates.length, 1, answer);
     }
-    // Transport failure and a candidate that moved under an open request: both
-    // are FAILED and both write nothing.
+    // A transport failure is no answer and stays recoverable; a candidate that
+    // moved under an open request FAILS. Both write nothing.
     for (answer of ["disconnect", "stale"]) {
       const failed = await call();
-      assert.equal(failed.outcome, "FAILED", answer);
+      assert.equal(failed.outcome, answer === "disconnect" ? "OPERATOR_DECISION" : "FAILED", answer);
       assert.deepEqual(failed.decisionReferences, [], answer);
       assert.equal(await decisionLedger(worktree), null, answer);
     }

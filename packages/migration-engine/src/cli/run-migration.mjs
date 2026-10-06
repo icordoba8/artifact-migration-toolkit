@@ -50,7 +50,7 @@ import {
   moduleApprover,
   recorderFor,
 } from "../operator-approval.mjs";
-import { renderDecisionReview } from "../record-decision.mjs";
+import { renderDecisionReview, reviewReference } from "../record-decision.mjs";
 
 export const parseRunArguments = (arguments_) => {
   const { positionals, values } = parseArgs({
@@ -205,6 +205,7 @@ export const decisionCandidates = async (options) =>
 const operatorApproval = (candidates, group = null) =>
   candidates[0]?.review
     ? { cwd: process.cwd(), review: group?.review ?? candidates[0].review,
+        reference: reviewReference(group?.review ?? candidates[0].review),
         blocked: group?.blocked ?? candidates[0].blocked ?? null }
     : { cwd: process.cwd(), candidates, group };
 

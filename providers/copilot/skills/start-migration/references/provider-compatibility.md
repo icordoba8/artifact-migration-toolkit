@@ -21,10 +21,14 @@ policy and candidate-bound review. The operator explicitly selects `APPROVE` or
 `REJECT`, relayed as `AGENT_RELAYED` into the direct ledger. Status/pending/run
 reread the projection immediately. No ID transcription, challenge phrase,
 service, signer, protected policy, authenticator or external network is required.
-Use `migration_run` / `artifact_run` with elicitation, or the ordinary installed
-command in the operator's terminal. A missing response, cancellation, dismissal,
-timeout or transport failure appends nothing; auto-permission, model reasoning,
-prior conversation and arbitrary tool payloads never authorize a decision.
+Use `migration_run` / `artifact_run` with elicitation when the host renders it.
+Otherwise a module-19 `OPERATOR_DECISION` carries the review and an opaque
+`operatorApproval.reference`: the agent shows the review, the user answers
+`APPROVE` or `REJECT` in the conversation, and the agent relays only that next
+explicit answer through `migration_relay_decision`. A missing response,
+cancellation, dismissal, timeout or transport failure appends nothing; a stale
+reference or a `HUMAN_ATTESTED` requirement is refused; auto-permission, model
+reasoning and prior conversation never authorize a decision.
 
 The optional protected WebAuthn signer provides `HUMAN_ATTESTED`. An explicit
 protected high-assurance policy fails closed without valid signer activation;

@@ -1974,6 +1974,54 @@ export const runRecordDecisionCli = async (
       });
 };
 
+/** Opaque handle for one engine review; any candidate, evidence or policy change yields another. */
+export const reviewReference = (review) =>
+  `review-${createHash("sha256").update(JSON.stringify(review)).digest("hex").slice(0, 32)}`;
+
+/**
+ * Relay the operator's explicit conversational APPROVE/REJECT for one open
+ * format-19 review. It goes through the same gate as every other answer: the
+ * module lock, the recompute, the deep-equality check and the policy's
+ * requiredPrincipal. So it records AGENT_RELAYED or nothing.
+ */
+export const relayOperatorDecision = async ({ registryPath, moduleName, reference, decision, stdout = process.stdout }) => {
+  if (!["APPROVE", "REJECT"].includes(decision)) {
+    throw new Error("decision must be APPROVE or REJECT. Nothing was written.");
+  }
+  const pending = await pendingDecisionCandidates({ registryPath, moduleName });
+  if (!pending.decisions?.directLedger) {
+    throw new Error(`Record '${moduleName}' does not use direct-ledger decisions; nothing can be relayed. Nothing was written.`);
+  }
+  const stale = (reason) => ({
+    outcome: "BLOCKED", recorded: [], reason: `STALE_REVIEW: ${reason}`,
+    blocked: { state: "STALE_REVIEW", reason },
+  });
+  const selected = [pending.group, ...pending.candidates]
+    .find((candidate) => candidate?.approvable !== false && candidate?.review &&
+      typeof reference === "string" && reviewReference(candidate.review) === reference);
+  if (!selected) {
+    return stale("The reviewed decision is no longer the current pending review. Nothing was written; run the migration again for the current review.");
+  }
+  let result;
+  try {
+    result = await runRecordDecisionCli([moduleName, "--approve", selected.id], {
+      stdout, ask: async ({ review }) => (reviewReference(review) === reference ? decision : ""),
+    });
+  } catch (error) {
+    if (/changed while its review was open/.test(error.message)) return stale(error.message);
+    throw error;
+  }
+  if (result?.blocked) {
+    return { outcome: "BLOCKED", recorded: [], reason: `${result.blocked.state}: ${result.blocked.reason}`, blocked: result.blocked };
+  }
+  const recorded = (result?.decisions ?? (result?.decision ? [result.decision] : [])).map((line) => line.id);
+  return {
+    outcome: "CONTINUE", recorded,
+    reason: `Recorded AGENT_RELAYED ${decision === "APPROVE" ? "APPROVED" : "REJECTED"} ${recorded.join(", ")}. Run the migration again to continue.`,
+    decisions: (await pendingDecisionCandidates({ registryPath, moduleName })).decisions,
+  };
+};
+
 if (isMainModule(import.meta.url)) {
   runRecordDecisionCli(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error.message}\n`);

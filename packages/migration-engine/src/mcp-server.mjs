@@ -53,7 +53,7 @@ import {
   upgradeCommandFor,
   WORKFLOW_VERSION,
 } from "./core.mjs";
-import { runRecordDecisionCli } from "./record-decision.mjs";
+import { relayOperatorDecision, runRecordDecisionCli } from "./record-decision.mjs";
 import { runMigration } from "./cli/run-migration.mjs";
 import { getArtifactStatus, runArtifact } from "./artifact/artifact-migration.mjs";
 
@@ -136,6 +136,20 @@ const RUN_INPUT_SCHEMA = {
         "Adopt an already-implemented target: pins an immutable pre-migration baseline of the target tree and unlocks row-level ADOPTED_VERIFIED.",
     },
   },
+};
+
+// The one tool whose arguments carry an answer, and only the operator's relayed one.
+const RELAY_TOOL = "migration_relay_decision";
+const RELAY_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    module: INPUT_SCHEMA.properties.module,
+    cwd: INPUT_SCHEMA.properties.cwd,
+    reference: { type: "string", description: "operatorApproval.reference from the OPERATOR_DECISION result, unchanged." },
+    decision: { type: "string", enum: ["APPROVE", "REJECT"], description: "The operator's explicit answer from their latest message." },
+  },
+  required: ["module", "reference", "decision"],
+  additionalProperties: false,
 };
 
 const ARTIFACT_INPUT_SCHEMA = {
@@ -334,6 +348,8 @@ const trustedDecisionRecorder = (session, stdout) => (arguments_) =>
     stdout,
     ask: async ({ challenge, summary, review }) => {
       let timer;
+      // Elicitation is only a fast path: timeout, transport failure or an
+      // unrendered request is no answer, so the driver stops at OPERATOR_DECISION.
       const response = await Promise.race([
         Promise.resolve().then(() => session.request("elicitation/create", {
           message: `Working directory: ${process.cwd()}\n${summary}` +
@@ -346,7 +362,7 @@ const trustedDecisionRecorder = (session, stdout) => (arguments_) =>
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error("Elicitation timed out; no decision was recorded.")), ELICITATION_TIMEOUT_MS);
         }),
-      ]).finally(() => clearTimeout(timer));
+      ]).catch(() => null).finally(() => clearTimeout(timer));
       if (response?.action === "cancel") return "cancel";
       if (review) return response?.action === "accept" &&
         ["APPROVE", "REJECT"].includes(response.content?.decision) &&
@@ -477,6 +493,25 @@ const TOOLS = [
     /** The one tool whose body may need the connection's human channel. */
     sessionAware: true,
   },
+  {
+    name: RELAY_TOOL,
+    description:
+      "Relay the operator's explicit APPROVE or REJECT, given in conversation after seeing the review of an OPERATOR_DECISION, as AGENT_RELAYED. Pass operatorApproval.reference unchanged. Never relay without the operator's explicit answer; a stale reference or a policy requiring HUMAN_ATTESTED records nothing.",
+    inputSchema: RELAY_INPUT_SCHEMA,
+    call: async (arguments_) => {
+      const previousExitCode = process.exitCode;
+      const log = [];
+      try {
+        const result = await relayOperatorDecision({
+          ...(await registryFor(arguments_)),
+          reference: arguments_.reference,
+          decision: arguments_.decision,
+          stdout: { write: (chunk) => (log.push(String(chunk)), true) },
+        });
+        return { ...result, log: log.join("") };
+      } finally { process.exitCode = previousExitCode; }
+    },
+  },
 ];
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));
@@ -554,7 +589,7 @@ const callToolInContext = async (id, parameters, session) => {
   // argument to some future tool is the same act under a different label, and a
   // list of names cannot refuse a name it has never seen. The iteration tools
   // obtain a response through elicitation, never through a tool argument.
-  const smuggled = approvalShapedArgument(parameters?.arguments, name);
+  const smuggled = name === RELAY_TOOL ? null : approvalShapedArgument(parameters?.arguments, name);
   if (smuggled) {
     return failure(
       id,

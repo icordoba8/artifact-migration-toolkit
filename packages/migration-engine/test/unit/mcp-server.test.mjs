@@ -154,12 +154,13 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
     "artifact_run",
     "artifact_status",
     "migration_pending_decisions",
+    "migration_relay_decision",
     "migration_run",
     "migration_scan",
     "migration_status",
   ]);
   const run = tools.find((tool) => tool.name === "migration_run");
-  const readOnlyTools = tools.filter((tool) => tool !== run && tool.name.startsWith("migration_"));
+  const readOnlyTools = tools.filter((tool) => tool !== run && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
   for (const tool of readOnlyTools) {
     assert.equal(typeof tool.description, "string");
     assert.deepEqual(tool.inputSchema.required, ["module"]);
@@ -385,7 +386,7 @@ test("a malformed frame is a parse error and the connection survives", async () 
   assert.equal(raw.length, 2);
   assert.equal(raw[0].error.code, -32700);
   assert.equal(raw[0].id, null);
-  assert.equal(raw[1].result.tools.length, 6);
+  assert.equal(raw[1].result.tools.length, 7);
 });
 
 // --- §11.6 no approval path --------------------------------------------------
@@ -1118,7 +1119,8 @@ test("cancel and transport failure are not signed REJECTED or any decision", asy
         () => response instanceof Error ? { error: { code: -32603, message: response.message } } : { result: response },
       );
       const run = structured(raw.find((frame) => frame.id === 2));
-      assert.equal(run.outcome, response instanceof Error ? "FAILED" : "OPERATOR_DECISION");
+      // A transport failure is no answer, never FAILED: the decision stays recoverable.
+      assert.equal(run.outcome, "OPERATOR_DECISION");
       assert.equal(await decisionLedger(fixture), null);
       assert.equal((await pendingDecisionCandidates({ ...(await resolutionFor(fixture)), moduleName: "auth" })).candidates.length, 1);
     } finally { await fixture.cleanup(); }
@@ -1159,8 +1161,8 @@ test("an unresponsive MCP provider times out, cleans pending, and ignores a late
     input.write(`${JSON.stringify(call(2, "migration_run", { module: "auth" }))}\n`);
     await serving;
     assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
-    assert.match(frames.find((frame) => frame.id === 2).result.structuredContent.reason, /timed out/);
-    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 6);
+    assert.equal(frames.find((frame) => frame.id === 2).result.structuredContent.outcome, "OPERATOR_DECISION");
+    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 7);
     assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
     assert.equal(await decisionLedger(fixture), null);
   } finally {
