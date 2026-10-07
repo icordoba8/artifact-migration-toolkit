@@ -405,7 +405,10 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
       {
         recursive: true,
         dereference: true,
-        filter: (source) => !source.split(path.sep).includes(".bin"),
+        // Type declarations and source maps are build-time output, except
+        // TypeScript's default libs (lib.*.d.ts): the pinned tsc fallback reads them.
+        filter: (source) => !source.split(path.sep).includes(".bin") &&
+          (!/\.(d\.ts|map)$/.test(path.basename(source)) || /^lib(\..+)?\.d\.ts$/.test(path.basename(source))),
       },
     );
   }

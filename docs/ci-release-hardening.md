@@ -13,8 +13,14 @@ advisory status* below; that status is debt, not the portability standard.
 
 ## Development CI
 
-`.github/workflows/ci.yml` runs on every branch push and pull request. Its
-`toolkit` matrix runs the same commands on `ubuntu-latest` and `windows-latest`:
+`.github/workflows/ci.yml` runs on every branch push and pull request. The
+`ubuntu` and `windows` jobs run the same commands, each as three parallel
+shards (`toolkit shard N/3 (<os>)`). `providers:test` is split **per test file**
+into `providers:test:1..3` (never within a file); every shard first asserts the
+three lists partition `providers:test` exactly, and shard 3 also runs the engine
+suites. The `toolkit` job, named `toolkit (ubuntu-latest)`, needs every Ubuntu
+shard, runs `if: always()`, and succeeds only when `needs.ubuntu.result` is
+`success` — so it stays the one required check:
 
 | Gate | PR | Main | Release SHA | Reason |
 | --- | --- | --- | --- | --- |
@@ -29,9 +35,9 @@ advisory status* below; that status is debt, not the portability standard.
 
 Every row above runs on **both** platforms. No step has `continue-on-error`, so
 a failed command still names its step and platform and the job still concludes
-red. The only `continue-on-error` in the workflow is the job-level
-`matrix.os == 'windows-latest'` expression described below; it changes what a
-Windows failure *blocks*, never whether it runs or is seen.
+red. The only `continue-on-error` in the workflow is the job-level one on the
+`windows` job described below; it changes what a Windows failure *blocks*,
+never whether it runs or is seen.
 
 The published 1.3.4 version may remain in the manifest during ordinary
 development; changed payload bytes correctly make `release:check` fail until a
@@ -54,8 +60,8 @@ What the policy is, exactly:
 
 | | Runs the full matrix | Failure visible | Blocks publication |
 | --- | --- | --- | --- |
-| `ci / toolkit (ubuntu-latest)` | yes | yes | **yes** |
-| `ci / toolkit (windows-latest)` | yes | yes | no (advisory) |
+| `ci / toolkit (ubuntu-latest)` (aggregates `toolkit shard 1..3/3 (ubuntu-latest)`) | yes | yes | **yes** |
+| `ci / toolkit shard 1..3/3 (windows-latest)` | yes | yes | no (advisory) |
 
 What this is **not**: Windows CI is not removed, no Windows test is skipped or
 marked pending, no individual failing test name is allowlisted, and the Windows
@@ -79,9 +85,9 @@ All of these, deliberately verified by a human — never inferred:
 7. the green result reproduces on at least **two independent normal CI runs**
    (different commits, not reruns of one).
 
-Then, in one change: delete the `continue-on-error` expression from
-`.github/workflows/ci.yml`, restore `ci / toolkit (windows-latest)` to the
-required branch-protection checks, and delete this section along with the
+Then, in one change: delete the `windows` job's `continue-on-error` from
+`.github/workflows/ci.yml`, add `windows` to the `toolkit` aggregator's `needs`
+and condition, and delete this section along with the
 advisory wording in `docs/release.md`. Re-enabling is a deliberate policy
 commit. Do not let it happen by guesswork or by a single lucky green run.
 
@@ -158,8 +164,8 @@ The candidate and final version commits each need, on their **own exact SHA**:
 
 - `ci / toolkit (ubuntu-latest)` = **SUCCESS**. Required. A red or missing
   Ubuntu result means the SHA is not release-ready, with no exceptions.
-- `ci / toolkit (windows-latest)` = **executed**, with its conclusion recorded
-  in the release evidence. Advisory during baseline stabilization: a known
+- `ci / toolkit shard 1/3, 2/3, 3/3 (windows-latest)` = **executed**, each
+  conclusion recorded in the release evidence. Advisory during baseline stabilization: a known
   portability failure does not block publication. A Windows job that never ran
   is *not* satisfied — "advisory" means reported, not absent.
 
@@ -167,8 +173,9 @@ Never call a SHA with red Ubuntu release-ready. Configure GitHub branch
 protection on `main` to require exactly one status check while Windows is
 advisory: `ci / toolkit (ubuntu-latest)`. Repository code cannot configure
 branch protection. No workflow or local script verifies remote check status;
-the release operator must read **both** check conclusions for the release SHA
-before running `release:check`, and report the Windows one either way.
+the release operator must read the Ubuntu and all three Windows shard
+conclusions for the release SHA before running `release:check`, and report the
+Windows ones either way.
 
 ## Release validation
 

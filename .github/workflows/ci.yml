@@ -6,24 +6,31 @@ on:
   pull_request:
 
 jobs:
+  # The one required check. A matrix job's `needs` result is `success` only if
+  # every shard succeeded; `always()` keeps a failed shard from turning this
+  # job into `skipped`, which branch protection would otherwise count as passing.
   toolkit:
+    name: toolkit (ubuntu-latest)
+    needs: ubuntu
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Ubuntu shard to succeed
+        run: test "${{ needs.ubuntu.result }}" = success
+
+  ubuntu:
     # The engine drives real file locking, atomic renames, `git ls-files`, child
     # processes and path rendering. Windows has no flock (module-lock.mjs) and
     # quotes command tokens differently (engine-paths.mjs), so it is a different
     # system under test, not the same one twice. Neither platform is optional.
+    # `providers:test` is split per test file into three shards; shard 3 also
+    # runs the engine suites. The `windows` job below runs the same steps.
+    name: toolkit shard ${{ matrix.shard }}/3 (ubuntu-latest)
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    # TEMPORARY, and tracked as debt in docs/ci-release-hardening.md ->
-    # "Windows advisory status". Windows had never reached `engine:test` until
-    # 9a328f9; it then exposed a pre-existing portability backlog that predates
-    # every release including 1.3.4. Until that backlog is fixed, Windows runs
-    # the complete matrix and reports its real red conclusion, but does not fail
-    # the workflow run, so an old portability bug cannot hold a release hostage.
-    # Ubuntu stays blocking. No suite is skipped and no failure is allowlisted.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+        shard: [1, 2, 3]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -59,16 +66,97 @@ jobs:
             exit 1
           fi
 
+      # The shards must run every providers:test file exactly once.
+      - name: Verify the shards partition providers:test
+        shell: bash
+        run: |
+          node -e '
+            const s = require("./package.json").scripts;
+            const files = (k) => s[k].split(/\s+/).filter((t) => t.endsWith(".mjs"));
+            const shards = [1, 2, 3].flatMap((n) => files(`providers:test:${n}`));
+            if (shards.length !== new Set(shards).size ||
+                JSON.stringify([...shards].sort()) !== JSON.stringify(files("providers:test").sort())) {
+              console.error("::error::providers:test:1..3 must partition providers:test exactly");
+              process.exit(1);
+            }'
+
       # Provider projection, ownership-safe pruning, the no-engine-in-providers
       # boundary, the canonical skill hashes in skills-lock.json, and the
       # installed adapter acceptance matrix for all four providers.
-      - name: Run the provider generation and installation suites
-        run: pnpm providers:test
+      - name: Run the provider generation and installation suites (shard ${{ matrix.shard }}/3)
+        run: pnpm providers:test:${{ matrix.shard }}
 
       # Lifecycle, formats, decisions, integrity, MCP, discovery, artifact, and
       # the external-installation / rendered-command path suites.
       - name: Run the engine suites
+        if: ${{ matrix.shard == 3 }}
         run: pnpm engine:test
 
       - name: Run the TypeScript artifact suites
+        if: ${{ matrix.shard == 3 }}
+        run: pnpm engine:test:ts
+
+  windows:
+    name: toolkit shard ${{ matrix.shard }}/3 (windows-latest)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    runs-on: windows-latest
+    # TEMPORARY, and tracked as debt in docs/ci-release-hardening.md ->
+    # "Windows advisory status". Windows had never reached `engine:test` until
+    # 9a328f9; it then exposed a pre-existing portability backlog that predates
+    # every release including 1.3.4. Until that backlog is fixed, Windows runs
+    # the complete matrix and reports its real red conclusion, but does not fail
+    # the workflow run, so an old portability bug cannot hold a release hostage.
+    # Ubuntu stays blocking. No suite is skipped and no failure is allowlisted.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify generated provider trees
+        run: pnpm providers:check
+
+      - name: Scan for consumer-relative engine paths
+        shell: bash
+        run: |
+          if git grep -n -E '\.agents/skills/(start-migration|migrate-artifact)/scripts' -- \
+               skills providers scripts docs README.md .github; then
+            echo "::error::a canonical or generated surface names a consumer-relative engine path"
+            exit 1
+          fi
+
+      - name: Verify the shards partition providers:test
+        shell: bash
+        run: |
+          node -e '
+            const s = require("./package.json").scripts;
+            const files = (k) => s[k].split(/\s+/).filter((t) => t.endsWith(".mjs"));
+            const shards = [1, 2, 3].flatMap((n) => files(`providers:test:${n}`));
+            if (shards.length !== new Set(shards).size ||
+                JSON.stringify([...shards].sort()) !== JSON.stringify(files("providers:test").sort())) {
+              console.error("::error::providers:test:1..3 must partition providers:test exactly");
+              process.exit(1);
+            }'
+
+      - name: Run the provider generation and installation suites (shard ${{ matrix.shard }}/3)
+        run: pnpm providers:test:${{ matrix.shard }}
+
+      - name: Run the engine suites
+        if: ${{ matrix.shard == 3 }}
+        run: pnpm engine:test
+
+      - name: Run the TypeScript artifact suites
+        if: ${{ matrix.shard == 3 }}
         run: pnpm engine:test:ts

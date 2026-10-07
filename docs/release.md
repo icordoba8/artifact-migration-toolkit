@@ -15,8 +15,8 @@ The exact candidate SHA must have, before any release command runs:
 
 | Check | Requirement |
 | --- | --- |
-| `ci / toolkit (ubuntu-latest)` | **SUCCESS** — required, blocking |
-| `ci / toolkit (windows-latest)` | **executed and recorded** — advisory, non-blocking |
+| `ci / toolkit (ubuntu-latest)` | **SUCCESS** — required, blocking; succeeds only if every `toolkit shard N/3 (ubuntu-latest)` succeeded |
+| `ci / toolkit shard 1/3, 2/3, 3/3 (windows-latest)` | **executed and recorded** — advisory, non-blocking |
 
 Windows is temporarily advisory because the repository has no certified green
 Windows baseline and never had one; see
@@ -38,8 +38,8 @@ UBUNTU CI:  SUCCESS
 WINDOWS CI: ADVISORY_FAILURE | SUCCESS
 ```
 
-On `ADVISORY_FAILURE`, name the first failing step and test — e.g.
-`first failure: pnpm engine:test — <suite> / <test name>`. A Windows job that
+On `ADVISORY_FAILURE`, name the first failing shard, step and test — e.g.
+`first failure: shard 3/3, pnpm engine:test — <suite> / <test name>`. A Windows job that
 did not execute is a release blocker, not an advisory failure: rerun it.
 
 ## The three runners
