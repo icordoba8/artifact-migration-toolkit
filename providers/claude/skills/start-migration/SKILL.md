@@ -81,6 +81,14 @@ code and its remedy; do not work around it.
 | `RELEASE_NOT_PUBLISHED` | No immutable release carries the required version. Install a published release with `skills add`. |
 | `RUNTIME_UPDATE_REQUIRED_OFFLINE` | The required release is not available locally. One connected run clears it. |
 | `SKILL_SET_INCOHERENT` | Two installed skills require different releases. Run `skills add` for both so they match. |
+| `SKILL_PROJECTION_SKEW` | Installed copies of this skill in different host roots disagree and cannot be updated from a verified `.agents/skills` copy. Run `skills add` for both skills, then run this skill again. |
+| `SKILL_PROJECTION_CONVERGED` | This copy was older than `.agents/skills`; every copy and the runtime were updated. Run this skill again so the updated instructions load. |
+
+To update, run `skills add` for both skills; the next preflight from any host
+updates every other project copy (`.claude`, `.github`, `.codex`,
+`.opencode/skills`) from the verified `.agents/skills` copy and reports the
+replaced paths as `projectionsConverged`. Copies a provider receipt owns are
+left to that provider's installer.
 
 Never suggest editing or deleting `.artifact-migration-tools/<provider>.json`,
 any provider MCP configuration, or the install lock. None of them is a repair
@@ -284,8 +292,8 @@ installed CLI. Neither front end can attest a module-19 decision.
    artifact-migration-run <module> [--mode auto|step] [--slice <id>] [options]
    ```
 
-   An agent-run shell has no TTY, so an operator decision reached this way can
-   only stop at `OPERATOR_DECISION`.
+   An agent-run shell has no TTY, so an operator decision reached this way
+   stops at `OPERATOR_DECISION`; it is relayed as in step 2 below.
 
 Either way the directive's `next=` repeats the iteration; obey it literally
 through the same front end.
@@ -298,14 +306,18 @@ For module 19, when `operatorApproval.blocked` is null:
 2. Only when the user's next message is an explicit `APPROVE` or `REJECT`, call
    the MCP tool `migration_relay_decision` with `module`, `cwd`,
    `reference` = `operatorApproval.reference` unchanged, and `decision` = that
-   answer. Anything else relays nothing; show the review again if asked.
-3. Then call `migration_run` again; it resumes normally.
+   answer. Without MCP, run the same relay through the CLI from the same
+   working directory:
+   `artifact-migration-decision <module> --relay <operatorApproval.reference> --decision <APPROVE|REJECT>`.
+   Anything else relays nothing; show the review again if asked.
+3. Then call `migration_run` (or `artifact-migration-run <module> --json`)
+   again; it resumes normally.
 
 Never approve or reject on your own, never in the same turn you asked, and
 never from an earlier message. Never ask the user for IDs, digests, references,
-commands or runtime paths, and never send them to another terminal or a raw
-`node` command. A `STALE_REVIEW` result means the review changed: run
-`migration_run` again and ask about the new review. If `blocked` names a
+commands or runtime paths; the user types only `APPROVE` or `REJECT`. Never
+send them to another terminal or any command other than the relay above. A `STALE_REVIEW` result means the review changed: run
+the migration again and ask about the new review. If `blocked` names a
 required `HUMAN_ATTESTED` principal, report it and stop; the relay refuses it.
 For historical formats,
 `reason` names any recorded line and `decisionReferences` carries its citation;

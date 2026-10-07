@@ -25,10 +25,20 @@ Use `migration_run` / `artifact_run` with elicitation when the host renders it.
 Otherwise a module-19 `OPERATOR_DECISION` carries the review and an opaque
 `operatorApproval.reference`: the agent shows the review, the user answers
 `APPROVE` or `REJECT` in the conversation, and the agent relays only that next
-explicit answer through `migration_relay_decision`. A missing response,
+explicit answer through `migration_relay_decision`, or without MCP through
+`artifact-migration-decision <module> --relay <reference> --decision APPROVE|REJECT`,
+which calls the same engine function. A missing response,
 cancellation, dismissal, timeout or transport failure appends nothing; a stale
 reference or a `HUMAN_ATTESTED` requirement is refused; auto-permission, model
 reasoning and prior conversation never authorize a decision.
+
+GitHub Copilot CLI reads workspace MCP servers only from `.mcp.json` or
+`.github/mcp.json`, and only in a trusted folder; the Copilot adapter registers
+in `.vscode/mcp.json` (VS Code). Without a connected server Copilot CLI uses the
+CLI fallback above. Its path sandbox also needs the release store
+(`%LOCALAPPDATA%\artifact-migration-tools` on Windows,
+`~/.local/share/artifact-migration-tools` elsewhere) passed as
+`copilot --add-dir <store>`, because the engine runs from there.
 
 The optional protected WebAuthn signer provides `HUMAN_ATTESTED`. An explicit
 protected high-assurance policy fails closed without valid signer activation;

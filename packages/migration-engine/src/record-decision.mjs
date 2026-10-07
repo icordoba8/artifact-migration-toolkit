@@ -194,6 +194,8 @@ export const parseDecisionArguments = (arguments_) => {
     strict: true,
     options: {
       approve: { type: "string" },
+      relay: { type: "string" },
+      decision: { type: "string" },
       list: { type: "boolean", default: false },
       pending: { type: "boolean", default: false },
       verify: { type: "boolean", default: false },
@@ -209,14 +211,18 @@ export const parseDecisionArguments = (arguments_) => {
     values.pending,
     values.verify,
     Boolean(values.approve),
+    values.relay !== undefined,
   ].filter(Boolean).length;
   if (modes !== 1) {
     throw new Error(
-      "Choose exactly one of --pending, --approve <stable-id>, --list, or --verify.",
+      "Choose exactly one of --pending, --approve <stable-id>, --relay <reference> --decision APPROVE|REJECT, --list, or --verify.",
     );
   }
+  if ((values.relay !== undefined) !== (values.decision !== undefined) || values.relay === "") {
+    throw new Error("--relay <operatorApproval.reference> and --decision APPROVE|REJECT go together. Nothing was written.");
+  }
   if (values.artifact !== undefined) {
-    if (positionals.length !== 0) {
+    if (positionals.length !== 0 || values.relay !== undefined) {
       throw new Error(
         "Usage: record-decision.mjs --artifact <source> --type <type> [--source-root <path>] [--target-root <path>] (--pending | --approve <stable-id> | --list | --verify)",
       );
@@ -236,12 +242,13 @@ export const parseDecisionArguments = (arguments_) => {
   }
   if (positionals.length !== 1) {
     throw new Error(
-      "Usage: record-decision.mjs <module> (--pending | --approve <stable-id> | --list | --verify) [--registry <path>]",
+      "Usage: record-decision.mjs <module> (--pending | --approve <stable-id> | --relay <reference> --decision APPROVE|REJECT | --list | --verify) [--registry <path>]",
     );
   }
   return {
     moduleName: positionals[0],
     approve: values.approve,
+    ...(values.relay !== undefined && { relay: values.relay, decision: values.decision }),
     list: values.list,
     pending: values.pending,
     verify: values.verify,
@@ -1899,6 +1906,18 @@ export const runRecordDecisionCli = async (
     cliPath: options.registryOption,
     moduleName: options.moduleName,
   });
+
+  // The no-MCP front end of `migration_relay_decision`: same function, same authority.
+  if (options.relay !== undefined) {
+    const log = [];
+    const result = await relayOperatorDecision({
+      registryPath, moduleName: options.moduleName, reference: options.relay, decision: options.decision,
+      stdout: { write: (chunk) => (log.push(String(chunk)), true) },
+    });
+    stdout.write(`${JSON.stringify({ ...result, log: log.join("") }, null, 2)}\n`);
+    process.exitCode = result.outcome === "BLOCKED" ? BLOCKED_EXIT_CODE : 0;
+    return result;
+  }
 
   if (options.list || options.verify) {
     const { registryData, resolved } = await readMigrationContext({

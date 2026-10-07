@@ -675,3 +675,47 @@ test('T19: a released skill stamp binds to the exact commit and contentHash of i
   assert.equal(accepted.selection, 'skill');
   assert.equal(accepted.toolkit.version, '1.15.0');
 });
+
+test('project copies of a skill converge from the verified .agents copy; skew without one is refused', async () => {
+  const f = await releaseFixture();
+  const version = f.resolved.version;
+  const root = path.join(scratch, 'projection consumer');
+  const store = path.join(scratch, 'projection store');
+  await mkdir(root, { recursive: true });
+  await requiring(version);
+  await ensureRuntime({ provider: 'codex', root, store }, { resolve: async () => f.resolved, download: f.download, skillRelease });
+
+  const copy = rel => path.join(root, rel, 'start-migration');
+  const identity = async rel => JSON.parse(await readFile(path.join(copy(rel), 'release-identity.json'), 'utf8'));
+  const stamp = (rel, stamped) => writeFile(path.join(copy(rel), 'release-identity.json'), `${JSON.stringify(stamped, null, 2)}\n`);
+  const from = rel => ({ ...offline, skillRelease: () => identity(rel), skillDir: copy(rel) });
+  const current = { ...requiredSkill };
+  const older = { ...current, version: '1.0.5' };
+  for (const rel of ['.agents/skills', '.github/skills', '.opencode/skills']) {
+    await cp(path.join(import.meta.dirname, '../skills/start-migration'), copy(rel), { recursive: true });
+    await stamp(rel, rel === '.agents/skills' ? current : older);
+  }
+
+  const converged = await ensureRuntime({ provider: 'codex', root, store }, from('.agents/skills'));
+  assert.deepEqual(converged.projectionsConverged, ['.github/skills/start-migration', '.opencode/skills/start-migration']);
+  assert.deepEqual(await identity('.github/skills'), current);
+
+  // The host ran a stale copy: it is updated too, and the run stops so the new instructions load.
+  await stamp('.github/skills', older);
+  const rerun = await ensureRuntime({ provider: 'codex', root, store }, from('.github/skills')).then(() => null, e => e);
+  assert.equal(rerun.code, 'SKILL_PROJECTION_CONVERGED');
+  assert.deepEqual(await identity('.github/skills'), current);
+
+  const receipt = await readFile(receiptPath(root));
+  const refused = async (rel, why) => {
+    await stamp('.opencode/skills', older);
+    const error = await ensureRuntime({ provider: 'codex', root, store }, from(rel)).then(() => null, e => e);
+    assert.equal(error?.code, 'SKILL_PROJECTION_SKEW', why);
+    assert.deepEqual(await identity('.opencode/skills'), older, why);
+    assert.deepEqual(await readFile(receiptPath(root)), receipt, why);
+  };
+  await writeFile(path.join(copy('.agents/skills'), 'SKILL.md'), 'tampered\n', { flag: 'a' });
+  await refused('.agents/skills', 'reference bytes do not match its stamp');
+  await rm(path.join(root, '.agents'), { recursive: true });
+  await refused('.github/skills', 'no reference copy');
+});

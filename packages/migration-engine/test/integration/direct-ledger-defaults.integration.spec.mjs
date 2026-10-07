@@ -140,8 +140,8 @@ for (const provider of ["claude", "codex", "copilot", "opencode"]) {
   });
 }
 
-for (const answer of ["APPROVE", "REJECT"]) {
-  test(`conversational ${answer} relay: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse`, async () => {
+for (const [answer, transport] of ["APPROVE", "REJECT"].flatMap((answer) => [[answer, "mcp"], [answer, "cli"]])) {
+  test(`conversational ${answer} relay over ${transport}: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse`, async () => {
     const fixture = await createFixture();
     const exitCode = process.exitCode;
     try {
@@ -155,7 +155,13 @@ for (const answer of ["APPROVE", "REJECT"]) {
       const failing = createSession({ request: async () => { throw new Error("Elicitation timed out"); } });
       await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize",
         params: { capabilities: { elicitation: {} } } }, failing);
-      const relay = (reference, decision = answer) => call("migration_relay_decision", { reference, decision });
+      const relay = (reference, decision = answer) => transport === "mcp"
+        ? call("migration_relay_decision", { reference, decision })
+        : record(fixture, ["--relay", reference, "--decision", decision]);
+      if (transport === "cli") {
+        await assert.rejects(record(fixture, ["--decision", answer]), /--relay <reference> --decision/);
+        await assert.rejects(record(fixture, ["--relay", "", "--decision", answer]), /--relay <operatorApproval.reference>/);
+      }
       await withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { EXCLUSION: "HUMAN_ATTESTED" }), async () => {
         const run = await call("migration_run");
         assert.equal(run.blocked.requiredPrincipal, "HUMAN_ATTESTED");

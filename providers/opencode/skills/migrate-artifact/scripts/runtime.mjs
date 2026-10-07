@@ -4,8 +4,8 @@
 // It resolves transport only; release verification, installation, receipts and MCP
 // ownership stay in the release's provider adapter.
 import { execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { access, constants as fsConstants, mkdtemp, mkdir, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { access, constants as fsConstants, cp, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -29,6 +29,10 @@ const exactVersion = value => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(
 const assetName = version => `${TOOLKIT}-v${version}.tar.gz`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const IDENTITY_FILE = 'release-identity.json';
+const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Project skill roots the supported hosts read; `.agents/skills` is what `skills add` writes.
+const PROJECTION_ROOTS = ['.agents/skills', '.claude/skills', '.github/skills', '.codex/skills', '.opencode/skills'];
+const TOOLKIT_SKILLS = ['start-migration', 'migrate-artifact'];
 
 /**
  * The installed skill's exact identity, read from the stamp beside this skill.
@@ -66,7 +70,7 @@ export class RuntimeSelectionError extends Error {
     super(message);
     this.name = 'RuntimeSelectionError';
     this.code = code;
-    this.state = { code, ...state, receipt: 'unchanged' };
+    this.state = { code, receipt: 'unchanged', ...state };
   }
 }
 
@@ -431,7 +435,131 @@ const releaseMissing = error => {
   return false;
 };
 
-export async function ensureRuntime(
+/** `computeSkillHash` from scripts/skills-lock.mjs, inlined: this file ships alone inside each skill. */
+async function skillHash(dir) {
+  const walk = async (absolute, relative = '') => (await Promise.all((await readdir(absolute, { withFileTypes: true }))
+    .filter(entry => entry.name !== 'node_modules')
+    .map(entry => entry.isDirectory() ? walk(path.join(absolute, entry.name), path.posix.join(relative, entry.name)) : [path.posix.join(relative, entry.name)]))).flat();
+  const digest = createHash('sha256');
+  for (const relative of (await walk(dir)).sort()) {
+    if (relative === IDENTITY_FILE) continue;
+    digest.update(relative); digest.update('\0');
+    digest.update(await readFile(path.join(dir, relative))); digest.update('\0');
+  }
+  return digest.digest('hex');
+}
+
+const identityKey = id => JSON.stringify([id?.version, id?.computedHash, id?.source, id?.commit, id?.contentHash]);
+
+/** Every project copy of one toolkit skill that no receipt owns (an adapter converges its own). */
+async function projections(root, skill) {
+  const owned = [];
+  try {
+    for (const name of await readdir(path.join(root, '.artifact-migration-tools'))) {
+      if (!name.endsWith('.json')) continue;
+      try { owned.push(...Object.keys(JSON.parse(await readFile(path.join(root, '.artifact-migration-tools', name), 'utf8')).files ?? {})); } catch {}
+    }
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const found = [];
+  for (const base of PROJECTION_ROOTS) {
+    const rel = `${base}/${skill}`;
+    const dir = path.join(root, rel);
+    let identity;
+    try { identity = JSON.parse(await readFile(path.join(dir, IDENTITY_FILE), 'utf8')); } catch { continue; }
+    if (identity?.name !== TOOLKIT || identity.skill !== skill || owned.some(file => file.startsWith(`${rel}/`))) continue;
+    found.push({ rel, dir, real: await realpath(dir), identity });
+  }
+  return found;
+}
+
+const describe = found => found.map(p => `${p.rel}=${p.identity.version}`).join(', ');
+
+const skew = (skill, found, why, state = {}) => new RuntimeSelectionError('SKILL_PROJECTION_SKEW',
+  `Installed copies of the "${skill}" skill disagree (${describe(found)}): ${why} `
+  + 'Run `skills add` for both skills (start-migration and migrate-artifact), then run this skill again; the next run updates every copy from `.agents/skills`.',
+  { skill, projections: found.map(p => ({ path: p.rel, version: p.identity.version, computedHash: p.identity.computedHash })), ...state });
+
+/** Replace a stale copy with the verified reference bytes; the old copy is restored on failure. */
+async function replaceProjection(reference, target) {
+  const staging = `${target}.${randomUUID()}.tmp`;
+  const previous = `${target}.${randomUUID()}.old`;
+  try {
+    await cp(reference, staging, { recursive: true });
+    await rename(target, previous);
+    try { await rename(staging, target); }
+    catch (error) { await rename(previous, target); throw error; }
+    await rm(previous, { recursive: true, force: true });
+  } finally { await rm(staging, { recursive: true, force: true }); }
+}
+
+/**
+ * Selection, after making every project copy of the toolkit skills agree.
+ *
+ * A host reads whichever copy it finds first, and `skills add` refreshes only
+ * `.agents/skills` (and the `.claude/skills` link to it), so an older copy left in
+ * another host's root used to select an older runtime without a word. The
+ * `.agents/skills` copy is the reference: its bytes must recompute to its stamp
+ * and selection must prove that stamp against a release manifest before any other
+ * copy is replaced. Without a reference, disagreement is refused.
+ *
+ * ponytail: no lock around the replacement; two concurrent preflights write the
+ * same verified bytes. Add the install lock if they are ever observed to race.
+ */
+export async function ensureRuntime(options = {}, deps = {}) {
+  const { skillRelease = readSkillRelease, skillDir = SKILL_DIR } = deps;
+  const root = path.resolve(options.root ?? process.cwd());
+  const own = await skillRelease();
+  if ((options.version ?? process.env.ARTIFACT_MIGRATION_TOOLS_VERSION) !== undefined || own?.name !== TOOLKIT || !TOOLKIT_SKILLS.includes(own.skill)) {
+    return selectRuntime(options, deps);
+  }
+  const found = await projections(root, own.skill);
+  const running = await realpath(skillDir).catch(() => null);
+  if (!found.some(p => p.real === running)) return selectRuntime(options, deps);
+  const reference = found.find(p => p.rel === `.agents/skills/${own.skill}`);
+  const expected = identityKey(reference?.identity ?? own);
+  if (!found.some(p => identityKey(p.identity) !== expected) && identityKey(own) === expected) return selectRuntime(options, deps);
+  if (!reference) throw skew(own.skill, found, 'there is no `.agents/skills` copy to update the others from.');
+  if (await skillHash(reference.real) !== reference.identity.computedHash) {
+    throw skew(own.skill, found, 'the `.agents/skills` copy does not match its own release-identity.json.');
+  }
+
+  let result;
+  try { result = await selectRuntime(options, { ...deps, skillRelease: async () => reference.identity }); }
+  catch (error) {
+    if (error instanceof RuntimeSelectionError) throw skew(own.skill, found, `the \`.agents/skills\` copy is not proven by a published release (${error.code}: ${error.message})`);
+    throw error;
+  }
+  // A still-valid rollback pin selected the runtime, so no manifest proved the reference.
+  if (result.selection !== 'skill') return result;
+
+  const receipt = JSON.parse(await readFile(path.join(root, `.artifact-migration-tools/${PROVIDERS.get(options.provider)}.json`), 'utf8'));
+  const manifest = await receiptManifest(receipt);
+  const inside = `${await realpath(root)}${path.sep}`;
+  const converged = [];
+  for (const skill of TOOLKIT_SKILLS) {
+    const copies = skill === own.skill ? found : await projections(root, skill);
+    const source = copies.find(p => p.rel === `.agents/skills/${skill}`);
+    // The other skill is converged only when this same release proves its reference too.
+    if (!source || !satisfies(manifest, { version: source.identity.version, exact: source.identity }) ||
+        (skill !== own.skill && await skillHash(source.real) !== source.identity.computedHash)) continue;
+    const done = new Set([source.real]);
+    for (const copy of copies) {
+      if (done.has(copy.real) || !copy.real.startsWith(inside) || identityKey(copy.identity) === identityKey(source.identity)) continue;
+      done.add(copy.real);
+      await replaceProjection(source.real, copy.real);
+      converged.push(copy.rel);
+    }
+  }
+  if (identityKey(own) !== identityKey(reference.identity)) {
+    throw new RuntimeSelectionError('SKILL_PROJECTION_CONVERGED',
+      `This copy of "${own.skill}" (${own.version}) was older than \`.agents/skills\` (${reference.identity.version}). `
+      + `Updated ${converged.join(', ')} and the runtime to ${result.toolkit.version}. Run this skill again so the updated instructions are loaded.`,
+      { skill: own.skill, converged, toolkit: result.toolkit.version, receipt: 'converged' });
+  }
+  return { ...result, projectionsConverged: converged };
+}
+
+async function selectRuntime(
   { provider, root = process.cwd(), store = defaultStore(), version } = {},
   { resolve = resolveRelease, download = downloadAsset, skillRelease = readSkillRelease } = {},
 ) {

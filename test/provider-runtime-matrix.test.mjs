@@ -539,7 +539,7 @@ test('a provider configuration regenerated from scratch is repaired without adop
     // the receipt now reaches the doctor already converged, so a restored path
     // is always the current one.
     const entry = await ownedRegistration(root, provider);
-    assert.ok(JSON.stringify(entry).includes(JSON.stringify(receipt.release).slice(1, -1)), `${provider}: the restored registration does not name the selected release`);
+    assert.ok((typeof entry === 'string' ? entry : JSON.stringify(entry)).includes(JSON.stringify(receipt.release).slice(1, -1)), `${provider}: the restored registration does not name the selected release`);
     // Idempotent: the restored file validates as ours on the next run.
     assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null, provider);
   }

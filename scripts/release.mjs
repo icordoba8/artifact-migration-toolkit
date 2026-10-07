@@ -408,7 +408,8 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
         // Type declarations and source maps are build-time output, except
         // TypeScript's default libs (lib.*.d.ts): the pinned tsc fallback reads them.
         filter: (source) => !source.split(path.sep).includes(".bin") &&
-          (!/\.(d\.ts|map)$/.test(path.basename(source)) || /^lib(\..+)?\.d\.ts$/.test(path.basename(source))),
+          (!/\.(d\.ts|map)$/.test(path.basename(source)) ||
+            (dependency === "ts-discovery-compiler" && /^lib(\..+)?\.d\.ts$/.test(path.basename(source)))),
       },
     );
   }

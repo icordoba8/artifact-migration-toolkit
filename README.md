@@ -104,6 +104,14 @@ pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit \
   --skill migrate-artifact
 ```
 
+To update, run the same two `skills add` commands. The next preflight from any
+host updates every other project copy of the skills (`.claude`, `.github`,
+`.codex`, `.opencode/skills`) from the `.agents/skills` copy `skills add` wrote,
+after verifying it against its release manifest, and lists the replaced paths in
+`projectionsConverged`. Copies that disagree with no verifiable `.agents/skills`
+copy are refused as `SKILL_PROJECTION_SKEW`; copies owned by a provider receipt
+are left to that provider's installer.
+
 ### What selects the runtime
 
 **The installed skill's exact identity decides which toolkit release runs.**
@@ -169,6 +177,11 @@ code is printed on stderr as JSON alongside the message.
 | `RELEASE_NOT_PUBLISHED` | No immutable release carries the required version. Never falls back to `latest` or to a previous version. |
 | `RUNTIME_UPDATE_REQUIRED_OFFLINE` | The installed runtime does not satisfy the installed skill, the exact target is not available locally, and the network is unreachable. |
 | `SKILL_SET_INCOHERENT` | Two installed skills require different releases of one provider's runtime. Refused rather than rewriting the runtime on alternating invocations. |
+| `SKILL_PROJECTION_SKEW` | Project copies of a skill disagree and there is no `.agents/skills` copy that verifies against a published release to update them from. |
+
+`SKILL_PROJECTION_CONVERGED` is not a failure: the running copy was older than
+`.agents/skills`, every copy and the runtime were updated, and the skill is run
+again so its updated instructions load.
 
 Every one of these is cleared by a first-class command, never by editing or
 deleting a file: `skills add` for each skill, one connected run, or an explicit

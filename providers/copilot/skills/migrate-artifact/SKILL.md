@@ -34,8 +34,10 @@ registered MCP is visible). The result names which rule fired as `selection`,
 Stop on preflight failure; never use a checkout, branch, mutable `latest` URL, or
 ambient `PATH` instead. Refusals are typed — `SKILL_IDENTITY_MISSING`,
 `SKILL_IDENTITY_LEGACY`, `SKILL_IDENTITY_UNRELEASED`, `RELEASE_NOT_PUBLISHED`,
-`RUNTIME_UPDATE_REQUIRED_OFFLINE`, `SKILL_SET_INCOHERENT` — and each leaves every
-file unchanged. Report the code and its remedy: `skills add` for each skill, one
+`RUNTIME_UPDATE_REQUIRED_OFFLINE`, `SKILL_SET_INCOHERENT`,
+`SKILL_PROJECTION_SKEW` — and each leaves every file unchanged; and
+`SKILL_PROJECTION_CONVERGED` means older copies of this skill were updated from
+`.agents/skills`, so run this skill again. Report the code and its remedy: `skills add` for each skill, one
 connected run, or an explicit `--version`. Never suggest editing or deleting a
 receipt, an MCP configuration or the install lock.
 
