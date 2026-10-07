@@ -218,12 +218,16 @@ test("the MCP server runs from the installation and keeps host elicitation the o
 
   const tools = responses.find((message) => message.id === 2)?.result?.tools ?? [];
   assert.ok(tools.length > 0, `MCP listed no tools: ${JSON.stringify(responses)}`);
-  // A client that declared no elicitation capability has no approval channel at
-  // all, so no tool may expose an approval-shaped argument as a substitute.
+  // A client without elicitation gets exactly one answer channel: the relay of
+  // the operator's explicit APPROVE/REJECT, gated as AGENT_RELAYED by the engine.
   for (const tool of tools) {
     const properties = Object.keys(tool.inputSchema?.properties ?? {});
     for (const forbidden of ["approve", "approval", "decision", "confirmApproval"]) {
       if (tool.name === "migration_run" && forbidden === "approve") continue;
+      if (tool.name === "migration_relay_decision" && forbidden === "decision") {
+        assert.deepEqual(tool.inputSchema.properties.decision.enum, ["APPROVE", "REJECT"]);
+        continue;
+      }
       assert.ok(
         !properties.includes(forbidden),
         `${tool.name} exposes an approval-shaped argument '${forbidden}'`,
