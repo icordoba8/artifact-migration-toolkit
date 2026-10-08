@@ -12,7 +12,7 @@ const optional = file => readFile(file).catch(error => { if (error.code === 'ENO
 const layouts = {
   claude: { project: ['skills', null, '.mcp.json', 'mcpServers'], user: ['skills', null, '.mcp.json', 'mcpServers'] },
   codex: { project: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null], user: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null] },
-  opencode: { project: ['.opencode/skills', '.opencode/commands', 'opencode.json', 'mcp'], user: ['.config/opencode/skills', '.config/opencode/commands', '.config/opencode/opencode.json', 'mcp'] },
+  opencode: { project: ['.opencode/skills', '.opencode/commands', 'opencode.json', 'mcp.servers'], user: ['.config/opencode/skills', '.config/opencode/commands', '.config/opencode/opencode.json', 'mcp.servers'] },
   copilot: { project: ['.github/skills', '.github/prompts', '.vscode/mcp.json', 'servers'] },
 };
 
@@ -84,9 +84,19 @@ const end = '# END artifact-migration-tools\n';
  * bytes; this pattern only tells "absent" apart from "there but not ours".
  */
 const ownedBlock = /# BEGIN artifact-migration-tools\n[\s\S]*?\n# END artifact-migration-tools\n/;
-const serverFor = (provider, release) => {
+// OpenCode 2 honors `codemode` only under `mcp.servers`; `false` puts the engine's
+// tool result in the tool row instead of inside `execute`. `legacy` is the
+// pre-1.3.13 `mcp.<name>` shape, accepted only so it can converge.
+const opencodeServer = (command, legacy) => legacy ? { type: 'local', command, enabled: true } : { type: 'local', command, codemode: false };
+const serversIn = (config, key) => {
+  const [outer, nested] = key.split('.');
+  if (!nested) return config[outer] ?? {};
+  const { [nested]: servers, ...legacy } = config[outer] ?? {};
+  return { ...legacy, ...servers };
+};
+const serverFor = (provider, release, legacy = false) => {
   const launch = { command: process.execPath, args: [path.join(release, 'packages/migration-engine/src/mcp-server.mjs')] };
-  return provider === 'opencode' ? { type: 'local', command: [launch.command, ...launch.args], enabled: true }
+  return provider === 'opencode' ? opencodeServer([launch.command, ...launch.args], legacy)
     : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
 };
 
@@ -96,10 +106,13 @@ async function historicalTemplateMatches(release, provider, layout, adapter) {
     const sections = template.split('[mcp_servers.start-migration]\n');
     return sections.length === 2 && sections[1].trim() === 'command = "node"\nargs = ["{{ENGINE_MCP_ENTRY}}"]';
   }
+  const parsed = JSON.parse(template);
   const launch = { command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] };
-  const expected = provider === 'opencode' ? { type: 'local', command: ['node', '{{ENGINE_MCP_ENTRY}}'], enabled: true }
-    : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
-  return same(JSON.parse(template)?.[layout[3]]?.['start-migration'], expected);
+  if (provider === 'opencode') {
+    return same(parsed?.mcp?.servers?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], false)) ||
+      same(parsed?.mcp?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], true));
+  }
+  return same(parsed?.[layout[3]]?.['start-migration'], provider === 'copilot' ? { type: 'stdio', ...launch } : launch);
 }
 
 async function historicalOwned(receipt, provider, layout) {
@@ -116,7 +129,9 @@ async function historicalOwned(receipt, provider, layout) {
       if (adapter.provider !== provider || !same(adapter.toolkit, manifest.toolkit) ||
           !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
-    owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release)).owned, agents: serverFor('claude', item.release) });
+    for (const legacy of provider === 'opencode' ? [false, true] : [false]) {
+      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release) });
+    }
   }
   return owned;
 }
@@ -165,15 +180,26 @@ function mergeConfig(raw, layout, previous, server, historical = []) {
     return { bytes: Buffer.from(text + (owned ?? '')), owned: owned ?? null, missing, stale };
   }
   const config = raw ? JSON.parse(raw) : {};
-  const key = layout[3];
-  if (!config || Array.isArray(config) || typeof config !== 'object' || (config[key] && (Array.isArray(config[key]) || typeof config[key] !== 'object'))) throw new Error('MCP config must be an object');
-  const existing = config[key]?.['start-migration'];
-  if ((raw?.toString().match(/"start-migration"\s*:/g) ?? []).length !== (existing === undefined ? 0 : 1)) throw new Error('Conflicting or modified MCP configuration');
+  const [key, nested] = layout[3].split('.');
+  const notObject = value => value && (Array.isArray(value) || typeof value !== 'object');
+  if (!config || Array.isArray(config) || typeof config !== 'object' || notObject(config[key]) || (nested && notObject(config[key]?.[nested]))) throw new Error('MCP config must be an object');
+  const legacy = nested ? config[key]?.['start-migration'] : undefined;
+  const found = [(nested ? config[key]?.[nested] : config[key])?.['start-migration'], legacy].filter(entry => entry !== undefined);
+  if (found.length > 1 || (raw?.toString().match(/"start-migration"\s*:/g) ?? []).length !== found.length) throw new Error('Conflicting or modified MCP configuration');
+  const [existing] = found;
   const missing = Boolean(previous) && existing === undefined;
   const stale = previous && existing !== undefined && !same(existing, previous) && historical.some(owned => same(existing, owned));
   if (!missing && !stale && (previous ? !same(existing, previous) : existing !== undefined)) throw new Error('Conflicting or modified MCP configuration');
-  if (server) (config[key] ??= {})['start-migration'] = server;
-  else if (config[key]) { delete config[key]['start-migration']; if (!Object.keys(config[key]).length) delete config[key]; }
+  if (legacy !== undefined) delete config[key]['start-migration'];
+  if (server) {
+    config[key] ??= {};
+    (nested ? (config[key][nested] ??= {}) : config[key])['start-migration'] = server;
+  } else if (config[key]) {
+    const servers = nested ? config[key][nested] : config[key];
+    if (servers) delete servers['start-migration'];
+    if (nested && servers && !Object.keys(servers).length) delete config[key][nested];
+    if (!Object.keys(config[key]).length) delete config[key];
+  }
   return { bytes: Buffer.from(json(config)), owned: server, missing, stale };
 }
 
@@ -242,8 +268,8 @@ async function validateSelection(receipt, provider, layout) {
   const pkg = JSON.parse(await readFile(path.join(receipt.release, 'packages/migration-engine/package.json')));
   const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(receipt.release, 'packages/migration-engine', entry)]]));
   if (!same(receipt.commands, commands)) throw new Error('Installation CLI selection conflict');
-  const server = serverFor(provider, receipt.release);
-  if (!same(receipt.mcp, server)) throw new Error('Installation MCP selection conflict');
+  const server = [serverFor(provider, receipt.release), serverFor(provider, receipt.release, true)].find(candidate => same(receipt.mcp, candidate));
+  if (!server) throw new Error('Installation MCP selection conflict');
   const owned = mergeConfig(null, layout, null, server).owned;
   if (!same(receipt.configOwned, owned) && !(typeof owned === 'string' && receipt.configOwned === `\n${owned}`)) throw new Error('Invalid configuration ownership');
   const source = JSON.parse(await readFile(path.join(receipt.release, `providers/${provider}/adapter.json`)));
@@ -298,7 +324,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
       // runtime still succeeds: this invocation continues on absolute CLI paths.
       mcpRepair = { repaired: true, server: 'start-migration', registrationFile: merged.missing || merged.stale ? configFile : agentsFile, restartRequired: true };
     }
-    const servers = layout[3] ? JSON.parse(merged.bytes)[layout[3]] ?? {} : { 'start-migration': previous.mcp };
+    const servers = layout[3] ? serversIn(JSON.parse(merged.bytes), layout[3]) : { 'start-migration': previous.mcp };
     return { ...previous, outcome: 'OK', mcpRepair, mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
   }
   const writes = new Map();

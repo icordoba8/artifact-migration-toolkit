@@ -1,12 +1,14 @@
 {
   "mcp": {
-    "start-migration": {
-      "type": "local",
-      "command": [
-        "node",
-        "{{ENGINE_MCP_ENTRY}}"
-      ],
-      "enabled": true
+    "servers": {
+      "start-migration": {
+        "type": "local",
+        "command": [
+          "node",
+          "{{ENGINE_MCP_ENTRY}}"
+        ],
+        "codemode": false
+      }
     }
   }
 }

@@ -55,6 +55,8 @@ const SURFACES = {
 };
 
 const OWNED_BLOCK = /# BEGIN artifact-migration-tools\n[\s\S]*?\n# END artifact-migration-tools\n/;
+/** The object holding the owned entry: OpenCode nests it under `mcp.servers`. */
+const ownedParent = (config, provider) => provider === 'opencode' ? config.mcp?.servers : config[SURFACES[provider].key];
 const configFile = (root, provider) => path.join(root, SURFACES[provider].config);
 const readConfig = (root, provider) => readFile(configFile(root, provider), 'utf8');
 const receiptFile = (root, provider) => path.join(root, '.artifact-migration-tools', `${provider}.json`);
@@ -68,7 +70,7 @@ const identityOf = receipt => ({
 async function ownedRegistration(root, provider) {
   const text = await readConfig(root, provider);
   const { key } = SURFACES[provider];
-  return key ? JSON.parse(text)[key]?.['start-migration'] ?? null : text.match(OWNED_BLOCK)?.[0] ?? null;
+  return key ? ownedParent(JSON.parse(text), provider)?.['start-migration'] ?? null : text.match(OWNED_BLOCK)?.[0] ?? null;
 }
 
 /** The registration in the file is exactly the one the receipt proves it owns. */
@@ -85,7 +87,7 @@ async function deleteOwnedRegistration(root, provider) {
   const { key } = SURFACES[provider];
   if (!key) return writeFile(file, text.replace(OWNED_BLOCK, ''));
   const config = JSON.parse(text);
-  delete config[key]['start-migration'];
+  delete ownedParent(config, provider)['start-migration'];
   await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
 }
 
@@ -96,7 +98,8 @@ async function modifyOwnedRegistration(root, provider) {
   const { key } = SURFACES[provider];
   if (!key) return writeFile(file, text.replace(/(\[mcp_servers\.start-migration\]\ncommand = )"[^"]*"/, '$1"tampered"'));
   const config = JSON.parse(text);
-  config[key]['start-migration'] = { ...config[key]['start-migration'], tamperedByUser: true };
+  const servers = ownedParent(config, provider);
+  servers['start-migration'] = { ...servers['start-migration'], tamperedByUser: true };
   await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
 }
 
@@ -342,7 +345,7 @@ for (const provider of NAMES) {
       const file = configFile(root, provider);
       if (SURFACES[provider].key) {
         const config = JSON.parse(native);
-        config[SURFACES[provider].key]['start-migration'] = value;
+        ownedParent(config, provider)['start-migration'] = value;
         await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);
       } else await writeFile(file, native.replace(OWNED_BLOCK, value));
     };
@@ -472,6 +475,30 @@ for (const source of NAMES) {
 }
 
 // --- D. multiple sibling providers ------------------------------------------
+
+test('OpenCode: install and update register codemode false under mcp.servers and touch no other server', async () => {
+  const { first, second } = await fixtures();
+  const root = await seedConsumer('opencode codemode', ['opencode']);
+  const store = path.join(scratch, 'opencode codemode store');
+  await install('opencode', root, store, first);
+  const receipt = await readReceipt(root, 'opencode');
+  assert.equal(receipt.mcp.codemode, false);
+  await assertReceiptOwnsRegistration(root, 'opencode', receipt);
+
+  // The pre-1.3.13 shape: `mcp.start-migration`, no codemode.
+  const legacy = { type: 'local', command: receipt.mcp.command, enabled: true };
+  const config = JSON.parse(await readConfig(root, 'opencode'));
+  delete config.mcp.servers;
+  config.mcp['start-migration'] = legacy;
+  await writeFile(configFile(root, 'opencode'), `${JSON.stringify(config, null, 2)}\n`);
+  await writeFile(receiptFile(root, 'opencode'), `${JSON.stringify({ ...receipt, mcp: legacy, configOwned: legacy }, null, 2)}\n`);
+
+  await install('opencode', root, store, second, { version: second.version });
+  const updated = JSON.parse(await readConfig(root, 'opencode'));
+  const { seed } = SURFACES.opencode;
+  assert.deepEqual(updated, { ...seed, mcp: { ...seed.mcp, servers: { 'start-migration': (await readReceipt(root, 'opencode')).mcp } } });
+  assert.equal(updated.mcp.servers['start-migration'].codemode, false);
+});
 
 test('D1: three agreeing siblings let a fourth provider install entirely offline', async () => {
   const { first } = await fixtures();

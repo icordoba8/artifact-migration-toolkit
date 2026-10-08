@@ -340,11 +340,11 @@ test("every MCP template launches the installed engine through a placeholder, ne
     assert.deepEqual(server.args, [ENGINE_MCP_ENTRY_PLACEHOLDER]);
   }
   const fragment = JSON.parse(await readText(root, "providers/opencode/opencode.fragment.json"));
-  assert.deepEqual(fragment.mcp["start-migration"].command, [
-    "node",
-    ENGINE_MCP_ENTRY_PLACEHOLDER,
-  ]);
-  assert.equal(fragment.mcp["start-migration"].type, "local");
+  assert.deepEqual(fragment.mcp.servers["start-migration"], {
+    type: "local",
+    command: ["node", ENGINE_MCP_ENTRY_PLACEHOLDER],
+    codemode: false,
+  });
   // A fragment carries only the MCP block: OpenCode's config is consumer-owned
   // and the adapter merges into it rather than replacing it.
   assert.deepEqual(Object.keys(fragment), ["mcp"]);

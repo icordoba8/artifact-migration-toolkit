@@ -137,6 +137,12 @@ real path it resolved at install time.
 | OpenCode       | `providers/opencode/opencode.fragment.json`   |
 | GitHub Copilot | `providers/copilot/mcp.json`                  |
 
+Every provider exposes the engine tools directly, so each engine call's status
+block is that call's tool row. OpenCode registers under `mcp.servers` with
+`codemode: false` for this: otherwise OpenCode 2 routes MCP tools through its
+`execute` tool. Updating a pre-1.3.13 registration moves the toolkit's own
+`mcp.start-migration` entry there and leaves every other server untouched.
+
 Two rules follow, and neither is negotiable:
 
 - **No consumer-relative engine path.** A registration may not name a path

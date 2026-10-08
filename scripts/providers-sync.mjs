@@ -320,14 +320,18 @@ const providers = [
     mcp: {
       // A fragment, not a config: OpenCode's `opencode.json` is consumer-owned
       // and carries unrelated settings the adapter merges into, never replaces.
+      // OpenCode 2 reads `codemode` only under `mcp.servers`; `false` exposes the
+      // engine tools directly, so their result is the tool row, as on every host.
       output: "providers/opencode/opencode.fragment.json",
       render: (server) =>
         renderJson({
           mcp: {
-            [MCP_SERVER_NAME]: {
-              type: "local",
-              command: [server.command, ...server.args],
-              enabled: true,
+            servers: {
+              [MCP_SERVER_NAME]: {
+                type: "local",
+                command: [server.command, ...server.args],
+                codemode: false,
+              },
             },
           },
         }),
