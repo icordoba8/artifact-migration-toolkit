@@ -54,5 +54,9 @@
   {
     "version": "1.3.13",
     "contentHash": "sha256:c35ea4f762bb331b267692ecd96a145596bf8be659754aa77dc5c7bd11c9c094"
+  },
+  {
+    "version": "1.3.14",
+    "contentHash": "sha256:976b213999caff4b188812913c0bb3fab7110e801cbf5ab7bd9afe36752d56aa"
   }
 ]
