@@ -11235,10 +11235,14 @@ const assertDiscoveryUnchanged = async (root, state, roots) => {
     legacyRoot: roots.legacyRoot,
     moduleRoots: recorded.moduleRoots,
     declaredEntryPoints:
-      recorded.declaredEntryPoints ??
-      (recorded.entryPoints ?? [])
-        .filter((entry) => entry.discovery === "DECLARED")
-        .map((entry) => entry.path),
+      (recorded.declaredEntryPoints ??
+        (recorded.entryPoints ?? [])
+          .filter((entry) => entry.discovery === "DECLARED")
+          .map((entry) => entry.path))
+        .map((entryPath) => ({
+          path: entryPath,
+          reason: recorded.entryPoints?.find((entry) => entry.path === entryPath)?.reason,
+        })),
     moduleEdgeTargets: Object.fromEntries(
       (recorded.findings ?? [])
         .filter((finding) => Array.isArray(finding.resolvedTargets))

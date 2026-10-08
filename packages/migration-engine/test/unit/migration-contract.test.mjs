@@ -7041,6 +7041,55 @@ test("recovering a partial, an absent, and an already-complete event all end ide
 
 // --- FINALIZE drift ---------------------------------------------------------
 
+test("persisted discovery scans retain declared entry reasons through FINALIZE", async () => {
+  for (const algorithmVersion of [1, 2]) {
+    const fixture = await createFixture();
+    try {
+      const classification = {
+        ...MODULE_CLASSIFICATION,
+        algorithmVersion,
+        declaredEntryPoints: [
+          { path: "auth/marker.txt", reason: "Authored fixture entry." },
+        ],
+        files: [
+          {
+            ...MODULE_CLASSIFICATION.files[0],
+            reachability: "REACHABLE_FROM_ENTRY",
+          },
+        ],
+      };
+      await driveTo(fixture, "SLICES", advance, { classification });
+      const scanPath = path.join(
+        fixture.migrationRoot,
+        "inventories/discovery-scan.json",
+      );
+      const persistedScan = await readFile(scanPath, "utf8");
+      const scan = JSON.parse(persistedScan);
+      assert.equal(scan.algorithmVersion, algorithmVersion);
+      assert.deepEqual(scan.entryPoints, [
+        {
+          path: "auth/marker.txt",
+          discovery: "DECLARED",
+          reason: "Authored fixture entry.",
+        },
+      ]);
+      await authorFinalize(fixture);
+      const added = path.join(fixture.legacyRoot, "auth/added-later.txt");
+      await writeFile(added, "new legacy file\n");
+      await assert.rejects(
+        advance(fixture),
+        /changed after DISCOVERY_COMPLETENESS closed.*added: auth\/added-later\.txt/s,
+      );
+      await rm(added);
+      await advance(fixture);
+      assert.equal((await state(fixture)).status, "COMPLETE");
+      assert.equal(await readFile(scanPath, "utf8"), persistedScan);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
 test("a legacy file added after the checkpoint blocks FINALIZE, naming it", async () => {
   const fixture = await createFixture();
   try {
