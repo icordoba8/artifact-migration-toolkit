@@ -86,6 +86,7 @@ import {
   decisionKindAllowed,
   decisionRationaleDigest,
   edgeDecisionSubject,
+  LATE_DECISION_KINDS,
   LEGACY_COMPATIBILITY_ACTION_REQUIRED,
   legacySourceBinding,
   legacySourcesOf,
@@ -696,7 +697,9 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
       left.id.localeCompare(right.id),
   );
   const lifecycle = await lifecycleBinding(state, path.join(root, "state.json"));
-  const groupable = censusClosed ? [] : candidates;
+  const groupable = censusClosed
+    ? candidates.filter((candidate) => LATE_DECISION_KINDS.has(candidate.kind))
+    : candidates;
   const group = directLedger
     ? await createNewFormatDecisionGroup({
         candidates: groupable,
