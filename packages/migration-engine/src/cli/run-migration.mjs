@@ -28,7 +28,6 @@ import {
   authoringRequest,
   DEFAULT_MODE,
   exitCodeFor,
-  LATE_DECISION_KINDS,
   migrationProgress,
   MODULE_CLASSIFICATION_FILE,
   nextOutcome,
@@ -169,19 +168,7 @@ const pendingApprovals = async ({ step, state, registryPath, moduleName }) => {
     return { candidates: [], references: [], group: null, decisions: null };
   }
   const pending = await pendingDecisionCandidates({ registryPath, moduleName });
-  if (step === "DISCOVERY_COMPLETENESS") return pending;
-  const candidates = pending.candidates.filter((candidate) =>
-    LATE_DECISION_KINDS.has(candidate.kind),
-  );
-  const offered = new Set(candidates.map((candidate) => candidate.id));
-  return {
-    ...pending,
-    candidates,
-    group:
-      pending.group?.boundTo.members.every((member) => offered.has(member.id))
-        ? pending.group
-        : null,
-  };
+  return pending;
 };
 
 export const decisionCandidates = async (options) =>

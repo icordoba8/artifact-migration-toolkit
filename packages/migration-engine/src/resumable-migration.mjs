@@ -1410,6 +1410,8 @@ const DERIVED_PINS = {
  * did not exist yet when the census ran.
  */
 export const LATE_DECISION_KINDS = new Set(["TARGET_DRIFT_ACCEPTED", "VISUAL_UNBACKED"]);
+export const decisionKindAllowed = (kind, censusClosed) =>
+  !censusClosed || LATE_DECISION_KINDS.has(kind);
 
 const assertLateDecisionsAreAppendable = (tail) => {
   const text = tail.toString("utf8");
@@ -1428,7 +1430,7 @@ const assertLateDecisionsAreAppendable = (tail) => {
     } catch {
       throw rewritten();
     }
-    if (!LATE_DECISION_KINDS.has(decision.kind)) {
+    if (!decisionKindAllowed(decision.kind, true)) {
       throw new Error(
         `${DECISIONS_FILE} gained a '${decision.kind}' decision after DISCOVERY_COMPLETENESS closed. Only ${[...LATE_DECISION_KINDS].join(", ")} may be recorded once the census is fixed; every other approval binds to facts that checkpoint already pinned.`,
       );

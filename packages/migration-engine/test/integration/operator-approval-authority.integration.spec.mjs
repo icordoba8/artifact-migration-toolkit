@@ -27,15 +27,19 @@ import {
   advanceMigration,
   createDecisionCandidate,
   decisionLineDigest,
+  getMigrationStatus,
   previewAdvance,
   legacySourceBinding,
   pendingDecisionCandidates,
   validateResumableMigration,
 } from "../../src/core.mjs";
 import {
+  completeAttestedDecision,
   challengeFor,
   parseDecisionArguments,
   recordNewFormatDecisionGroup,
+  relayOperatorDecision,
+  reviewReference,
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
 import {
@@ -462,6 +466,61 @@ test("a format-19 group shows one complete review and refuses host/terminal atte
     await fixture.cleanup();
   }
   });
+});
+
+test("the pinned census never re-offers discovery approvals after legacy edits", async () => {
+  const fixture = await createFixture();
+  const previousCwd = process.cwd();
+  try {
+    await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+    process.chdir(fixture.root);
+    const context = await contextFor(fixture);
+    const [candidate] = (await pendingFor(fixture)).candidates;
+    const first = await relayOperatorDecision({
+      ...context, reference: reviewReference(candidate.review), decision: "APPROVE",
+      stdout: { write: () => true },
+    });
+    assert.equal(first.outcome, "CONTINUE");
+    assert.equal(first.recorded.length, 1);
+    const preview = await previewAdvance(context);
+    await advanceMigration({ ...context, confirmAdvance: preview.confirmationId });
+    assert.ok((await state(fixture)).completedSteps.includes("DISCOVERY_COMPLETENESS"));
+    await writeFile(path.join(fixture.legacyRoot, "auth/marker.txt"), "legacy changed after census\n");
+    assert.deepEqual((await pendingFor(fixture)).candidates, []);
+    assert.deepEqual((await getMigrationStatus(context)).decisions.candidates, []);
+
+    const before = await snapshot(fixture.targetRoot);
+    for (const ask of [({ challenge }) => challenge, Object.assign(({ challenge }) => challenge, { channel: "AUTO" }), () => "APPROVE"]) {
+      await assert.rejects(
+        runRecordDecisionCli(["auth", "--approve", candidate.id], {
+          ask, stdout: { write: () => true },
+        }), /stale|not pending/i,
+      );
+      assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    }
+    await assert.rejects(
+      runRecordDecisionCli(["auth", "--approve", candidate.id], {
+        stdin: { isTTY: true }, stdout: { isTTY: true, write: () => true },
+      }), /stale|not pending/i,
+    );
+    assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    const relayed = await relayOperatorDecision({
+      ...context, reference: reviewReference(candidate.review), decision: "APPROVE",
+      stdout: { write: () => true },
+    });
+    assert.equal(relayed.outcome, "BLOCKED");
+    assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    await assert.rejects(
+      completeAttestedDecision({
+        signer: { issued: () => ({ result: "APPROVED" }), preverify: () => assert.fail("No signer assertion is needed") },
+        target: { recordKind: "module", registryPath: context.registryPath, moduleName: "auth" },
+        candidateId: candidate.id, nonce: "old-review", response: {},
+      }), /STALE_REVIEW/,
+    );
+    assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    await appendFile(path.join(fixture.migrationRoot, DECISIONS), "not-json\n");
+    await assert.rejects(getMigrationStatus(context), /bytes changed after DISCOVERY_COMPLETENESS/);
+  } finally { process.chdir(previousCwd); await fixture.cleanup(); }
 });
 
 test("a format-19 single candidate cannot write v1, attest via host/TTY/argv, or downgrade to AUTO", async () => {

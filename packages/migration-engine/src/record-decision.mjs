@@ -83,9 +83,9 @@ import {
   decisionGroupFor,
   decisionLineDigest,
   decisionLineProblem,
+  decisionKindAllowed,
   decisionRationaleDigest,
   edgeDecisionSubject,
-  LATE_DECISION_KINDS,
   LEGACY_COMPATIBILITY_ACTION_REQUIRED,
   legacySourceBinding,
   legacySourcesOf,
@@ -456,6 +456,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   // principal that decided it does not change it.
   const { decisions, byId } = await readRecordedDecisions(root);
   const candidates = [];
+  const censusClosed = (state.completedSteps ?? []).includes("DISCOVERY_COMPLETENESS");
   // Ledger-backed receipts for candidates that are already approved but not yet
   // cited. An approval recorded at a terminal is otherwise invisible to the next
   // iteration: the candidate stops pending, and the agent has no way to learn
@@ -483,6 +484,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     // opts out, and it opts out of AUTO alone; a human can still decide it.
     autoResolvable = true,
   }) => {
+    if (!decisionKindAllowed(kind, censusClosed)) return;
     const input = {
       kind,
       subjectType,
@@ -694,11 +696,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
       left.id.localeCompare(right.id),
   );
   const lifecycle = await lifecycleBinding(state, path.join(root, "state.json"));
-  const groupable = (state.completedSteps ?? []).includes(
-    "DISCOVERY_COMPLETENESS",
-  )
-    ? candidates.filter((candidate) => LATE_DECISION_KINDS.has(candidate.kind))
-    : candidates;
+  const groupable = censusClosed ? [] : candidates;
   const group = directLedger
     ? await createNewFormatDecisionGroup({
         candidates: groupable,
@@ -1039,6 +1037,10 @@ export const ledgerFileForChannel = (channel) =>
   channel === "AUTO" ? AUTO_DECISIONS_FILE : DECISIONS_FILE;
 
 const appendDecisions = async (locked, decisions, stdout) => {
+  if (locked.recordKind !== "artifact" && decisions.some((decision) =>
+    !decisionKindAllowed(decision.kind, (locked.state.completedSteps ?? []).includes("DISCOVERY_COMPLETENESS")))) {
+    throw new Error("Only post-census decision kinds may be recorded after DISCOVERY_COMPLETENESS closed. Nothing was written.");
+  }
   const channels = new Set(decisions.map((decision) => decisionChannelOf(decision)));
   if (channels.size > 1) {
     throw new Error(
@@ -1440,6 +1442,10 @@ export const completeAttestedDecision = ({ signer, target, candidateId, nonce, r
       if (path.join(locked.root, DECISIONS_FILE) !== ledgerFile) throw refused("WRONG_RECORD", "The record moved while its review was open.");
       const candidate = locked.candidates.find((entry) => entry.id === candidateId);
       const binding = await attestedBinding(candidate, locked, issued.result);
+      if (locked.recordKind !== "artifact" && !decisionKindAllowed(candidate.kind,
+        (locked.state.completedSteps ?? []).includes("DISCOVERY_COMPLETENESS"))) {
+        throw refused("POST_CENSUS_DECISION", "Only post-census decision kinds may be recorded after DISCOVERY_COMPLETENESS closed.");
+      }
       const { BINDING_KEYS } = await webauthnProtocol();
       const current = signer.issued(nonce, ledgerFile);
       if (BINDING_KEYS.some((key) => JSON.stringify(binding[key]) !== JSON.stringify(current[key]))) {
