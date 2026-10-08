@@ -128,7 +128,7 @@ const runThroughHost = async (fixture, onElicit) => {
       session,
     );
     assert.ok(!response.error, JSON.stringify(response.error));
-    return response.result.structuredContent;
+    return JSON.parse(response.result.content.at(-1).text);
   } finally {
     process.chdir(previousCwd);
     process.exitCode = previousExitCode;

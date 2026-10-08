@@ -2142,7 +2142,7 @@ for (const provider of ["claude", "codex", "copilot", "opencode"]) {
             name, arguments: { ...fixture.options, cwd: fixture.root, ...extra },
           } }, session);
           assert.equal(reply.error, undefined, JSON.stringify(reply));
-          return reply.result.structuredContent;
+          return JSON.parse(reply.result.content.at(-1).text);
         };
         assert.equal((await call("artifact_run")).outcome, "CONTINUE");
         assert.equal((await stateOf(fixture)).formatVersion, 14);

@@ -21,6 +21,7 @@ import {
   exitCodeFor,
   MIGRATION_OUTCOMES,
   renderLoopDirective,
+  renderProgressBlock,
   assertPonytailTarget,
 } from "../core.mjs";
 import { getArtifactStatus, runArtifact } from "./artifact-migration.mjs";
@@ -104,7 +105,8 @@ export const artifactDirective = (result, source, mode) => {
 };
 
 const render = (result, { emitDirective = true, source, mode } = {}) => {
-  let output = result.progressChecklist ?? "";
+  // Nested under `run-migration` (no directive), the parent shows the block.
+  let output = emitDirective ? renderProgressBlock(result) : "";
   if (result.request) {
     output +=
       `Author next: ${result.request.artifacts.join(", ")}\n` +
@@ -156,6 +158,8 @@ export const runArtifactCli = async (
   const result = parsed.status
     ? await getArtifactStatus(options)
     : await runArtifact(options, { recordTrustedDecision });
+  // stdout stays pure JSON; the engine still shows progress, on stderr.
+  if (parsed.json || parsed.status) process.stderr.write(renderProgressBlock(result));
   const output = parsed.json || parsed.status
     ? `${JSON.stringify(result, null, 2)}\n`
     : render(result, {

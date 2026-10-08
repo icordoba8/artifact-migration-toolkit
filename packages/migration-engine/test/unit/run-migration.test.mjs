@@ -599,7 +599,11 @@ test("--json prints the outcome object instead of the authoring block", async ()
 
 // --- §11.5 the emitDirective seam -------------------------------------------
 
-test("emitDirective defaults to today's bytes and subtracts only the loop line", async () => {
+// Nested (no directive), the sub-CLI also leaves the checklist to the one
+// post-iteration block `run-migration` prints, so it is never shown twice.
+const withoutChecklist = (stdout) => stdout.replace(/^progress: [\s\S]*?^next: .*\n/m, "");
+
+test("emitDirective defaults to today's bytes and subtracts only the loop line and checklist", async () => {
   const fixture = await createFixture();
   try {
     // A NOT_STARTED module with no OpenSpec proposal is the discover CLI's
@@ -615,7 +619,7 @@ test("emitDirective defaults to today's bytes and subtracts only the loop line",
     );
     assert.equal(directiveOf(without.stdout), null);
     assert.equal(
-      withDirective.stdout.replace("loop: STOP reason=BLOCKED\n", ""),
+      withoutChecklist(withDirective.stdout.replace("loop: STOP reason=BLOCKED\n", "")),
       without.stdout,
     );
 
@@ -632,7 +636,7 @@ test("emitDirective defaults to today's bytes and subtracts only the loop line",
     assert.equal(directiveOf(advanceWith.stdout), "loop: STOP reason=BLOCKED");
     assert.equal(directiveOf(advanceWithout.stdout), null);
     assert.equal(
-      advanceWith.stdout.replace("loop: STOP reason=BLOCKED\n", ""),
+      withoutChecklist(advanceWith.stdout.replace("loop: STOP reason=BLOCKED\n", "")),
       advanceWithout.stdout,
     );
   } finally {

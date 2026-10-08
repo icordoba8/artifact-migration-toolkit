@@ -739,6 +739,11 @@ and `migration_run` returns both on every outcome. Display one of those.
 Never derive displayed progress from source files, changed files, git state,
 test results, or conversation memory.
 
+The tool output already shows progress: every `migration_run`,
+`migration_status` and `artifact_run` result starts with a plain-text status
+line and the checklist, and the CLI prints them (to stderr under `--json`).
+You still render the full checklist at start, on resume and at stop.
+
 Render progress at two moments, in this order, every iteration:
 
 ```

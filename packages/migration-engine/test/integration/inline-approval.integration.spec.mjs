@@ -178,7 +178,7 @@ test("inline worktree approval preserves context, rejects invalid answers, and r
       );
       assert.equal(process.cwd(), main.root);
       assert.ok(!response.error, JSON.stringify(response));
-      return response.result.structuredContent;
+      return JSON.parse(response.result.content.at(-1).text);
     };
     assert.equal(
       (await call("migration_status")).currentStep,
@@ -371,7 +371,7 @@ test("protected high assurance: status, pending and run refuse relayed authority
         session,
       );
       assert.ok(!response.error, JSON.stringify(response));
-      return response.result.structuredContent;
+      return JSON.parse(response.result.content.at(-1).text);
     };
 
     /** The projection as each of the four consumers reports it, in one go. */

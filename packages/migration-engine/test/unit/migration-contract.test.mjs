@@ -10009,7 +10009,7 @@ test("a delegated artifact decision is recorded through one migration_run elicit
 
     const response = await rpc(fixture, runCall(1), session);
 
-    const result = response.result.structuredContent;
+    const result = JSON.parse(response.result.content.at(-1).text);
     assert.equal(result.outcome, "CONTINUE", result.reason);
     assert.equal(asked.length, 1, JSON.stringify(asked));
     // The human decision crossed the transport and the ledger line is the child's,
@@ -10040,7 +10040,7 @@ test("without elicitation the same migration_run awaits an explicit standard art
 
     const response = await rpc(fixture, runCall(1), createSession());
 
-    const result = response.result.structuredContent;
+    const result = JSON.parse(response.result.content.at(-1).text);
     assert.equal(result.outcome, "OPERATOR_DECISION");
     assert.deepEqual(await artifactLedger(ledgerPath), []);
   } finally {
@@ -10090,7 +10090,7 @@ test("a host answering the delegated decision without a human writes no artifact
       const label = JSON.stringify(answer);
       assert.equal(asked, 1, label);
       assert.equal(
-        response.result.structuredContent.outcome,
+        JSON.parse(response.result.content.at(-1).text).outcome,
         "OPERATOR_DECISION",
         label,
       );

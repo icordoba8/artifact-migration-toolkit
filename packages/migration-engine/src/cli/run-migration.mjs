@@ -35,6 +35,7 @@ import {
   pendingDecisionCandidates,
   previewAdvance,
   renderProgress,
+  renderProgressBlock,
   renderLoopDirective,
   resolveRegistryPath,
   validateResumableMigration,
@@ -256,7 +257,8 @@ const recordedPrefix = (recorded) =>
 export const runMigration = async (
   arguments_,
   // No default: absent probes the TTY; null declares no trusted human channel.
-  { stdout = process.stdout, recordTrustedDecision } = {},
+  // `emitProgress: false` is the MCP server, which shows the same block itself.
+  { stdout = process.stdout, recordTrustedDecision, emitProgress = true } = {},
 ) => {
   const options = parseRunArguments(arguments_);
   // The most recent persisted record this iteration saw. It is only ever read
@@ -294,10 +296,17 @@ export const runMigration = async (
       progress,
       progressChecklist: progress ? renderProgress(progress) : null,
     };
+    // Progress is shown by the engine on every outcome, never left for the
+    // agent to re-render: stderr under --json so stdout's JSON stays untouched.
+    const block = emitProgress ? renderProgressBlock(result) : "";
     if (options.json) {
+      process.stderr.write(block);
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    } else if (result.request?.summary) {
-      stdout.write(renderAuthoringRequest(result.request, result.reason));
+    } else {
+      if (result.request?.summary) {
+        stdout.write(renderAuthoringRequest(result.request, result.reason));
+      }
+      stdout.write(block);
     }
     stdout.write(
       renderLoopDirective({

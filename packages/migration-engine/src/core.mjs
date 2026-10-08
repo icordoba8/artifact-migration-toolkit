@@ -121,6 +121,7 @@ export {
   previewUiObservationsAdoption,
   renderAdvancePreview,
   renderProgress,
+  renderProgressBlock,
   renderProgressChecklist,
   validateResumableMigration,
 } from "./resumable-migration.mjs";

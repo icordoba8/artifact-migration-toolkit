@@ -264,8 +264,9 @@ export const runDiscoverCli = async (
   }
   stdout.write(renderExecutionPreview(preview));
   // Before the blocked branch on purpose: a refused run is exactly when the
-  // operator most needs to see where the migration actually stands.
-  if (preview.progressChecklist) {
+  // operator most needs to see where the migration actually stands. Nested in
+  // `run-migration` (no directive), its one post-iteration block replaces this.
+  if (preview.progressChecklist && emitDirective) {
     stdout.write(preview.progressChecklist);
   }
   if (!preview.requiresConfirmation) {

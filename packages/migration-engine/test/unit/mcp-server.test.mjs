@@ -19,10 +19,13 @@ import test from "node:test";
 import {
   exitCodeFor,
   getMigrationStatus,
+  migrationProgress,
   MIGRATION_MODES,
   pendingDecisionCandidates,
   PONYTAIL_TARGETS,
+  renderLoopDirective,
   renderProgress,
+  renderProgressBlock,
 } from "../../src/core.mjs";
 import { challengeFor } from "../../src/record-decision.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
@@ -41,11 +44,13 @@ import {
   NON_APPROVABLE_CLASSIFICATION,
   authorDiscoverLegacy,
   atDiscoveryCompleteness,
+  atDirectLedgerCompleteness,
   state,
   historyEvents,
   decisionLedger,
 } from "../integration/approval.fixture.mjs";
 import { renderedCommandPattern } from "../support/portability.mjs";
+import { withDecisionPolicy } from "../support/decision-policy-fixture.mjs";
 
 /**
  * Drives the server over a pair of streams, from the fixture's working
@@ -99,7 +104,7 @@ const only = async (fixture, message) => {
 
 const structured = (response) => {
   assert.ok(!response.error, JSON.stringify(response.error));
-  return response.result.structuredContent;
+  return JSON.parse(response.result.content.at(-1).text);
 };
 
 // --- §11.1 handshake ---------------------------------------------------------
@@ -539,7 +544,9 @@ test("CLI and MCP default omitted mode to auto", async () => {
     );
     const cli = await cliOutcome(viaCli);
 
-    assert.match(mcp.log, /mode=auto/);
+    // `log` no longer carries the stale preflight checklist; the mode is read
+    // from the post-iteration projection the status block renders.
+    assert.equal(mcp.progress.mode, "auto");
     assert.match(cli.log, /mode=auto/);
   } finally {
     await viaMcp.cleanup();
@@ -1161,7 +1168,7 @@ test("an unresponsive MCP provider times out, cleans pending, and ignores a late
     input.write(`${JSON.stringify(call(2, "migration_run", { module: "auth" }))}\n`);
     await serving;
     assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
-    assert.equal(frames.find((frame) => frame.id === 2).result.structuredContent.outcome, "OPERATOR_DECISION");
+    assert.equal(JSON.parse(frames.find((frame) => frame.id === 2).result.content.at(-1).text).outcome, "OPERATOR_DECISION");
     assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 7);
     assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
     assert.equal(await decisionLedger(fixture), null);
@@ -1291,5 +1298,122 @@ test("migration_run forwards repeated legacy sources and adoptTarget to the CLI"
     assert.match(adopting.reason, /'src\/features\/auth\/' does not exist/);
   } finally {
     await fresh.cleanup();
+  }
+});
+
+// --- engine-visible progress -------------------------------------------------
+//
+// A host that has `structuredContent` (Claude Code) shows only that and drops
+// `content`, so the progress tools send none: content[0] is the status block the
+// user sees without the agent re-rendering it, and content.at(-1) is the JSON,
+// serialized exactly as content[0] used to be.
+
+const checklists = (text) => (text.match(/^progress: /gm) ?? []).length;
+
+const progressReply = (response, firstLine) => {
+  assert.ok(!response.error, JSON.stringify(response.error));
+  assert.equal(response.result.structuredContent, undefined);
+  const { content } = response.result;
+  assert.equal(content.length, 2);
+  const payload = JSON.parse(content.at(-1).text);
+  assert.equal(content.at(-1).text, JSON.stringify(payload, null, 2));
+  const block = content[0].text;
+  assert.equal(block.split("\n")[0], firstLine);
+  assert.ok(block.startsWith(`${firstLine}\n${payload.progressChecklist}`), block);
+  // One checklist per iteration, nowhere a stale pre-iteration one.
+  assert.equal(checklists(block), 1);
+  assert.equal(checklists(payload.log ?? ""), 0);
+  return { block, payload };
+};
+
+test("progress tools put the status block first, the unchanged JSON last, and send no structuredContent", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture);
+    progressReply(await only(fixture, call(1, "migration_status", { module: "auth" })),
+      "auth -> auth | 2/9 DISCOVER_LEGACY | ACTIVE");
+    await authorDiscoverLegacy(fixture);
+    const { block, payload } = progressReply(
+      await only(fixture, call(2, "migration_run", { module: "auth" })),
+      "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE");
+    assert.equal(payload.outcome, "CONTINUE");
+    assert.match(block, /^\[>\] 3\/9 DISCOVERY_COMPLETENESS$/m);
+    assert.ok(block.endsWith("loop: CONTINUE next=/start-migration auth\n"));
+    // Every other tool is unchanged.
+    const other = await only(fixture, call(3, "migration_pending_decisions", { module: "auth" }));
+    assert.equal(other.result.content.length, 1);
+    assert.deepEqual(JSON.parse(other.result.content[0].text), other.result.structuredContent);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("an OPERATOR_DECISION stop and the resume after the relay both show the block", async () => {
+  const fixture = await createFixture();
+  try {
+    await withDecisionPolicy(null, async () => {
+      await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+      const stop = progressReply(await only(fixture, call(1, "migration_run", { module: "auth" })),
+        "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | OPERATOR_DECISION");
+      assert.ok(stop.block.endsWith("loop: STOP reason=OPERATOR_DECISION\n"));
+      const relay = await only(fixture, call(2, "migration_relay_decision", {
+        module: "auth", reference: stop.payload.operatorApproval.reference, decision: "APPROVE" }));
+      assert.equal(JSON.parse(relay.result.content.at(-1).text).outcome, "CONTINUE");
+      const resumed = progressReply(await only(fixture, call(3, "migration_run", { module: "auth" })),
+        "auth -> auth | 4/9 ASSESS_TARGET | CONTINUE");
+      assert.equal(resumed.payload.outcome, "CONTINUE");
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the status block names checkpoint, slice and outcome for every outcome", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture);
+    const base = await state(fixture);
+    const sliced = { ...base, currentStep: "IMPLEMENT_SLICES", activeSlice: "s-1", pendingSlices: ["s-1", "s-2"] };
+    const done = { ...base, currentStep: "COMPLETE", status: "COMPLETE" };
+    for (const [record, outcome, firstLine] of [
+      [base, "CONTINUE", "auth -> auth | 2/9 DISCOVER_LEGACY | CONTINUE"],
+      [base, "OPERATOR_DECISION", "auth -> auth | 2/9 DISCOVER_LEGACY | OPERATOR_DECISION"],
+      [base, "BLOCKED", "auth -> auth | 2/9 DISCOVER_LEGACY | BLOCKED"],
+      [base, "FORMAT_UPGRADE", "auth -> auth | 2/9 DISCOVER_LEGACY | FORMAT_UPGRADE"],
+      [sliced, "CONTINUE", "auth -> auth | 7/9 IMPLEMENT_SLICES | slice s-1 (0/2 done) | CONTINUE"],
+      [done, "COMPLETE", "auth -> auth | 9/9 COMPLETE | COMPLETE"],
+    ]) {
+      const progress = migrationProgress(record, { mode: "auto", outcome });
+      const progressChecklist = renderProgress(progress);
+      const loop = renderLoopDirective({ moduleName: "auth", mode: "auto", outcome });
+      const block = renderProgressBlock({ progress, progressChecklist, outcome }, loop);
+      assert.equal(block, `${firstLine}\n${progressChecklist}${loop}`);
+      assert.match(block, /^[\x20-\x7e\n]*$/, "ASCII only");
+    }
+    assert.equal(renderProgressBlock({ progress: null, progressChecklist: null }), "");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("the CLI prints one post-iteration block: stderr under --json, stdout otherwise", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture);
+    await authorDiscoverLegacy(fixture);
+    const bin = path.join(repositoryRoot, "packages/migration-engine/src/cli/run-migration.mjs");
+    const json = await execFileAsync(process.execPath, [bin, "auth", "--json"], { cwd: fixture.root });
+    assert.ok(json.stderr.startsWith("auth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE\nprogress: "), json.stderr);
+    assert.equal(checklists(json.stderr), 1);
+    assert.equal(checklists(json.stdout), 0);
+    // The extraction an installed client already performs still reads the result.
+    const result = JSON.parse(json.stdout.slice(json.stdout.indexOf('{\n  "outcome"'), json.stdout.lastIndexOf("\nloop:")));
+    assert.equal(result.outcome, "CONTINUE");
+    assert.ok(json.stderr.includes(result.progressChecklist));
+    const text = await execFileAsync(process.execPath, [bin, "auth"], { cwd: fixture.root });
+    assert.equal(checklists(text.stdout), 1);
+    assert.match(text.stdout, /^auth -> auth \| 3\/9 DISCOVERY_COMPLETENESS \| CONTINUE$/m);
+  } finally {
+    await fixture.cleanup();
   }
 });

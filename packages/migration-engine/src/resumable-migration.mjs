@@ -16452,6 +16452,34 @@ export const renderProgress = (progress) => {
   return `${lines.join("\n")}\n`;
 };
 
+/**
+ * What a tool row or terminal shows first, with no agent in between: one status
+ * line, `progressChecklist` verbatim, then the loop line. Read from the same
+ * projection `renderProgress` reads, so it cannot disagree with the checklist
+ * under it; ASCII for the same reason. Empty when there is no progress.
+ */
+export const renderProgressBlock = (
+  { progress, progressChecklist, outcome = null },
+  loop = "",
+) => {
+  if (!progress || !progressChecklist) return "";
+  const total = progress.checkpoints.length;
+  const active = progress.checkpoints.find(
+    ({ name }) => name === progress.activeCheckpoint,
+  );
+  const slice =
+    progress.activeSlice &&
+    ["IMPLEMENT_SLICES", "VERIFY_SLICES"].includes(progress.activeCheckpoint)
+      ? ` | slice ${progress.activeSlice} (${progress.slices.completed}/${progress.slices.total} done)`
+      : "";
+  return (
+    `${progress.module} -> ${progress.target}` +
+    ` | ${active ? `${active.index}/${total} ${active.name}` : `${total}/${total} COMPLETE`}` +
+    `${slice} | ${outcome ?? progress.stopReason ?? progress.status}\n` +
+    `${progressChecklist}${loop}`
+  );
+};
+
 /** The pre-projection entry point, kept verbatim for every existing caller. */
 export const renderProgressChecklist = (
   state,

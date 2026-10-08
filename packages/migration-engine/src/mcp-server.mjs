@@ -49,6 +49,8 @@ import {
   pendingDecisionCandidates,
   PONYTAIL_TARGETS,
   previewDiscoveryScan,
+  renderLoopDirective,
+  renderProgressBlock,
   resolveRegistryPath,
   upgradeCommandFor,
   WORKFLOW_VERSION,
@@ -56,6 +58,7 @@ import {
 import { relayOperatorDecision, runRecordDecisionCli } from "./record-decision.mjs";
 import { runMigration } from "./cli/run-migration.mjs";
 import { getArtifactStatus, runArtifact } from "./artifact/artifact-migration.mjs";
+import { artifactDirective } from "./artifact/run-artifact.mjs";
 
 const SERVER_NAME = "start-migration";
 
@@ -396,6 +399,8 @@ const runTool = async (arguments_, session) => {
   try {
     result = await runMigration(runArguments(arguments_), {
       stdout: buffer,
+      // Shown as the first content block instead; `log` stays as it was.
+      emitProgress: false,
       // A human channel when the client declared one, and `null` -- never
       // `undefined` -- when it did not. `null` is a positive statement that
       // this transport has no human to ask, which is what stops `recorderFor`
@@ -462,6 +467,7 @@ const TOOLS = [
         return { ...result, log: log.join("") };
       } finally { process.exitCode = previousExitCode; }
     },
+    loop: (arguments_, result) => artifactDirective(result, arguments_.source, arguments_.mode),
   },
   {
     name: "migration_status",
@@ -490,6 +496,7 @@ const TOOLS = [
       "Perform one migration iteration: preflight, validate, and at most one advance. Every write happens in the core, under its existing lock and journal.",
     inputSchema: RUN_INPUT_SCHEMA,
     call: runTool,
+    loop: ({ module, mode }, { outcome }) => renderLoopDirective({ moduleName: module, mode, outcome }),
     /** The one tool whose body may need the connection's human channel. */
     sessionAware: true,
   },
@@ -513,6 +520,9 @@ const TOOLS = [
     },
   },
 ];
+
+/** Results read as `JSON.parse(content.at(-1).text)`, never `structuredContent`. */
+const PROGRESS_TOOLS = new Set(["migration_run", "migration_status", "artifact_run"]);
 
 const TOOLS_BY_NAME = new Map(TOOLS.map((tool) => [tool.name, tool]));
 
@@ -615,11 +625,20 @@ const callToolInContext = async (id, parameters, session) => {
       arguments_,
       tool.sessionAware ? session : undefined,
     );
+    const json = { type: "text", text: JSON.stringify(structuredContent, null, 2) };
+    if (!PROGRESS_TOOLS.has(name)) {
+      return success(id, { content: [json], structuredContent });
+    }
+    // Progress first, as plain text the user sees with no agent re-rendering
+    // it; the unchanged JSON last. No `structuredContent`: a host that has it
+    // (Claude Code) shows only that and drops `content`, progress included.
+    // None of these tools declares an `outputSchema`, so MCP allows omitting it.
+    const progressText = renderProgressBlock(
+      structuredContent ?? {},
+      tool.loop?.(arguments_, structuredContent) ?? "",
+    );
     return success(id, {
-      content: [
-        { type: "text", text: JSON.stringify(structuredContent, null, 2) },
-      ],
-      structuredContent,
+      content: [...(progressText ? [{ type: "text", text: progressText }] : []), json],
     });
   } catch (error) {
     return failure(id, JSON_RPC_INTERNAL_ERROR, error.message);

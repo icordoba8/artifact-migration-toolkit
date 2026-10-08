@@ -60,7 +60,7 @@ for (const provider of ["claude", "codex", "copilot", "opencode"]) {
         const call = async (name, extra) => {
           const reply = await handleMessage(message(name, extra), session);
           assert.equal(reply.error, undefined, JSON.stringify(reply));
-          return reply.result.structuredContent;
+          return JSON.parse(reply.result.content.at(-1).text);
         };
         const pending = await call("migration_pending_decisions");
         const [candidate] = pending.candidates;
@@ -93,7 +93,7 @@ for (const provider of ["claude", "codex", "copilot", "opencode"]) {
           decision: "APPROVE", principal: "HUMAN_ATTESTED" }), session);
         assert.ok(injected.error);
         const noRelay = await handleMessage(message("migration_run", { mode: "auto" }), createSession());
-        assert.equal(noRelay.result.structuredContent.outcome, "OPERATOR_DECISION");
+        assert.equal(JSON.parse(noRelay.result.content.at(-1).text).outcome, "OPERATOR_DECISION");
         assert.equal(await decisionLedger(fixture), null);
 
         response = { action: "accept", content: { decision: "APPROVE" } };
@@ -150,7 +150,7 @@ for (const [answer, transport] of ["APPROVE", "REJECT"].flatMap((answer) => [[an
         const reply = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/call",
           params: { name, arguments: { module: "auth", cwd: fixture.root, ...extra } } }, session);
         assert.equal(reply.error, undefined, JSON.stringify(reply));
-        return reply.result.structuredContent;
+        return JSON.parse(reply.result.content.at(-1).text);
       };
       const failing = createSession({ request: async () => { throw new Error("Elicitation timed out"); } });
       await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize",

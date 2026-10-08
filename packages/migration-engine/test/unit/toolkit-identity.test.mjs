@@ -448,7 +448,8 @@ test("A-02 artifact mismatch remains BLOCKED with progress and exact identity re
   const args = [source, "--source-root", root, "--target-root", root, "--json"];
   const bootstrap = await runEngine(sourceEngine, "artifact/run-artifact.mjs", args, root);
   assert.equal(bootstrap.code, 0, bootstrap.output);
-  const before = JSON.parse(bootstrap.output);
+  // stdout is the JSON channel; under --json the progress block goes to stderr.
+  const before = JSON.parse(bootstrap.stdout);
   assert.notEqual(before.artifactId, source);
 
   const blocked = await runEngine(engine, "artifact/run-artifact.mjs", args, root);
@@ -485,7 +486,7 @@ test("A-02 artifact mismatch remains BLOCKED with progress and exact identity re
   assert.match(blockedResult.nextCommand, update);
   const resumed = await runEngine(engine, "artifact/run-artifact.mjs", args, root);
   assert.equal(resumed.code, 0, resumed.output);
-  assert.equal(JSON.parse(resumed.output).artifactId, before.artifactId);
+  assert.equal(JSON.parse(resumed.stdout).artifactId, before.artifactId);
 });
 
 test("an unidentified checkout reads an unstamped active record and may not write to it", async (t) => {
@@ -677,7 +678,7 @@ test("after adoption the same toolkit resumes the record normally", async (t) =>
     consumer.root,
   );
   assert.equal(resumed.code, 0, resumed.output);
-  assert.equal(JSON.parse(resumed.output).formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(JSON.parse(resumed.stdout).formatVersion, MIGRATION_FORMAT_VERSION);
 
   // And the mutation that was refused before adoption now runs: adoption is the
   // thing that lifts the block, not a side effect of something else.

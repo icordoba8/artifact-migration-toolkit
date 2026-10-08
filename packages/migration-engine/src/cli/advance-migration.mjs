@@ -77,7 +77,7 @@ export const runAdvanceCli = async (
   const preview = await previewAdvance(options);
   stdout.write(renderAdvancePreview(preview));
   if (preview.nextWorkKind === "RUN_ARTIFACT") {
-    stdout.write(preview.progressChecklist);
+    if (emitDirective) stdout.write(preview.progressChecklist);
     stdout.write(
       `Artifact prerequisite: ${preview.artifactMigration.command}\n`,
     );
@@ -86,7 +86,7 @@ export const runAdvanceCli = async (
     return { preview, delegated: true };
   }
   if (preview.outcome === "OPERATOR_DECISION") {
-    stdout.write(preview.progressChecklist);
+    if (emitDirective) stdout.write(preview.progressChecklist);
     for (const decision of preview.pendingDecisions ?? []) {
       stdout.write(`${decision.command}\n`);
     }
@@ -98,7 +98,7 @@ export const runAdvanceCli = async (
     const { outcome } = nextOutcome({ preview });
     // Same reason as the discover CLI: a refused advance is exactly when the
     // operator most needs to see where the migration actually stands.
-    stdout.write(preview.progressChecklist);
+    if (emitDirective) stdout.write(preview.progressChecklist);
     stdout.write(
       "Advance: BLOCKED. No state, history, or artifact was modified.\n",
     );
@@ -144,9 +144,13 @@ export const runAdvanceCli = async (
       `Current step: ${result.state.currentStep}\n` +
       `Next artifact: ${result.nextArtifact ?? "none"}\n`,
   );
-  stdout.write(
-    renderProgressChecklist(result.state, options.mode ?? DEFAULT_MODE),
-  );
+  // Nested in `run-migration` (no directive), its one post-iteration block
+  // shows this state instead; printing both would show the checklist twice.
+  if (emitDirective) {
+    stdout.write(
+      renderProgressChecklist(result.state, options.mode ?? DEFAULT_MODE),
+    );
+  }
   // The advance is the end of an iteration, so this is where the loop is told
   // to run again. `COMPLETE` is the only success that stops it.
   stdout.write(

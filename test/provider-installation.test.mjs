@@ -181,7 +181,7 @@ for (const provider of ['claude', 'codex', 'opencode', 'copilot']) {
       const mcp = await mcpStatus(receipt, consumer.root);
       assert.equal(mcp.error, undefined, JSON.stringify(mcp));
       assert.ok(!mcp.result.isError, JSON.stringify(mcp));
-      assert.deepEqual(mcp.result.structuredContent.activeToolkitIdentity, receipt.toolkit);
+      assert.deepEqual(JSON.parse(mcp.result.content.at(-1).text).activeToolkitIdentity, receipt.toolkit);
       assert.deepEqual(JSON.parse(status.output).activeToolkitIdentity, receipt.toolkit);
       assert.deepEqual(await consumer.snapshot(), before);
       const adopted = await run(receipt, 'artifact-migration-toolkit', ['adopt', '--module', 'auth'], consumer.root);
