@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { cp, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, open, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
@@ -258,7 +258,7 @@ test('ownership, checksums, symlinks and config conflicts fail closed', async ()
   await writeFile(path.join(root, file), 'edited by owner');
   await assert.rejects(adapter('copilot', { ...options, action: 'remove' }), /Owned file modified/);
   await writeFile(path.join(root, file), bytes);
-  const manifestFile = path.join(root, '.artifact-migration-tools/copilot.json');
+  const manifestFile = path.join(root, '.artifact-migration-toolkit/copilot.json');
   const raw = await readFile(manifestFile);
   await writeFile(manifestFile, JSON.stringify({ ...receipt, files: { '../victim': digest('x') } }));
   await assert.rejects(adapter('copilot', { ...options, action: 'remove' }), /Invalid ownership/);
@@ -302,7 +302,7 @@ test('provider-owned CLI forwards argv and cwd; interrupted install locks fail c
   assert.deepEqual(JSON.parse(doctor.stdout).toolkit, receipt.toolkit);
   const status = await capture(process.execPath, [entry, 'exec', ...selection, '--', 'artifact-migration-toolkit', 'status', '--module', 'auth'], consumer.root);
   assert.equal(JSON.parse(status.stdout).toolkitIdentityStatus, 'UNSTAMPED');
-  const lock = path.join(consumer.root, '.artifact-migration-tools/install.lock');
+  const lock = path.join(consumer.root, '.artifact-migration-toolkit/install.lock');
   await writeFile(lock, 'interrupted');
   await assert.rejects(adapter('opencode', { ...options, action: 'update' }), /locked/);
   await assert.rejects(adapter('opencode', { ...options, action: 'doctor' }), /locked/);
@@ -315,7 +315,7 @@ test('v1.0.0 stores without a mode or SHA256SUMS remain valid, updatable and rem
   const root = path.join(scratch, 'v1 receipt root');
   const options = { scope: 'project', root, store: path.join(scratch, 'v1 receipt store'), bundle: b.first, pin: b.pin };
   const receipt = await adapter('codex', options);
-  const receiptFile = path.join(root, '.artifact-migration-tools/codex.json');
+  const receiptFile = path.join(root, '.artifact-migration-toolkit/codex.json');
   delete receipt.mode;
   await writeFile(receiptFile, `${JSON.stringify(receipt, null, 2)}\n`);
   // v1.0.0 staged no SHA256SUMS alongside the pinned release manifest.
@@ -325,6 +325,57 @@ test('v1.0.0 stores without a mode or SHA256SUMS remain valid, updatable and rem
   assert.equal(next.toolkit.version, '1.1.1');
   assert.equal((await adapter('codex', { ...options, action: 'rollback' })).pin, b.pin);
   assert.equal((await adapter('codex', { ...options, action: 'remove' })).removed, true);
+});
+
+// The consumer folder: created, updated, moved and recreated by any install.
+const receiptIn = async (root, provider, folder = '.artifact-migration-toolkit') => JSON.parse(await readFile(path.join(root, folder, `${provider}.json`), 'utf8'));
+const gone = target => assert.rejects(readdir(target), { code: 'ENOENT' });
+
+for (const provider of ['codex', 'claude']) {
+  test(`${provider}: first install creates the folder, reinstall updates it, an old folder is moved`, async () => {
+    const b = await bundles();
+    const root = path.join(scratch, `${provider} folder lifecycle`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} folder store`) };
+    await adapter(provider, { ...options, bundle: b.second, pin: b.nextPin });
+    assert.equal((await receiptIn(root, provider)).toolkit.version, '1.1.1');
+    await gone(path.join(root, '.artifact-migration-tools'));
+    // A plain reinstall, not `update`, moves the folder to the newer bundle.
+    await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    assert.equal((await receiptIn(root, provider)).toolkit.version, b.identity.version);
+    // A pre-1.3.20 folder is moved, contents unchanged, and nothing is left behind.
+    await rename(path.join(root, '.artifact-migration-toolkit'), path.join(root, '.artifact-migration-tools'));
+    const legacy = await receiptIn(root, provider, '.artifact-migration-tools');
+    await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    assert.deepEqual((await receiptIn(root, provider)).toolkit, legacy.toolkit);
+    await gone(path.join(root, '.artifact-migration-tools'));
+  });
+
+  test(`${provider}: a deleted folder is recreated from its own registration; a modified one still fails closed`, async () => {
+    const b = await bundles();
+    const root = path.join(scratch, `${provider} deleted folder`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} deleted store`), bundle: b.first, pin: b.pin };
+    const first = await adapter(provider, options);
+    await rm(path.join(root, '.artifact-migration-toolkit'), { recursive: true });
+    const recreated = await adapter(provider, options);
+    assert.deepEqual(await receiptIn(root, provider), recreated);
+    assert.deepEqual(recreated.configOwned, first.configOwned);
+    assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK');
+
+    await rm(path.join(root, '.artifact-migration-toolkit'), { recursive: true });
+    const config = path.join(root, provider === 'codex' ? '.codex/config.toml' : '.mcp.json');
+    const modified = (await readFile(config, 'utf8')).replace('mcp-server.mjs', 'mcp-server.mjs.edited');
+    await writeFile(config, modified);
+    await assert.rejects(adapter(provider, options), /Conflicting/);
+    assert.equal(await readFile(config, 'utf8'), modified);
+    await assert.rejects(receiptIn(root, provider), { code: 'ENOENT' });
+  });
+}
+
+test('the install flow names no consumer path or repository', async () => {
+  for (const file of ['../providers/install-support.mjs', '../scripts/runtime-bootstrap.mjs']) {
+    const source = await readFile(new URL(file, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /wms-milla7|[A-Za-z]:\\\\Users|\/home\/|\/Users\//, file);
+  }
 });
 
 test('SHA256SUMS disagreeing with the release manifest fails closed', async () => {

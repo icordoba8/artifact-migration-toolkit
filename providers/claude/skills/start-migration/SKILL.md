@@ -91,7 +91,7 @@ updates every other project copy (`.claude`, `.github`, `.codex`,
 replaced paths as `projectionsConverged`. Copies a provider receipt owns are
 left to that provider's installer.
 
-Never suggest editing or deleting `.artifact-migration-tools/<provider>.json`,
+Never suggest editing or deleting `.artifact-migration-toolkit/<provider>.json`,
 any provider MCP configuration, or the install lock. None of them is a repair
 step, and a hand-edited receipt is rejected rather than trusted. An interrupted
 installation recovers on its own when its owner process is provably gone.

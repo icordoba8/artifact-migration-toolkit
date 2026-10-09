@@ -113,7 +113,7 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     assert.equal(installed.selection, "skill");
     assert.equal(installed.skillIdentity, "required");
     assert.deepEqual(installed.toolkit, manifest.toolkit);
-    const receipt = await json(path.join(consumer, ".artifact-migration-tools/codex.json"));
+    const receipt = await json(path.join(consumer, ".artifact-migration-toolkit/codex.json"));
     assert.deepEqual(receipt.toolkit, manifest.toolkit);
     const ensure = await capture(process.execPath, [bootstrap, "ensure", "--provider", "codex",
       "--root", consumer, "--store", store], consumer);

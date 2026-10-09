@@ -34,6 +34,15 @@ const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 // Project skill roots the supported hosts read; `.agents/skills` is what `skills add` writes.
 const PROJECTION_ROOTS = ['.agents/skills', '.claude/skills', '.github/skills', '.codex/skills', '.opencode/skills'];
 const TOOLKIT_SKILLS = ['start-migration', 'migrate-artifact'];
+// The consumer folder holding receipts; LEGACY is its pre-1.3.20 name.
+const DIR = '.artifact-migration-toolkit';
+const LEGACY = '.artifact-migration-tools';
+
+/** `moveLegacyFolder` from providers/install-support.mjs, inlined: this file ships alone inside each skill. */
+async function moveLegacyFolder(root) {
+  if (await stat(path.join(root, DIR)).catch(() => null)) return;
+  await rename(path.join(root, LEGACY), path.join(root, DIR)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+}
 
 /**
  * The installed skill's exact identity, read from the stamp beside this skill.
@@ -298,7 +307,7 @@ async function fromHistory(previous, store, require) {
  * release-discipline breach, and it stays a tripwire rather than a version guard.
  */
 async function fromSiblings({ provider, root, store, require }) {
-  const directory = path.join(root, '.artifact-migration-tools');
+  const directory = path.join(root, DIR);
   let names;
   try { names = await readdir(directory); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -474,9 +483,9 @@ const identityKey = id => JSON.stringify([id?.version, id?.computedHash, id?.sou
 async function projections(root, skill) {
   const owned = [];
   try {
-    for (const name of await readdir(path.join(root, '.artifact-migration-tools'))) {
+    for (const name of await readdir(path.join(root, DIR))) {
       if (!name.endsWith('.json')) continue;
-      try { owned.push(...Object.keys(JSON.parse(await readFile(path.join(root, '.artifact-migration-tools', name), 'utf8')).files ?? {})); } catch {}
+      try { owned.push(...Object.keys(JSON.parse(await readFile(path.join(root, DIR, name), 'utf8')).files ?? {})); } catch {}
     }
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const found = [];
@@ -527,6 +536,7 @@ async function replaceProjection(reference, target) {
 export async function ensureRuntime(options = {}, deps = {}) {
   const { skillRelease = readSkillRelease, skillDir = SKILL_DIR } = deps;
   const root = path.resolve(options.root ?? process.cwd());
+  await moveLegacyFolder(root);
   const own = await skillRelease();
   if ((options.version ?? process.env.ARTIFACT_MIGRATION_TOOLS_VERSION) !== undefined || own?.name !== TOOLKIT || !TOOLKIT_SKILLS.includes(own.skill)) {
     return selectRuntime(options, deps);
@@ -551,7 +561,7 @@ export async function ensureRuntime(options = {}, deps = {}) {
   // A still-valid rollback pin selected the runtime, so no manifest proved the reference.
   if (result.selection !== 'skill') return result;
 
-  const receipt = JSON.parse(await readFile(path.join(root, `.artifact-migration-tools/${PROVIDERS.get(options.provider)}.json`), 'utf8'));
+  const receipt = JSON.parse(await readFile(path.join(root, `${DIR}/${PROVIDERS.get(options.provider)}.json`), 'utf8'));
   const manifest = await receiptManifest(receipt);
   const inside = `${await realpath(root)}${path.sep}`;
   const converged = [];
@@ -588,7 +598,7 @@ async function selectRuntime(
   if (version !== undefined && !exactVersion(version)) throw new Error('Exact version override must be X.Y.Z');
   root = path.resolve(root);
   store = path.resolve(store);
-  const receiptFile = path.join(root, `.artifact-migration-tools/${provider}.json`);
+  const receiptFile = path.join(root, `${DIR}/${provider}.json`);
   let previous = null;
   try { previous = JSON.parse(await readFile(receiptFile, 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -596,7 +606,7 @@ async function selectRuntime(
     // Names both sides. The common cause is one repository driven from two
     // environments -- a Windows checkout and the same tree under WSL resolve a
     // different store and a different absolute root, so the two are mutually
-    // exclusive over one `.artifact-migration-tools/`. Fail-closed is correct;
+    // exclusive over one receipt folder. Fail-closed is correct;
     // an error that named neither cause nor remedy was not.
     throw new Error(
       `Runtime receipt selection conflict: this receipt was written for provider "${previous.provider}" / root "${previous.root}" / store "${previous.store}" `

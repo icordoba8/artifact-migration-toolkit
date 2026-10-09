@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
@@ -304,7 +304,7 @@ test('tampered release asset is refused before receipt, MCP, or migration-state 
     ),
     /asset digest mismatch/,
   );
-  for (const relative of ['.artifact-migration-tools/codex.json', '.codex/config.toml', '.agents/knowledge/migrations']) {
+  for (const relative of ['.artifact-migration-toolkit/codex.json', '.codex/config.toml', '.agents/knowledge/migrations']) {
     await assert.rejects(stat(path.join(root, relative)), { code: 'ENOENT' });
   }
 });
@@ -366,7 +366,7 @@ test('an unreadable archive is one typed refusal naming tar, with no store write
     ensureRuntime({ provider: 'codex', root, store }, { resolve: async () => f.resolved, download: (_, destination) => writeFile(destination, 'not gzip'), skillRelease }),
     error => error.code === 'RUNTIME_ARCHIVE_UNREADABLE' && /tar/.test(error.state.tar) && error.state.receipt === 'unchanged',
   );
-  for (const target of [store, path.join(root, '.artifact-migration-tools/codex.json')]) {
+  for (const target of [store, path.join(root, '.artifact-migration-toolkit/codex.json')]) {
     await assert.rejects(stat(target), { code: 'ENOENT' });
   }
 });
@@ -392,7 +392,7 @@ test('an exact-version override reaches the resolver unchanged, persists nothing
   assert.equal(explicit.toolkit.version, version);
   assert.equal(explicit.selection, 'explicit');
   assert.equal(explicit.skillIdentity, 'unverified');
-  const receiptFile = path.join(root, '.artifact-migration-tools/codex.json');
+  const receiptFile = path.join(root, '.artifact-migration-toolkit/codex.json');
   assert.equal(JSON.parse(await readFile(receiptFile, 'utf8')).pinned, undefined, 'an override must not persist a pin');
 
   // The next ordinary invocation converges back, and says which rule fired.
@@ -412,7 +412,7 @@ test('an exact-version override reaches the resolver unchanged, persists nothing
 // silent steady state.
 // ---------------------------------------------------------------------------
 
-const receiptPath = (root, provider = 'codex') => path.join(root, `.artifact-migration-tools/${provider}.json`);
+const receiptPath = (root, provider = 'codex') => path.join(root, `.artifact-migration-toolkit/${provider}.json`);
 
 /** Every file under `root`, by digest. The proof that a refusal wrote nothing. */
 async function snapshot(root) {
@@ -486,6 +486,20 @@ test('T1-T5: a stale receipt converges to the exact release the installed skill 
     const text = await readFile(path.join(root, relative), 'utf8');
     assert.ok(!text.includes(before.release), `${relative} still names the previous release`);
   }
+});
+
+// `skills add` of a newer skill into a pre-1.3.20 consumer: the first skill run
+// moves the old folder and converges its receipt to the new requirement.
+test('after skills add, the first run moves a pre-rename folder and converges its receipt', async () => {
+  const stale = await variantRelease('1.3.4');
+  const wanted = await variantRelease('1.3.20');
+  const { root, store } = await consumerAt('pre-rename folder', stale);
+  await rename(path.join(root, '.artifact-migration-toolkit'), path.join(root, '.artifact-migration-tools'));
+  await requiring('1.3.20');
+  const updated = await ensureRuntime({ provider: 'codex', root, store }, { ...wanted, skillRelease });
+  assert.equal(updated.bootstrapped, true);
+  assert.equal(JSON.parse(await readFile(receiptPath(root), 'utf8')).toolkit.version, '1.3.20');
+  await assert.rejects(readdir(path.join(root, '.artifact-migration-tools')), { code: 'ENOENT' });
 });
 
 // T15. The whole point: a stale runtime is not a steady state. Nothing changed
@@ -644,7 +658,7 @@ test('T23: an incoherent installed skill set is refused, not flip-flopped', asyn
 test('T12: a provably dead lock owner is reclaimed once; anything ambiguous stays blocked', async () => {
   const release = await variantRelease('1.12.0');
   const { root, store } = await consumerAt('stale lock', release);
-  const lock = path.join(root, '.artifact-migration-tools/install.lock');
+  const lock = path.join(root, '.artifact-migration-toolkit/install.lock');
   const dead = 2 ** 22 - 1; // Above every pid_max this test could collide with.
   const settled = await snapshot(root);
 

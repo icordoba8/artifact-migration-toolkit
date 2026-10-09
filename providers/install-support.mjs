@@ -9,6 +9,22 @@ export const digest = bytes => `sha256:${createHash('sha256').update(bytes).dige
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const optional = file => readFile(file).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+// The consumer folder holding receipts and the install lock. LEGACY is the
+// pre-1.3.20 name; the marker, package and toolkit names keep the old spelling.
+export const DIR = '.artifact-migration-toolkit';
+const LEGACY = '.artifact-migration-tools';
+
+/**
+ * Move a pre-rename folder to DIR, once, before anything reads it. Its receipts
+ * record no folder path, so they stay valid. Never deletes: when DIR already
+ * exists the old folder is left alone.
+ */
+export async function moveLegacyFolder(root) {
+  const from = await safePath(root, LEGACY);
+  const to = await safePath(root, DIR);
+  if (await lstat(to).catch(() => null)) return;
+  await rename(from, to).catch(error => { if (error.code !== 'ENOENT') throw error; });
+}
 const layouts = {
   claude: { project: ['skills', null, '.mcp.json', 'mcpServers'], user: ['skills', null, '.mcp.json', 'mcpServers'] },
   codex: { project: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null], user: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null] },
@@ -287,7 +303,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   if (!layout || !root || !store) throw new Error('Supported scope, explicit root and external store are required');
   root = path.resolve(root); store = path.resolve(store);
   if (store === root || store.startsWith(`${root}${path.sep}`)) throw new Error('Engine store must be outside the consumer/plugin root');
-  const receiptFile = await safePath(root, `.artifact-migration-tools/${provider}.json`);
+  const receiptFile = await safePath(root, `${DIR}/${provider}.json`);
   const rawReceipt = await optional(receiptFile);
   const previous = rawReceipt ? JSON.parse(rawReceipt) : null;
   const mode = runtimeOnly ? 'runtime' : 'provider';
@@ -297,7 +313,8 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const history = previous ? await historicalOwned(previous, provider, layout) : [];
   const historical = history.map(item => item.native);
   if (action !== 'install' && !previous) throw new Error('No installation selected');
-  if (action === 'install' && previous) throw new Error('Already installed; select update explicitly');
+  // Reinstalling is an update: the same ownership checks, the new bundle.
+  if (action === 'install' && previous) action = 'update';
   const configFile = await safePath(root, layout[2]);
   const rawConfig = await optional(configFile);
   const agentsFile = scope === 'project' ? await safePath(root, '.agents/mcp.json') : null;
@@ -387,14 +404,28 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     if (requiredBy ?? previous?.requiredBy) receipt.requiredBy = requiredBy ?? previous.requiredBy;
     // Check ownership/config before staging any release or changing a consumer.
   }
-  const merged = mergeConfig(rawConfig, layout, previous?.configOwned, server, historical);
-  const agents = mergeAgents(rawAgents, previous, receipt?.release, history, provider);
+  // No receipt (its folder was deleted): a registration is ours only when it is
+  // exactly what this installer writes for a release in this store, so it can
+  // be taken over and the receipt recreated. Anything else stays a conflict.
+  let adoptable = [];
+  let adopted;
+  if (!previous && receipt) {
+    const names = await readdir(store).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+    const releases = [receipt.release, ...names.filter(name => /^\d+\.\d+\.\d+-[a-f0-9]{64}$/.test(name)).map(name => path.join(store, name))];
+    adoptable = releases.flatMap(release => (provider === 'opencode' ? [false, true] : [false])
+      .map(legacy => ({ native: mergeConfig(null, layout, null, serverFor(provider, release, legacy)).owned, agents: serverFor('claude', release) })));
+    const existing = layout[3] === null ? rawConfig?.toString() ?? '' : serversIn(JSON.parse(rawConfig ?? '{}') ?? {}, layout[3])['start-migration'];
+    adopted = adoptable.find(item => layout[3] === null ? existing.split(item.native).length === 2 : same(existing, item.native))?.native;
+  }
+  const merged = mergeConfig(rawConfig, layout, previous?.configOwned ?? adopted, server, historical);
+  const agents = mergeAgents(rawAgents, previous ?? (receipt && { release: receipt.release }), receipt?.release, previous ? history : adoptable, provider);
   if (receipt) receipt.configOwned = merged.owned;
   const backups = new Map();
-  for (const relative of new Set([...Object.keys(previous?.files ?? {}), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `.artifact-migration-tools/${provider}.json`])) {
+  for (const relative of new Set([...Object.keys(previous?.files ?? {}), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `${DIR}/${provider}.json`])) {
     const file = await safePath(root, relative);
     const bytes = await optional(file);
-    if (writes.has(relative) && bytes && !previous?.files[relative]) throw new Error(`Unowned file exists: ${relative}`);
+    // Without a receipt, a file identical to what would be written is ours.
+    if (writes.has(relative) && bytes && !previous?.files[relative] && (previous || !bytes.equals(writes.get(relative)))) throw new Error(`Unowned file exists: ${relative}`);
     backups.set(file, bytes);
   }
   if (receipt) {
@@ -449,7 +480,8 @@ const lockOwnerDead = async (lock) => {
 // the same single lock per host root instead of racing an install.
 export async function adapter(provider, options = {}) {
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
-  const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
+  await moveLegacyFolder(options.root);
+  const lock = await safePath(options.root, `${DIR}/install.lock`);
   await mkdir(path.dirname(lock), { recursive: true });
   // One config writer per host root, still the same `wx` open, so mutual
   // exclusion is unchanged. The file now says who holds it, which is what turns

@@ -33,7 +33,7 @@ to*. It has only two inputs that can select a version: an explicit
 consulted **only when no receipt exists**. The consequence is that the first
 successful install permanently decides the runtime version for that consumer,
 for every provider, forever, with no user-visible decision and no path back
-other than hand-deleting `.artifact-migration-tools/`.
+other than hand-deleting `.artifact-migration-toolkit/`.
 
 The fix is not a new updater, a staleness check, a network poll, or a new
 identity system. The authoritative material is already present, already
@@ -82,7 +82,7 @@ if (previous && (!version || previous.toolkit?.version === version)) {
 
 Read precisely:
 
-- `previous` is the parsed `.artifact-migration-tools/<provider>.json`.
+- `previous` is the parsed `.artifact-migration-toolkit/<provider>.json`.
 - `version` is `--version` / `ARTIFACT_MIGRATION_TOOLS_VERSION`, else `undefined`.
 - For a normal invocation `version` is `undefined`, so `!version` is `true`.
 - Therefore **any** existing, locally-validatable receipt short-circuits
@@ -145,7 +145,7 @@ in the installed files proves it, and no code checks it. Under the corrected
 architecture these files would carry `computedHash` and that coincidence
 becomes a verified fact instead of an assumption.
 
-### 3.2 Provider receipts — `.artifact-migration-tools/`
+### 3.2 Provider receipts — `.artifact-migration-toolkit/`
 
 Only two receipts exist; no `copilot.json`, no `opencode.json`;
 no `install.lock` present (no interrupted install).
@@ -253,7 +253,7 @@ consumer today.** Section 13 is therefore forward-looking, not remedial.
              ├─ normalize provider via PROVIDERS map                       :255
              ├─ version ??= env ARTIFACT_MIGRATION_TOOLS_VERSION           :257
              ├─ root/store = path.resolve(...)   store default = defaultStore() :130
-             ├─ read R/.artifact-migration-tools/P.json  -> `previous`     :263
+             ├─ read R/.artifact-migration-toolkit/P.json  -> `previous`     :263
              ├─ identity guard: provider/root/store must match             :265
              │
              ├─[A] previous && (!version || previous.version === version)  :275  ◀── ROOT CAUSE
@@ -276,7 +276,7 @@ consumer today.** Section 13 is therefore forward-looking, not remedial.
              │     *** no network, no release discovery, no comparison ***
              │
              ├─[B] !previous -> siblingSelection({provider,root,store,version}) :177
-             │     · scan R/.artifact-migration-tools/*.json for other providers
+             │     · scan R/.artifact-migration-toolkit/*.json for other providers
              │     · candidate = {receipt.release, receipt.pin}
              │       + receipt.releases[] ONLY IF an explicit `version` was given :189
              │     · each candidate re-verified through pinnedToolkit
@@ -333,7 +333,7 @@ identity**, and row 9 is new.
 | 3 | Runtime bootstrap script | `scripts/runtime-bootstrap.mjs`, copied to all ten skill `scripts/runtime.mjs` | file sha256 | `pnpm providers:sync` | same | `runtime-bootstrap.test.mjs:171` ("one shared bootstrap source") | ships inside #2, and is covered by #2's `computedHash` | no (locked to #2) | n/a |
 | 4 | Immutable GitHub Release | `github.com/icordoba8/artifact-migration-toolkit` releases | tag `vX.Y.Z`, tag commit sha, one asset + `digest`, `immutable:true` | `scripts/release.mjs` + CI | never (immutable) | `resolveRelease()` :85 | permanent | no | n/a |
 | 5 | Extracted runtime store | `<store>/<version>-<pinhex>/` | `release-manifest.json`: `toolkit{name,version,commit,contentHash}`, **`skills` = the whole `skills-lock.json`** (`release.mjs:413`), `files{}`; plus `SHA256SUMS`, `packages/migration-engine/build-identity.json` | `applyAdapter` staging+rename :341-348 | never rewritten in place (new version = new directory) | `verifyBundle()` :45 (every file), `pinnedToolkit()` :147 | append-only, never GC'd | only by tampering | `verifyBundle` fails closed |
-| 6 | Provider receipt | `<root>/.artifact-migration-tools/<provider>.json` | `provider, scope, mode, root, store, toolkit{}, **skills**, release, pin, commands{}, mcp{}, configOwned, files{}, releases[]` | `applyAdapter` :323 | `applyAdapter` on install/update/rollback | `validateSelection` :221 + `pinnedToolkit` :147. **`skills` is written but never validated or compared** | per provider per consumer; **never expires** | **yes — this is the stale pin** | Reused forever (§2) |
+| 6 | Provider receipt | `<root>/.artifact-migration-toolkit/<provider>.json` | `provider, scope, mode, root, store, toolkit{}, **skills**, release, pin, commands{}, mcp{}, configOwned, files{}, releases[]` | `applyAdapter` :323 | `applyAdapter` on install/update/rollback | `validateSelection` :221 + `pinnedToolkit` :147. **`skills` is written but never validated or compared** | per provider per consumer; **never expires** | **yes — this is the stale pin** | Reused forever (§2) |
 | 7 | Provider MCP registration | `.mcp.json` / `.vscode/mcp.json` / `.codex/config.toml` / `opencode.json` (+`.agents/mcp.json`) | absolute `node` + absolute `<release>/packages/migration-engine/src/mcp-server.mjs` | `mergeConfig` :137 / `mergeAgents` :179 | same, on every install/update/rollback/doctor | `mergeConfig` ownership check against `receipt.configOwned` + `historicalOwned` | follows #6 inside one lock | **yes** — consumer tooling regenerates the file (observed, §3.4) | `doctor` restores it **from the receipt**, i.e. restores the *stale* path (§3.6.3) |
 | 8 | Migration record `toolkitIdentity` | `.agents/knowledge/migrations/**` record JSON | `{name, version, commit, contentHash}` | engine on record creation / `toolkit-identity.mjs adopt` | **only** explicit `adopt` / `update` / `rollback` | `toolkitIdentityStatus()` → `UNSTAMPED`/`MATCH`/`MISMATCH`/`UNIDENTIFIED_TOOLKIT`; `autoAdoptableToolkitTransition()` | per record, independent of #6 | yes, by design | `MISMATCH` reported read-only; fail-closed gates apply. **Correct as built — do not touch.** |
 | 9 | **Skill↔release binding (new, §9)** | the pair `(installed release-identity.json, selected release-manifest.json.skills)` | required: `{skill, version, computedHash}` (+`commit`,`contentHash` when `source:"release"`); proven by: `manifest.skills.skills[skill].computedHash` | `skills-lock.mjs` (requirement side), `release.mjs` (proof side) — **both already exist; only the requirement side needs the digest added** | neither — it is a relation, not a stored artifact | **`ensureRuntime` (new)** | evaluated on every invocation | **no — it is the thing that makes drift detectable** | A mismatch is a typed, fail-closed error, never a silent reuse |
@@ -414,7 +414,7 @@ Rows N and O are new in this correction.
 
 *(Unchanged by the correction, except the final field list.)*
 
-`.artifact-migration-tools/<provider>.json` currently carries **seven**
+`.artifact-migration-toolkit/<provider>.json` currently carries **seven**
 responsibilities:
 
 | Responsibility | Fields | Correct? |
@@ -625,7 +625,7 @@ ensureRuntime({ provider, root = cwd, store = defaultStore(), version }, deps):
   version  := version ?? env ARTIFACT_MIGRATION_TOOLS_VERSION
   if version given and not exactVersion(version): FAIL
   root, store := path.resolve(...)
-  previous := read(root/.artifact-migration-tools/<provider>.json) or null
+  previous := read(root/.artifact-migration-toolkit/<provider>.json) or null
   if previous and (provider|root|store mismatch): FAIL  # enriched message, §15
 
   # ---- 1. authority: pin > exact skill identity > development override ----
@@ -1010,7 +1010,7 @@ Traced consequences of running the same repository from WSL:
    `"Installation selection conflict"`. **Fail-closed, as designed.** A WSL
    invocation cannot silently adopt or corrupt the Windows installation.
 4. But the failure is **unrecoverable without manual deletion**: the two
-   environments are mutually exclusive over one `.artifact-migration-tools/`
+   environments are mutually exclusive over one `.artifact-migration-toolkit/`
    directory, and the error message names neither cause nor remedy.
 5. `pinnedToolkit`'s path equality (`:153`) and `validateSelection`'s
    (`install-support.mjs:222`) both use `path.join`, so they are consistent
@@ -1054,7 +1054,7 @@ Current state after interruption, traced point by point:
 | During MCP registration replacement | Same as above, same lock | Same |
 
 **The real gap is the lock, not the data.** `adapter()` (`:367-379`) opens
-`.artifact-migration-tools/install.lock` with `'wx'`. A killed process never
+`.artifact-migration-toolkit/install.lock` with `'wx'`. A killed process never
 reaches the `finally`, so the lock persists and **every subsequent invocation,
 forever, throws** *“Installation locked; inspect interrupted installation
 before retrying”*. Recovery requires deleting a file by hand — a direct
@@ -1280,7 +1280,7 @@ publication*:
 | 5 | `pnpm release:build` → staged `dist/artifact-migration-tools-1.3.9/`; `pnpm release:verify` re-hashes the staged bundle against its own manifest | verify clean |
 | 6 | **Staged candidate acceptance.** Run the full `ensureRuntime` matrix against the **staged candidate bundle**, with `deps.resolve`/`deps.download` serving `dist/` locally and `deps.skillRelease` reading the staged `skills/<name>/release-identity.json`. This proves the exact binding — stamp `computedHash` ↔ candidate `manifest.skills` ↔ candidate adapter behavior — **before publication**, in a throwaway consumer root, offline. Covers all four providers | all four providers converge; T1–T23 pass against the candidate |
 | 7 | Publish the immutable v1.3.9 GitHub Release; `pnpm release:record` | `released-versions.json` establishes 1.3.9 |
-| 8 | **Real-consumer proof against the released identity.** Back up `wms-milla7/.artifact-migration-tools/`, the four MCP configs and `.agents/mcp.json`. Install **both** skills from the v1.3.9 identity (`skills add`, then confirm each installed stamp's `computedHash` equals v1.3.9's `manifest.skills` entry). Run the preflight as claude, codex, copilot and opencode | all four receipts, all four configs and every MCP absolute path land on **one** identity = v1.3.9; old store releases and `releases[]` survive; a second run is offline with `bootstrapped:false` and zero requests |
+| 8 | **Real-consumer proof against the released identity.** Back up `wms-milla7/.artifact-migration-toolkit/`, the four MCP configs and `.agents/mcp.json`. Install **both** skills from the v1.3.9 identity (`skills add`, then confirm each installed stamp's `computedHash` equals v1.3.9's `manifest.skills` entry). Run the preflight as claude, codex, copilot and opencode | all four receipts, all four configs and every MCP absolute path land on **one** identity = v1.3.9; old store releases and `releases[]` survive; a second run is offline with `bootstrapped:false` and zero requests |
 | 9 | Negative proof on the real consumer: with the network unavailable and a deliberately stale receipt, confirm `RUNTIME_UPDATE_REQUIRED_OFFLINE` leaves every file byte-identical | byte-comparison clean |
 
 Step 8 is the only step that touches the consumer, happens **after** v1.3.9
@@ -1303,7 +1303,7 @@ converges — no receipt deletion, no JSON editing, no `--version`.
    selection path exists in which the skill digest is unchecked, except an
    explicit `--version`, which is one-invocation and labelled
    `skillIdentity:"unverified"`.
-4. `.artifact-migration-tools/<provider>.json` has a documented role in
+4. `.artifact-migration-toolkit/<provider>.json` has a documented role in
    `README.md`: *installed-runtime state + runtime-side skill identity +
    provider/MCP ownership + rollback history + optional rollback pin + satisfied
    requirements* — and nothing else.

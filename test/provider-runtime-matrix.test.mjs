@@ -59,7 +59,7 @@ const OWNED_BLOCK = /# BEGIN artifact-migration-tools\n[\s\S]*?\n# END artifact-
 const ownedParent = (config, provider) => provider === 'opencode' ? config.mcp?.servers : config[SURFACES[provider].key];
 const configFile = (root, provider) => path.join(root, SURFACES[provider].config);
 const readConfig = (root, provider) => readFile(configFile(root, provider), 'utf8');
-const receiptFile = (root, provider) => path.join(root, '.artifact-migration-tools', `${provider}.json`);
+const receiptFile = (root, provider) => path.join(root, '.artifact-migration-toolkit', `${provider}.json`);
 const readReceipt = async (root, provider) => JSON.parse(await readFile(receiptFile(root, provider), 'utf8'));
 /** The five fields a reused runtime must carry over exactly. */
 const identityOf = receipt => ({

@@ -186,17 +186,32 @@ again so its updated instructions load.
 
 Every one of these is cleared by a first-class command, never by editing or
 deleting a file: `skills add` for each skill, one connected run, or an explicit
-`--version`. **Receipts under `.artifact-migration-tools/` are never meant to be
+`--version`. **Receipts under `.artifact-migration-toolkit/` are never meant to be
 hand-edited or deleted**, and a hand-edited one is rejected rather than trusted.
 An interrupted installation also recovers on its own: the install lock records
 its owner, and a lock whose owner is provably dead on the same host is reclaimed
 once and the installation re-verified from scratch. Anything ambiguous — a live
 owner, another host, unreadable contents — still fails closed.
 
-`.artifact-migration-tools/<provider>.json` records exactly this and nothing
+`.artifact-migration-toolkit/<provider>.json` records exactly this and nothing
 else: installed-runtime state, the runtime-side skill identity, provider/MCP
 ownership, rollback history, an optional rollback pin, and the skill
 requirements already satisfied.
+
+Every install leaves that folder at the installed version: a reinstall with the
+explicit installer runs as `update`, and the first skill run after `skills add`
+converges the receipt to the release the new skill requires. If the folder is
+deleted but the MCP registration is still the exact one this installer writes,
+the next install takes it over and recreates the folder and receipt; a foreign
+or edited registration is still refused.
+
+**Folder rename (1.3.20).** Before 1.3.20 this folder was named
+`.artifact-migration-tools/`. The first install or skill run of 1.3.20 or later
+moves it to `.artifact-migration-toolkit/` unchanged (nothing is deleted; if
+both exist, the old one is left alone). Known limit: once moved, a release from
+before the rename (`--version` ≤ 1.3.19, or a rollback to one) no longer finds
+its receipt and fails with `No installation selected`. Published releases are
+immutable, so stay on 1.3.20 or later after the move.
 
 ### Explicit selection and rollback
 
