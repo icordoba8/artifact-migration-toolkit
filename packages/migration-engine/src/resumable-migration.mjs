@@ -10791,6 +10791,15 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
   // unclaimed *and* stays a human decision. Ambiguity is the one drift case
   // `--mode auto` must not decide, and this is where that is recorded.
   const autoResolvable = owners.length > 0;
+  const laterOwners = plannedTargetOwners(
+    slices.filter(
+      (slice) =>
+        slice.id !== state.activeSlice &&
+        (state.pendingSlices ?? []).includes(slice.id),
+    ),
+  );
+  const withinLaterSlice = (relative) =>
+    laterOwners.length > 0 && withinPlannedScope(relative, laterOwners);
   const findings = [];
   for (const entry of dirty.entries) {
     const relative = entry.path.replaceAll("\\", "/");
@@ -10811,6 +10820,9 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       });
       continue;
     }
+    // Not drift yet: a later pending slice still scopes this path, and the
+    // engine claims it for that slice when it is implemented (`engineSliceClaims`).
+    if (withinLaterSlice(relative)) continue;
     // Brownfield: already dirty before the migration started and unchanged
     // since is not this migration's doing.
     if (changedSinceBaseline && !changedSinceBaseline(relative)) continue;
@@ -10890,7 +10902,7 @@ const eventNamesSlice = (event, sliceId) =>
  * re-proves, from fresh reads. Each refusal is a named blocker; the amendment
  * itself is computed only once none remain.
  */
-const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
+const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles, engineClaim = false) => {
   const blockers = [];
   const refuse = (message) =>
     blockers.push(`--amend-slice '${sliceId}' ${message}`);
@@ -10929,7 +10941,11 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
       event.event === "UI_REMEDIATION_REOPENED" &&
       eventNamesSlice(event, sliceId),
   );
-  if (reopenedAt < 0) {
+  // The engine's own claim (`engineSliceClaims`) amends the slice it just
+  // moved to VERIFY_SLICES, before any evidence binds it; no reopen exists.
+  if (engineClaim) {
+    if (state.activeSlice !== sliceId) refuse("is not the active slice the engine claims for.");
+  } else if (reopenedAt < 0) {
     refuse(
       "is not pending because of a reopen. A first implementation pass or a rework edits the slice record directly; only a slice reopened by --reopen-ui is amended.",
     );
@@ -11134,6 +11150,33 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
     priorBytes,
     amendedBytes,
   };
+};
+
+/**
+ * Fix B: target paths the engine can attribute without asking anyone. Right
+ * after IMPLEMENT_SLICES for `sliceId`, every unclaimed modified file inside
+ * that slice's planned scope -- and inside no later pending slice's, which
+ * would claim it instead (a claimed file is frozen once its slice verifies) --
+ * belongs to that slice. Only claims the amendment would accept; anything else
+ * stays unclaimed drift for TARGET_DRIFT_ACCEPTED.
+ * ponytail: "changed during the slice" is read as "dirty and unclaimed at its
+ * IMPLEMENT pass"; per-slice target snapshots would sharpen it, at a format change.
+ */
+const engineSliceClaims = async (root, state, roots, sliceId) => {
+  if (!usesSliceRework(state) || !roots?.targetRoot) return [];
+  const plan = await readOptionalJson(path.join(root, initialArtifacts.slices), "Slice index");
+  const slices = Array.isArray(plan?.slices) ? plan.slices : [];
+  const scope = plannedTargetOwners(slices.filter((slice) => slice.id === sliceId));
+  if (scope.length === 0) return [];
+  const paths = [];
+  for (const finding of unclaimedTargetDrift(await classifyTargetDrift(root, state, roots, slices))) {
+    if (!withinPlannedScope(finding.path, scope)) continue;
+    if (!(await stat(path.join(roots.targetRoot, finding.path)).then((entry) => entry.isFile(), () => false))) continue;
+    paths.push(finding.path);
+  }
+  if (paths.length === 0) return [];
+  const { blockers } = await sliceAmendmentFor(root, state, roots, sliceId, paths, true);
+  return blockers.length === 0 ? paths : [];
 };
 
 /**
@@ -13082,6 +13125,7 @@ const amendSliceUnderLock = async ({
   sliceId,
   addFiles,
   authorization = null,
+  engineClaim = false,
   hooks,
 }) => {
   // Refused before a byte moves, and before the amendment is even computed: an
@@ -13096,6 +13140,7 @@ const amendSliceUnderLock = async ({
       { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot },
       sliceId,
       addFiles,
+      engineClaim,
     );
   if (blockers.length > 0) {
     throw new Error(`${blockers.join(" ")} Nothing was written.`);
@@ -13104,8 +13149,11 @@ const amendSliceUnderLock = async ({
   const { preservesAs } = sliceAmendment;
   const amendedState = {
     ...state,
-    evidenceFreshness: "STALE",
-    nextAction: `Recapture Playwright TARGET UI evidence for ${state.activeSlice}, bound to the amended implementation of '${sliceId}'.`,
+    // An engine claim precedes any evidence: nothing to recapture.
+    ...(engineClaim ? {} : {
+      evidenceFreshness: "STALE",
+      nextAction: `Recapture Playwright TARGET UI evidence for ${state.activeSlice}, bound to the amended implementation of '${sliceId}'.`,
+    }),
     nextCommand: `/start-migration ${resolved.canonical}`,
     artifactHashes: {
       ...state.artifactHashes,
@@ -16867,9 +16915,26 @@ const advanceUnderLock = async ({
   await appendHistoryOnce(registryData.targetRoot, context.root, event);
   await hooks?.afterWrite?.("history");
   await rm(journalFile, { force: true });
+  const roots = { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot };
+  const claims = currentStep === "IMPLEMENT_SLICES"
+    ? await engineSliceClaims(context.root, nextState, roots, activeSlice)
+    : [];
+  const claimed = claims.length > 0
+    ? await amendSliceUnderLock({
+        registryData,
+        resolved,
+        root: context.root,
+        statePath: context.statePath,
+        state: nextState,
+        sliceId: activeSlice,
+        addFiles: claims,
+        engineClaim: true,
+        hooks,
+      })
+    : null;
   return {
     changed: true,
-    state: nextState,
+    state: claimed?.state ?? nextState,
     statePath: context.statePath,
     migrationRoot: context.root,
     completedStep: currentStep,

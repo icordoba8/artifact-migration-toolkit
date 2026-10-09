@@ -700,13 +700,18 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   const groupable = censusClosed
     ? candidates.filter((candidate) => LATE_DECISION_KINDS.has(candidate.kind))
     : candidates;
-  const group = directLedger
-    ? await createNewFormatDecisionGroup({
-        candidates: groupable,
-        lifecycle,
-        projectRoot: registryData.targetRoot,
-      })
-    : decisionGroupFor(groupable, lifecycle);
+  // Offer == accept: the v2 group is one GROUP_APPROVAL line, so the predicate
+  // `appendDecisions` writes under decides whether it is offered at all. When it
+  // refuses, the members stay offered one by one, each a writable late kind.
+  const group = !directLedger
+    ? decisionGroupFor(groupable, lifecycle)
+    : decisionKindAllowed(DECISION_GROUP_KIND, censusClosed)
+      ? await createNewFormatDecisionGroup({
+          candidates: groupable,
+          lifecycle,
+          projectRoot: registryData.targetRoot,
+        })
+      : null;
   if (directLedger && group) {
     group.review = reviewFor(group);
     group.blocked = blockedFor(group);
