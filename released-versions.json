@@ -62,5 +62,9 @@
   {
     "version": "1.3.15",
     "contentHash": "sha256:4b33d46505e03bedeb0729ec4202bc1e2c106f36eb372e1280be001bce484098"
+  },
+  {
+    "version": "1.3.16",
+    "contentHash": "sha256:1806d5009b6612d99a739bb746462b576e5347aa0e33c4736fef0c73729e8191"
   }
 ]
