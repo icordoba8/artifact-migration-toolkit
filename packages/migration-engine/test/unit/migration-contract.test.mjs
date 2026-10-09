@@ -16732,11 +16732,15 @@ test("amend: one amendment preserves the prior record, re-pins both, and writes 
     assert.equal(after.activeSlice, before.activeSlice);
     assert.deepEqual(after.completedSlices, before.completedSlices);
 
-    // Add-only: the prior list survives verbatim, with the addition appended.
+    // Add-only: the prior list survives verbatim, with the addition appended
+    // and bound to the identity it was claimed at.
     const record = await readJson(
       path.join(fixture.migrationRoot, "slices/slice-a.json"),
     );
-    assert.deepEqual(record.changedFiles, ["src/slice-a.ts", added]);
+    assert.equal(record.changedFiles.length, 2);
+    assert.equal(record.changedFiles[0], "src/slice-a.ts");
+    assert.match(record.changedFiles[1], /^src\/slice-a-helper\.ts sha256:\S+$/);
+    assert.equal(added, "src/slice-a-helper.ts");
 
     // The prior bytes are kept exactly, and pinned for life.
     const preserved = await readFile(
@@ -20218,4 +20222,119 @@ test("ODA-6: a grouped member view points at one group entry and is never its ow
     project([tampered], members[0]),
     /does not re-derive to the candidate digest/,
   );
+});
+
+/* --------------------------------------------------------------------------
+ * The engine's own slice claim is the manual amendment, not a re-implementation
+ * of it: one claim spelling, one claim-time byte binding, one transaction.
+ * ------------------------------------------------------------------------ */
+
+const implementAndVerify = async (fixture, sliceId) => {
+  await advance(fixture, { slice: sliceId });
+  await authorEvidence(fixture, sliceId, {});
+  await advance(fixture, { slice: sliceId });
+};
+
+const amendedBy = async (fixture, sliceId) =>
+  (await historyEvents(fixture))
+    .filter((event) => event.event === "SLICE_SCOPE_AMENDED" && event.slice === sliceId)
+    .flatMap((event) => event.added);
+
+test("engine claim: a file a verified slice claims under another spelling is not re-claimed", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await writeFile(path.join(fixture.targetRoot, "src/shared.ts"), "export const shared = 1;\n");
+    const recordPath = path.join(fixture.migrationRoot, "slices/slice-a.json");
+    const record = await readJson(recordPath);
+    // The project-relative spelling the implementation gate already accepts.
+    await writeJson(recordPath, {
+      ...record,
+      changedFiles: [...record.changedFiles, "target/src/shared.ts"],
+    });
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a", {});
+    // `authorEvidence` binds src/slice-a.ts alone; bind both claimed files.
+    const raw = async (relative) =>
+      createHash("sha256").update(await readFile(path.join(fixture.targetRoot, relative))).digest("hex");
+    const implementationDigest = `sha256:${createHash("sha256")
+      .update(JSON.stringify([
+        ["src/shared.ts", await raw("src/shared.ts")],
+        ["src/slice-a.ts", await raw("src/slice-a.ts")],
+      ]))
+      .digest("hex")}`;
+    const evidencePath = path.join(fixture.migrationRoot, "evidence/slice-a/result.json");
+    const evidence = await readJson(evidencePath);
+    for (const row of evidence.uiEvidence ?? []) {
+      if (row.boundTo?.implementationDigest) row.boundTo.implementationDigest = implementationDigest;
+    }
+    await writeJson(evidencePath, evidence);
+    await advance(fixture, { slice: "slice-a" });
+
+    await authorSlice(fixture, "slice-b");
+    await advance(fixture, { slice: "slice-b" });
+    assert.deepEqual(
+      await amendedBy(fixture, "slice-b"),
+      [],
+      "src/shared.ts is slice-a's claim; slice-b may not take it",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("engine claim: editing an engine-claimed file after its slice verified blocks FINALIZE until accepted", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await implementAndVerify(fixture, "slice-a");
+    await authorSlice(fixture, "slice-b");
+    const helper = await extraTargetFile(fixture, "src/slice-b-helper.ts");
+    await implementAndVerify(fixture, "slice-b");
+    assert.deepEqual(await amendedBy(fixture, "slice-b"), [helper]);
+
+    await writeFile(path.join(fixture.targetRoot, helper), "export const edited = true;\n");
+    await authorFinalize(fixture);
+    const failure = await advance(fixture).catch((error) => error);
+    assert.ok(failure instanceof Error, "FINALIZE must not reach COMPLETE");
+    assert.match(failure.message, /UNCLAIMED_TARGET_DRIFT/);
+    assert.ok(failure.message.includes(helper), "the refusal names the edited file");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("engine claim: a crash after the IMPLEMENT advance's history write recovers with the claim", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await implementAndVerify(fixture, "slice-a");
+    await authorSlice(fixture, "slice-b");
+    const helper = await extraTargetFile(fixture, "src/slice-b-helper.ts");
+    await assert.rejects(
+      advance(fixture, {
+        slice: "slice-b",
+        hooks: {
+          afterWrite: (written) => {
+            if (written === "history") throw new Error("killed after history");
+          },
+        },
+      }),
+      /killed after history/,
+    );
+    await recoverMigrationRecord({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+    const recovered = await state(fixture);
+    assert.equal(recovered.currentStep, "VERIFY_SLICES");
+    assert.deepEqual(await amendedBy(fixture, "slice-b"), [helper], "both, or neither");
+    assert.ok(
+      (await readJson(path.join(fixture.migrationRoot, "slices/slice-b.json"))).changedFiles
+        .some((entry) => entry.split(/\s+/)[0] === helper),
+    );
+    assert.equal(await exists(path.join(fixture.migrationRoot, "advance.journal")), false);
+  } finally {
+    await fixture.cleanup();
+  }
 });

@@ -216,7 +216,8 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
       });
       await runTo("VERIFY_SLICES");
       if (slice.id === "slice-b") {
-        assert.ok((await json(path.join(record, "slices/slice-b.json"))).changedFiles.includes("src/shared.ts"));
+        assert.ok((await json(path.join(record, "slices/slice-b.json"))).changedFiles
+          .some((entry) => entry.split(/\s+/)[0] === "src/shared.ts"));
         // Fix A: two late in-scope edits after the claim. Post-census the
         // format-19 group line is not writable, so none is offered; each
         // member is, and each is accepted by the writer that offered it.
