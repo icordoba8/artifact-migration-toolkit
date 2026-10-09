@@ -205,20 +205,29 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     for (const slice of slices) {
       const changedFile = `src/${slice.id}.ts`;
       await writeFile(path.join(target, changedFile), "export {};\n");
-      // Fix B: slice-a writes a file its record does not list. slice-b still
-      // scopes `src`, so it is no drift question now and slice-b claims it.
+      // slice-a writes a file its record does not list. slice-b still scopes
+      // `src`, so it is no drift question now: slice-b's IMPLEMENT gate asks
+      // the agent to list it, and the engine writes nothing until it does.
       if (slice.id === "slice-a") await writeFile(path.join(target, "src/shared.ts"), "export {};\n");
-      await author(`slices/${slice.id}.json`, {
+      const authorSlice = (changedFiles) => author(`slices/${slice.id}.json`, {
         id: slice.id, implementationStatus: "COMPLETE", requirementIds: slice.requirementIds,
         scenarioIds: slice.scenarioIds, traceIds: slice.traceIds,
-        capabilityIds: slice.capabilityIds, changedFiles: [changedFile],
+        capabilityIds: slice.capabilityIds, changedFiles,
         decisions: ["Implemented in the target architecture."], checks: ["typecheck"],
       });
+      await authorSlice([changedFile]);
+      if (slice.id === "slice-b") {
+        const gated = await runTo("IMPLEMENT_SLICES");
+        assert.equal(gated.outcome, "CONTINUE");
+        assert.deepEqual(gated.request.unlistedChangedFiles, ["src/shared.ts"]);
+        assert.match(gated.reason, /SLICE_FILES_UNLISTED: slice-b .*Add them to this slice's changedFiles \(or revert them\)/);
+        await authorSlice([changedFile, "src/shared.ts"]);
+      }
       await runTo("VERIFY_SLICES");
       if (slice.id === "slice-b") {
-        assert.ok((await json(path.join(record, "slices/slice-b.json"))).changedFiles
-          .some((entry) => entry.split(/\s+/)[0] === "src/shared.ts"));
-        // Fix A: two late in-scope edits after the claim. Post-census the
+        assert.deepEqual((await json(path.join(record, "slices/slice-b.json"))).changedFiles,
+          ["src/slice-b.ts", "src/shared.ts"]);
+        // Fix A: two late in-scope edits after the listing. Post-census the
         // format-19 group line is not writable, so none is offered; each
         // member is, and each is accepted by the writer that offered it.
         await writeFile(path.join(target, "src/late-a.ts"), "export {};\n");
@@ -287,8 +296,8 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
       assert.equal(event.previousHash, index === 0 ? null : events[index - 1].hash);
       assert.equal(hash, sha(`artifact-migration-tools/module-history/v1\n${canonical(payload)}`));
     }
-    assert.deepEqual(events.filter((event) => event.event === "SLICE_SCOPE_AMENDED")
-      .map(({ slice, added }) => ({ slice, added })), [{ slice: "slice-b", added: ["src/shared.ts"] }]);
+    // The engine amends no slice on its own; the agent listed the file.
+    assert.deepEqual(events.filter((event) => event.event === "SLICE_SCOPE_AMENDED"), []);
     assert.equal(events.at(-1).event, "STEP_COMPLETED");
     assert.equal(integrity.historyChain.headHash, events.at(-1).hash);
     assert.equal(sha(historyBytes.subarray(0, integrity.history.bytes)).slice(7), integrity.history.sha256);

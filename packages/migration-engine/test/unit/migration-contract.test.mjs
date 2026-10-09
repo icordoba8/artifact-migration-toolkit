@@ -14945,6 +14945,33 @@ const rework = async (fixture, sliceId, extra = {}) => {
   });
 };
 
+/**
+ * The IMPLEMENT gate's answer for a later slice whose `src` scope holds the FAIL
+ * defect evidence: list it in that slice's changedFiles. Returns a rebinder for
+ * the slice's UI evidence, which `authorEvidence` binds to `src/<slice>.ts` alone.
+ */
+const listDefectEvidence = async (fixture, sliceId) => {
+  const recordPath = path.join(fixture.migrationRoot, `slices/${sliceId}.json`);
+  const record = await readJson(recordPath);
+  await writeJson(recordPath, { ...record, changedFiles: [...record.changedFiles, FAIL_DEFECT_EVIDENCE] });
+  return async () => {
+    const raw = async (relative) =>
+      createHash("sha256").update(await readFile(path.join(fixture.targetRoot, relative))).digest("hex");
+    const implementationDigest = `sha256:${createHash("sha256")
+      .update(JSON.stringify([
+        [FAIL_DEFECT_EVIDENCE, await raw(FAIL_DEFECT_EVIDENCE)],
+        [`src/${sliceId}.ts`, await raw(`src/${sliceId}.ts`)],
+      ].sort(([a], [b]) => a.localeCompare(b))))
+      .digest("hex")}`;
+    const evidencePath = path.join(fixture.migrationRoot, `evidence/${sliceId}/result.json`);
+    const evidence = await readJson(evidencePath);
+    for (const row of evidence.uiEvidence ?? []) {
+      if (row.boundTo?.implementationDigest) row.boundTo.implementationDigest = implementationDigest;
+    }
+    await writeJson(evidencePath, evidence);
+  };
+};
+
 /** Re-author the same evidenced FAIL for a slice already back at VERIFY_SLICES. */
 const atFailedVerificationAgain = async (fixture, sliceId) => {
   const defectFile = path.join(fixture.targetRoot, FAIL_DEFECT_EVIDENCE);
@@ -15562,8 +15589,10 @@ test("R-W5-a: a preserved FAIL under rework/ with a newer terminal PASS finalize
     await advance(fixture, { slice: sliceId });
     for (const slice of SLICES.slice(1)) {
       await authorSlice(fixture, slice.id);
+      const rebind = await listDefectEvidence(fixture, slice.id);
       await advance(fixture, { slice: slice.id });
       await authorEvidence(fixture, slice.id);
+      await rebind();
       await advance(fixture, { slice: slice.id });
     }
 
@@ -15612,8 +15641,10 @@ test("R-W5-b / R-W3-f: a terminal PASS older than the newest rework blocks FINAL
 
     for (const slice of SLICES.slice(1)) {
       await authorSlice(fixture, slice.id);
+      const rebind = await listDefectEvidence(fixture, slice.id);
       await advance(fixture, { slice: slice.id });
       await authorEvidence(fixture, slice.id);
+      await rebind();
       await advance(fixture, { slice: slice.id });
     }
     assert.equal((await state(fixture)).currentStep, "FINALIZE");
@@ -16733,14 +16764,11 @@ test("amend: one amendment preserves the prior record, re-pins both, and writes 
     assert.deepEqual(after.completedSlices, before.completedSlices);
 
     // Add-only: the prior list survives verbatim, with the addition appended
-    // and bound to the identity it was claimed at.
+    // as a plain path -- never the retired `<path> <identity>` shape.
     const record = await readJson(
       path.join(fixture.migrationRoot, "slices/slice-a.json"),
     );
-    assert.equal(record.changedFiles.length, 2);
-    assert.equal(record.changedFiles[0], "src/slice-a.ts");
-    assert.match(record.changedFiles[1], /^src\/slice-a-helper\.ts sha256:\S+$/);
-    assert.equal(added, "src/slice-a-helper.ts");
+    assert.deepEqual(record.changedFiles, ["src/slice-a.ts", added]);
 
     // The prior bytes are kept exactly, and pinned for life.
     const preserved = await readFile(
@@ -20225,8 +20253,10 @@ test("ODA-6: a grouped member view points at one group entry and is never its ow
 });
 
 /* --------------------------------------------------------------------------
- * The engine's own slice claim is the manual amendment, not a re-implementation
- * of it: one claim spelling, one claim-time byte binding, one transaction.
+ * The IMPLEMENT gate. The engine never claims a file for a slice: it names the
+ * in-scope files the slice left out and the agent lists them (or reverts them)
+ * in the slice record it authors. These replace the retired v1.3.16/v1.3.17
+ * engine-claim tests, one for one.
  * ------------------------------------------------------------------------ */
 
 const implementAndVerify = async (fixture, sliceId) => {
@@ -20240,7 +20270,15 @@ const amendedBy = async (fixture, sliceId) =>
     .filter((event) => event.event === "SLICE_SCOPE_AMENDED" && event.slice === sliceId)
     .flatMap((event) => event.added);
 
-test("engine claim: a file a verified slice claims under another spelling is not re-claimed", async () => {
+const recordBytes = async (fixture, sliceId) =>
+  Promise.all(
+    ["state.json", "integrity.json", "history/history.ndjson", `slices/${sliceId}.json`].map(
+      (relative) => readFile(path.join(fixture.migrationRoot, relative), "utf8"),
+    ),
+  );
+
+// Converted from "engine claim: a file a verified slice claims under another spelling is not re-claimed".
+test("IMPLEMENT gate: a file a verified slice claims under another spelling is not requested again", async () => {
   const fixture = await createFixture();
   try {
     await driveTo(fixture, "PLAN");
@@ -20274,17 +20312,20 @@ test("engine claim: a file a verified slice claims under another spelling is not
 
     await authorSlice(fixture, "slice-b");
     await advance(fixture, { slice: "slice-b" });
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
     assert.deepEqual(
-      await amendedBy(fixture, "slice-b"),
-      [],
-      "src/shared.ts is slice-a's claim; slice-b may not take it",
+      (await readJson(path.join(fixture.migrationRoot, "slices/slice-b.json"))).changedFiles,
+      ["src/slice-b.ts"],
+      "src/shared.ts is slice-a's claim; slice-b is never asked for it",
     );
+    assert.deepEqual(await amendedBy(fixture, "slice-b"), []);
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("engine claim: editing an engine-claimed file after its slice verified blocks FINALIZE until accepted", async () => {
+// Converted from "engine claim: editing an engine-claimed file after its slice verified blocks FINALIZE until accepted".
+test("IMPLEMENT gate: a missed in-scope file blocks the advance with a typed request and zero mutation; listing it passes", async () => {
   const fixture = await createFixture();
   try {
     await driveTo(fixture, "PLAN");
@@ -20292,21 +20333,35 @@ test("engine claim: editing an engine-claimed file after its slice verified bloc
     await implementAndVerify(fixture, "slice-a");
     await authorSlice(fixture, "slice-b");
     const helper = await extraTargetFile(fixture, "src/slice-b-helper.ts");
-    await implementAndVerify(fixture, "slice-b");
-    assert.deepEqual(await amendedBy(fixture, "slice-b"), [helper]);
+    const before = await recordBytes(fixture, "slice-b");
 
-    await writeFile(path.join(fixture.targetRoot, helper), "export const edited = true;\n");
-    await authorFinalize(fixture);
-    const failure = await advance(fixture).catch((error) => error);
-    assert.ok(failure instanceof Error, "FINALIZE must not reach COMPLETE");
-    assert.match(failure.message, /UNCLAIMED_TARGET_DRIFT/);
-    assert.ok(failure.message.includes(helper), "the refusal names the edited file");
+    const refusal = await validateResumableMigration({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+    }).catch((error) => error);
+    assert.ok(refusal instanceof Error);
+    assert.match(refusal.message, /^SLICE_FILES_UNLISTED: slice-b /);
+    assert.match(refusal.message, /Add them to this slice's changedFiles \(or revert them\)/);
+    assert.deepEqual(refusal.unlistedChangedFiles, [helper]);
+    const blocked = await advance(fixture, { slice: "slice-b" }).catch((error) => error);
+    assert.deepEqual(blocked.unlistedChangedFiles, [helper]);
+    assert.deepEqual(await recordBytes(fixture, "slice-b"), before, "the gate writes nothing");
+    assert.equal((await state(fixture)).currentStep, "IMPLEMENT_SLICES");
+
+    const recordPath = path.join(fixture.migrationRoot, "slices/slice-b.json");
+    const record = await readJson(recordPath);
+    await writeJson(recordPath, { ...record, changedFiles: [...record.changedFiles, helper] });
+    await advance(fixture, { slice: "slice-b" });
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+    assert.deepEqual((await readJson(recordPath)).changedFiles, ["src/slice-b.ts", helper]);
+    assert.deepEqual(await amendedBy(fixture, "slice-b"), [], "the engine amends nothing");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("engine claim: a crash after the IMPLEMENT advance's history write recovers with the claim", async () => {
+// Converted from "engine claim: a crash after the IMPLEMENT advance's history write recovers with the claim".
+test("IMPLEMENT gate: a crash after the IMPLEMENT advance's history write recovers the authored record, no engine amendment", async () => {
   const fixture = await createFixture();
   try {
     await driveTo(fixture, "PLAN");
@@ -20314,6 +20369,9 @@ test("engine claim: a crash after the IMPLEMENT advance's history write recovers
     await implementAndVerify(fixture, "slice-a");
     await authorSlice(fixture, "slice-b");
     const helper = await extraTargetFile(fixture, "src/slice-b-helper.ts");
+    const recordPath = path.join(fixture.migrationRoot, "slices/slice-b.json");
+    const record = await readJson(recordPath);
+    await writeJson(recordPath, { ...record, changedFiles: [...record.changedFiles, helper] });
     await assert.rejects(
       advance(fixture, {
         slice: "slice-b",
@@ -20326,14 +20384,60 @@ test("engine claim: a crash after the IMPLEMENT advance's history write recovers
       /killed after history/,
     );
     await recoverMigrationRecord({ ...(await resolutionFor(fixture)), moduleName: "auth" });
-    const recovered = await state(fixture);
-    assert.equal(recovered.currentStep, "VERIFY_SLICES");
-    assert.deepEqual(await amendedBy(fixture, "slice-b"), [helper], "both, or neither");
-    assert.ok(
-      (await readJson(path.join(fixture.migrationRoot, "slices/slice-b.json"))).changedFiles
-        .some((entry) => entry.split(/\s+/)[0] === helper),
-    );
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+    assert.deepEqual((await readJson(recordPath)).changedFiles, ["src/slice-b.ts", helper]);
+    assert.deepEqual(await amendedBy(fixture, "slice-b"), []);
     assert.equal(await exists(path.join(fixture.migrationRoot, "advance.journal")), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("v1.3.17 `<path> <identity>` entry reads as its path; reworking that file is not drift", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await implementAndVerify(fixture, "slice-a");
+    await authorSlice(fixture, "slice-b");
+    const helper = await extraTargetFile(fixture, "src/slice-b-helper.ts");
+    const recordPath = path.join(fixture.migrationRoot, "slices/slice-b.json");
+    const record = await readJson(recordPath);
+    // Exactly what v1.3.17's engine claim wrote, with an identity the bytes
+    // no longer match -- v1.3.17 reported that as drift; BASE never did.
+    const tokened = `${helper} sha256:${"0".repeat(64)}`;
+    await writeJson(recordPath, { ...record, changedFiles: [...record.changedFiles, tokened] });
+    await advance(fixture, { slice: "slice-b" });
+    await writeFile(path.join(fixture.targetRoot, helper), "export const reworked = true;\n");
+    const persisted = await state(fixture);
+    assert.equal(persisted.currentStep, "VERIFY_SLICES");
+    const drift = await pendingTargetDriftCandidates(fixture.migrationRoot, persisted, {
+      legacyRoot: fixture.legacyRoot,
+      targetRoot: fixture.targetRoot,
+    });
+    assert.deepEqual(drift.map((candidate) => candidate.subjectPath), []);
+    assert.deepEqual((await readJson(recordPath)).changedFiles, ["src/slice-b.ts", tokened]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("IMPLEMENT gate: a path no changedFiles entry can spell (a space) is not requested; it stays BASE drift", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await implementAndVerify(fixture, "slice-a");
+    await authorSlice(fixture, "slice-b");
+    const spaced = await extraTargetFile(fixture, "src/slice b helper.ts");
+    await advance(fixture, { slice: "slice-b" });
+    const persisted = await state(fixture);
+    assert.equal(persisted.currentStep, "VERIFY_SLICES");
+    const drift = await pendingTargetDriftCandidates(fixture.migrationRoot, persisted, {
+      legacyRoot: fixture.legacyRoot,
+      targetRoot: fixture.targetRoot,
+    });
+    assert.deepEqual(drift.map((candidate) => candidate.subjectPath), [spaced]);
   } finally {
     await fixture.cleanup();
   }

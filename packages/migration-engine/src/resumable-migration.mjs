@@ -1532,6 +1532,13 @@ const historyAnchorOf = (bytes) => ({
   sha256: createHash("sha256").update(bytes).digest("hex"),
 });
 
+const historyAnchorNow = async (root) => {
+  const file = path.join(root, initialArtifacts.history);
+  return historyAnchorOf(
+    (await fileExists(file)) ? await readFile(file) : Buffer.alloc(0),
+  );
+};
+
 const renderIntegrity = (state, history, decisions, autoDecisions, historyChain) =>
   `${JSON.stringify(
     {
@@ -1588,23 +1595,11 @@ const autoDecisionsAnchorNow = async (root) => {
  * write and therefore before its own history append -- so a caller cannot
  * accidentally anchor one and forget another.
  */
-const renderIntegrityNow = async (root, state, event, ...chained) => {
-  let historyChain = await prepareHistoryEvent(root, event);
-  // Further events of the same transaction chain off the one before them, and
-  // the byte anchor covers every one but the last, so W6-1's "exactly one
-  // event past the anchor" holds for a multi-event transaction too.
-  const events = [event, ...chained];
-  for (const [index, next] of chained.entries()) {
-    historyChain = await prepareHistoryEvent(root, next, events[index]);
-  }
-  const historyFile = path.join(root, initialArtifacts.history);
-  const anchoredBytes = Buffer.concat([
-    (await fileExists(historyFile)) ? await readFile(historyFile) : Buffer.alloc(0),
-    Buffer.from(events.slice(0, -1).map((recorded) => `${JSON.stringify(recorded)}\n`).join("")),
-  ]);
+const renderIntegrityNow = async (root, state, event) => {
+  const historyChain = await prepareHistoryEvent(root, event);
   return renderIntegrity(
     state,
-    historyAnchorOf(anchoredBytes),
+    await historyAnchorNow(root),
     await decisionsAnchorNow(root),
     await autoDecisionsAnchorNow(root),
     historyChain,
@@ -1628,14 +1623,6 @@ const readIntegrity = async (root) => {
  * agree, so pruning or rewriting a pin in `state.json` alone -- without also
  * forging the independently-written anchor -- is refused.
  */
-const interruptedTransition = (journal) =>
-  Object.assign(
-    new Error(
-      `Migration has an interrupted checkpoint transition from revision ${journal.fromRevision} to ${journal.toRevision}. Nothing is wrong with the record: resume it with '/start-migration <module>' (or 'discover-module.mjs <module>'), which recovers under the module lock before doing anything else.`,
-    ),
-    { pendingTransaction: true },
-  );
-
 const assertIntegrityAnchor = async (root, state) => {
   const integrity = await readIntegrity(root);
   if (!integrity) {
@@ -1665,7 +1652,12 @@ const assertIntegrityAnchor = async (root, state) => {
       journal.fromRevision === state.revision &&
       journal.toRevision === integrity.revision
     ) {
-      throw interruptedTransition(journal);
+      throw Object.assign(
+        new Error(
+          `Migration has an interrupted checkpoint transition from revision ${journal.fromRevision} to ${journal.toRevision}. Nothing is wrong with the record: resume it with '/start-migration <module>' (or 'discover-module.mjs <module>'), which recovers under the module lock before doing anything else.`,
+        ),
+        { pendingTransaction: true },
+      );
     }
     throw new Error(
       `Migration state revision is '${state.revision}', but integrity.json -- written outside state.json in the same transaction -- must pin exactly revision '${integrity.revision}'. state.json was edited outside the workflow; reopen the responsible checkpoint instead.`,
@@ -1743,14 +1735,6 @@ const assertHistoryAppendOnly = async (root, state, anchor) => {
     content.length < anchor.bytes ||
     historyAnchorOf(content.subarray(0, anchor.bytes)).sha256 !== anchor.sha256
   ) {
-    // A multi-event transaction anchors its bytes past events it has not
-    // appended yet; until recovery appends them that is an interruption, not
-    // a truncation. Refused either way.
-    const journal = await readAdvanceJournal(root);
-    if (journal && !journal.corrupt && Array.isArray(journal.events) &&
-        journal.toRevision === state.revision) {
-      throw interruptedTransition(journal);
-    }
     throw new Error(
       `Migration history/history.ndjson must still contain, unchanged, the ${anchor.bytes} bytes integrity.json pinned outside it; it is append-only and is the audit record every other check is anchored to. It was truncated or rewritten; restore it before continuing.`,
     );
@@ -3281,8 +3265,7 @@ const assertStateGraph = async (root, state, pendingJournal) => {
     journal &&
     !journal.corrupt &&
     journal.toRevision === state.revision &&
-    revision < state.revision &&
-    revision >= state.revision - (journal.events?.length ?? 1);
+    revision === state.revision - 1;
   if (inFlight) return { toRevision: journal.toRevision };
   if (journal && !journal.corrupt && journal.toRevision === state.revision) {
     // Journal left behind after a fully applied transition; nothing is missing.
@@ -3374,7 +3357,7 @@ const hashHistoryEvent = (event) => {
   return historyDigest(`${HISTORY_HASH_DOMAIN}${canonicalHistoryJson(payload)}`);
 };
 
-const prepareHistoryEvent = async (root, event, after = null) => {
+const prepareHistoryEvent = async (root, event) => {
   if (!isPlainObject(event) || Object.hasOwn(event, "hash")) {
     throw new Error("Migration history event is already chained or invalid; nothing was written.");
   }
@@ -3383,9 +3366,8 @@ const prepareHistoryEvent = async (root, event, after = null) => {
   const bytes = await readFile(path.join(root, initialArtifacts.history));
   const legacyPrefixSha256 = integrity?.historyChain
     ? integrity.historyChain.legacyPrefixSha256 : historyDigest(bytes);
-  const previousHash = after?.hash ?? existing.at(-1)?.hash ?? legacyPrefixSha256;
-  const seq = after ? after.seq + 1 : existing.length + 1;
-  Object.assign(event, { at: event.at ?? now(), seq, previousHash });
+  const previousHash = existing.at(-1)?.hash ?? legacyPrefixSha256;
+  Object.assign(event, { at: event.at ?? now(), seq: existing.length + 1, previousHash });
   event.hash = hashHistoryEvent(event);
   return {
     version: 1,
@@ -3473,12 +3455,13 @@ const sealHistoryTail = async (targetRoot, root) => {
 const appendHistoryOnce = async (targetRoot, root, event) => {
   await sealHistoryTail(targetRoot, root);
   const existing = await readHistoryEvents(root, await readIntegrity(root), await readAdvanceJournal(root));
-  const recorded = existing.find(
-    (candidate) =>
-      candidate.event === event.event && candidate.revision === event.revision,
-  );
-  if (recorded) {
-    if (event.hash && recorded.hash !== event.hash) {
+  if (
+    existing.some(
+      (recorded) =>
+        recorded.event === event.event && recorded.revision === event.revision,
+    )
+  ) {
+    if (event.hash && existing.at(-1)?.hash !== event.hash) {
       throw new Error("Migration history retry disagrees with the journaled event hash; restore the record before continuing.");
     }
     return false;
@@ -3548,10 +3531,7 @@ const recoverPendingAdvance = async (targetRoot, root, statePath) => {
         await atomicWrite(targetRoot, integrityPath, journal.integrity.content);
       }
     }
-    let appended = false;
-    for (const event of journal.events ?? [journal.event]) {
-      appended = (await appendHistoryOnce(targetRoot, root, event)) || appended;
-    }
+    const appended = await appendHistoryOnce(targetRoot, root, journal.event);
     // The journal is the only thing that can retry this, so it is dropped only
     // after the repaired record proves itself: `null` removes the in-flight
     // tolerance, so history must now replay to exactly this state, revision and
@@ -3637,17 +3617,11 @@ const readHistoryEvents = async (root, integrity, pendingJournal) => {
       }
       previousHash = event.hash;
     }
-    // The journal's not-yet-appended events must chain, hash by hash, from the
-    // recorded head to the anchored one.
-    const pending = (pendingJournal?.events ?? [pendingJournal?.event]).filter(isPlainObject);
-    const first = pending.findIndex((event) => event.seq === events.length + 1);
-    let chained = first < 0 ? null : previousHash;
-    for (const [offset, event] of pending.slice(Math.max(first, 0)).entries()) {
-      if (chained === null) break;
-      chained = event.seq === events.length + 1 + offset && event.previousHash === chained &&
-        hashHistoryEvent(event) === event.hash ? event.hash : null;
-    }
-    if (previousHash !== anchor.headHash && chained !== anchor.headHash) {
+    if (previousHash !== anchor.headHash &&
+        !(pendingJournal?.event?.hash === anchor.headHash &&
+          pendingJournal.event.seq === events.length + 1 &&
+          pendingJournal.event.previousHash === previousHash &&
+          hashHistoryEvent(pendingJournal.event) === anchor.headHash)) {
       throw new Error("Migration history headHash disagrees with integrity.json; recover the pending journal or restore the record.");
     }
   } else if (events.some((event) => Object.hasOwn(event, "hash") ||
@@ -10412,12 +10386,19 @@ const validateStep = async (root, state, step, sliceId, roots) => {
   // Returned so advanceMigration reuses this traversal instead of repeating it.
   if (step === "PLAN") return validatePlan(root, state, roots);
   if (step === "IMPLEMENT_SLICES") {
-    await validateImplementedSlice(
-      root,
-      sliceId ?? state.activeSlice,
-      state,
-      roots,
-    );
+    const implemented = sliceId ?? state.activeSlice;
+    await validateImplementedSlice(root, implemented, state, roots);
+    if (state.currentStep === step && implemented === state.activeSlice) {
+      const unlisted = await unlistedSliceFiles(root, state, roots, implemented);
+      if (unlisted.length > 0) {
+        throw Object.assign(
+          new Error(
+            `SLICE_FILES_UNLISTED: ${implemented} leaves ${unlisted.length} changed file(s) inside its scope out of its changedFiles: ${unlisted.join(", ")}. Add them to this slice's changedFiles (or revert them). Nothing was written.`,
+          ),
+          { unlistedChangedFiles: unlisted },
+        );
+      }
+    }
   }
   if (step === "VERIFY_SLICES") {
     return withUiProofReopenHint(
@@ -10664,7 +10645,8 @@ const withinPlannedScope = (relative, owners) =>
 /**
  * One `changedFiles` claim in canonical target-relative form, resolved exactly
  * as the implementation digest resolves it -- so `target/src/x.ts` and
- * `src/x.ts` are one claim to every lookup, manual or engine.
+ * `src/x.ts` are one claim to every lookup, manual or engine. A v1.3.17
+ * `<path> <identity>` entry reads as its path, like any other entry.
  */
 const canonicalClaim = async (changed, roots) => {
   const resolved = roots?.targetRoot ? await resolveChangedFile(changed, roots) : null;
@@ -10691,33 +10673,6 @@ const claimedTargetPaths = async (root, slices, roots) => {
 };
 
 /**
- * The claim-time byte binding every scope amendment writes, manual or engine:
- * each file it adds is recorded as `<path> <identity>` -- the first token is
- * the path every reader already takes, the second the file's identity when it
- * was claimed. Returns each claimed path whose bytes no longer match it, mapped
- * to the slice that claimed it.
- */
-const unboundSliceClaims = async (root, roots, slices) => {
-  const unbound = new Map();
-  if (!roots?.targetRoot) return unbound;
-  for (const slice of slices) {
-    const record = await readOptionalJson(
-      path.join(root, `slices/${slice.id}.json`),
-      `Slice ${slice.id}`,
-    );
-    for (const changed of record?.changedFiles ?? []) {
-      if (typeof changed !== "string") continue;
-      const identity = changed.trim().split(/\s+/)[1];
-      if (!identity?.startsWith("sha256:")) continue;
-      const resolved = await resolveChangedFile(changed, roots);
-      if (resolved && (await fileIdentityMatches(identity, resolved).catch(() => false))) continue;
-      unbound.set(await canonicalClaim(changed, roots), slice.id);
-    }
-  }
-  return unbound;
-};
-
-/**
  * W4-1/W4-2. The set difference over data the engine already holds -- no new
  * scan, no new cost -- and then a classification, because reporting an
  * unclaimed path without saying whose it is just moves the judgement to prose.
@@ -10735,7 +10690,6 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
     ? await targetBaselineDrift(roots.targetRoot, baseline)
     : null;
   const claimed = await claimedTargetPaths(root, slices, roots);
-  const unbound = await unboundSliceClaims(root, roots, slices);
 
   // A slice under an active rework legitimately re-touches its own files.
   const reworked = new Set(
@@ -10866,50 +10820,10 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
   );
   const withinLaterSlice = (relative) =>
     laterOwners.length > 0 && withinPlannedScope(relative, laterOwners);
-  /** Accepted when an operator decision binds these exact bytes; otherwise unclaimed. */
-  const acceptedOrUnclaimed = async (relative, reason) => {
-    if (accepted.has(relative)) {
-      // W4-5: the acceptance binds to the bytes. Editing the file after
-      // acceptance invalidates the decision, exactly as a classification
-      // approval stops applying when its candidate changes.
-      const current = await hashFile(path.join(roots.targetRoot, relative)).catch(
-        () => null,
-      );
-      if (await acceptsDrift(relative, current && `sha256:${current}`)) {
-        return { path: relative, class: DRIFT_CLASSES.OPERATOR_ACCEPTED };
-      }
-      return {
-        path: relative,
-        class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
-        autoResolvable,
-        reason:
-          "an operator accepted this path, but its bytes changed since; the acceptance no longer applies",
-      };
-    }
-    return {
-      path: relative,
-      class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
-      autoResolvable,
-      ...(reason ? { reason } : autoResolvable ? {} : { reason: UNDERIVABLE_OWNERSHIP_REASON }),
-    };
-  };
   const findings = [];
   for (const entry of dirty.entries) {
     const relative = entry.path.replaceAll("\\", "/");
-    if (claimed.has(relative)) {
-      // A claim holds the bytes it was made over, not the name: a file edited
-      // after its slice's scope amendment is drift until claimed or accepted.
-      const by = unbound.get(relative);
-      if (by) {
-        findings.push(
-          await acceptedOrUnclaimed(
-            relative,
-            `claimed by ${by} at an identity its bytes no longer match; the file changed after the claim`,
-          ),
-        );
-      }
-      continue;
-    }
+    if (claimed.has(relative)) continue;
     if (engineAuthored.has(relative)) {
       findings.push({ path: relative, class: DRIFT_CLASSES.ENGINE_AUTHORED });
       continue;
@@ -10926,8 +10840,8 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       });
       continue;
     }
-    // Not drift yet: a later pending slice still scopes this path, and the
-    // engine claims it for that slice when it is implemented (`engineSliceClaims`).
+    // Not drift yet: a later pending slice still scopes this path, and its own
+    // IMPLEMENT gate (`unlistedSliceFiles`) asks that slice to list it.
     if (withinLaterSlice(relative)) continue;
     // Brownfield: already dirty before the migration started and unchanged
     // since is not this migration's doing.
@@ -10943,7 +10857,32 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       });
       continue;
     }
-    findings.push(await acceptedOrUnclaimed(relative));
+    if (accepted.has(relative)) {
+      // W4-5: the acceptance binds to the bytes. Editing the file after
+      // acceptance invalidates the decision, exactly as a classification
+      // approval stops applying when its candidate changes.
+      const current = await hashFile(path.join(roots.targetRoot, relative)).catch(
+        () => null,
+      );
+      if (await acceptsDrift(relative, current && `sha256:${current}`)) {
+        findings.push({ path: relative, class: DRIFT_CLASSES.OPERATOR_ACCEPTED });
+        continue;
+      }
+      findings.push({
+        path: relative,
+        class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
+        autoResolvable,
+        reason:
+          "an operator accepted this path, but its bytes changed since; the acceptance no longer applies",
+      });
+      continue;
+    }
+    findings.push({
+      path: relative,
+      class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
+      autoResolvable,
+      ...(autoResolvable ? {} : { reason: UNDERIVABLE_OWNERSHIP_REASON }),
+    });
   }
   return findings;
 };
@@ -10983,7 +10922,7 @@ const eventNamesSlice = (event, sliceId) =>
  * re-proves, from fresh reads. Each refusal is a named blocker; the amendment
  * itself is computed only once none remain.
  */
-const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles, engineClaim = false) => {
+const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
   const blockers = [];
   const refuse = (message) =>
     blockers.push(`--amend-slice '${sliceId}' ${message}`);
@@ -11022,11 +10961,7 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles, engineCl
       event.event === "UI_REMEDIATION_REOPENED" &&
       eventNamesSlice(event, sliceId),
   );
-  // The engine's own claim (`engineSliceClaims`) amends the slice it just
-  // moved to VERIFY_SLICES, before any evidence binds it; no reopen exists.
-  if (engineClaim) {
-    if (state.activeSlice !== sliceId) refuse("is not the active slice the engine claims for.");
-  } else if (reopenedAt < 0) {
+  if (reopenedAt < 0) {
     refuse(
       "is not pending because of a reopen. A first implementation pass or a rework edits the slice record directly; only a slice reopened by --reopen-ui is amended.",
     );
@@ -11133,19 +11068,8 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles, engineCl
   }
   if (blockers.length > 0) return blocked();
 
-  // Add-only by construction: the prior list, untouched, then the additions,
-  // each bound to its claim-time identity (`unboundSliceClaims`).
-  const identities = new Map();
-  for (const relative of added) {
-    identities.set(relative, await fileIdentity(path.join(roots.targetRoot, relative)));
-  }
-  const amended = {
-    ...prior,
-    changedFiles: [
-      ...prior.changedFiles,
-      ...added.map((relative) => `${relative} ${identities.get(relative)}`),
-    ],
-  };
+  // Add-only by construction: the prior list, untouched, then the additions.
+  const amended = { ...prior, changedFiles: [...prior.changedFiles, ...added] };
   try {
     await validateImplementedSlice(root, sliceId, state, roots, amended);
   } catch (error) {
@@ -11202,7 +11126,7 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles, engineCl
       .map(([id]) => id);
     add.push({
       path: relative,
-      identity: identities.get(relative),
+      identity: await fileIdentity(path.join(roots.targetRoot, relative)),
       ownershipBasis: (planned.targetPaths ?? []).some((owner) =>
         under(relative, owner),
       )
@@ -11239,33 +11163,37 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles, engineCl
 };
 
 /**
- * Fix B: target paths the engine can attribute without asking anyone. Right
- * after IMPLEMENT_SLICES for `sliceId`, every unclaimed modified file inside
- * that slice's planned scope -- and inside no later pending slice's, which
- * would claim it instead (a claimed file is frozen once its slice verifies) --
- * belongs to that slice. Only claims the amendment would accept; anything else
- * stays unclaimed drift for TARGET_DRIFT_ACCEPTED.
- * ponytail: "changed during the slice" is read as "dirty and unclaimed at its
- * IMPLEMENT pass"; per-slice target snapshots would sharpen it, at a format change.
+ * The IMPLEMENT gate. The paths VERIFY_SLICES would report as unclaimed drift
+ * inside the active slice's planned scope -- dirty, listed by no slice, deferred
+ * to no later pending slice -- and that this slice could list (its record
+ * still validates with the path added). The agent lists them or
+ * reverts them; the engine writes nothing and decides nothing. A path the slice
+ * cannot list keeps its VERIFY/FINALIZE drift handling.
  */
-const engineSliceClaims = async (root, state, roots, sliceId) => {
+const unlistedSliceFiles = async (root, state, roots, sliceId) => {
   if (!usesSliceRework(state) || !roots?.targetRoot) return [];
   const plan = await readOptionalJson(path.join(root, initialArtifacts.slices), "Slice index");
   const slices = Array.isArray(plan?.slices) ? plan.slices : [];
   const scope = plannedTargetOwners(slices.filter((slice) => slice.id === sliceId));
   if (scope.length === 0) return [];
-  // A path some slice already claims stays that slice's, even once its bytes
-  // moved after the claim: that is drift to report, never a file to re-claim.
-  const claimed = await claimedTargetPaths(root, slices, roots);
-  const paths = [];
-  for (const finding of unclaimedTargetDrift(await classifyTargetDrift(root, state, roots, slices))) {
-    if (claimed.has(finding.path) || !withinPlannedScope(finding.path, scope)) continue;
-    if (!(await stat(path.join(roots.targetRoot, finding.path)).then((entry) => entry.isFile(), () => false))) continue;
-    paths.push(finding.path);
+  const record = await readJson(path.join(root, `slices/${sliceId}.json`), `Slice ${sliceId}`);
+  // Classified as the VERIFY_SLICES this advance enters will classify it.
+  const findings = await classifyTargetDrift(
+    root,
+    { ...state, currentStep: "VERIFY_SLICES" },
+    roots,
+    slices,
+  );
+  const unlisted = [];
+  for (const { path: relative } of unclaimedTargetDrift(findings)) {
+    if (!withinPlannedScope(relative, scope)) continue;
+    const listable = await validateImplementedSlice(root, sliceId, state, roots, {
+      ...record,
+      changedFiles: [...record.changedFiles, relative],
+    }).then(() => true, () => false);
+    if (listable) unlisted.push(relative);
   }
-  if (paths.length === 0) return [];
-  const { blockers } = await sliceAmendmentFor(root, state, roots, sliceId, paths, true);
-  return blockers.length === 0 ? paths : [];
+  return unlisted;
 };
 
 /**
@@ -13200,19 +13128,21 @@ const reworkSliceUnderLock = async ({
 };
 
 /**
- * The amendment as data -- the state, the event, the bytes to write and how to
- * undo them -- so the engine's own claim can ride the IMPLEMENT advance's
- * journal rather than follow it in a second transaction.
+ * `--amend-slice`: add files to a reopened slice's pinned record, in one
+ * journalled transaction and in exactly this order -- preserve the prior bytes,
+ * write the amended record, re-pin both, append SLICE_SCOPE_AMENDED. No FAIL,
+ * no rework attempt, no step or slice movement, no plan change.
  */
-const sliceAmendmentTransition = async ({
+const amendSliceUnderLock = async ({
   registryData,
   resolved,
   root,
+  statePath,
   state,
   sliceId,
   addFiles,
   authorization = null,
-  engineClaim = false,
+  hooks,
 }) => {
   // Refused before a byte moves, and before the amendment is even computed: an
   // unbranded authorization is a caller authoring its own audit field.
@@ -13226,7 +13156,6 @@ const sliceAmendmentTransition = async ({
       { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot },
       sliceId,
       addFiles,
-      engineClaim,
     );
   if (blockers.length > 0) {
     throw new Error(`${blockers.join(" ")} Nothing was written.`);
@@ -13235,11 +13164,8 @@ const sliceAmendmentTransition = async ({
   const { preservesAs } = sliceAmendment;
   const amendedState = {
     ...state,
-    // An engine claim precedes any evidence: nothing to recapture.
-    ...(engineClaim ? {} : {
-      evidenceFreshness: "STALE",
-      nextAction: `Recapture Playwright TARGET UI evidence for ${state.activeSlice}, bound to the amended implementation of '${sliceId}'.`,
-    }),
+    evidenceFreshness: "STALE",
+    nextAction: `Recapture Playwright TARGET UI evidence for ${state.activeSlice}, bound to the amended implementation of '${sliceId}'.`,
     nextCommand: `/start-migration ${resolved.canonical}`,
     artifactHashes: {
       ...state.artifactHashes,
@@ -13269,32 +13195,6 @@ const sliceAmendmentTransition = async ({
     // place for it to claim an authorization it did not spend.
     ...(authorizedBy ? { authorizedBy } : {}),
   };
-  return {
-    amendedState,
-    event,
-    restore: [
-      { path: preservesAs, remove: true },
-      { path: recordRelative, content: priorBytes.toString("utf8") },
-    ],
-    // The preserved copy first, so no reachable state has replaced a record
-    // that was not already kept.
-    writes: [
-      [preservesAs, priorBytes],
-      [recordRelative, amendedBytes],
-    ],
-  };
-};
-
-/**
- * `--amend-slice`: add files to a reopened slice's pinned record, in one
- * journalled transaction and in exactly this order -- preserve the prior bytes,
- * write the amended record, re-pin both, append SLICE_SCOPE_AMENDED. No FAIL,
- * no rework attempt, no step or slice movement, no plan change.
- */
-const amendSliceUnderLock = async ({ statePath, hooks, ...amendment }) => {
-  const { registryData, resolved, root, state } = amendment;
-  const { amendedState, event, restore, writes } =
-    await sliceAmendmentTransition(amendment);
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");
   const nextIntegrity = await renderIntegrityNow(root, amendedState, event);
@@ -13306,12 +13206,20 @@ const amendSliceUnderLock = async ({ statePath, hooks, ...amendment }) => {
     event,
     startedAt: now(),
     pid: process.pid,
-    restore,
+    restore: [
+      { path: preservesAs, remove: true },
+      { path: recordRelative, content: priorBytes.toString("utf8") },
+    ],
     integrity: { content: nextIntegrity, before: integrityBefore },
   });
-  for (const [relative, bytes] of writes) {
-    await atomicWrite(registryData.targetRoot, path.join(root, relative), bytes);
-  }
+  // The preserved copy lands first, so no reachable state has replaced a
+  // record that was not already kept.
+  await atomicWrite(registryData.targetRoot, path.join(root, preservesAs), priorBytes);
+  await atomicWrite(
+    registryData.targetRoot,
+    path.join(root, recordRelative),
+    amendedBytes,
+  );
   await hooks?.afterWrite?.("slice");
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(amendedState));
@@ -16986,31 +16894,11 @@ const advanceUnderLock = async ({
   // exactly one event, drop the journal. A death in any gap is completed by
   // `recoverPendingAdvance` on the next command, so state, its integrity
   // anchor, and history can never disagree permanently.
-  // The engine's own slice claim is the manual amendment, computed against the
-  // state this advance produces and committed in this same journal: recovery
-  // replays the advance and the claim together, or neither.
-  const roots = { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot };
-  const claims = currentStep === "IMPLEMENT_SLICES"
-    ? await engineSliceClaims(context.root, nextState, roots, activeSlice)
-    : [];
-  const claim = claims.length > 0
-    ? await sliceAmendmentTransition({
-        registryData,
-        resolved,
-        root: context.root,
-        state: nextState,
-        sliceId: activeSlice,
-        addFiles: claims,
-        engineClaim: true,
-      })
-    : null;
-  const finalState = claim?.amendedState ?? nextState;
-  const events = claim ? [event, claim.event] : [event];
   const integrityPath = path.join(context.root, INTEGRITY_FILE);
   const integrityBefore = (await fileExists(integrityPath))
     ? await readFile(integrityPath, "utf8")
     : null;
-  const nextIntegrity = await renderIntegrityNow(context.root, finalState, ...events);
+  const nextIntegrity = await renderIntegrityNow(context.root, nextState, event);
   await assertHistoryAppendable(registryData.targetRoot, context.root);
   const journalFile = path.join(context.root, ADVANCE_JOURNAL);
   // The four points a crash can land between. `hooks.afterWrite` is the same
@@ -17021,33 +16909,27 @@ const advanceUnderLock = async ({
   // byte-identical.
   await writeJournalAtomic(journalFile, {
     fromRevision: state.revision,
-    toRevision: finalState.revision,
+    toRevision: nextState.revision,
     event,
-    ...(claim ? { events, restore: claim.restore } : {}),
     startedAt: now(),
     pid: process.pid,
     integrity: { content: nextIntegrity, before: integrityBefore },
   });
   await hooks?.afterWrite?.("journal");
-  for (const [relative, bytes] of claim?.writes ?? []) {
-    await atomicWrite(registryData.targetRoot, path.join(context.root, relative), bytes);
-  }
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await hooks?.afterWrite?.("integrity");
   await atomicWrite(
     registryData.targetRoot,
     context.statePath,
-    renderState(finalState),
+    renderState(nextState),
   );
   await hooks?.afterWrite?.("state");
-  for (const recorded of events) {
-    await appendHistoryOnce(registryData.targetRoot, context.root, recorded);
-  }
+  await appendHistoryOnce(registryData.targetRoot, context.root, event);
   await hooks?.afterWrite?.("history");
   await rm(journalFile, { force: true });
   return {
     changed: true,
-    state: finalState,
+    state: nextState,
     statePath: context.statePath,
     migrationRoot: context.root,
     completedStep: currentStep,

@@ -532,7 +532,13 @@ export const runMigration = async (
                 )
                 .join(" ")}`,
         next: step,
-        request: authoringRequest(discovered.result.state),
+        request: {
+          ...authoringRequest(discovered.result.state),
+          // The IMPLEMENT gate's paths, typed: the slice must list or revert them.
+          ...(error.unlistedChangedFiles
+            ? { unlistedChangedFiles: error.unlistedChangedFiles }
+            : {}),
+        },
       });
     }
 
