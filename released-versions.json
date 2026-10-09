@@ -70,5 +70,9 @@
   {
     "version": "1.3.17",
     "contentHash": "sha256:ca750b51a5dbccfaf62c56d7ebdfe0ce05326c219ca51c560b56c4a4111f4184"
+  },
+  {
+    "version": "1.3.18",
+    "contentHash": "sha256:aab3ea965b952de6373357538d46246dfd6c5113929dac989c5d4f6324f07d6b"
   }
 ]
