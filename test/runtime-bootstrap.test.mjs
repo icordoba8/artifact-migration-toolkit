@@ -10,7 +10,7 @@ import { digest } from '../providers/install-support.mjs';
 
 const execFileAsync = promisify(execFile);
 
-import { apiJson, ensureRuntime, resolveRelease, verifyDownloadedAsset } from '../scripts/runtime-bootstrap.mjs';
+import { apiJson, ensureRuntime, extractArchive, resolveRelease, verifyDownloadedAsset } from '../scripts/runtime-bootstrap.mjs';
 import { buildRelease, buildReleaseArchive } from '../scripts/release.mjs';
 import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
 
@@ -306,6 +306,68 @@ test('tampered release asset is refused before receipt, MCP, or migration-state 
   );
   for (const relative of ['.artifact-migration-tools/codex.json', '.codex/config.toml', '.agents/knowledge/migrations']) {
     await assert.rejects(stat(path.join(root, relative)), { code: 'ENOENT' });
+  }
+});
+
+// Git Bash puts GNU tar first on PATH, and GNU tar reads `C:\...` as host `C`.
+test('tar is handed only the archive basename, from inside the archive directory', async () => {
+  const f = await releaseFixture();
+  const directory = await mkdtemp(path.join(scratch, 'extract '));
+  const archive = path.join(directory, f.resolved.asset.name);
+  await f.download(f.resolved, archive);
+  const calls = [];
+  const execute = (command, args, options) => {
+    calls.push({ args, cwd: options.cwd });
+    return execFileAsync(command, args, { ...options, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  };
+  const bundle = await extractArchive(archive, directory, f.resolved.version, { execute });
+  assert.ok((await stat(path.join(bundle, 'release-manifest.json'))).isFile());
+  assert.equal(calls.length, 2);
+  for (const { args, cwd } of calls) {
+    assert.equal(cwd, directory);
+    assert.ok(args.includes(f.resolved.asset.name), args.join(' '));
+    assert.ok(args.every(arg => !/^[A-Za-z]:/.test(arg) && !path.isAbsolute(arg)), args.join(' '));
+  }
+});
+
+test('Windows: ensure succeeds with Git GNU tar first on PATH', { skip: process.platform !== 'win32' }, async () => {
+  const gitBin = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'usr', 'bin');
+  const gnuTar = path.join(gitBin, 'tar.exe');
+  assert.ok((await stat(gnuTar)).isFile(), `${gnuTar} is required to exercise this case`);
+  const f = await releaseFixture();
+  const PATH = process.env.PATH;
+  process.env.PATH = `${gitBin};${PATH}`;
+  try {
+    // The archive argument itself is safe for GNU tar now, not only bypassed.
+    const directory = await mkdtemp(path.join(scratch, 'gnu tar '));
+    const archive = path.join(directory, f.resolved.asset.name);
+    await f.download(f.resolved, archive);
+    await extractArchive(archive, directory, f.resolved.version, { tar: gnuTar });
+
+    const root = path.join(scratch, 'gnu tar consumer');
+    await mkdir(root, { recursive: true });
+    await requiring(f.resolved.version);
+    const result = await ensureRuntime(
+      { provider: 'claude', root, store: path.join(scratch, 'gnu tar store') },
+      { resolve: async () => f.resolved, download: f.download, skillRelease },
+    );
+    assert.equal(result.outcome, 'OK');
+    assert.equal(result.network, true);
+  } finally { process.env.PATH = PATH; }
+});
+
+test('an unreadable archive is one typed refusal naming tar, with no store write', async () => {
+  const f = await releaseFixture();
+  const root = path.join(scratch, 'unreadable consumer');
+  const store = path.join(scratch, 'unreadable store');
+  await mkdir(root, { recursive: true });
+  await requiring(f.resolved.version);
+  await assert.rejects(
+    ensureRuntime({ provider: 'codex', root, store }, { resolve: async () => f.resolved, download: (_, destination) => writeFile(destination, 'not gzip'), skillRelease }),
+    error => error.code === 'RUNTIME_ARCHIVE_UNREADABLE' && /tar/.test(error.state.tar) && error.state.receipt === 'unchanged',
+  );
+  for (const target of [store, path.join(root, '.artifact-migration-tools/codex.json')]) {
+    await assert.rejects(stat(target), { code: 'ENOENT' });
   }
 });
 

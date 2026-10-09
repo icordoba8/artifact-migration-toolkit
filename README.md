@@ -176,6 +176,7 @@ code is printed on stderr as JSON alongside the message.
 | `SKILL_IDENTITY_UNRELEASED` | The release at the required version proves a different digest for this skill — the skill's bytes were never published under that version. |
 | `RELEASE_NOT_PUBLISHED` | No immutable release carries the required version. Never falls back to `latest` or to a previous version. |
 | `RUNTIME_UPDATE_REQUIRED_OFFLINE` | The installed runtime does not satisfy the installed skill, the exact target is not available locally, and the network is unreachable. |
+| `RUNTIME_ARCHIVE_UNREADABLE` | tar could not list or extract the digest-verified release archive. Names the tar used; nothing reaches the release store. |
 | `SKILL_SET_INCOHERENT` | Two installed skills require different releases of one provider's runtime. Refused rather than rewriting the runtime on alternating invocations. |
 | `SKILL_PROJECTION_SKEW` | Project copies of a skill disagree and there is no `.agents/skills` copy that verifies against a published release to update them from. |
 

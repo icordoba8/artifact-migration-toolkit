@@ -5,6 +5,7 @@
 // ownership stay in the release's provider adapter.
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { access, constants as fsConstants, cp, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -165,11 +166,29 @@ const safeArchiveEntry = entry => {
   return normalized && !path.isAbsolute(normalized) && !normalized.includes('\\') && normalized.split('/').every(part => part && part !== '.' && part !== '..');
 };
 
-async function extractArchive(archive, destination, version) {
-  const { stdout } = await run('tar', ['-tzf', archive]);
+// Windows' own bsdtar first: Git Bash puts GNU tar first on PATH, and that one
+// reads a `C:` drive letter in its archive name as a remote host.
+const tarCommand = () => {
+  const system = process.platform === 'win32' && path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+  return system && existsSync(system) ? system : 'tar';
+};
+
+/**
+ * Lists, checks and extracts one release archive. tar runs inside the archive's
+ * directory and is handed only its basename, so no tar on any platform ever sees
+ * a drive-letter path as its archive argument.
+ */
+export async function extractArchive(archive, destination, version, { execute = run, tar = tarCommand() } = {}) {
+  const cwd = path.dirname(archive);
+  const tarRun = args => execute(tar, args, { cwd }).catch(error => {
+    throw new RuntimeSelectionError('RUNTIME_ARCHIVE_UNREADABLE',
+      `${error.message}. Make a working tar available (on Windows, %SystemRoot%\\System32\\tar.exe), then run this skill again.`,
+      { tar, archive });
+  });
+  const { stdout } = await tarRun(['-tzf', path.basename(archive)]);
   const entries = stdout.split(/\r?\n/).filter(Boolean);
   if (!entries.length || entries.some(entry => !safeArchiveEntry(entry))) throw new Error('Unsafe or empty release archive');
-  await run('tar', ['-xzf', archive, '-C', destination]);
+  await tarRun(['-xzf', path.basename(archive), '-C', path.relative(cwd, destination) || '.']);
   const bundle = path.join(destination, `${TOOLKIT}-${version}`);
   if (!(await stat(path.join(bundle, 'release-manifest.json'))).isFile()) throw new Error('Release archive has no bundle manifest');
   return bundle;

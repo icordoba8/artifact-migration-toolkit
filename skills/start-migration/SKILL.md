@@ -78,6 +78,7 @@ code and its remedy; do not work around it.
 | `SKILL_IDENTITY_UNRELEASED` | This skill's bytes were never published under the version it names. Install it from a published release with `skills add`. |
 | `RELEASE_NOT_PUBLISHED` | No immutable release carries the required version. Install a published release with `skills add`. |
 | `RUNTIME_UPDATE_REQUIRED_OFFLINE` | The required release is not available locally. One connected run clears it. |
+| `RUNTIME_ARCHIVE_UNREADABLE` | tar could not read the verified release archive; the error names the tar used. Make a working tar available (on Windows, `%SystemRoot%\System32\tar.exe`), then run this skill again. |
 | `SKILL_SET_INCOHERENT` | Two installed skills require different releases. Run `skills add` for both so they match. |
 | `SKILL_PROJECTION_SKEW` | Installed copies of this skill in different host roots disagree and cannot be updated from a verified `.agents/skills` copy. Run `skills add` for both skills, then run this skill again. |
 | `SKILL_PROJECTION_CONVERGED` | This copy was older than `.agents/skills`; every copy and the runtime were updated. Run this skill again so the updated instructions load. |
