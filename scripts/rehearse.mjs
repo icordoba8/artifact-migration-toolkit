@@ -6,15 +6,19 @@
  *
  *   pnpm rehearse            replay and compare; exit 1 on any difference
  *   pnpm rehearse --update   replay and rewrite the golden trace
+ *   pnpm rehearse --negative <case>   corrupt what one step reads (NEGATIVE
+ *                            below); used only by `pnpm rehearse:negative`
  *
  * Determinism comes from fixed inputs (rehearse-preload.mjs: clock and
  * randomUUID; pinned Git dates; no global/system Git config; an allowlisted
  * environment with a pinned operator, locale and time zone), never from
  * masking. The one exception is closed and enumerated in IDENTITY below: the
  * release identity names the commit under test and the payload hash, so it
- * changes with every commit by construction. Each identity-derived field is
- * verified against the real bytes first, then replaced by a placeholder; an
- * identity value left anywhere else fails the run.
+ * changes with every commit by construction. Each identity field is first
+ * compared with the identity of the release the fixture actually built (passed
+ * in from `buildRelease`, never read from the record), each identity-derived
+ * digest is verified against the real bytes, and only then is the field
+ * replaced by a placeholder; an identity value left anywhere else fails the run.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -23,6 +27,7 @@ import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import { digestToolkitIdentity } from "../packages/migration-engine/src/toolkit-identity.mjs";
 
@@ -67,8 +72,11 @@ const parseLines = (text, label) => text.trimEnd().split("\n").map((line, index)
   return value;
 });
 
-/** Verify every identity-derived digest on the real bytes; throw on any mismatch. */
-const verify = ({ state, history, integrity }) => {
+/**
+ * Verify every identity field against the built release and every
+ * identity-derived digest on the real bytes; throw on any mismatch.
+ */
+const verify = ({ state, history, integrity, release }) => {
   const events = history === null ? [] : parseLines(history.toString("utf8"), "history");
   for (const [index, event] of events.entries()) {
     const { hash, ...payload } = event;
@@ -77,12 +85,19 @@ const verify = ({ state, history, integrity }) => {
       hash === `sha256:${sha256(`${HISTORY_DOMAIN}${canonical(payload)}`)}`;
     if (!ok) throw new Error(`rehearse verification: history chain broken at line ${index + 1}`);
   }
+  const differs = (what) => { throw new Error(`rehearse verification: ${what} does not match the built release`); };
+  if (state !== null && !isDeepStrictEqual(state.toolkitIdentity, release)) differs("state.toolkitIdentity");
+  for (const [index, event] of events.entries()) {
+    if ("toolkitIdentity" in event && !isDeepStrictEqual(event.toolkitIdentity, release)) {
+      differs(`history event ${index + 1} toolkitIdentity`);
+    }
+  }
   if (integrity === null) return events;
   const anchor = parseJson(integrity, "integrity.json");
   const fail = (what) => { throw new Error(`rehearse verification: integrity ${what} does not match the record`); };
   if (anchor.history && (history === null || sha256(history.subarray(0, anchor.history.bytes)) !== anchor.history.sha256)) fail("history.sha256");
   if (anchor.historyChain && anchor.historyChain.headHash !== events.at(-1)?.hash) fail("historyChain.headHash");
-  if ((anchor.toolkitIdentitySha256 ?? null) !== digestToolkitIdentity(state?.toolkitIdentity ?? null)) fail("toolkitIdentitySha256");
+  if (anchor.toolkitIdentitySha256 !== digestToolkitIdentity(release)) differs("integrity.toolkitIdentitySha256");
   return events;
 };
 
@@ -96,9 +111,54 @@ const normalizeStdout = (stdout, stateBytes) => stdout.replace(STATE_HASH, (_mat
   return `${label}${placeholder(IDENTITY.stdout[0])}`;
 });
 
+const pretty = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+const zeroes = "0".repeat(40);
+/**
+ * `pnpm rehearse:negative` only: each case corrupts an in-memory copy of what
+ * one step read, consistently enough that only the named verification can
+ * catch it. The record on disk is never touched.
+ */
+const NEGATIVE = {
+  "history-byte": [5, (raw) => {
+    raw.history = Buffer.from(raw.history);
+    const at = raw.history.lastIndexOf('"event":"') + '"event":"'.length;
+    raw.history[at] ^= 0x20;
+  }],
+  // The reviewer's probe: a wrong state commit with a matching identity digest.
+  "state-commit": [5, (raw) => {
+    const state = JSON.parse(raw.state);
+    state.toolkitIdentity.commit = zeroes;
+    raw.state = pretty(state);
+    const anchor = JSON.parse(raw.integrity);
+    anchor.toolkitIdentitySha256 = digestToolkitIdentity(state.toolkitIdentity);
+    raw.integrity = pretty(anchor);
+  }],
+  // A wrong event identity with the chain and the integrity anchors rebuilt.
+  "event-identity": [5, (raw) => {
+    const events = raw.history.toString("utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+    events.find((event) => event.toolkitIdentity).toolkitIdentity.commit = zeroes;
+    for (const [index, event] of events.entries()) {
+      event.previousHash = index === 0 ? null : events[index - 1].hash;
+      const { hash: _hash, ...payload } = event;
+      event.hash = `sha256:${sha256(`${HISTORY_DOMAIN}${canonical(payload)}`)}`;
+    }
+    raw.history = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+    const anchor = JSON.parse(raw.integrity);
+    anchor.history.sha256 = sha256(raw.history.subarray(0, anchor.history.bytes));
+    anchor.historyChain.headHash = events.at(-1).hash;
+    raw.integrity = pretty(anchor);
+  }],
+  // state.json changed after the command printed its stateHash (first at step 12).
+  "state-after-stdout": [12, (raw) => {
+    const state = JSON.parse(raw.state);
+    state.revision += 1;
+    raw.state = pretty(state);
+  }],
+};
+
 let step = 0;
 /** Called by the fixture after every engine command when REHEARSE_TRACE is set. */
-export const traceStep = async ({ scratch, record, name, args, stdout }) => {
+export const traceStep = async ({ scratch, record, release, name, args, stdout }) => {
   step += 1;
   const read = (relative) => readFile(path.join(record, relative))
     .catch((error) => (error.code === "ENOENT" ? null : Promise.reject(error)));
@@ -109,18 +169,13 @@ export const traceStep = async ({ scratch, record, name, args, stdout }) => {
     history: await read("history/history.ndjson"),
     integrity: await read("integrity.json"),
   };
-  // Adversarial self-check: flip one byte of an in-memory copy of history.
-  if (process.env.REHEARSE_CORRUPT_HISTORY === String(step) && raw.history) {
-    raw.history = Buffer.from(raw.history);
-    const at = raw.history.lastIndexOf('"event":"') + '"event":"'.length;
-    raw.history[at] ^= 0x20;
-  }
+  const [corruptAt, corrupt] = NEGATIVE[process.env.REHEARSE_NEGATIVE] ?? [];
+  if (corruptAt === step) corrupt(raw);
   const state = raw.state === null ? null : parseJson(raw.state.toString("utf8"), "state.json");
-  const events = verify({ state, history: raw.history, integrity: raw.integrity?.toString("utf8") ?? null });
-  const identity = state?.toolkitIdentity ? { ...state.toolkitIdentity } : null;
+  const events = verify({ state, history: raw.history, integrity: raw.integrity?.toString("utf8") ?? null, release });
   const scrub = (text) => {
     if (text === null) return null;
-    for (const value of [identity?.commit, identity?.contentHash].filter(Boolean)) {
+    for (const value of [release.commit, release.contentHash]) {
       assert.ok(!text.includes(value), `rehearse: a toolkit identity value outside the closed list:\n${text}`);
     }
     return text.replaceAll(scratch, "<SCRATCH>").replaceAll(repo, "<REPO>")
@@ -181,6 +236,11 @@ const diff = (expected, actual) => {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const started = performance.now();
+  const negative = process.argv.includes("--negative") ? process.argv[process.argv.indexOf("--negative") + 1] : null;
+  if (negative !== null && (!Object.hasOwn(NEGATIVE, negative) || process.argv.includes("--update"))) {
+    console.error(`rehearse: --negative takes one of ${Object.keys(NEGATIVE).join(", ")} and never --update`);
+    process.exit(1);
+  }
   // Fixed so a rerun reuses (and first deletes) only this directory.
   const scratch = assertScratch(path.join(os.tmpdir(), SCRATCH_NAME));
   await rm(scratch, { recursive: true, force: true });
@@ -188,12 +248,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const trace = path.join(scratch, "trace.ndjson");
   const preload = pathToFileURL(path.join(repo, "scripts/rehearse-preload.mjs")).href;
   // The fixture gets this environment only, never the inherited one: the
-  // operator ledger records USER@HOSTNAME, and engine/runtime overrides
-  // (MIGRATION_*, ARTIFACT_MIGRATION_TOOLS_*) must stay unset.
+  // operator ledger records USER@HOSTNAME, engine/runtime overrides
+  // (MIGRATION_*, ARTIFACT_MIGRATION_TOOLS_*) must stay unset, and every
+  // REHEARSE_* entry is set here, never forwarded from the caller's shell.
   const run = spawnSync(process.execPath, ["--test", fixture], {
     cwd: repo, stdio: "inherit", env: {
-      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("REHEARSE_"))),
       PATH: process.env.PATH, HOME: scratch, TMPDIR: scratch, REHEARSE_TRACE: trace,
+      ...(negative !== null && { REHEARSE_NEGATIVE: negative }),
       NODE_OPTIONS: `--import=${preload}`,
       GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
       GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",

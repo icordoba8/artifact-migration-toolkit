@@ -138,7 +138,7 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
       assert.ok(path.isAbsolute(bin));
       const result = await capture(bin, [...prefix, ...args], consumer, input);
       assert.equal(result.code, 0, `${name}: ${result.stdout}\n${result.stderr}`);
-      await rehearse?.traceStep({ scratch, record, name, args, stdout: result.stdout });
+      await rehearse?.traceStep({ scratch, record, release: built.identity, name, args, stdout: result.stdout });
       return result.stdout;
     };
     const author = (relative, value) => put(path.join(record, relative), value);
