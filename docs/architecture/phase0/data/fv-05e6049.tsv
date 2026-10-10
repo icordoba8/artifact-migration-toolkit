@@ -1,0 +1,57 @@
+artifact/artifact-migration.mjs	201	artifactFormatAdmissible	formatVersion === ARTIFACT_FORMAT_VERSION
+artifact/artifact-migration.mjs	201	artifactFormatAdmissible	formatVersion === ARTIFACT_FORMAT_VERSION
+artifact/artifact-migration.mjs	204	artifactFormatAdmissible	formatVersion < ARTIFACT_FORMAT_UPGRADE_FLOOR
+artifact/artifact-migration.mjs	205	artifactFormatAdmissible	formatVersion > ARTIFACT_FORMAT_VERSION
+artifact/artifact-migration.mjs	205	artifactFormatAdmissible	formatVersion > ARTIFACT_FORMAT_VERSION
+artifact/artifact-migration.mjs	209	artifactFormatAdmissible	at < ARTIFACT_FORMAT_VERSION
+artifact/artifact-migration.mjs	1350	resolveArtifact	formatVersion !== ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS
+artifact/artifact-migration.mjs	1634	verifyConsumedHistory	state.formatVersion !== 14
+artifact/artifact-migration.mjs	1713	verifyConsumedHistory	line.boundTo?.formatVersion !== 14
+artifact/artifact-migration.mjs	1855	pristineFormatUpgrade	state.formatVersion !== 13
+artifact/artifact-migration.mjs	1918	validateTransactionInput	input.formatVersion !== undefined
+artifact/artifact-migration.mjs	1918	validateTransactionInput	input.formatVersion !== 14
+artifact/artifact-migration.mjs	1974	assertTransactionReplayable	transaction.state?.formatVersion === 14
+artifact/artifact-migration.mjs	2082	proveBootstrapTransaction	state.formatVersion !== (input.formatVersion ?? input.pilotFormat ?? 13)
+artifact/artifact-migration.mjs	2158	proveAdvanceTransaction	previousState.formatVersion === 14
+artifact/artifact-migration.mjs	2179	proveAdvanceTransaction	previousState.formatVersion === 14
+artifact/artifact-migration.mjs	2198	proveAdvanceTransaction	previousState.formatVersion === 14
+artifact/artifact-migration.mjs	2384	recoverTransaction	transaction.state.formatVersion === 14
+artifact/artifact-migration.mjs	2403	buildAdvanceTransaction	previousState.formatVersion === 14
+artifact/artifact-migration.mjs	2433	previewArtifact	state.formatVersion !== 14
+artifact/artifact-migration.mjs	2495	createArtifactRecord	resolved.formatVersion === 14
+artifact/artifact-migration.mjs	2684	validateSourceInventory	state.formatVersion === 14
+artifact/artifact-migration.mjs	2691	validateSourceInventory	state.formatVersion === 14
+artifact/artifact-migration.mjs	2696	validateSourceInventory	state.formatVersion === 14
+artifact/artifact-migration.mjs	2710	validateSourceInventory	state.formatVersion === 14
+artifact/artifact-migration.mjs	3116	artifactVisualAcceptance	state.formatVersion === 14
+artifact/artifact-migration.mjs	3124	artifactVisualAcceptance	state.formatVersion === 14
+artifact/artifact-migration.mjs	3143	artifactVisualDecisions	state.formatVersion === 14
+artifact/artifact-migration.mjs	3947	reconcileArtifactDecisions	state.formatVersion === 14
+artifact/artifact-migration.mjs	4007	runCheckpointValidation	state.formatVersion === 14
+artifact/artifact-migration.mjs	4031	runCheckpointValidation	state.formatVersion === 14
+artifact/artifact-migration.mjs	4055	runCheckpointValidation	state.formatVersion === 14
+artifact/artifact-migration.mjs	4078	runCheckpointValidation	state.formatVersion === 14
+artifact/artifact-migration.mjs	4200	assertInvocationMatches	state.formatVersion !== 14
+artifact/artifact-migration.mjs	4483	previewAdvance	state.formatVersion === 14
+artifact/artifact-migration.mjs	4802	artifactOperatorDecisions	state.formatVersion === 14
+artifact/artifact-migration.mjs	4814	artifactOperatorDecisions	state.formatVersion !== 14
+artifact/artifact-migration.mjs	4816	artifactOperatorDecisions	state.formatVersion !== 14
+artifact/artifact-migration.mjs	4825	artifactOperatorDecisions	state.formatVersion === 14
+record-decision.mjs	1364	attestedBinding	locked.state.formatVersion !== 14
+record-decision.mjs	1520	deriveArtifactDecisions	context.state.formatVersion !== 14
+record-decision.mjs	1533	deriveArtifactDecisions	context.state.formatVersion === 14
+record-decision.mjs	1542	deriveArtifactDecisions	context.state.formatVersion === 14
+resumable-migration.mjs	523	formatIsSupported	version === MIGRATION_FORMAT_VERSION
+resumable-migration.mjs	651	compatibilityBlocker	formatVersion === UPGRADABLE_FORMAT_VERSION
+resumable-migration.mjs	651	compatibilityBlocker	formatVersion === UPGRADABLE_FORMAT_VERSION
+resumable-migration.mjs	657	compatibilityBlocker	formatVersion > MIGRATION_FORMAT_SUPPORTED
+resumable-migration.mjs	1629	assertIntegrityAnchor	(state.formatVersion ?? 1) >= ANCHORED_FORMAT_VERSION
+resumable-migration.mjs	1723	assertHistoryAppendOnly	(state.formatVersion ?? 1) >= ANCHORED_FORMAT_VERSION
+resumable-migration.mjs	3234	assertStateGraph	(state.formatVersion ?? 1) < ANCHORED_FORMAT_VERSION
+upgrades/upgrade-migration.mjs	224	classify	formatVersion === 3
+upgrades/upgrade-migration.mjs	625	executeUpgrade	committedState.formatVersion !== V5_FORMAT_VERSION
+upgrades/upgrade-migration.mjs	625	executeUpgrade	committedState.formatVersion !== V5_FORMAT_VERSION
+upgrades/upgrade-v4-to-v5.mjs	132	validateSource	formatVersion !== SOURCE_FORMAT_VERSION
+upgrades/upgrade-v4-to-v5.mjs	132	validateSource	formatVersion !== SOURCE_FORMAT_VERSION
+upgrades/upgrade-v4-to-v5.mjs	318	validateV5State	state.formatVersion !== V5_FORMAT_VERSION
+upgrades/upgrade-v4-to-v5.mjs	318	validateV5State	state.formatVersion !== V5_FORMAT_VERSION

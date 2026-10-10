@@ -1,0 +1,229 @@
+## module edges (function->function references; count = distinct caller/callee pairs)
+ok       	census->decisions	13
+ok       	census->formats	27
+ok       	census->leaf	95
+VIOLATION	census->lifecycle	23
+VIOLATION	census->slices	2
+ok       	census->store	26
+VIOLATION	census->visual	1
+VIOLATION	decisions->census	4
+ok       	decisions->formats	43
+ok       	decisions->leaf	30
+VIOLATION	decisions->lifecycle	11
+VIOLATION	decisions->slices	1
+ok       	decisions->store	12
+VIOLATION	decisions->transport	8
+VIOLATION	decisions->visual	5
+ok       	formats->leaf	38
+VIOLATION	formats->lifecycle	3
+VIOLATION	formats->transport	3
+ok       	lifecycle->census	50
+ok       	lifecycle->decisions	13
+ok       	lifecycle->formats	210
+ok       	lifecycle->leaf	139
+ok       	lifecycle->slices	46
+ok       	lifecycle->store	239
+VIOLATION	lifecycle->transport	9
+ok       	lifecycle->visual	29
+ok       	slices->census	12
+ok       	slices->decisions	3
+ok       	slices->formats	32
+ok       	slices->leaf	76
+VIOLATION	slices->lifecycle	28
+ok       	slices->store	55
+VIOLATION	slices->transport	2
+ok       	slices->visual	6
+VIOLATION	store->census	3
+VIOLATION	store->decisions	2
+ok       	store->formats	61
+ok       	store->leaf	62
+VIOLATION	store->lifecycle	9
+VIOLATION	store->slices	2
+VIOLATION	store->visual	4
+ok       	transport->census	2
+ok       	transport->decisions	33
+ok       	transport->formats	16
+ok       	transport->leaf	4
+ok       	transport->lifecycle	43
+ok       	transport->store	14
+ok       	visual->census	2
+ok       	visual->decisions	5
+ok       	visual->formats	34
+ok       	visual->leaf	32
+VIOLATION	visual->lifecycle	9
+VIOLATION	visual->slices	3
+ok       	visual->store	19
+## SCCs (module cycles)
+visual, decisions, formats, store, slices, census, lifecycle, transport
+## 2-cycles
+formats <-> lifecycle	3 / 210
+census <-> lifecycle	23 / 50
+census <-> slices	2 / 12
+census <-> store	26 / 3
+decisions <-> store	12 / 2
+lifecycle <-> store	239 / 9
+lifecycle <-> transport	9 / 43
+census <-> decisions	13 / 4
+decisions <-> visual	5 / 5
+decisions <-> lifecycle	11 / 13
+lifecycle <-> visual	29 / 9
+slices <-> store	55 / 2
+slices <-> visual	6 / 3
+lifecycle <-> slices	46 / 28
+decisions <-> transport	8 / 33
+formats <-> transport	3 / 16
+decisions <-> slices	1 / 3
+store <-> visual	4 / 19
+census <-> visual	1 / 2
+### census->lifecycle (23)
+artifact/artifact-migration.mjs:structuralParser -> asEngineFault
+artifact/artifact-migration.mjs:targetProject -> asEngineFault
+artifact/artifact-migration.mjs:legacyDependencies -> asEngineFault
+artifact/artifact-migration.mjs:architectureFindings -> asEngineFault
+artifact/artifact-migration.mjs:validateSourceInventory -> consumedAtCheckpoint
+artifact/artifact-migration.mjs:sourceRequirements -> asEngineFault
+artifact/artifact-migration.mjs:validateCompleteness -> asEngineFault
+artifact/artifact-migration.mjs:validateCompleteness -> engineFault
+resumable-migration.mjs:assertLegacyDiscoveryChecklist -> assertEvidenceChecklist
+resumable-migration.mjs:assertTargetAssessmentChecklist -> assertEvidenceChecklist
+resumable-migration.mjs:validateLegacyInventory -> assertEvidenceResolves
+resumable-migration.mjs:validateLegacyInventory -> assertOpenSpecIds
+resumable-migration.mjs:assertLegacyEvidenceWithinBoundary -> evidencePathClaim
+resumable-migration.mjs:assertLegacyEvidenceWithinBoundary -> resolveEvidencePath
+resumable-migration.mjs:validateDiscoveryCompleteness -> assertEvidenceChecklist
+resumable-migration.mjs:assertAdoptedTargetEvidence -> evidencePathClaim
+resumable-migration.mjs:assertAdoptedTargetEvidence -> resolveEvidencePath
+resumable-migration.mjs:validateTargetInventory -> assertEvidenceResolves
+resumable-migration.mjs:assertLegacyEvidenceAttributes -> evidencePathClaim
+resumable-migration.mjs:assertLegacyEvidenceAttributes -> resolveEvidencePath
+resumable-migration.mjs:reopenDiscoveryUnderLock -> module-lock.mjs:writeJournalAtomic
+resumable-migration.mjs:reopenDiscoveryUnderLock -> ADVANCE_JOURNAL
+resumable-migration.mjs:reopenDiscoveryUnderLock -> activeArtifact
+### census->slices (2)
+artifact/artifact-migration.mjs:legacyDependencies -> pathKey
+artifact/artifact-migration.mjs:validateExternalRequirements -> assertTargetProvides
+### census->visual (1)
+resumable-migration.mjs:validateLegacyInventory -> assertRequiredObservations
+### decisions->census (4)
+artifact/artifact-migration.mjs:artifactOperatorDecisions -> validateSourceInventory
+record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:previewDiscoveryScan
+record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:legacySourceBinding
+record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:legacySourcesOf
+### decisions->lifecycle (11)
+artifact/artifact-migration.mjs:artifactVisualDecisions -> consumedAtCheckpoint
+artifact/artifact-migration.mjs:artifactOperatorDecisions -> locate
+artifact/artifact-migration.mjs:artifactOperatorDecisions -> assertInvocationMatches
+artifact/artifact-migration.mjs:artifactOperatorDecisions -> freshness
+operation-sequence.mjs:deriveOperationSequence -> resumable-migration.mjs:previewMigrationExecution
+operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:previewMigrationExecution
+operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:assertExecutionConfirmation
+operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:bootstrapMigration
+record-decision.mjs:withOperatorApproval -> module-lock.mjs:withModuleLock
+record-decision.mjs:completeAttestedDecision -> module-lock.mjs:withModuleLock
+resumable-migration.mjs:isAutoAuthority -> DEFAULT_MODE
+### decisions->slices (1)
+record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:pendingTargetDriftCandidates
+### decisions->transport (8)
+artifact/artifact-migration.mjs:reconcileArtifactDecisions -> engine-paths.mjs:engineCommand
+mcp-server.mjs:trustedDecisionRecorder -> record-decision.mjs:runRecordDecisionCli
+operator-approval.mjs:terminalDecisionRecorder -> record-decision.mjs:runRecordDecisionCli
+operator-approval.mjs:autoDecisionRecorder -> record-decision.mjs:runRecordDecisionCli
+record-decision.mjs:derivePendingDecisions -> engine-paths.mjs:engineCommand
+record-decision.mjs:recordNewFormatDecisionGroup -> resumable-migration.mjs:BLOCKED_EXIT_CODE
+record-decision.mjs:withOperatorApproval -> resumable-migration.mjs:BLOCKED_EXIT_CODE
+record-decision.mjs:relayOperatorDecision -> runRecordDecisionCli
+### decisions->visual (5)
+artifact/artifact-migration.mjs:artifactVisualDecisions -> resumable-migration.mjs:visualAuthorityOf
+artifact/artifact-migration.mjs:artifactVisualDecisions -> strictVisualState
+artifact/artifact-migration.mjs:artifactVisualDecisions -> resumable-migration.mjs:pendingVisualUnbackedCandidates
+artifact/artifact-migration.mjs:artifactVisualDecisions -> artifactUiInventory
+record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:pendingVisualUnbackedCandidates
+### formats->lifecycle (3)
+artifact/artifact-migration.mjs:artifactFormatUpgrade -> ARTIFACT_FORMAT_UPGRADERS
+artifact/artifact-migration.mjs:artifactFormatAdmissible -> ARTIFACT_FORMAT_UPGRADERS
+resumable-migration.mjs:assertNoPendingFormatUpgrade -> FORMAT_UPGRADERS
+### formats->transport (3)
+artifact/artifact-migration.mjs:assertArtifactToolkitIdentity -> artifactIdentityCommand
+resumable-migration.mjs:upgradeCommandFor -> engine-paths.mjs:engineCommand
+resumable-migration.mjs:toolkitAdoptCommand -> engine-paths.mjs:engineCommand
+### lifecycle->transport (9)
+artifact/artifact-migration.mjs:initialArtifactState -> artifactCommandFor
+artifact/artifact-migration.mjs:outcomeResult -> migration-policy.mjs:exitCodeFor
+artifact/artifact-migration.mjs:readArtifactStatus -> migration-policy.mjs:exitCodeFor
+artifact/artifact-migration.mjs:readArtifactStatus -> artifactCommandFor
+artifact/artifact-migration.mjs:runArtifactIteration -> migration-policy.mjs:MIGRATION_MODES
+artifact/artifact-migration.mjs:runArtifactIteration -> artifactCommandFor
+artifact/artifact-migration.mjs:runArtifactIteration -> migration-policy.mjs:exitCodeFor
+artifact/artifact-migration.mjs:runArtifactIteration -> artifactIdentityCommand
+migration-utils.mjs:assertNoPendingTransaction -> engine-paths.mjs:engineCommand
+### slices->lifecycle (28)
+artifact/artifact-migration.mjs:assertMayExecute -> engineFault
+artifact/artifact-migration.mjs:execute -> engineFault
+artifact/artifact-migration.mjs:executeTypeScriptValidation -> asEngineFault
+artifact/artifact-migration.mjs:targetManifest -> asEngineFault
+artifact/artifact-migration.mjs:validatePlan -> validateBaseline
+resumable-migration.mjs:validatePlan -> validateBaseline
+resumable-migration.mjs:validatePlan -> TERMINAL_PARITY
+resumable-migration.mjs:assertCapabilityPlan -> assertEvidenceResolves
+resumable-migration.mjs:validateImplementedSlice -> delegatedChangedFilesSatisfiedByChild
+resumable-migration.mjs:validateImplementedSlice -> assertCommandResults
+resumable-migration.mjs:validateImplementedSlice -> resolveEvidencePath
+resumable-migration.mjs:validateImplementedSlice -> assertArtifactPrerequisites
+resumable-migration.mjs:resolveChangedFile -> resolveEvidencePath
+resumable-migration.mjs:validateFailedSliceResult -> assertEvidenceReference
+resumable-migration.mjs:validateFailedSliceResult -> evidencePathClaim
+resumable-migration.mjs:validateVerifiedSlice -> assertCommandResults
+resumable-migration.mjs:validateVerifiedSlice -> validateBaseline
+resumable-migration.mjs:validateVerifiedSlice -> assertPostAnchorEvidence
+resumable-migration.mjs:repairSliceState -> module-lock.mjs:withModuleLock
+resumable-migration.mjs:repairSliceState -> ADVANCE_JOURNAL
+resumable-migration.mjs:repairSliceState -> module-lock.mjs:writeJournalAtomic
+resumable-migration.mjs:reworkSliceUnderLock -> resolveEvidencePath
+resumable-migration.mjs:reworkSliceUnderLock -> ADVANCE_JOURNAL
+resumable-migration.mjs:reworkSliceUnderLock -> module-lock.mjs:writeJournalAtomic
+resumable-migration.mjs:reworkSliceUnderLock -> activeArtifact
+resumable-migration.mjs:amendSliceUnderLock -> ADVANCE_JOURNAL
+resumable-migration.mjs:amendSliceUnderLock -> module-lock.mjs:writeJournalAtomic
+resumable-migration.mjs:amendSliceUnderLock -> activeArtifact
+### slices->transport (2)
+resumable-migration.mjs:validateVerifiedSlice -> engine-paths.mjs:engineCommand
+resumable-migration.mjs:assertNoUnclaimedTargetDrift -> engine-paths.mjs:engineCommand
+### store->census (3)
+resumable-migration.mjs:resolveStepPins -> isBrownfield
+resumable-migration.mjs:completedArtifactHashes -> isBrownfield
+resumable-migration.mjs:readContext -> migration-utils.mjs:resolveLegacySources
+### store->decisions (2)
+artifact/artifact-migration.mjs:validateIntegrity -> verifyConsumedHistory
+resumable-migration.mjs:DERIVED_PINS -> assertLateDecisionsAreAppendable
+### store->lifecycle (9)
+artifact/artifact-migration.mjs:writeTransaction -> finishTransaction
+migration-utils.mjs:updateRegistry -> module-lock.mjs:withModuleLock
+migration-utils.mjs:updateRegistry -> module-lock.mjs:writeJournalAtomic
+resumable-migration.mjs:isBytePinned -> ADOPTION_ROOT
+resumable-migration.mjs:assertIntegrityAnchor -> readAdvanceJournal
+resumable-migration.mjs:readState -> migration-utils.mjs:assertNoPendingTransaction
+resumable-migration.mjs:assertStateGraph -> readAdvanceJournal
+resumable-migration.mjs:appendHistoryOnce -> readAdvanceJournal
+upgrades/upgrade-migration.mjs:commitReplacement -> writeJournal
+### store->slices (2)
+resumable-migration.mjs:isBytePinned -> reworkPathParts
+resumable-migration.mjs:validateCompletedHashes -> reworkPathParts
+### store->visual (4)
+resumable-migration.mjs:assertStateGraph -> pinsAuthorityContext
+resumable-migration.mjs:assertStateGraph -> usesVisualContract
+resumable-migration.mjs:completedArtifactHashes -> pinsAuthorityContext
+resumable-migration.mjs:completedArtifactHashes -> usesVisualContract
+### visual->lifecycle (9)
+resumable-migration.mjs:validateUiRuntimeEvidence -> assertEvidenceReference
+resumable-migration.mjs:sliceLacksUiProofV1 -> evidencePathClaim
+resumable-migration.mjs:sliceLacksUiProofV1 -> resolveEvidencePath
+resumable-migration.mjs:assertVisualAcceptance -> assertEvidenceReference
+resumable-migration.mjs:assertVisualAcceptance -> resolveEvidencePath
+resumable-migration.mjs:assertVisualAcceptance -> evidencePathClaim
+resumable-migration.mjs:reopenUiUnderLock -> readAdvanceJournal
+resumable-migration.mjs:reopenUiUnderLock -> ADVANCE_JOURNAL
+resumable-migration.mjs:reopenUiUnderLock -> module-lock.mjs:writeJournalAtomic
+### visual->slices (3)
+resumable-migration.mjs:validateUiRuntimeEvidence -> implementationDigests
+resumable-migration.mjs:withUiProofReopenHint -> validateVerifiedSlice
+resumable-migration.mjs:assertNoNavigationRepairNeeded -> inspectSliceArtifacts
