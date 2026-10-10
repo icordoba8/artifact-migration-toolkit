@@ -81,7 +81,7 @@ engine/
 
 ### Phase 0 — Functional baseline (Priority 1, before Day 1)
 - v1.3.18 released and reviewed READY.
-- A clean `roles` migration reaches **COMPLETE** in the real consumer, with 0 manual continues and 0 state edits.
+- A clean migration of the first real consumer module reaches **COMPLETE** in the real consumer, with 0 manual continues and 0 state edits.
 - Capture the **golden trace** from the fixture rehearsal on the same release: the sequence of outcomes and checkpoints, plus a normalized hash of state, ledger and history after each step.
 
 **Accept when:** COMPLETE is reached in real use, and the golden trace is saved in the repo under `test/golden/`.
@@ -139,11 +139,11 @@ engine/
 **Accept when:**
 - the independent review of the full v1.3.18..v1.4.0 diff is READY;
 - one real migration of a small module reaches COMPLETE in the consumer on **Claude Code, Codex and Copilot**, with 0 manual continues and 0 state edits;
-- the existing `roles` record still loads under v1.4.0 (backward compatibility in real use).
+- the first real consumer module's existing record still loads under v1.4.0 (backward compatibility in real use).
 
 ## 6. Prompts (use one per phase, in order)
 
-Each prompt goes into a **new** Claude Code session in `/home/utmwac/artifact-migration-toolkit`. Replace `<BASE_SHA>` with the current `toolkit/main` HEAD (all 40 characters).
+Each prompt goes into a **new** Claude Code session in `<TOOLKIT_ROOT>`. Replace `<BASE_SHA>` with the current `toolkit/main` HEAD (all 40 characters).
 
 ### Phase 1 prompt
 ```text
@@ -286,7 +286,7 @@ OUTPUT: /tmp/phase-<N>-review.md with READY or NOT_READY, a table, and severitie
 | The replay harness cannot reproduce agent-authored steps | Phase 1 stops and reports; fall back to real `codex exec` rehearsal per phase (+1 h each) |
 | A phase overruns | Hard timebox; Phases 6–7 slip to next week; Phases 1–5 keep priority |
 | Hidden behavior found during extraction | Log it in `BACKLOG.md`; do not fix inside the phase |
-| Old records break after `formats/` | Compatibility matrix in Phase 5 + the real `roles` record must load in Phase 8 |
+| Old records break after `formats/` | Compatibility matrix in Phase 5 + the first real consumer module's record must load in Phase 8 |
 
 ## 8. Definition of done (whole plan)
 
