@@ -16,6 +16,8 @@
     "providers:test:2": "node --test --test-concurrency=1 test/provider-installation.test.mjs test/runtime-bootstrap.test.mjs",
     "providers:test:3": "node --test --test-concurrency=1 test/providers-sync.test.mjs test/provider-progress-parity.test.mjs test/release-version-discipline.test.mjs test/concurrent-suites.test.mjs test/installed-full-lifecycle.test.mjs test/portability-support.test.mjs",
     "test": "pnpm engine:test && pnpm engine:test:ts && pnpm providers:test",
+    "rehearse": "node scripts/rehearse.mjs",
+    "rehearse:negative": "node scripts/rehearse-negative.mjs",
     "providers:sync": "node scripts/providers-sync.mjs",
     "providers:check": "node scripts/providers-sync.mjs --check",
     "skills:lock": "node scripts/skills-lock.mjs",
