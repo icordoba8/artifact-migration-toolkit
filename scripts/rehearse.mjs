@@ -8,7 +8,8 @@
  *   pnpm rehearse --update   replay and rewrite the golden trace
  *
  * Determinism comes from fixed inputs (rehearse-preload.mjs: clock and
- * randomUUID; pinned Git dates; no global/system Git config), never from
+ * randomUUID; pinned Git dates; no global/system Git config; an allowlisted
+ * environment with a pinned operator, locale and time zone), never from
  * masking. The one exception is closed and enumerated in IDENTITY below: the
  * release identity names the commit under test and the payload hash, so it
  * changes with every commit by construction. Each identity-derived field is
@@ -186,12 +187,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await mkdir(scratch);
   const trace = path.join(scratch, "trace.ndjson");
   const preload = pathToFileURL(path.join(repo, "scripts/rehearse-preload.mjs")).href;
+  // The fixture gets this environment only, never the inherited one: the
+  // operator ledger records USER@HOSTNAME, and engine/runtime overrides
+  // (MIGRATION_*, ARTIFACT_MIGRATION_TOOLS_*) must stay unset.
   const run = spawnSync(process.execPath, ["--test", fixture], {
     cwd: repo, stdio: "inherit", env: {
-      ...process.env, TMPDIR: scratch, REHEARSE_TRACE: trace,
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${preload}`.trim(),
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("REHEARSE_"))),
+      PATH: process.env.PATH, HOME: scratch, TMPDIR: scratch, REHEARSE_TRACE: trace,
+      NODE_OPTIONS: `--import=${preload}`,
       GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
       GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
+      USER: "rehearse", USERNAME: "rehearse", HOSTNAME: "rehearse-host", COMPUTERNAME: "rehearse-host",
+      TZ: "UTC", LANG: "C.UTF-8", LC_ALL: "C.UTF-8",
     },
   });
   const timings = await readFile(`${trace}.timings`, "utf8").catch(() => "");
