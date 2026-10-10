@@ -14,6 +14,10 @@ import { SPEC, LEGACY_INVENTORY, MODULE_CLASSIFICATION } from
   "../packages/migration-engine/test/support/consumer-fixture.mjs";
 
 const exec = promisify(execFile);
+// `pnpm rehearse` (scripts/rehearse.mjs) traces every engine command and needs
+// a runtime string that is the same on every Node. Unset, nothing changes.
+const rehearse = process.env.REHEARSE_TRACE ? await import("../scripts/rehearse.mjs") : null;
+const runner = rehearse ? "node <rehearse>" : `node ${process.version}`;
 const sha = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const put = (file, value) => writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -61,10 +65,12 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     return { code, stdout: await readFile(stdoutPath, "utf8"), stderr: await readFile(stderrPath, "utf8") };
   };
   try {
+    const buildStarted = performance.now();
     const candidate = await candidateReleaseRoot(scratch);
     const built = await buildRelease({ root: candidate, force: true });
     await verifyRelease(built.stagingRoot);
     const archive = await buildReleaseArchive(built);
+    await rehearse?.timing("release-build", performance.now() - buildStarted);
     const manifest = await json(path.join(built.stagingRoot, "release-manifest.json"));
     const consumer = path.join(scratch, "fresh consumer with spaces");
     const store = path.join(scratch, "store");
@@ -94,9 +100,15 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
       target: { root: path.relative(path.dirname(registry), target) },
     }, modules: { auth: { target: "auth" } } });
     await exec("git", ["init", "-q"], { cwd: consumer });
-    await exec("git", ["add", "-A"], { cwd: consumer });
-    await exec("git", ["-c", "user.name=Installed Test", "-c", "user.email=installed@example.invalid",
-      "commit", "-qm", "fresh consumer"], { cwd: consumer });
+    // The consumer first, then the installed skill: the skill's identity stamp
+    // names the toolkit commit, and in one commit with legacy/ and target/ it
+    // would make their path-scoped revisions depend on that commit.
+    for (const [paths, message] of [[["legacy", "target", "package.json"], "fresh consumer"],
+      [["."], "install start-migration skill"]]) {
+      await exec("git", ["add", "-A", "--", ...paths], { cwd: consumer });
+      await exec("git", ["-c", "user.name=Installed Test", "-c", "user.email=installed@example.invalid",
+        "commit", "-qm", message], { cwd: consumer });
+    }
     const runtime = await import(pathToFileURL(bootstrap).href);
     const transport = {
       resolve: async () => ({ asset: { name: path.basename(archive.archive), digest: archive.digest,
@@ -126,6 +138,7 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
       assert.ok(path.isAbsolute(bin));
       const result = await capture(bin, [...prefix, ...args], consumer, input);
       assert.equal(result.code, 0, `${name}: ${result.stdout}\n${result.stderr}`);
+      await rehearse?.traceStep({ scratch, record, name, args, stdout: result.stdout });
       return result.stdout;
     };
     const author = (relative, value) => put(path.join(record, relative), value);
@@ -252,7 +265,7 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
         sliceId: slice.id, result: "PASS", requirementIds: slice.requirementIds,
         scenarioIds: slice.scenarioIds, capabilityIds: slice.capabilityIds,
         traceIds: slice.traceIds, commands: [{ command: "pnpm --dir target test", exitCode: 0,
-          executedAt: new Date().toISOString(), runner: `node ${process.version}`,
+          executedAt: new Date().toISOString(), runner,
           outputPath: path.relative(target, outputAbsolute).replaceAll(path.sep, "/"),
           outputDigest: sha(output) }], scenarios: slice.acceptanceScenarios,
         uiEvidence: [], uiEvidenceLimitations: [], residualRisks: [],
@@ -274,7 +287,7 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     await author("gates.json", { version: 1, gates: gates.map((gate) => ({ gate, result: "PASS",
       attempts: 1, evidence: [{ kind: "command", reference: "pnpm --dir target test",
         producedAt: new Date().toISOString(), producer: "installed-lifecycle-test",
-        environment: `node ${process.version}`, hash: `sha256:${"a".repeat(64)}`, boundTo }] })) });
+        environment: runner, hash: `sha256:${"a".repeat(64)}`, boundTo }] })) });
     const final = await runTo("COMPLETE");
     assert.equal(final.outcome, "COMPLETE", JSON.stringify(final));
     assert.match(await command("artifact-migration-validate", ["auth", "--complete"]), /Complete auth/);
