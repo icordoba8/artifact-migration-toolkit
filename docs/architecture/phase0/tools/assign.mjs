@@ -1,6 +1,8 @@
-// PROPOSAL ownership map. Every top-level function/class -> exactly one module.
-// usage: node assign.mjs <decls.tsv>  -> prints file\tline\tE/I\tname\tmodule ; exits 1 on missing/duplicate/unknown.
-import { readFileSync } from "node:fs";
+// PROPOSAL ownership map. Every top-level declaration (function, class, value, module-init) -> exactly one module.
+// usage: node assign.mjs <decls.tsv> <a|b>  -> prints file line E/I name module span kind
+// a = the table below; b = a plus the four declared option-(b) overrides. Exits 1, printing nothing, on any unknown,
+// duplicate, missing or empty entry, a module outside the registry, or an override that does not change exactly one owner.
+import { MODULES, MODULE_INIT, Failure, parseArgs, readTsv, run, tsv } from "./analysis.mjs";
 const RM = "resumable-migration.mjs", AM = "artifact/artifact-migration.mjs";
 const LEAF = "unassigned:leaf";
 // [file, module, names]; "*" = every remaining function in that file
@@ -134,7 +136,6 @@ const T = [
           fileContentIdentity
     fileContentIdentityMatches`],
   ["migration-utils.mjs", "lifecycle", `pendingTransactions assertNoPendingTransaction`],
-  ["migration-utils.mjs", "visual", ` `],
   ["migration-utils.mjs", "census", `resolveLegacySources`],
   ["migration-utils.mjs", "transport", `doctorCheck existingKnowledgeRoot runDoctor`],
   ["migration-utils.mjs", LEAF, `contentIdentityMatches contentIdentity isContentIdentity parseContentIdentity isTextIdentityEligible isTextContent expandLf foldCrlf sha256Hex portablePath comparablePath samePath isPonytailTarget assertPonytailTarget assertSafeName assertPlainObject isWithin
@@ -176,20 +177,41 @@ const T = [
   ["cli/advance-migration.mjs", "transport", "*"], ["cli/discover-module.mjs", "transport", "*"], ["cli/toolkit-identity.mjs", "transport", "*"],
   ["cli/update-migration-registry.mjs", "transport", "*"], ["cli/validate-migration.mjs", "transport", "*"], ["artifact/run-artifact.mjs", "transport", "*"],
 ];
-const isFnKind = (k) => k === "fn" || k === "class";
-const decls = readFileSync(process.argv[2], "utf8").trim().split("\n").map((l) => l.split("\t"))
-  .filter(([, , , kind]) => isFnKind(kind) || kind === "value");
-const out = new Map(); let bad = 0;
-for (const [file, mod, names, kind = "fn"] of T) {
-  const pool = decls.filter((d) => d[0] === file && (kind === "value" ? d[3] === "value" : isFnKind(d[3])));
-  const list = names === "*" ? pool.filter((d) => !out.has(`${file}\t${d[4]}`)).map((d) => d[4]) : names.trim().split(/\s+/).filter(Boolean);
-  for (const n of list) {
-    const key = `${file}\t${n}`;
-    if (!pool.some((d) => d[4] === n)) { console.error(`UNKNOWN ${key}`); bad++; continue; }
-    if (out.has(key)) { console.error(`DUPLICATE ${key} ${out.get(key)} ${mod}`); bad++; continue; }
-    out.set(key, mod);
+// Entry blocks (`if (isMainModule(import.meta.url)) ...`) start a CLI, so they belong to transport.
+for (const file of ["artifact/run-artifact.mjs", "cli/advance-migration.mjs", "cli/discover-module.mjs", "cli/run-migration.mjs", "cli/toolkit-identity.mjs",
+  "cli/update-migration-registry.mjs", "cli/validate-migration.mjs", "mcp-server.mjs", "operator-signer-service.mjs", "record-decision.mjs", "upgrades/upgrade-migration.mjs"])
+  T.push([file, "transport", MODULE_INIT, "module-init"]);
+// Option (b) of section 4: the candidate builders move to the module that owns their facts.
+const B = [[RM, "pendingTargetDriftCandidates", "slices"], [RM, "pendingVisualUnbackedCandidates", "visual"], [RM, "moduleDecisionCandidate", "census"], [RM, "moduleEdgeTargetsFrom", "census"]];
+
+const DECL_COLUMNS = [{ name: "file", re: /^[\w./-]+\.mjs$/ }, { name: "line", re: /^[1-9]\d*$/ }, { name: "export", values: ["E", "I"] },
+  { name: "kind", values: ["fn", "class", "value", "module-init", "reexport"] }, { name: "name", re: /^\S(?:.*\S)?$/ }, { name: "span", re: /^[1-9]\d*$/ }];
+const pools = { fn: ["fn", "class"], value: ["value"], "module-init": ["module-init"] };
+
+run("node assign.mjs <decls.tsv> <a|b>", () => {
+  const { positional: [declsFile, option] } = parseArgs(process.argv.slice(2), { positional: [{ name: "decls.tsv" }, { name: "option", values: ["a", "b"] }] });
+  const decls = readTsv(declsFile, { columns: DECL_COLUMNS, key: (r) => (r[3] === "reexport" ? `${r[0]}\t${r[1]}\t${r[4]}` : `${r[0]}\t${r[4]}`) })
+    .filter((d) => d[3] !== "reexport");
+  const out = new Map(), problems = [];
+  for (const [file, mod, names, kind = "fn"] of T) {
+    if (!(mod in MODULES)) { problems.push(`UNKNOWN MODULE ${mod} (${file})`); continue; }
+    const pool = decls.filter((d) => d[0] === file && pools[kind].includes(d[3]));
+    const list = names === "*" ? pool.filter((d) => !out.has(`${file}\t${d[4]}`)).map((d) => d[4]) : names.trim().split(/\s+/).filter(Boolean);
+    if (!list.length) problems.push(`EMPTY ${file} ${mod} ${kind}`);
+    for (const n of list) {
+      const key = `${file}\t${n}`;
+      if (!pool.some((d) => d[4] === n)) { problems.push(`UNKNOWN ${file} ${n} (${kind})`); continue; }
+      if (out.has(key)) { problems.push(`DUPLICATE ${file} ${n} ${out.get(key)} ${mod}`); continue; }
+      out.set(key, mod);
+    }
   }
-}
-for (const d of decls) if (!out.has(`${d[0]}\t${d[4]}`)) { console.error(`MISSING ${d[0]}:${d[1]} ${d[4]}`); bad++; }
-for (const d of decls) console.log([d[0], d[1], d[2], d[4], out.get(`${d[0]}\t${d[4]}`) ?? "?", d[5], d[3]].join("\t"));
-process.exitCode = bad ? 1 : 0;
+  for (const d of decls) if (!out.has(`${d[0]}\t${d[4]}`)) problems.push(`MISSING ${d[0]}:${d[1]} ${d[4]}`);
+  if (option === "b") for (const [file, name, mod] of B) {
+    const key = `${file}\t${name}`;
+    if (!out.has(key)) problems.push(`OVERRIDE ${file} ${name} matches no declaration`);
+    else if (out.get(key) === mod) problems.push(`OVERRIDE ${file} ${name} does not change its owner (${mod})`);
+    else out.set(key, mod);
+  }
+  if (problems.length) throw new Failure(problems);
+  return tsv(decls.map((d) => [d[0], d[1], d[2], d[4], out.get(`${d[0]}\t${d[4]}`), d[5], d[3]]));
+});
