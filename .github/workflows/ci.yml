@@ -86,6 +86,19 @@ jobs:
       - name: Run the provider generation and installation suites (shard ${{ matrix.shard }}/3)
         run: pnpm providers:test:${{ matrix.shard }}
 
+      # LLM-free replay of the installed lifecycle, compared step by step with
+      # test/golden/installed-full-lifecycle.ndjson. The golden is regenerated
+      # only locally (`pnpm rehearse --update`), never from CI output.
+      - name: Replay the installed lifecycle against the golden trace
+        if: ${{ matrix.shard == 2 }}
+        run: pnpm rehearse
+
+      # A one-byte history corruption must fail at verification, not at the
+      # golden comparison.
+      - name: Refuse a corrupted history in the replay
+        if: ${{ matrix.shard == 2 }}
+        run: pnpm rehearse:negative
+
       # Lifecycle, formats, decisions, integrity, MCP, discovery, artifact, and
       # the external-installation / rendered-command path suites.
       - name: Run the engine suites
