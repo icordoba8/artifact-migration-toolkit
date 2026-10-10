@@ -98,6 +98,39 @@ test("F3-10 computed member access, non-literal specifiers and lossy flows fail"
   refused(graph({ "a.mjs": a, "b.mjs": 'export const f = () => import("./a.mjs").then(({ ...all }) => all);\n' }), /module-only dependency/);
 });
 
+test("B2 objects carrying a module (literal, method, loader property, returned or spread) cannot escape", () => {
+  const a = { "a.mjs": "export const helper = () => 1;\n" };
+  const NS = 'import * as ns from "./a.mjs";\nconst use = (o) => o.get().helper();\n';
+  refused(graph({ ...a, "b.mjs": `${NS}export const f = () => use({ get() { return ns; } });\n` }), /module-only dependency: use\(\{ get\(\)/);
+  refused(graph({ ...a, "b.mjs": `${NS}export const f = () => { const o = { get: () => ns }; return use(o); };\n` }), /module-only dependency: use\(o\)/);
+  refused(graph({ ...a, "b.mjs": `${NS}class C { get() { return ns; } }\nexport const f = () => use(new C());\n` }), /module-only dependency: return ns/);
+  refused(graph({ ...a, "b.mjs": `import * as ns from "./a.mjs";\n/** @returns {object} */\nconst mk = () => ({ m: ns });\nexport const f = () => mk().m.helper();\n` }), /module-only dependency: \(\) => \(\{ m: ns \}\)/);
+  const H = 'const h = async (c) => { const m = await import("./a.mjs"); return { m, ...(c ? { x: 1 } : {}) }; };\nconst use = (o) => o.m.helper();\n';
+  refused(graph({ ...a, "b.mjs": `${H}export const f = async () => use(await h());\n` }), /module-only dependency: use\(await h\(\)\)/);
+  assert.deepEqual(edgesOf({ ...a, "b.mjs": `${H}export const f = async () => { const { m } = await h(); return m.helper(); };\n` }),
+    ["b.mjs:f>a.mjs:helper dynamic", "b.mjs:f>b.mjs:h local"]);
+  assert.deepEqual(edgesOf({ ...a, "b.mjs": `import * as ns from "./a.mjs";\nconst o = { get() { return ns; } };\nexport const f = () => o.get().helper();\n` }),
+    ["b.mjs:f>a.mjs:helper dynamic", "b.mjs:f>b.mjs:o local"]);
+});
+
+test("B3 named callbacks and type-hiding loaders fail; inline callbacks and plain loaders resolve", () => {
+  const a = { "a.mjs": "export const helper = () => 1;\n" };
+  const B = (src) => graph({ ...a, "b.mjs": src });
+  refused(B('const onLoad = (mod) => mod.helper();\nexport const f = () => import("./a.mjs").then(onLoad);\n'), /module-only dependency: import\("\.\/a\.mjs"\)\.then/);
+  refused(B('function onLoad(mod) { return mod.helper(); }\nexport const f = () => import("./a.mjs").then(onLoad);\n'), /module-only dependency: import\("\.\/a\.mjs"\)\.then/);
+  refused(B('export const f = () => import("./a.mjs").then(/** @param {any} m */ (m) => m.helper());\n'), /module-only dependency/);
+  refused(B('export const f = () => import("./a.mjs").then(() => 1);\n'), /module-only dependency/);
+  refused(B('/** @returns {Promise<any>} */\nconst lazy = () => import("./a.mjs");\nexport const f = async () => (await lazy()).helper();\n'), /module-only dependency: \(\) => import/);
+  refused(B('/** @type {() => Promise<any>} */\nconst lazy = () => import("./a.mjs");\nexport const f = async () => (await lazy()).helper();\n'), /module-only dependency: \(\) => import/);
+  refused(B('/** @returns {Promise<any>} */\nasync function load() { return import("./a.mjs"); }\nexport const f = async () => (await load()).helper();\n'), /module-only dependency: return import/);
+  refused(B('export const f = async () => { const m = /** @type {any} */ (await import("./a.mjs")); return m.helper(); };\n'), /module-only dependency/);
+  refused(B('const lazy = () => import("./a.mjs");\nconst run = (load) => load().then((m) => m.helper());\nexport const f = () => run(lazy);\n'), /module-only dependency: run\(lazy\)/);
+  refused(B('const run = (load) => load().then((m) => m.helper());\nexport const f = () => run(() => import("./a.mjs"));\n'), /module-only dependency: run\(\(\) => import/);
+  assert.deepEqual(edgesOf({ ...a, "b.mjs": 'async function load() { return import("./a.mjs"); }\nexport const f = async () => (await load()).helper();\n' +
+    'export const g = () => import("./a.mjs").then(function (m) { return m.helper(); });\n' }),
+    ["b.mjs:f>a.mjs:helper dynamic", "b.mjs:f>b.mjs:load local", "b.mjs:g>a.mjs:helper dynamic"]);
+});
+
 test("F3-11 top-level statements belong to <module-init>", () => {
   assert.deepEqual(edgesOf({ "a.mjs": "const isMain = () => true;\nconst run = () => {};\nif (isMain()) run();\n" }), ["<module-init>>isMain local", "<module-init>>run local"]);
 });

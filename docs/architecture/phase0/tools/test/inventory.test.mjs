@@ -111,6 +111,54 @@ export const f = async (p) => { await wf(p, "x"); await fsp.rm(p); await fs.prom
   assert.deepEqual(rowsOf(r.stdout).map((w) => w[3]), ["fs.mkdirSync", "fs.promises.rename", "fsp.rm", "w", "wf"]);
 });
 
+const EXPORTED = `import { writeFile as fsWriteFile } from "node:fs/promises";\nexport const writeFile = fsWriteFile;\n`;
+const callsIn = (files) => { const r = inv(files, "writes"); assert.equal(r.status, 0, r.stderr); return rowsOf(r.stdout).map(([file, , , call]) => `${file} ${call}`); };
+
+test("F4-11 P1 an exported const alias is followed through named imports, renames and re-export chains", () => {
+  assert.deepEqual(callsIn({ "a.mjs": EXPORTED, "b.mjs": `import { writeFile } from "./a.mjs";\nexport const f = async (p) => { await writeFile(p, "x"); };\n` }), ["b.mjs writeFile"]);
+  assert.deepEqual(callsIn({ "a.mjs": EXPORTED, "c.mjs": `export * from "./a.mjs";\nexport { writeFile as save } from "./a.mjs";\n`,
+    "b.mjs": `import { writeFile, save } from "./c.mjs";\nexport const f = (p) => { writeFile(p, "x"); save(p, "y"); };\n` }), ["b.mjs save", "b.mjs writeFile"]);
+});
+
+test("F4-12 P2 const alias chains are followed transitively; P3 one level still counts; cycles end", () => {
+  assert.deepEqual(writesOf(`const w1 = writeFile;\nconst w2 = w1;\nconst w3 = w2;\nexport const f = async (p) => { await w2(p, "x"); await w3(p, "y"); };\n`), ["w2", "w3"]);
+  assert.deepEqual(writesOf(`const w = writeFile;\nexport const f = async (p) => { await w(p, "x"); };\n`), ["w"]);
+  assert.deepEqual(callsIn({ "a.mjs": `import { y } from "./b.mjs";\nexport const x = y;\nconst c1 = c2;\nconst c2 = c1;\nexport const f = () => c1();\n`,
+    "b.mjs": `import { x } from "./a.mjs";\nexport const y = x;\nexport const g = () => y();\n` }), []);
+});
+
+test("F4-13 aliases keep lexical identity: shadowed names and same-named engine functions are not writes", () => {
+  assert.deepEqual(writesOf(`const w = writeFile;\nexport const f = (w, p) => w(p);\nexport const g = (p) => { const w = (q) => q; return w(p); };\n`), []);
+  assert.deepEqual(callsIn({ "a.mjs": `export const writeFile = (p) => p;\nexport const w1 = writeFile;\n`,
+    "b.mjs": `import { writeFile, w1 } from "./a.mjs";\nexport const f = (p) => { writeFile(p); w1(p); };\n` }), []);
+});
+
+test("F4-14 an alias chain that escapes fails: value use at any depth, namespace and dynamic imports of a module exporting one", () => {
+  refused(inv({ "a.mjs": `${FS}const w1 = rm;\nconst w2 = w1;\nexport const f = (ps) => ps.map(w2);\n` }, "writes"), /used as a value: w2/);
+  refused(inv({ "a.mjs": EXPORTED, "b.mjs": `import { writeFile } from "./a.mjs";\nexport const f = (ps) => ps.map(writeFile);\n` }, "writes"), /used as a value: writeFile/);
+  refused(inv({ "a.mjs": EXPORTED, "b.mjs": `import * as a from "./a.mjs";\nexport const f = (p) => a.writeFile(p, "x");\n` }, "writes"), /namespace or dynamic import of \.\/a\.mjs, which exports fs write alias writeFile/);
+  refused(inv({ "a.mjs": EXPORTED, "c.mjs": `export * from "./a.mjs";\n`, "b.mjs": `import * as c from "./c.mjs";\nexport const f = (p) => c.writeFile(p, "x");\n` }, "writes"), /import of \.\/c\.mjs/);
+  refused(inv({ "a.mjs": EXPORTED, "b.mjs": `export const f = async (p) => { const { writeFile } = await import("./a.mjs"); await writeFile(p, "x"); };\n` }, "writes"), /namespace or dynamic import/);
+  assert.deepEqual(callsIn({ "a.mjs": `export const g = () => 1;\n`, "b.mjs": `import * as a from "./a.mjs";\nexport const f = async () => { a.g(); (await import("./a.mjs")).g(); };\n` }), []);
+});
+
+test("B1 fs re-exports consumed through namespace or dynamic imports fail; named imports of them fail; read-only re-exports pass", () => {
+  const NS = `import * as a from "./a.mjs";\nexport const f = (p) => a.writeFile(p, "x");\n`;
+  const DYN = `export const f = async (p) => (await import("./a.mjs")).writeFile(p, "x");\n`;
+  const NSX = `import * as a from "./a.mjs";\nexport const f = (p) => a.fsx.writeFileSync(p, "x");\n`;
+  const RE = `export { writeFile } from "node:fs/promises";\n`;
+  refused(inv({ "a.mjs": RE, "b.mjs": NS }, "writes"), /namespace or dynamic import of \.\/a\.mjs, which exports fs write alias writeFile/);
+  refused(inv({ "a.mjs": RE, "b.mjs": DYN }, "writes"), /namespace or dynamic import of \.\/a\.mjs, which exports fs write alias writeFile/);
+  refused(inv({ "a.mjs": `export { promises } from "node:fs";\n`, "b.mjs": NS }, "writes"), /exports fs write alias promises/);
+  refused(inv({ "a.mjs": `export * from "node:fs/promises";\n`, "b.mjs": NS }, "writes"), /export \* from fs/);
+  refused(inv({ "a0.mjs": `export * from "node:fs/promises";\n`, "a.mjs": `export * from "./a0.mjs";\n`, "b.mjs": DYN }, "writes"), /export \* from fs/);
+  refused(inv({ "a.mjs": `export * as fsx from "node:fs";\n`, "b.mjs": NSX }, "writes"), /exports fs write alias fsx/);
+  refused(inv({ "a0.mjs": RE, "a.mjs": `export * from "./a0.mjs";\n`, "b.mjs": NS }, "writes"), /exports fs write alias writeFile/);
+  refused(inv({ "a.mjs": RE, "b.mjs": `import { writeFile } from "./a.mjs";\nexport const f = (p) => writeFile(p, "x");\n` }, "writes"), /writeFile does not resolve/);
+  refused(inv({ "a.mjs": `import { writeFile } from "node:fs/promises";\nexport { writeFile };\n`, "b.mjs": NS }, "writes"), /does not resolve/);
+  assert.deepEqual(callsIn({ "a.mjs": `export { readFile } from "node:fs/promises";\nexport const g = () => 1;\n`, "b.mjs": `import * as a from "./a.mjs";\nexport const f = (p) => { a.g(); return a.readFile(p); };\n` }), []);
+});
+
 test("F4-7 same-named locals, stdio and non-fs streams are not writes", () => {
   const body = `const rm = () => {}; const write = () => {}; const opener = { open: () => {} };
 export const f = async (stdout, response, socket) => {

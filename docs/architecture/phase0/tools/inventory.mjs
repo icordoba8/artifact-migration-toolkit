@@ -8,7 +8,9 @@
 // never by spelling. `open` counts only when its flags allow writing; a FileHandle (a binding that only ever
 // holds `await open(...)`) counts its write methods. writeSync/write on a literal fd 0-2 is stdio, not a file.
 // Fails (no output) on what it cannot classify: non-literal or non-zero numeric open flags, a handle or write
-// primitive used as a value, computed fs access, require/import() of fs, unknown FileHandle methods.
+// primitive used as a value, computed fs access, require/import() of fs, unknown FileHandle methods, and a namespace
+// or dynamic import of an engine module that exports a write alias, re-exports fs, or star-exports fs (aliases are
+// followed only by name).
 // Not detected by design: child-process writes, non-fs streams, writes inside third-party packages.
 import { engineProgram, forEachOwned, parseArgs, run, tsv, Failure, MODULE_INIT } from "./analysis.mjs";
 
@@ -65,32 +67,57 @@ const writes = (p, file, sf, rows, problems, at) => {
   const up = (n) => { while (ts.isParenthesizedExpression(n.parent)) n = n.parent; return n; }; // outermost paren around n
   const fsImport = (symbol) => {
     const d = symbol?.flags & ts.SymbolFlags.Alias ? symbol.declarations?.[0] : null;
-    const decl = d && (ts.isImportSpecifier(d) ? d.parent.parent.parent : ts.isNamespaceImport(d) ? d.parent.parent : ts.isImportClause(d) ? d.parent : null);
-    const mod = decl && FS.get(decl.moduleSpecifier.text);
+    const decl = d && (ts.isImportSpecifier(d) ? d.parent.parent.parent : ts.isNamespaceImport(d) ? d.parent.parent : ts.isImportClause(d) ? d.parent
+      : ts.isExportSpecifier(d) ? d.parent.parent : ts.isNamespaceExport(d) ? d.parent : null);
+    const mod = decl?.moduleSpecifier && FS.get(decl.moduleSpecifier.text);
     if (!mod) return null;
-    if (!ts.isImportSpecifier(d)) return { ns: mod };
+    if (!ts.isImportSpecifier(d) && !ts.isExportSpecifier(d)) return { ns: mod };
     const name = (d.propertyName ?? d.name).text;
     return name === "default" ? { ns: mod } : member(mod, name);
   };
   const member = (mod, name) => (mod === "fs" && name === "promises" ? { ns: "fsp" } : name === "constants" ? { ns: "constants" } : { mod, name });
   // What an expression denotes in fs terms: { ns } for fs / fsp / constants, { mod, name } for a member, else null.
-  const fsRef = (e, depth = 0) => {
+  const fsRef = (e, seen = new Set()) => {
     e = strip(e);
-    if (ts.isIdentifier(e)) {
-      const s = ts.isShorthandPropertyAssignment(e.parent) && e.parent.name === e ? checker.getShorthandAssignmentValueSymbol(e.parent) : checker.getSymbolAtLocation(e);
-      const viaImport = fsImport(s);
-      if (viaImport) return viaImport;
-      // `const w = writeFile` is followed one level.
-      const d = s?.valueDeclaration;
-      if (depth === 0 && d && ts.isVariableDeclaration(d) && d.initializer && d.parent.flags & ts.NodeFlags.Const) {
-        const r = fsRef(d.initializer, 1);
-        if (r?.name) return r;
-      }
-      return null;
-    }
-    if (ts.isPropertyAccessExpression(e)) { const r = fsRef(e.expression, depth); return r?.ns && r.ns !== "constants" ? member(r.ns, e.name.text) : r?.ns === "constants" ? { constant: e.name.text } : null; }
+    if (ts.isIdentifier(e)) return symbolRef(ts.isShorthandPropertyAssignment(e.parent) && e.parent.name === e ? checker.getShorthandAssignmentValueSymbol(e.parent) : checker.getSymbolAtLocation(e), seen);
+    if (ts.isPropertyAccessExpression(e)) { const r = fsRef(e.expression, seen); return r?.ns && r.ns !== "constants" ? member(r.ns, e.name.text) : r?.ns === "constants" ? { constant: e.name.text } : null; }
     return null;
   };
+  // An fs import or re-export, or an engine import or export list (one alias hop at a time, since fs itself is not in the
+  // program) and `const w = <fs member>` chains, followed transitively; `seen` stops cycles.
+  const symbolRef = (s, seen = new Set()) => {
+    for (; s?.flags & ts.SymbolFlags.Alias && !seen.has(s); s = checker.getImmediateAliasedSymbol(s)) {
+      seen.add(s);
+      const viaImport = fsImport(s);
+      if (viaImport) return viaImport;
+    }
+    const d = s?.valueDeclaration;
+    if (!d || seen.has(d) || !ts.isVariableDeclaration(d) || !d.initializer || !(d.parent.flags & ts.NodeFlags.Const)) return null;
+    seen.add(d);
+    const r = fsRef(d.initializer, seen);
+    return r?.name ? r : null;
+  };
+  const isPrimitive = (r) => !!r?.name && (WRITES.has(r.name) || OPENS.has(r.name));
+  // `export * from "<fs>"` anywhere down a module's export-star chain: its members cannot be listed (fs is not in the program).
+  const starsFs = (m, seen = new Set()) => {
+    const msf = m?.declarations?.find(ts.isSourceFile);
+    if (!msf || seen.has(msf)) return false;
+    seen.add(msf);
+    return msf.statements.some((s) => ts.isExportDeclaration(s) && !s.exportClause && s.moduleSpecifier
+      && (FS.has(s.moduleSpecifier.text) || starsFs(checker.getSymbolAtLocation(s.moduleSpecifier), seen)));
+  };
+  // Only named imports follow an exported alias; a namespace or dynamic import of a module that exports one, re-exports an fs
+  // write primitive or fs namespace, or star-exports fs fails.
+  const refuseNamespace = (n, spec) => {
+    const m = checker.getSymbolAtLocation(spec);
+    const x = m && (checker.getExportsOfModule(m).find((e) => { const r = symbolRef(e); return isPrimitive(r) || r?.ns === "fs" || r?.ns === "fsp"; })?.name
+      ?? (starsFs(m) ? "* (export * from fs)" : null));
+    if (x) problems.push(`${at(n)}: namespace or dynamic import of ${spec.text}, which exports fs write alias ${x}`);
+  };
+  for (const s of sf.statements) {
+    const ns = ts.isImportDeclaration(s) ? s.importClause?.namedBindings : ts.isExportDeclaration(s) ? s.exportClause : null;
+    if (ns && (ts.isNamespaceImport(ns) || ts.isNamespaceExport(ns))) refuseNamespace(s, s.moduleSpecifier);
+  }
   const isFsLoad = (n) => ts.isCallExpression(n) && n.arguments.length && ts.isStringLiteralLike(n.arguments[0]) && FS.has(n.arguments[0].text)
     && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === "require"));
   const flagsOf = (call) => {
@@ -122,6 +149,7 @@ const writes = (p, file, sf, rows, problems, at) => {
   const isNullish = (e) => { e = strip(e); return e.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(e) && e.text === "undefined"); };
   forEachOwned(ts, sf, function visit(n, owner) {
     if (isFsLoad(n)) problems.push(`${at(n)}: fs loaded dynamically: ${n.getText(sf)}`);
+    else if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword) refuseNamespace(n, n.arguments[0]);
     if (ts.isCallExpression(n)) {
       const r = fsRef(n.expression);
       const fd = n.arguments[0] && strip(n.arguments[0]);
@@ -129,13 +157,13 @@ const writes = (p, file, sf, rows, problems, at) => {
       if (r?.name && !stdio && (WRITES.has(r.name) || (OPENS.has(r.name) && flagsOf(n) === "write")))
         rows.push([file, p.line(sf, n), owner, n.expression.getText(sf).replace(/\s+/g, " ")]);
     }
-    // A write primitive that is not the callee (nor a one-level const alias) is used as a value.
+    // A write primitive that is not the callee (nor a const alias) is used as a value.
     if ((ts.isIdentifier(n) || ts.isPropertyAccessExpression(n)) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) {
       const r = fsRef(n), top = up(n), parent = top.parent;
       const callee = ts.isCallExpression(parent) && parent.expression === top;
       const alias = ts.isVariableDeclaration(parent) && (parent.name === top || (parent.initializer === top && parent.parent.flags & ts.NodeFlags.Const));
       const receiver = ts.isPropertyAccessExpression(parent) && parent.expression === top;
-      if (r?.name && (WRITES.has(r.name) || OPENS.has(r.name)) && !callee && !alias) problems.push(`${at(n)}: fs write primitive used as a value: ${n.getText(sf)}`);
+      if (isPrimitive(r) && !callee && !alias) problems.push(`${at(n)}: fs write primitive used as a value: ${n.getText(sf)}`);
       if ((r?.ns === "fs" || r?.ns === "fsp") && !receiver)
         problems.push(ts.isElementAccessExpression(parent) ? `${at(n)}: computed fs access ${parent.getText(sf)}` : `${at(n)}: fs namespace used as a value: ${n.getText(sf)}`);
     }

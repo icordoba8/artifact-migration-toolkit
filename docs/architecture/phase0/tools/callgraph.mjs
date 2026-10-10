@@ -3,7 +3,8 @@
 // References are resolved by the TypeScript checker (lexical scope, aliases, re-export chains), per declarator;
 // top-level statements belong to <module-init>. count = reference occurrences; via = local | import | namespace | dynamic.
 // A namespace or dynamically imported module may only be read through a static member or destructuring; any other use
-// (escaping, computed access, an unknown member) fails the run, so no declaration edge is ever guessed.
+// (escaping, computed access, an unknown member, a loader or module-holding object passed on, a named or member-less
+// `.then` callback, a JSDoc type that hides the module) fails the run, so no declaration edge is ever guessed.
 import { engineProgram, forEachOwned, parseArgs, run, tsv, Failure } from "./analysis.mjs";
 
 const USAGE = "node callgraph.mjs <repo> <ref>";
@@ -13,7 +14,8 @@ const main = () => {
   const p = engineProgram(repo, ref), { ts, checker } = p, edges = new Map(), problems = [];
   // The engine module a value denotes (namespace types only); used to resolve member reads.
   const moduleOf = (type) => (type?.isUnion() ? type.types.map(moduleOf).find(Boolean) ?? null : p.isModuleSymbol(type?.symbol) ? type.symbol : null);
-  // How a value carries an engine namespace: "namespace", "promise" of one, or "object" literal type holding one in a property.
+  // How a value carries an engine namespace: "namespace", "promise" of one, "object" (literal or anonymous) holding one in a property,
+  // or "function" returning one (a loader or a method).
   const kinds = new Map();
   const carrier = (type) => {
     if (!type) return null;
@@ -23,8 +25,10 @@ const main = () => {
     if (type.isUnion()) kind = type.types.map(carrier).find(Boolean) ?? null;
     else if (moduleOf(type)) kind = "namespace";
     else if (type.symbol?.name === "Promise" && checker.getTypeArguments(type).some(carrier)) kind = "promise";
-    else if (type.flags & ts.TypeFlags.Object && type.objectFlags & ts.ObjectFlags.ObjectLiteral
+    // Not only ObjectLiteral: a JS return value widens to JSLiteral, and a spread to a plain Anonymous type.
+    else if (type.flags & ts.TypeFlags.Object && type.objectFlags & (ts.ObjectFlags.ObjectLiteral | ts.ObjectFlags.JSLiteral | ts.ObjectFlags.Anonymous)
       && type.getProperties().some((s) => carrier(checker.getTypeOfSymbol(s)))) kind = "object";
+    else if (type.getCallSignatures().some((s) => carrier(s.getReturnType()))) kind = "function";
     kinds.set(type, kind);
     return kind;
   };
@@ -42,24 +46,44 @@ const main = () => {
       const k = [file, owner, target.file, target.name, via].join("\t");
       edges.set(k, (edges.get(k) ?? 0) + 1);
     };
-    // A value carrying a namespace may only be read by static member, awaited, bound, destructured, returned or stored in an
-    // object literal: every one keeps its type, so later reads are checked too. Anything that can lose the type fails.
-    const checkModuleUse = (n, kind) => {
-      const top = up(n), parent = top.parent;
-      if (ts.isPropertyAccessExpression(parent) && parent.expression === top && (kind !== "promise" || ["then", "catch", "finally"].includes(parent.name.text))) return;
-      if (ts.isAwaitExpression(parent) || ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === top)) return;
-      if ((ts.isPropertyAssignment(parent) && parent.initializer === top) || ts.isShorthandPropertyAssignment(parent)) return;
+    // A value carrying a namespace may only be read by static member, called (a loader), awaited, bound, destructured, returned
+    // or stored in an object literal, and only where the receiving binding, cast or return type still carries it, so later
+    // reads are checked too. `.then` takes only an inline callback whose first parameter carries it. Anything else fails.
+    const keeps = (node) => !!carrier(checker.getTypeAtLocation(node));
+    const returnKeeps = (node) => {
+      while (!ts.isFunctionLike(node)) node = node.parent;
+      // shortcut: class instances are not tracked as carriers, so a class member may not hand a module out at all.
+      return !ts.isClassLike(node.parent) && !!carrier(checker.getSignatureFromDeclaration(node)?.getReturnType());
+    };
+    const thenKeeps = (member) => {
+      const call = member.parent, cb = ts.isCallExpression(call) && call.expression === member && call.arguments[0] && strip(call.arguments[0]);
+      return !!cb && (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) && cb.parameters.length > 0 && keeps(cb.parameters[0]);
+    };
+    const usedSafely = (top, parent, kind) => {
+      if (ts.isPropertyAccessExpression(parent) && parent.expression === top)
+        return kind === "namespace" || kind === "object" || (kind === "promise" && (["catch", "finally"].includes(parent.name.text) || (parent.name.text === "then" && thenKeeps(parent))));
+      if (ts.isCallExpression(parent) && parent.expression === top) return kind === "function";
+      if (ts.isAwaitExpression(parent) || (ts.isPropertyAssignment(parent) && parent.initializer === top) || ts.isShorthandPropertyAssignment(parent)) return true;
+      if (ts.isReturnStatement(parent) || (ts.isArrowFunction(parent) && parent.body === top)) return returnKeeps(parent);
       if (ts.isVariableDeclaration(parent) && parent.initializer === top) {
         const pattern = parent.name;
-        if (ts.isIdentifier(pattern)) return;
-        if (kind !== "promise" && ts.isObjectBindingPattern(pattern) && pattern.elements.every((e) => !e.dotDotDotToken && (!e.propertyName || ts.isIdentifier(e.propertyName)) && ts.isIdentifier(e.name))) return;
+        if (ts.isIdentifier(pattern)) return keeps(pattern);
+        return (kind === "namespace" || kind === "object") && ts.isObjectBindingPattern(pattern) && keeps(pattern)
+          && pattern.elements.every((e) => !e.dotDotDotToken && (!e.propertyName || ts.isIdentifier(e.propertyName)) && ts.isIdentifier(e.name));
       }
+      return false;
+    };
+    const checkModuleUse = (n, kind) => {
+      const top = up(n), parent = top.parent;
+      if ((top === n || keeps(top)) && usedSafely(top, parent, kind)) return;
       problems.push(`${at(n)}: module-only dependency: ${parent.getText(sf).replace(/\s+/g, " ").slice(0, 80)}`);
     };
     forEachOwned(ts, sf, function visit(n, owner) {
-      if (ts.isIdentifier(n) || ts.isCallExpression(n) || ts.isAwaitExpression(n) || ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n) || ts.isObjectLiteralExpression(n)) {
+      if (ts.isIdentifier(n) || ts.isCallExpression(n) || ts.isAwaitExpression(n) || ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n) || ts.isObjectLiteralExpression(n)
+        || ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
         const declName = ts.isIdentifier(n) && n.parent && n.parent.name === n && (ts.isVariableDeclaration(n.parent) || ts.isParameter(n.parent)
-          || ts.isBindingElement(n.parent) || ts.isPropertyAssignment(n.parent) || ts.isPropertyDeclaration(n.parent) || ts.isMethodDeclaration(n.parent));
+          || ts.isBindingElement(n.parent) || ts.isPropertyAssignment(n.parent) || ts.isPropertyDeclaration(n.parent) || ts.isMethodDeclaration(n.parent)
+          || ts.isFunctionDeclaration(n.parent) || ts.isFunctionExpression(n.parent));
         const memberName = ts.isIdentifier(n) && ts.isPropertyAccessExpression(n.parent) && n.parent.name === n;
         const type = !declName && !memberName && !bindingKey(n) ? checker.getTypeAtLocation(n) : null;
         const kind = carrier(type);
