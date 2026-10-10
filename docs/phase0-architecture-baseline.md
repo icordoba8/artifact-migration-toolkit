@@ -1,8 +1,8 @@
-# Phase 0 — Architecture baseline for `start-migration` (revision 2, final)
+# Phase 0 — Architecture baseline for `start-migration` (revision 2.1)
 
-**Status:** evidence only, nothing implemented. **Every design item below is a PROPOSAL** unless it is a measurement. This is the only revision of the plan. It closes the gaps in revision 1, and the changes are listed in §0.
+**Status:** evidence only, nothing implemented. **Every design item below is a PROPOSAL** unless it is a measurement. Revision 2 closed the gaps in revision 1; its changes are listed in §0. Revision 2.1 changes only measurements: every dataset was regenerated with the corrected Phase 0 analyzers, and §0.1 lists each changed figure with its cause. No proposal changed.
 **BASE:** `05e604992f10b239753a74246a9ac5a45d9b2fed` (v1.3.19 record). Re-checked at the start of revision 2: `HEAD`, local `main` and `toolkit/main` were all equal to BASE.
-**Working tree:** only untracked docs, namely `docs/start-migration-architecture-plan.md` (pre-existing), this file, and `docs/architecture/phase0/` (tools and data). Nothing committed.
+**Branch:** `arch/phase0-docs`, which commits the plan under revision, this file, and `docs/architecture/phase0/` (tools, their tests, and data). The analyzers were last corrected at `2a55280baa1b2bbcd8c20bfc0b0311631f5068e9`; every dataset was regenerated with that version.
 **Plan under revision:** `docs/start-migration-architecture-plan.md`, audited at `f0809218274131d06dd363280e6c825178fa38e2` (v1.3.17 record).
 **Scope of "engine":** the 27 `*.mjs` files under `packages/migration-engine/src`. Install code (`providers/install-support.mjs`, `scripts/runtime-bootstrap.mjs`) is covered in §5 and Track A7.
 **Findings source:** the run log the user supplied (read-only, outside the repo). Findings are cited by ID only.
@@ -13,11 +13,12 @@ Every command runs from `docs/architecture/phase0/` and reads git objects, so it
 cd docs/architecture/phase0
 BASE=05e604992f10b239753a74246a9ac5a45d9b2fed
 R=$(git rev-parse --show-toplevel)   # repo root
-T=tools                              # inventory.mjs, callgraph.mjs, assign.mjs, modgraph.mjs
-# The tools load the repo's own pinned typescript@5.9.3; nothing new is installed.
+T=tools                              # inventory, callgraph, assign, writesites, modgraph (shared code in analysis.mjs)
+# The tools load the engine's pinned typescript@5.9.3 (the ts-discovery-compiler alias) from this checkout,
+# so run `pnpm install` once; nothing new is installed. Each tool exits 1 with empty stdout on anything it cannot classify.
 ```
 
-Regenerate every data file (about 1 minute):
+Regenerate every data file (under a minute). Running the block twice gives byte-identical files.
 
 ```sh
 node $T/inventory.mjs $R $BASE decls   > data/decls-05e6049.tsv
@@ -25,12 +26,15 @@ node $T/inventory.mjs $R $BASE writes  > data/writes-05e6049.tsv
 node $T/inventory.mjs $R $BASE imports > data/imports-05e6049.tsv
 node $T/inventory.mjs $R $BASE fv      > data/fv-05e6049.tsv
 node $T/callgraph.mjs $R $BASE         > data/edges.tsv
-node $T/assign.mjs data/decls-05e6049.tsv > data/owners.tsv        # exits 1 on any missing, duplicate or unknown function OR value
-# Option (b) of §4: move the 4 candidate builders to the module that owns their facts.
-awk -F'\t' 'BEGIN{OFS="\t"} $1=="resumable-migration.mjs" && $4=="pendingTargetDriftCandidates"{$5="slices"} $1=="resumable-migration.mjs" && $4=="pendingVisualUnbackedCandidates"{$5="visual"} $1=="resumable-migration.mjs" && ($4=="moduleDecisionCandidate"||$4=="moduleEdgeTargetsFrom"){$5="census"} {print}' data/owners.tsv > data/owners-b.tsv
-node $T/modgraph.mjs data/owners.tsv data/edges.tsv samples > data/modgraph-a.txt
-LAYER_ORDER='slices>visual>census>decisions' node $T/modgraph.mjs data/owners-b.tsv data/edges.tsv samples > data/modgraph-b.txt
+node $T/assign.mjs data/decls-05e6049.tsv a > data/owners.tsv     # exits 1 on any missing, duplicate or unknown declaration
+node $T/assign.mjs data/decls-05e6049.tsv b > data/owners-b.tsv   # option (b) of §4: the 4 candidate builders move to their fact modules
+node $T/writesites.mjs owned data/owners.tsv data/writes-05e6049.tsv > data/writes-owned.tsv
+node $T/writesites.mjs wrapper-calls data/owners.tsv data/writes-05e6049.tsv data/edges.tsv > data/wrapper-calls.tsv
+node $T/modgraph.mjs data/owners.tsv data/edges.tsv --samples > data/modgraph-a.txt
+node $T/modgraph.mjs data/owners-b.tsv data/edges.tsv --layer-order='slices>visual>census>decisions' --samples > data/modgraph-b.txt
 ```
+
+The tools' own tests: `node --test docs/architecture/phase0/tools/test/` (from the repo root).
 
 ---
 
@@ -49,11 +53,35 @@ LAYER_ORDER='slices>visual>census>decisions' node $T/modgraph.mjs data/owners-b.
 | Design source (Q6) | open | two options, each with owner, scope and hours (§6a) |
 | Estimates | ≈139 h | **Track A ≈101 h, Track B ≈48 h (up to ≈71 h with the conditional items), release 2 h. Core-first cut ≈27 h** (§8) |
 
+Figures in this table are as of revision 2. §0.1 lists the ones revision 2.1 changed.
+
+### 0.1 Revision 2.1: datasets regenerated with the corrected analyzers
+
+The analyzers now resolve references with the TypeScript checker, and they fail (exit 1, no output) on any construct they cannot classify instead of dropping a row (Appendix E). Every dataset was regenerated at BASE with them. Every revision-2 row is still present (for `edges.tsv`, every caller/callee pair; rows now carry a sixth `via` column), apart from the 6 duplicate `fv` rows below; no edge count changed; the 4 option-(b) moves are the same.
+
+| Figure | Revision 2 | Revision 2.1 | Exact reason |
+|---|---|---|---|
+| `decls` rows | 1,221 | 1,232 | +11 `<module-init>` rows: each file's top-level statements (the `if (isMainModule(import.meta.url)) …` CLI entry blocks) were not counted before |
+| Owned declarations (M3c, §2, Appendix A) | 1,191 | 1,202 | the same 1,191 named declarations, plus the 11 `<module-init>` rows, all owned by transport (§2) |
+| transport declaration spans | 2,660 | 2,732 | +72 lines of the 11 entry blocks |
+| Primitive fs write calls, monolith / engine (M5) | 39 / 90 | 40 / 96 | +6 calls the earlier scan missed: `open` with numeric `fsConstants` flags at `operator-signer-service.mjs:35`, `operator-signer.mjs:74` and `record-decision.mjs:1391`; `handle.write` at `record-decision.mjs:1394`, `:1396` and `resumable-migration.mjs:3445` (`write` was not in the primitive list) |
+| Write calls owned by store / decisions (§2.1) | 20 / 3 | 24 / 5 | the 6 calls above: `appendDurably` ×3 and `sealHistoryTail` are store; `writeOperatorOnly` and `openSignerStore` are decisions |
+| Caller/wrapper pairs (M5b) | 66 | 66 | unchanged; every curated wrapper is now proven to reach a write |
+| Raw `formatVersion` comparisons (M6c) | 57 | 51 | 6 comparisons were printed twice because both operands matched: `artifact/artifact-migration.mjs:201`, `:205`; `resumable-migration.mjs:651`; `upgrades/upgrade-migration.mjs:625`; `upgrades/upgrade-v4-to-v5.mjs:132`, `:318` |
+| `imports` rows | 113 | 113 | unchanged |
+| Declaration pairs in `edges.tsv` | 3,326 | 3,370 | +24 pairs from the `<module-init>` rows (each references `isMainModule` and its CLI runner; `cli/run-migration.mjs` and `mcp-server.mjs` also reference `exitCodeFor`); +20 pairs through dynamic `import()` that were not resolved before (member reads, destructuring and `.then` callbacks, at `cli/toolkit-identity.mjs:99`, `:114`; `migration-utils.mjs:1433`; `record-decision.mjs:1364`, `:1373`, `:1377`, `:1383`, `:1457`, `:1514`, `:1543`; `resumable-migration.mjs:5486`, `:5695`, `:6350`, `:7345`, `:11295`, `:15991`). None lost |
+| Cross-module pairs (a) / (b) | 1,656 / 1,653 | 1,665 / 1,662 | +9 of the 44 new pairs cross modules: transport→lifecycle 2, transport→census 1, transport→decisions 1 (the signer service's entry block), decisions→leaf 1, **lifecycle→transport 2**, lifecycle→census 1, lifecycle→decisions 1 |
+| Violating pairs (a) / (b) / (c) / best order with (a) | 176 / 132 / 133 / 135 | 178 / 134 / 135 / 137 | +2 lifecycle→transport (9 → 11): `resumable-migration.mjs:6349 artifactBindingFor` destructures `artifactArgumentsFor` and `artifactCommandFor` out of the lazy artifact-engine import at `:6350`. Option (b) is still the minimum over all 24 orders |
+| Upward violating pairs | 116 | 118 | the same +2 |
+| 2-cycles (b) | census↔lifecycle 23/50, decisions↔lifecycle 11/13, decisions↔transport 8/33, lifecycle↔transport 9/43 | 23/51, 11/14, 8/34, 11/45 | the new pairs above. The single SCC is unchanged |
+| A8 lifecycle estimate (§8) | 11.4 h | 11.7 h | 9 → 11 outgoing violations at 8 pairs per hour |
+| `owners-b.tsv` | an awk edit of `owners.tsv` | `assign.mjs … b` | the same 4 moves, now in the frozen table, so a stale override fails instead of matching nothing |
+
 ---
 
 ## 1. Re-measured metrics at BASE
 
-The values are unchanged from revision 1. The commands are rewritten to run from `docs/architecture/phase0/`: `git -C $R` keeps path arguments repo-relative. Each command was first run at the plan's audit SHA (f080921); where it reproduces the plan's number there, the method is the same.
+Revision 2.1 changed M3c, M5 and M6c (§0.1); every other value is unchanged from revision 1. The commands are rewritten to run from `docs/architecture/phase0/`: `git -C $R` keeps path arguments repo-relative. Each command was first run at the plan's audit SHA (f080921); where it reproduces the plan's number there, the method is the same.
 
 | # | Metric | Plan (f080921) | Same command at f080921 | **BASE** | Command |
 |---|---|---|---|---|---|
@@ -61,13 +89,13 @@ The values are unchanged from revision 1. The commands are rewritten to run from
 | M2 | `resumable-migration.mjs` lines | 17,057 | 17,057 ✓ | **16,939** | `git -C $R show $BASE:packages/migration-engine/src/resumable-migration.mjs \| wc -l` |
 | M3 | Top-level functions in that file | 336 | 336 ✓ | **334** (+1 class) | `node $T/inventory.mjs $R $BASE decls \| awk -F'\t' '$1=="resumable-migration.mjs" && $4=="fn"' \| wc -l` |
 | M3b | "Exported" in that file | 185 | 185 ✓ | **185** = 115 functions + 1 class + 69 values | `git -C $R show $BASE:packages/migration-engine/src/resumable-migration.mjs \| grep -c '^export '` |
-| M3c | Top-level declarations, whole engine | — | — | **1,191** = 852 functions + 4 classes + 335 values | `node $T/inventory.mjs $R $BASE decls \| awk -F'\t' '$4!="reexport"' \| wc -l` |
+| M3c | Top-level declarations, whole engine | — | — | **1,191** = 852 functions + 4 classes + 335 values; plus 11 `<module-init>` rows = **1,202** owned | `node $T/inventory.mjs $R $BASE decls \| awk -F'\t' '$4!="reexport" && $4!="module-init"' \| wc -l` and `node $T/inventory.mjs $R $BASE decls \| awk -F'\t' '$4=="module-init"' \| wc -l` |
 | M4 | Modules importing the monolith / distinct names | 11 / 71 | 11 / 71 ✓ | **11 / 71** | `node $T/inventory.mjs $R $BASE imports \| awk -F'\t' '$3 ~ /resumable-migration\.mjs$/ && $1!="core.mjs" {print $1}' \| sort -u \| wc -l` and `node $T/inventory.mjs $R $BASE imports \| awk -F'\t' '$3 ~ /resumable-migration\.mjs$/ && $1!="core.mjs" {n=split($4,a,","); for(i=1;i<=n;i++) print a[i]}' \| sort -u \| wc -l` |
-| M5 | Primitive fs write calls (AST): monolith / engine | 78 / 117 | not reproducible | **39 / 90** | `node $T/inventory.mjs $R $BASE writes \| awk -F'\t' '$1=="resumable-migration.mjs"' \| wc -l` and `node $T/inventory.mjs $R $BASE writes \| wc -l` |
+| M5 | Primitive fs write calls (AST): monolith / engine | 78 / 117 | not reproducible | **40 / 96** | `node $T/inventory.mjs $R $BASE writes \| awk -F'\t' '$1=="resumable-migration.mjs"' \| wc -l` and `node $T/inventory.mjs $R $BASE writes \| wc -l` |
 | M5b | Caller/wrapper pairs into write wrappers | — | — | **66** | `wc -l < data/wrapper-calls.tsv` (built in Appendix B.2) |
 | M6 | Supported record formats | 16 (4–19) | ✓ | **16 (4–19)** | `git -C $R show $BASE:packages/migration-engine/src/resumable-migration.mjs \| grep -nE '^export const (EARLIEST_SUPPORTED_FORMAT\|MIGRATION_FORMAT_VERSION) '` |
 | M6b | `uses*Format` gate calls | — | 72 | **72** | `git -C $R grep -hE '\buses(DiscoveryCompleteness\|CapabilityOwnership\|UiVerification\|ArtifactDelegation\|DesignSource\|MultiSource\|SliceRework\|VisualAcceptance\|RequiredObservations\|DirectLedgerDecisions)\(' $BASE -- packages/migration-engine/src \| wc -l` |
-| M6c | Raw `formatVersion` comparisons (AST) | — | — | **57** | `node $T/inventory.mjs $R $BASE fv \| wc -l` |
+| M6c | Raw `formatVersion` comparisons (AST) | — | — | **51** | `node $T/inventory.mjs $R $BASE fv \| wc -l` |
 | M7 | Growth from v1.0.0 | +40% / +46%, 28 releases | ✓ at v1.3.17 | **engine +40.1%, SKILL.md +46.3%; 30 releases** | `git -C $R show v1.0.0:skills/start-migration/SKILL.md \| wc -l` and the same at `$BASE`; engine = M1 at `v1.0.0`; `git -C $R tag -l 'v*' --sort=creatordate \| sed -n '/v1.0.0/,/v1.3.19/p' \| wc -l` |
 | M8 | Instruction words | ~31,000 | 31,247 | **31,300** | `git -C $R ls-tree -r --name-only $BASE skills/start-migration \| grep '\.md$' \| while read f; do git -C $R show $BASE:$f; done \| wc -w` |
 | M9 | Test lines / largest file | 50,405 / 20,340 | ✓ | **50,580 / 20,444** | `git -C $R ls-tree -r --name-only $BASE \| grep -E '^(packages/migration-engine/test\|test)/.*\.(mjs\|ts)$' \| while read f; do git -C $R show $BASE:$f; done \| wc -l` |
@@ -94,19 +122,19 @@ The real size problem is structural (§3, §4), not dead code. Deleting all of t
 
 ## 2. Ownership map (PROPOSAL)
 
-**Result:** all **1,191** top-level declarations (852 functions, 4 classes, 335 values) are assigned to exactly one owner, and `assign.mjs` exits 0. As a negative check, a copy of `assign.mjs` with `LATE_DECISION_KINDS` removed exits 1 (`MISSING`), and a copy that also assigns it to store exits 1 (`DUPLICATE`). The full list is in Appendix A.
+**Result:** all **1,202** owned declarations, namely the 1,191 top-level declarations (852 functions, 4 classes, 335 values) and 11 `<module-init>` rows, are assigned to exactly one owner, and `assign.mjs` exits 0 under both options. As a negative check, a copy of `assign.mjs` with `LATE_DECISION_KINDS` removed exits 1 (`MISSING`), and a copy that also assigns it to store exits 1 (`DUPLICATE`); both print nothing, under either option. The full list is in Appendix A.
 
-| Owner | Functions/classes | Values | Lines (declaration spans) | Option (b) delta |
-|---|---|---|---|---|
-| store | 97 | 9 | 2,067 | — |
-| formats | 80 | 96 | 1,848 | — |
-| lifecycle | 155 | 38 | 8,798 | — |
-| decisions | 150 | 49 | 3,993 | −4 functions (the candidate builders) |
-| slices | 66 | 18 | 2,481 | +1 `pendingTargetDriftCandidates` |
-| census | 76 | 43 | 4,473 | +2 `moduleDecisionCandidate`, `moduleEdgeTargetsFrom` |
-| visual | 93 | 39 | 3,566 | +1 `pendingVisualUnbackedCandidates` |
-| transport | 69 | 28 | 2,660 | — |
-| **unassigned (leaf)** | 70 | 15 | 618 | — |
+| Owner | Functions/classes | Values | Module-init | Lines (declaration spans) | Option (b) delta |
+|---|---|---|---|---|---|
+| store | 97 | 9 | — | 2,067 | — |
+| formats | 80 | 96 | — | 1,848 | — |
+| lifecycle | 155 | 38 | — | 8,798 | — |
+| decisions | 150 | 49 | — | 3,993 | −4 functions (the candidate builders) |
+| slices | 66 | 18 | — | 2,481 | +1 `pendingTargetDriftCandidates` |
+| census | 76 | 43 | — | 4,473 | +2 `moduleDecisionCandidate`, `moduleEdgeTargetsFrom` |
+| visual | 93 | 39 | — | 3,566 | +1 `pendingVisualUnbackedCandidates` |
+| transport | 69 | 28 | 11 | 2,732 | — |
+| **unassigned (leaf)** | 70 | 15 | — | 618 | — |
 
 Leaf holds path, hash, shape, git and content-identity primitives. **Reason it is unassigned:** none of these holds a domain guarantee. PROPOSAL: a leaf `shared/` module below formats (Q3).
 
@@ -138,21 +166,26 @@ Leaf holds path, hash, shape, git and content-identity primitives. **Reason it i
      - `NEXT_APP_FILES` / `NEXT_ROOT_FILES` → census, because the file-name rule does not apply to scanner vocabulary.
 - **R6.** `rootRelativePath`, `targetRelativePath` and `legacyRelativePath` → **slices**, which owns the DR4 claims model. `recordRelative` → **leaf**.
 
+**Revision 2.1 change:**
+- **R7 (module-init → transport).** A file's top-level statements form one `<module-init>` declaration. At BASE, 11 files have one, and each is exactly a CLI entry block, `if (isMainModule(import.meta.url)) { <runner>(…).catch(…) }`: `artifact/run-artifact.mjs`, `cli/advance-migration.mjs`, `cli/discover-module.mjs`, `cli/run-migration.mjs`, `cli/toolkit-identity.mjs`, `cli/update-migration-registry.mjs`, `cli/validate-migration.mjs`, `mcp-server.mjs`, `operator-signer-service.mjs`, `record-decision.mjs` and `upgrades/upgrade-migration.mjs`. Starting a process from argv is transport's job, so all 11 are owned by transport. `assign.mjs` lists these files explicitly, so top-level statements in any other file make it exit 1 until an owner is chosen.
+  - **Edges:** the entry blocks add 24 pairs. Only one crosses a module: `operator-signer-service.mjs <module-init> → runSignerService` (transport→decisions), a downward edge. They add no violation and no cycle.
+  - **Implication for extraction:** three files mix a CLI entry with domain code: `record-decision.mjs` (decisions), `operator-signer-service.mjs` (decisions) and `upgrades/upgrade-migration.mjs` (lifecycle, formats and store). In Track A, each entry block moves to transport as a thin executable, and the domain module keeps no top-level side effect. The installed command names do not change.
+
 ### 2.1 Write sites
 
-Unchanged in count. All **90** primitive calls and **66** caller/wrapper pairs have an owner (Appendix B).
+All **96** primitive calls (90 in revision 2; §0.1) and **66** caller/wrapper pairs have an owner (Appendix B).
 
 | Owner of enclosing function | Primitive calls | Wrapper pairs |
 |---|---|---|
-| store | 20 | 8 |
+| store | 24 | 8 |
 | lifecycle | 62 | 40 |
 | slices | 3 | 9 |
-| decisions | 3 | 2 |
+| decisions | 5 | 2 |
 | census | 1 | 3 |
 | visual | 1 | 3 |
 | transport | 0 | 1 |
 
-The only change from revision 1: the `writeJournal` alias is now owned by lifecycle, so its pair moved from "(value)" to lifecycle.
+Revision 2 changed one thing: the `writeJournal` alias is now owned by lifecycle, so its pair moved from "(value)" to lifecycle. Revision 2.1 adds the six calls the earlier scan missed: four in store (`appendDurably` ×3, `sealHistoryTail`) and two in decisions (`writeOperatorOnly`, `openSignerStore`). The wrapper pairs are unchanged.
 
 
 ---
@@ -203,22 +236,22 @@ Excluded as **same name, different rule**, because they belong to different reco
 
 **Base direction:** `transport → lifecycle → {middle tier} → store → formats → leaf`. Downward edges may skip layers.
 **Nodes:** functions, classes and, new in revision 2, **values**, so a function that reads a constant owned by another module counts.
-**Graph:** 3,326 declaration-level edges. 1,656 pairs cross a module boundary in (a), 1,653 in (b).
-**Commands:** see the header. `LAYER_ORDER` sets the order inside the middle tier; leaving it unset forbids every sibling edge.
+**Graph:** 3,370 declaration-level caller/callee pairs (2,774 local, 576 through a named import, 20 through a dynamic `import()`). 1,665 pairs cross a module boundary in (a), 1,662 in (b).
+**Commands:** see the header. `--layer-order=w>x>y>z` sets the order inside the middle tier (each may call the ones to its right); without it every sibling edge is forbidden. `modgraph.mjs` refuses to run while a `LAYER_ORDER` environment variable is set, so a stale shell cannot change the rules.
 
 ### 4.0 Layering options (Q1)
 
 | Option | Ownership | Middle-tier order | Violating pairs | Upward | Sibling | Decisions → siblings |
 |---|---|---|---|---|---|---|
-| **(a)** siblings forbidden | `owners.tsv` | none | **176** | 116 | 60 | 13 |
-| **(b)** candidate builders move to the module that owns their facts; decisions keeps creation, grouping, the offer==accept predicate, relay and authority | `owners-b.tsv` | `slices > visual > census > decisions` | **132** | 116 | 16 | 10 |
-| **(c)** best other order, with the (b) ownership | `owners-b.tsv` | `slices > census > visual > decisions` | 133 | 116 | 17 | 10 |
-| for reference: best order with (a) ownership | `owners.tsv` | `slices > census > decisions > visual` | 135 | 116 | 19 | 7 |
+| **(a)** siblings forbidden | `owners.tsv` | none | **178** | 118 | 60 | 13 |
+| **(b)** candidate builders move to the module that owns their facts; decisions keeps creation, grouping, the offer==accept predicate, relay and authority | `owners-b.tsv` | `slices > visual > census > decisions` | **134** | 118 | 16 | 10 |
+| **(c)** best other order, with the (b) ownership | `owners-b.tsv` | `slices > census > visual > decisions` | 135 | 118 | 17 | 10 |
+| for reference: best order with (a) ownership | `owners.tsv` | `slices > census > decisions > visual` | 137 | 118 | 19 | 7 |
 
 All 24 orders of the middle tier were computed with the (b) ownership. **(b) is the minimum**; no other order gives fewer violations, so (c) is shown only for comparison.
 
 **Recommendation (PROPOSAL): option (b).**
-- It removes 44 violating pairs compared with (a). All of them are sibling edges; the 116 upward edges are the same under every option.
+- It removes 44 violating pairs compared with (a). All of them are sibling edges; the 118 upward edges are the same under every option.
 - **decisions remains the single owner of the offer and write predicates.** `decisionKindAllowed`, `decisionAppliesToCandidate`, `createDecisionCandidate`, `createNewFormatDecisionGroup`, `resolveGroupDecision`, the append writers, relay and authority all stay in decisions.
 - The fact modules call down into decisions to *create* candidates. decisions never reads a fact module except through its projection.
 - **Remaining work:** the 10 decisions → sibling pairs all come from the two projection aggregators. `record-decision.mjs:420 derivePendingDecisions` reads census, slices and visual facts; `artifact/artifact-migration.mjs:3133 artifactVisualDecisions` reads visual facts. In Track A3, both should receive those facts as input from lifecycle. That is a behavior-preserving parameterization.
@@ -230,7 +263,7 @@ Pair counts for (a) and (b). The first count of each pair is the first module ca
 | slices → lifecycle | 28 | 28 | census → lifecycle | 23 | 23 |
 | census → decisions | 13 | — | decisions → lifecycle | 11 | 11 |
 | slices → census | 11 | — | visual → lifecycle | 9 | 9 |
-| lifecycle → transport | 9 | 9 | store → lifecycle | 9 | 9 |
+| lifecycle → transport | 11 | 11 | store → lifecycle | 9 | 9 |
 | decisions → transport | 8 | 8 | slices → visual | 6 | — |
 | decisions → visual | 6 | 5 | visual → decisions | 5 | — |
 | slices → decisions | 4 | — | decisions → census | 4 | 4 |
@@ -241,11 +274,13 @@ Pair counts for (a) and (b). The first count of each pair is the first module ca
 | slices → transport | 2 | 2 | store → decisions | 2 | 2 |
 | store → slices | 2 | 2 | census → visual | 1 | 1 |
 
+lifecycle → transport rose from 9 to 11 in revision 2.1: `resumable-migration.mjs:6349 artifactBindingFor` destructures the transport functions `artifactArgumentsFor` and `artifactCommandFor` out of the lazy artifact-engine import (`:6350`), which revision 2 did not resolve.
+
 **Cycles.** Under (b) the module graph is still **one strongly connected component**, covering every node except leaf; leaf now calls nothing. The direct 2-cycles are listed below, with the pair count in each direction:
 - formats↔lifecycle 3/210, formats↔transport 3/16
-- census↔lifecycle 23/50, census↔slices 2/12, census↔store 26/3, census↔decisions 13/4, census↔visual 1/2
-- decisions↔store 12/2, decisions↔visual 5/5, decisions↔lifecycle 11/13, decisions↔transport 8/33, decisions↔slices 1/3
-- lifecycle↔store 239/9, lifecycle↔transport 9/43, lifecycle↔visual 29/9, lifecycle↔slices 46/28
+- census↔lifecycle 23/51, census↔slices 2/12, census↔store 26/3, census↔decisions 13/4, census↔visual 1/2
+- decisions↔store 12/2, decisions↔visual 5/5, decisions↔lifecycle 11/14, decisions↔transport 8/34, decisions↔slices 1/3
+- lifecycle↔store 239/9, lifecycle↔transport 11/45, lifecycle↔visual 29/9, lifecycle↔slices 46/28
 - slices↔store 55/2, slices↔visual 6/3, store↔visual 4/19
 
 Every violating pair is listed in Appendix C: option (b) in full, option (a) as counts.
@@ -338,7 +373,7 @@ One script, `scripts/check-architecture.mjs`, built on the same TypeScript AST s
 
 1. **Single public entry.** Each module is `packages/migration-engine/src/<module>/` with exactly one entry, `index.mjs`. CI fails when any file outside `<module>/` imports a path inside it other than `index.mjs`.
 2. **No cross-module internal imports.** The same check, applied to dynamic `import()` too: `resumable-migration.mjs:107` and `cli/toolkit-identity.mjs:72` are dynamic today. `core.mjs` becomes a re-export of the `index.mjs` files only.
-3. **Dependency direction.** A rank table lives in `OWNERSHIP.md`. CI fails on any upward or sibling edge between modules. It starts with a committed baseline of the 132 pairs of option (b) in Appendix C. That file may only shrink, and each Track A phase must take its own module's outgoing count to 0.
+3. **Dependency direction.** A rank table lives in `OWNERSHIP.md`. CI fails on any upward or sibling edge between modules. It starts with a committed baseline of the 134 pairs of option (b) in Appendix C. That file may only shrink, and each Track A phase must take its own module's outgoing count to 0.
 4. **One owner per guarantee.** `OWNERSHIP.md` has one row per guarantee: guarantee, owning module, public function, and adversarial test id. CI checks that each named module and test exists and that no guarantee appears twice. Mechanical gates back the rows:
    - fs write primitives only in `store/` and the committed allow-list (lock, journal, signer);
    - `formatVersion` and `uses*Format` only in `formats/`;
@@ -393,8 +428,8 @@ Both options **keep the rule that a record's design source never changes in plac
 | A4 slices | 2,511 | 30 | **7.8 h** (6–10) | 2.5 + 3.8 + 1.5 |
 | A5 census | 4,486 | 26 | **9.2 h** (7–12) | 4.5 + 3.3 + 1.5 |
 | A6 visual | 3,605 | 12 | **6.6 h** (5–8) | 3.6 + 1.5 + 1.5 |
-| A7 transport/install | 2,660 + 1,238 (install code) | 0 | **5.4 h** (4–7) | 2.7 + 1.2 + 1.5 |
-| A8 lifecycle (residue) | 8,798 | 9 | **11.4 h** (9–14) | 8.8 + 1.1 + 1.5 |
+| A7 transport/install | 2,732 + 1,238 (install code) | 0 | **5.4 h** (4–7) | 2.7 + 1.2 + 1.5 |
+| A8 lifecycle (residue) | 8,798 | 11 | **11.7 h** (9–15) | 8.8 + 1.4 + 1.5 |
 | A9 instructions | — | — | **4.5 h** (3.5–6) | unchanged |
 | A10 tests | 50,580 | — | **31 h** (25–40) | unchanged |
 | **Track A** | | | **≈ 101 h ≈ 12.6 working days** | revision 1: 112 h |
@@ -476,9 +511,9 @@ The fixes go in place, in today's files, with no extraction first.
 
 ---
 
-## Appendix A — Ownership map: all 1,191 declarations
+## Appendix A — Ownership map: all 1,202 owned declarations
 
-Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = value. Source: `data/owners.tsv`, generated by `tools/assign.mjs`. Under option (b), four functions change owner; they are marked ⇢ with their (b) owner.
+Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = value; `<module-init>` = the file's top-level statements (§2, R7). Source: `data/owners.tsv`, generated by `tools/assign.mjs`. Under option (b), four functions change owner; they are marked ⇢ with their (b) owner.
 
 ### `artifact/artifact-migration.mjs`
 
@@ -494,32 +529,32 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 
 ### `artifact/run-artifact.mjs`
 
-- **transport** (4): **parseArtifactArguments**:29, **artifactDirective**:93, render:107, **runArtifactCli**:133
+- **transport** (5): **parseArtifactArguments**:29, **artifactDirective**:93, render:107, **runArtifactCli**:133, `<module-init>`:180
 
 ### `cli/advance-migration.mjs`
 
-- **transport** (3): **parseAdvanceArguments**:27, directive:56, **runAdvanceCli**:65
+- **transport** (4): **parseAdvanceArguments**:27, directive:56, **runAdvanceCli**:65, `<module-init>`:162
 
 ### `cli/discover-module.mjs`
 
-- **transport** (7): **normalizePonytailArgument**:36, sliceList:49, **parseDiscoverArguments**:61, **renderExecutionPreview**:143, renderSliceAmendment:164, directive:177, **runDiscoverCli**:197
+- **transport** (8): **normalizePonytailArgument**:36, sliceList:49, **parseDiscoverArguments**:61, **renderExecutionPreview**:143, renderSliceAmendment:164, directive:177, **runDiscoverCli**:197, `<module-init>`:381
 
 ### `cli/run-migration.mjs`
 
 - **decisions** (3): pendingApprovals:163, **decisionCandidates**:174, operatorApproval:193
-- **transport** (7): **parseRunArguments**:55, discoverArguments:108, advanceArguments:111, *TERMINAL_VALIDATION_REFUSALS*:124, **renderAuthoringRequest**:141, recordedPrefix:235, **runMigration**:244
+- **transport** (8): **parseRunArguments**:55, discoverArguments:108, advanceArguments:111, *TERMINAL_VALIDATION_REFUSALS*:124, **renderAuthoringRequest**:141, recordedPrefix:235, **runMigration**:244, `<module-init>`:569
 
 ### `cli/toolkit-identity.mjs`
 
-- **transport** (5): *COMMANDS*:30, **parseToolkitIdentityArguments**:32, artifactEngine:72, reportChange:74, **runToolkitIdentityCli**:89
+- **transport** (6): *COMMANDS*:30, **parseToolkitIdentityArguments**:32, artifactEngine:72, reportChange:74, **runToolkitIdentityCli**:89, `<module-init>`:160
 
 ### `cli/update-migration-registry.mjs`
 
-- **transport** (2): **parseRegistryArguments**:16, **runRegistryCli**:47
+- **transport** (3): **parseRegistryArguments**:16, **runRegistryCli**:47, `<module-init>`:84
 
 ### `cli/validate-migration.mjs`
 
-- **transport** (2): **parseValidateArguments**:12, **runValidateCli**:43
+- **transport** (3): **parseValidateArguments**:12, **runValidateCli**:43, `<module-init>`:61
 
 ### `discovery-scan.mjs`
 
@@ -538,7 +573,7 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 ### `mcp-server.mjs`
 
 - **decisions** (3): *CONFIRMATION_SCHEMA*:299, *ELICITATION_TIMEOUT_MS*:347, trustedDecisionRecorder:349
-- **transport** (33): *SERVER_NAME*:63, *PROTOCOL_VERSIONS*:66, *JSON_RPC_PARSE_ERROR*:68, *JSON_RPC_INVALID_REQUEST*:69, *JSON_RPC_METHOD_NOT_FOUND*:70, *JSON_RPC_INTERNAL_ERROR*:71, *INPUT_SCHEMA*:79, *RUN_INPUT_SCHEMA*:103, *RELAY_TOOL*:145, *RELAY_INPUT_SCHEMA*:146, *ARTIFACT_INPUT_SCHEMA*:158, artifactOptions:173, *REFUSED_TOOLS*:183, *APPROVAL_SHAPED_KEY*:220, **approvalShapedArgument**:221, registryFor:228, readOnly:241, runArguments:244, **createSession**:284, runTool:392, *TOOLS*:447, *PROGRESS_TOOLS*:525, *TOOLS_BY_NAME*:527, descriptorOf:529, failure:535, success:541, *toolCalls*:546, callTool:547, callToolInContext:573, **handleMessage**:649, respond:684, answeredId:696, **serve**:718
+- **transport** (34): *SERVER_NAME*:63, *PROTOCOL_VERSIONS*:66, *JSON_RPC_PARSE_ERROR*:68, *JSON_RPC_INVALID_REQUEST*:69, *JSON_RPC_METHOD_NOT_FOUND*:70, *JSON_RPC_INTERNAL_ERROR*:71, *INPUT_SCHEMA*:79, *RUN_INPUT_SCHEMA*:103, *RELAY_TOOL*:145, *RELAY_INPUT_SCHEMA*:146, *ARTIFACT_INPUT_SCHEMA*:158, artifactOptions:173, *REFUSED_TOOLS*:183, *APPROVAL_SHAPED_KEY*:220, **approvalShapedArgument**:221, registryFor:228, readOnly:241, runArguments:244, **createSession**:284, runTool:392, *TOOLS*:447, *PROGRESS_TOOLS*:525, *TOOLS_BY_NAME*:527, descriptorOf:529, failure:535, success:541, *toolCalls*:546, callTool:547, callToolInContext:573, **handleMessage**:649, respond:684, answeredId:696, **serve**:718, `<module-init>`:780
 
 ### `migration-policy.mjs`
 
@@ -571,6 +606,7 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 
 - **decisions** (2): writeOperatorOnly:34, **runSignerService**:39
 - **formats** (1): ***SERVICE_CONFIG_FILE***:32
+- **transport** (1): `<module-init>`:73
 
 ### `operator-signer.mjs`
 
@@ -586,7 +622,7 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 
 - **decisions** (53): ***DECISION_KINDS***:107, **challengeFor**:128, ***APPROVAL_CHANNELS***:143, **channelOf**:145, **autoApprovalChannel**:159, **approvedByPhrase**:167, APPROVAL_EVIDENCE:170, GROUP_APPROVAL_EVIDENCE:178, ***APPROVAL_EVIDENCE_PHRASES***:186, operatorIdentity:260, ***rationaleDigestOf***:268, ***SIGNER_UNAVAILABLE***:271, blockedFor:273, *REVIEW_EFFECTS*:281, **reviewFor**:291, inertText:327, indentReview:331, renderEvidence:332, **renderDecisionReview**:339, **buildDecision**:357, derivePendingDecisions:420, decisionCheckpoint:753, *PROJECTION_PRECEDENCE*:762, decisionProjection:764, **pendingDecisionCandidates**:782, **projectDecisions**:802, moduleRecompute:822, **recordNewFormatDecisionGroup**:849, withOperatorApproval:902, **ledgerFileForChannel**:1044, appendDecisions:1047, **groupFactsDigest**:1075, ledgerHeadFor:1083, autoAuthorization:1102, appendGroupDecisions:1121, appendNewFormatGroupDecision:1179, **assertReviewedCandidateCurrent**:1218, approveDecisionGroup:1226, approveCandidate:1259, webauthnProtocol:1325, refused:1326, attestedRecompute:1328, attestedBinding:1344, **reviewAttestedCandidate**:1411, **beginAttestedDecision**:1420, **completeAttestedDecision**:1437, deriveArtifactDecisions:1510, *BOUND_TO_FIELDS*:1624, **auditDecisionLedger**:1632, groupFindings:1754, verifyRecord:1818, **reviewReference**:2011, **relayOperatorDecision**:2020
 - **store** (1): appendDurably:1388
-- **transport** (3): **parseDecisionArguments**:191, runArtifactDecisionCli:1547, **runRecordDecisionCli**:1892
+- **transport** (4): **parseDecisionArguments**:191, runArtifactDecisionCli:1547, **runRecordDecisionCli**:1892, `<module-init>`:2058
 
 ### `resumable-migration.mjs`
 
@@ -609,7 +645,7 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 - **formats** (7): upgradesRoot:65, moduleUpgradeRoot:68, transactionRoot:74, classify:219, confirmationIdFor:416, **renderUpgradePreview**:433, **renderRollbackPreview**:755
 - **lifecycle** (14): *contractPath*:51, ***TRANSACTION_STATES***:55, lockPathFor:71, readJournal:132, *writeJournal*:136, **recoverTransaction**:145, resolveContext:230, **previewUpgrade**:257, acquireLock:497, **executeUpgrade**:505, restorableUpgrade:648, **previewRollback**:671, **executeRollback**:766, **recoverUpgrade**:863
 - **store** (7): exists:77, assertNoSymlink:87, readTree:98, manifestOf:113, writeTree:121, sameManifest:129, commitReplacement:453
-- **transport** (2): **parseUpgradeArguments**:890, **runUpgradeCli**:928
+- **transport** (3): **parseUpgradeArguments**:890, **runUpgradeCli**:928, `<module-init>`:995
 - **unassigned:leaf** (1): sha256:63
 
 ### `upgrades/upgrade-v4-to-v5.mjs`
@@ -624,7 +660,7 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 
 ## Appendix B — Filesystem write sites
 
-### B.1 The 90 primitive fs mutation calls
+### B.1 The 96 primitive fs mutation calls
 
 | Site | Enclosing function | Call | Owner | Target-state note |
 |---|---|---|---|---|
@@ -648,15 +684,21 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 | `module-lock.mjs:175` | `writeJournalAtomic` | `open` | lifecycle | lock / journal / recovery, so a store allow-list candidate |
 | `module-lock.mjs:177` | `writeJournalAtomic` | `handle.writeFile` | lifecycle | lock / journal / recovery, so a store allow-list candidate |
 | `module-lock.mjs:182` | `writeJournalAtomic` | `rename` | lifecycle | lock / journal / recovery, so a store allow-list candidate |
+| `operator-signer-service.mjs:35` | `writeOperatorOnly` | `open` | decisions | **not in store**: route through store |
 | `operator-signer-service.mjs:36` | `writeOperatorOnly` | `handle.writeFile` | decisions | **not in store**: route through store |
+| `operator-signer.mjs:74` | `openSignerStore` | `open` | decisions | signer store, exclusive create (DR12), so a store allow-list candidate |
 | `record-decision.mjs:1062` | `appendDecisions` | `mkdir` | decisions | **not in store**: route through store |
 | `record-decision.mjs:1063` | `appendDecisions` | `appendFile` | decisions | **not in store**: route through store |
 | `record-decision.mjs:1390` | `appendDurably` | `mkdir` | store |  |
+| `record-decision.mjs:1391` | `appendDurably` | `open` | store |  |
+| `record-decision.mjs:1394` | `appendDurably` | `handle.write` | store |  |
+| `record-decision.mjs:1396` | `appendDurably` | `handle.write` | store |  |
 | `resumable-migration.mjs:3383` | `appendHistory` | `mkdir` | store |  |
 | `resumable-migration.mjs:3384` | `appendHistory` | `appendFile` | store |  |
 | `resumable-migration.mjs:3400` | `assertHistoryAppendable` | `mkdir` | store |  |
 | `resumable-migration.mjs:3401` | `assertHistoryAppendable` | `open` | store |  |
 | `resumable-migration.mjs:3443` | `sealHistoryTail` | `open` | store |  |
+| `resumable-migration.mjs:3445` | `sealHistoryTail` | `handle.write` | store |  |
 | `resumable-migration.mjs:3446` | `sealHistoryTail` | `handle.truncate` | store |  |
 | `resumable-migration.mjs:3540` | `recoverPendingAdvance` | `rm` | lifecycle | lock / journal / recovery, so a store allow-list candidate |
 | `resumable-migration.mjs:3549` | `recoverPendingAdvance` | `rm` | lifecycle | lock / journal / recovery, so a store allow-list candidate |
@@ -751,35 +793,35 @@ Format: per file, `module (count): name:line`. **Bold** = exported; *italic* = v
 
 ## Appendix C — Violating pairs
 
-### C.1 Option (b), recommended: all 132 caller→callee pairs
+### C.1 Option (b), recommended: all 134 caller→callee pairs
 
 The callee's file is omitted when it is the caller's file.
 
 #### census->lifecycle (23)
 
+- `artifact/artifact-migration.mjs:architectureFindings -> asEngineFault`
+- `artifact/artifact-migration.mjs:legacyDependencies -> asEngineFault`
+- `artifact/artifact-migration.mjs:sourceRequirements -> asEngineFault`
 - `artifact/artifact-migration.mjs:structuralParser -> asEngineFault`
 - `artifact/artifact-migration.mjs:targetProject -> asEngineFault`
-- `artifact/artifact-migration.mjs:legacyDependencies -> asEngineFault`
-- `artifact/artifact-migration.mjs:architectureFindings -> asEngineFault`
-- `artifact/artifact-migration.mjs:validateSourceInventory -> consumedAtCheckpoint`
-- `artifact/artifact-migration.mjs:sourceRequirements -> asEngineFault`
 - `artifact/artifact-migration.mjs:validateCompleteness -> asEngineFault`
 - `artifact/artifact-migration.mjs:validateCompleteness -> engineFault`
-- `resumable-migration.mjs:assertLegacyDiscoveryChecklist -> assertEvidenceChecklist`
-- `resumable-migration.mjs:assertTargetAssessmentChecklist -> assertEvidenceChecklist`
-- `resumable-migration.mjs:validateLegacyInventory -> assertEvidenceResolves`
-- `resumable-migration.mjs:validateLegacyInventory -> assertOpenSpecIds`
-- `resumable-migration.mjs:assertLegacyEvidenceWithinBoundary -> evidencePathClaim`
-- `resumable-migration.mjs:assertLegacyEvidenceWithinBoundary -> resolveEvidencePath`
-- `resumable-migration.mjs:validateDiscoveryCompleteness -> assertEvidenceChecklist`
+- `artifact/artifact-migration.mjs:validateSourceInventory -> consumedAtCheckpoint`
 - `resumable-migration.mjs:assertAdoptedTargetEvidence -> evidencePathClaim`
 - `resumable-migration.mjs:assertAdoptedTargetEvidence -> resolveEvidencePath`
-- `resumable-migration.mjs:validateTargetInventory -> assertEvidenceResolves`
+- `resumable-migration.mjs:assertLegacyDiscoveryChecklist -> assertEvidenceChecklist`
 - `resumable-migration.mjs:assertLegacyEvidenceAttributes -> evidencePathClaim`
 - `resumable-migration.mjs:assertLegacyEvidenceAttributes -> resolveEvidencePath`
+- `resumable-migration.mjs:assertLegacyEvidenceWithinBoundary -> evidencePathClaim`
+- `resumable-migration.mjs:assertLegacyEvidenceWithinBoundary -> resolveEvidencePath`
+- `resumable-migration.mjs:assertTargetAssessmentChecklist -> assertEvidenceChecklist`
 - `resumable-migration.mjs:reopenDiscoveryUnderLock -> module-lock.mjs:writeJournalAtomic`
 - `resumable-migration.mjs:reopenDiscoveryUnderLock -> ADVANCE_JOURNAL`
 - `resumable-migration.mjs:reopenDiscoveryUnderLock -> activeArtifact`
+- `resumable-migration.mjs:validateDiscoveryCompleteness -> assertEvidenceChecklist`
+- `resumable-migration.mjs:validateLegacyInventory -> assertEvidenceResolves`
+- `resumable-migration.mjs:validateLegacyInventory -> assertOpenSpecIds`
+- `resumable-migration.mjs:validateTargetInventory -> assertEvidenceResolves`
 
 
 #### census->slices (2)
@@ -796,23 +838,23 @@ The callee's file is omitted when it is the caller's file.
 #### decisions->census (4)
 
 - `artifact/artifact-migration.mjs:artifactOperatorDecisions -> validateSourceInventory`
-- `record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:previewDiscoveryScan`
 - `record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:legacySourceBinding`
 - `record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:legacySourcesOf`
+- `record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:previewDiscoveryScan`
 
 
 #### decisions->lifecycle (11)
 
-- `artifact/artifact-migration.mjs:artifactVisualDecisions -> consumedAtCheckpoint`
-- `artifact/artifact-migration.mjs:artifactOperatorDecisions -> locate`
 - `artifact/artifact-migration.mjs:artifactOperatorDecisions -> assertInvocationMatches`
 - `artifact/artifact-migration.mjs:artifactOperatorDecisions -> freshness`
+- `artifact/artifact-migration.mjs:artifactOperatorDecisions -> locate`
+- `artifact/artifact-migration.mjs:artifactVisualDecisions -> consumedAtCheckpoint`
 - `operation-sequence.mjs:deriveOperationSequence -> resumable-migration.mjs:previewMigrationExecution`
-- `operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:previewMigrationExecution`
 - `operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:assertExecutionConfirmation`
 - `operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:bootstrapMigration`
-- `record-decision.mjs:withOperatorApproval -> module-lock.mjs:withModuleLock`
+- `operation-sequence.mjs:operationSequenceRunner -> resumable-migration.mjs:previewMigrationExecution`
 - `record-decision.mjs:completeAttestedDecision -> module-lock.mjs:withModuleLock`
+- `record-decision.mjs:withOperatorApproval -> module-lock.mjs:withModuleLock`
 - `resumable-migration.mjs:isAutoAuthority -> DEFAULT_MODE`
 
 
@@ -825,48 +867,50 @@ The callee's file is omitted when it is the caller's file.
 
 - `artifact/artifact-migration.mjs:reconcileArtifactDecisions -> engine-paths.mjs:engineCommand`
 - `mcp-server.mjs:trustedDecisionRecorder -> record-decision.mjs:runRecordDecisionCli`
-- `operator-approval.mjs:terminalDecisionRecorder -> record-decision.mjs:runRecordDecisionCli`
 - `operator-approval.mjs:autoDecisionRecorder -> record-decision.mjs:runRecordDecisionCli`
+- `operator-approval.mjs:terminalDecisionRecorder -> record-decision.mjs:runRecordDecisionCli`
 - `record-decision.mjs:derivePendingDecisions -> engine-paths.mjs:engineCommand`
 - `record-decision.mjs:recordNewFormatDecisionGroup -> resumable-migration.mjs:BLOCKED_EXIT_CODE`
-- `record-decision.mjs:withOperatorApproval -> resumable-migration.mjs:BLOCKED_EXIT_CODE`
 - `record-decision.mjs:relayOperatorDecision -> runRecordDecisionCli`
+- `record-decision.mjs:withOperatorApproval -> resumable-migration.mjs:BLOCKED_EXIT_CODE`
 
 
 #### decisions->visual (5)
 
-- `artifact/artifact-migration.mjs:artifactVisualDecisions -> resumable-migration.mjs:visualAuthorityOf`
+- `artifact/artifact-migration.mjs:artifactVisualDecisions -> artifactUiInventory`
 - `artifact/artifact-migration.mjs:artifactVisualDecisions -> strictVisualState`
 - `artifact/artifact-migration.mjs:artifactVisualDecisions -> resumable-migration.mjs:pendingVisualUnbackedCandidates`
-- `artifact/artifact-migration.mjs:artifactVisualDecisions -> artifactUiInventory`
+- `artifact/artifact-migration.mjs:artifactVisualDecisions -> resumable-migration.mjs:visualAuthorityOf`
 - `record-decision.mjs:derivePendingDecisions -> resumable-migration.mjs:pendingVisualUnbackedCandidates`
 
 
 #### formats->lifecycle (3)
 
-- `artifact/artifact-migration.mjs:artifactFormatUpgrade -> ARTIFACT_FORMAT_UPGRADERS`
 - `artifact/artifact-migration.mjs:artifactFormatAdmissible -> ARTIFACT_FORMAT_UPGRADERS`
+- `artifact/artifact-migration.mjs:artifactFormatUpgrade -> ARTIFACT_FORMAT_UPGRADERS`
 - `resumable-migration.mjs:assertNoPendingFormatUpgrade -> FORMAT_UPGRADERS`
 
 
 #### formats->transport (3)
 
 - `artifact/artifact-migration.mjs:assertArtifactToolkitIdentity -> artifactIdentityCommand`
-- `resumable-migration.mjs:upgradeCommandFor -> engine-paths.mjs:engineCommand`
 - `resumable-migration.mjs:toolkitAdoptCommand -> engine-paths.mjs:engineCommand`
+- `resumable-migration.mjs:upgradeCommandFor -> engine-paths.mjs:engineCommand`
 
 
-#### lifecycle->transport (9)
+#### lifecycle->transport (11)
 
 - `artifact/artifact-migration.mjs:initialArtifactState -> artifactCommandFor`
 - `artifact/artifact-migration.mjs:outcomeResult -> migration-policy.mjs:exitCodeFor`
-- `artifact/artifact-migration.mjs:readArtifactStatus -> migration-policy.mjs:exitCodeFor`
 - `artifact/artifact-migration.mjs:readArtifactStatus -> artifactCommandFor`
-- `artifact/artifact-migration.mjs:runArtifactIteration -> migration-policy.mjs:MIGRATION_MODES`
+- `artifact/artifact-migration.mjs:readArtifactStatus -> migration-policy.mjs:exitCodeFor`
 - `artifact/artifact-migration.mjs:runArtifactIteration -> artifactCommandFor`
-- `artifact/artifact-migration.mjs:runArtifactIteration -> migration-policy.mjs:exitCodeFor`
 - `artifact/artifact-migration.mjs:runArtifactIteration -> artifactIdentityCommand`
+- `artifact/artifact-migration.mjs:runArtifactIteration -> migration-policy.mjs:MIGRATION_MODES`
+- `artifact/artifact-migration.mjs:runArtifactIteration -> migration-policy.mjs:exitCodeFor`
 - `migration-utils.mjs:assertNoPendingTransaction -> engine-paths.mjs:engineCommand`
+- `resumable-migration.mjs:artifactBindingFor -> artifact/artifact-migration.mjs:artifactArgumentsFor`
+- `resumable-migration.mjs:artifactBindingFor -> artifact/artifact-migration.mjs:artifactCommandFor`
 
 
 #### slices->lifecycle (28)
@@ -876,42 +920,42 @@ The callee's file is omitted when it is the caller's file.
 - `artifact/artifact-migration.mjs:executeTypeScriptValidation -> asEngineFault`
 - `artifact/artifact-migration.mjs:targetManifest -> asEngineFault`
 - `artifact/artifact-migration.mjs:validatePlan -> validateBaseline`
-- `resumable-migration.mjs:validatePlan -> validateBaseline`
-- `resumable-migration.mjs:validatePlan -> TERMINAL_PARITY`
+- `resumable-migration.mjs:amendSliceUnderLock -> module-lock.mjs:writeJournalAtomic`
+- `resumable-migration.mjs:amendSliceUnderLock -> ADVANCE_JOURNAL`
+- `resumable-migration.mjs:amendSliceUnderLock -> activeArtifact`
 - `resumable-migration.mjs:assertCapabilityPlan -> assertEvidenceResolves`
-- `resumable-migration.mjs:validateImplementedSlice -> delegatedChangedFilesSatisfiedByChild`
-- `resumable-migration.mjs:validateImplementedSlice -> assertCommandResults`
-- `resumable-migration.mjs:validateImplementedSlice -> resolveEvidencePath`
-- `resumable-migration.mjs:validateImplementedSlice -> assertArtifactPrerequisites`
+- `resumable-migration.mjs:repairSliceState -> module-lock.mjs:withModuleLock`
+- `resumable-migration.mjs:repairSliceState -> module-lock.mjs:writeJournalAtomic`
+- `resumable-migration.mjs:repairSliceState -> ADVANCE_JOURNAL`
 - `resumable-migration.mjs:resolveChangedFile -> resolveEvidencePath`
+- `resumable-migration.mjs:reworkSliceUnderLock -> module-lock.mjs:writeJournalAtomic`
+- `resumable-migration.mjs:reworkSliceUnderLock -> ADVANCE_JOURNAL`
+- `resumable-migration.mjs:reworkSliceUnderLock -> activeArtifact`
+- `resumable-migration.mjs:reworkSliceUnderLock -> resolveEvidencePath`
 - `resumable-migration.mjs:validateFailedSliceResult -> assertEvidenceReference`
 - `resumable-migration.mjs:validateFailedSliceResult -> evidencePathClaim`
+- `resumable-migration.mjs:validateImplementedSlice -> assertArtifactPrerequisites`
+- `resumable-migration.mjs:validateImplementedSlice -> assertCommandResults`
+- `resumable-migration.mjs:validateImplementedSlice -> delegatedChangedFilesSatisfiedByChild`
+- `resumable-migration.mjs:validateImplementedSlice -> resolveEvidencePath`
+- `resumable-migration.mjs:validatePlan -> TERMINAL_PARITY`
+- `resumable-migration.mjs:validatePlan -> validateBaseline`
 - `resumable-migration.mjs:validateVerifiedSlice -> assertCommandResults`
-- `resumable-migration.mjs:validateVerifiedSlice -> validateBaseline`
 - `resumable-migration.mjs:validateVerifiedSlice -> assertPostAnchorEvidence`
-- `resumable-migration.mjs:repairSliceState -> module-lock.mjs:withModuleLock`
-- `resumable-migration.mjs:repairSliceState -> ADVANCE_JOURNAL`
-- `resumable-migration.mjs:repairSliceState -> module-lock.mjs:writeJournalAtomic`
-- `resumable-migration.mjs:reworkSliceUnderLock -> resolveEvidencePath`
-- `resumable-migration.mjs:reworkSliceUnderLock -> ADVANCE_JOURNAL`
-- `resumable-migration.mjs:reworkSliceUnderLock -> module-lock.mjs:writeJournalAtomic`
-- `resumable-migration.mjs:reworkSliceUnderLock -> activeArtifact`
-- `resumable-migration.mjs:amendSliceUnderLock -> ADVANCE_JOURNAL`
-- `resumable-migration.mjs:amendSliceUnderLock -> module-lock.mjs:writeJournalAtomic`
-- `resumable-migration.mjs:amendSliceUnderLock -> activeArtifact`
+- `resumable-migration.mjs:validateVerifiedSlice -> validateBaseline`
 
 
 #### slices->transport (2)
 
-- `resumable-migration.mjs:validateVerifiedSlice -> engine-paths.mjs:engineCommand`
 - `resumable-migration.mjs:assertNoUnclaimedTargetDrift -> engine-paths.mjs:engineCommand`
+- `resumable-migration.mjs:validateVerifiedSlice -> engine-paths.mjs:engineCommand`
 
 
 #### store->census (3)
 
-- `resumable-migration.mjs:resolveStepPins -> isBrownfield`
 - `resumable-migration.mjs:completedArtifactHashes -> isBrownfield`
 - `resumable-migration.mjs:readContext -> migration-utils.mjs:resolveLegacySources`
+- `resumable-migration.mjs:resolveStepPins -> isBrownfield`
 
 
 #### store->decisions (2)
@@ -925,11 +969,11 @@ The callee's file is omitted when it is the caller's file.
 - `artifact/artifact-migration.mjs:writeTransaction -> finishTransaction`
 - `migration-utils.mjs:updateRegistry -> module-lock.mjs:withModuleLock`
 - `migration-utils.mjs:updateRegistry -> module-lock.mjs:writeJournalAtomic`
-- `resumable-migration.mjs:isBytePinned -> ADOPTION_ROOT`
-- `resumable-migration.mjs:assertIntegrityAnchor -> readAdvanceJournal`
-- `resumable-migration.mjs:readState -> migration-utils.mjs:assertNoPendingTransaction`
-- `resumable-migration.mjs:assertStateGraph -> readAdvanceJournal`
 - `resumable-migration.mjs:appendHistoryOnce -> readAdvanceJournal`
+- `resumable-migration.mjs:assertIntegrityAnchor -> readAdvanceJournal`
+- `resumable-migration.mjs:assertStateGraph -> readAdvanceJournal`
+- `resumable-migration.mjs:isBytePinned -> ADOPTION_ROOT`
+- `resumable-migration.mjs:readState -> migration-utils.mjs:assertNoPendingTransaction`
 - `upgrades/upgrade-migration.mjs:commitReplacement -> writeJournal`
 
 
@@ -949,24 +993,24 @@ The callee's file is omitted when it is the caller's file.
 
 #### visual->lifecycle (9)
 
-- `resumable-migration.mjs:validateUiRuntimeEvidence -> assertEvidenceReference`
+- `resumable-migration.mjs:assertVisualAcceptance -> assertEvidenceReference`
+- `resumable-migration.mjs:assertVisualAcceptance -> evidencePathClaim`
+- `resumable-migration.mjs:assertVisualAcceptance -> resolveEvidencePath`
+- `resumable-migration.mjs:reopenUiUnderLock -> module-lock.mjs:writeJournalAtomic`
+- `resumable-migration.mjs:reopenUiUnderLock -> ADVANCE_JOURNAL`
+- `resumable-migration.mjs:reopenUiUnderLock -> readAdvanceJournal`
 - `resumable-migration.mjs:sliceLacksUiProofV1 -> evidencePathClaim`
 - `resumable-migration.mjs:sliceLacksUiProofV1 -> resolveEvidencePath`
-- `resumable-migration.mjs:assertVisualAcceptance -> assertEvidenceReference`
-- `resumable-migration.mjs:assertVisualAcceptance -> resolveEvidencePath`
-- `resumable-migration.mjs:assertVisualAcceptance -> evidencePathClaim`
-- `resumable-migration.mjs:reopenUiUnderLock -> readAdvanceJournal`
-- `resumable-migration.mjs:reopenUiUnderLock -> ADVANCE_JOURNAL`
-- `resumable-migration.mjs:reopenUiUnderLock -> module-lock.mjs:writeJournalAtomic`
+- `resumable-migration.mjs:validateUiRuntimeEvidence -> assertEvidenceReference`
 
 
 #### visual->slices (3)
 
+- `resumable-migration.mjs:assertNoNavigationRepairNeeded -> inspectSliceArtifacts`
 - `resumable-migration.mjs:validateUiRuntimeEvidence -> implementationDigests`
 - `resumable-migration.mjs:withUiProofReopenHint -> validateVerifiedSlice`
-- `resumable-migration.mjs:assertNoNavigationRepairNeeded -> inspectSliceArtifacts`
 
-### C.2 Option (a): counts per module pair (176 in total). Pairs are in `data/modgraph-a.txt`.
+### C.2 Option (a): counts per module pair (178 in total). Pairs are in `data/modgraph-a.txt`.
 
 - `census->decisions` 13
 - `census->lifecycle` 23
@@ -979,7 +1023,7 @@ The callee's file is omitted when it is the caller's file.
 - `decisions->visual` 6
 - `formats->lifecycle` 3
 - `formats->transport` 3
-- `lifecycle->transport` 9
+- `lifecycle->transport` 11
 - `slices->census` 11
 - `slices->decisions` 4
 - `slices->lifecycle` 28
@@ -997,24 +1041,34 @@ The callee's file is omitted when it is the caller's file.
 
 ## Appendix D — Data files (`docs/architecture/phase0/data/`)
 
-- `decls-05e6049.tsv`: every top-level declaration (file, line, E/I, kind, name, span).
-- `writes-05e6049.tsv`, `imports-05e6049.tsv`, `fv-05e6049.tsv`: raw inventories.
-- `edges.tsv`: declaration reference graph (3,326 edges).
-- `owners.tsv` / `owners-b.tsv`: owner per declaration (column 7 = kind).
-- `writes-owned.tsv`, `wrapper-calls.tsv`: write sites with owners.
-- `modgraph-a.txt` / `modgraph-b.txt`: module edges, violations, SCCs, 2-cycles, and sample pairs per option.
+- `decls-05e6049.tsv`: every top-level declaration (file, line, E/I, kind, name, span); kind is fn, class, value, module-init or reexport.
+- `writes-05e6049.tsv`, `imports-05e6049.tsv`, `fv-05e6049.tsv`: raw inventories (`inventory.mjs`).
+- `edges.tsv`: declaration reference graph, 3,370 caller/callee pairs (`callgraph.mjs`; column 5 = reference count, column 6 = via: local, import, namespace or dynamic).
+- `owners.tsv` / `owners-b.tsv`: owner per declaration for options (a) and (b) (`assign.mjs … a|b`; column 7 = kind).
+- `writes-owned.tsv`, `wrapper-calls.tsv`: write sites with owners, and every caller of a curated write wrapper (`writesites.mjs`).
+- `modgraph-a.txt` / `modgraph-b.txt`: layer order, module edges, violations, SCCs, 2-cycles, and sample pairs per option (`modgraph.mjs`).
 
 ## Appendix E — Tools (`docs/architecture/phase0/tools/`)
 
-Read-only. Each tool reads git objects at a ref and loads the repo's pinned `typescript@5.9.3`.
-- `inventory.mjs <repo> <ref> decls|writes|imports|fv`: AST inventories.
-- `callgraph.mjs <repo> <ref>`: references between top-level declarations; resolves imports and `core.mjs` re-exports. Names declared locally inside a declaration shadow top-level names; there is no per-block scoping.
-- `assign.mjs <decls.tsv>`: the frozen ownership table. Exits 1 on any missing, duplicate or unknown function, class or value.
-- `modgraph.mjs <owners.tsv> <edges.tsv> [samples]`: aggregates edges into module edges, marks violations against the layer ranks, and reports SCCs and 2-cycles. `LAYER_ORDER=a>b>c>d` orders the middle tier.
+Read-only. Each tool reads git objects at a ref, loads the engine's pinned `typescript@5.9.3` from this checkout, and prints nothing unless it succeeds (exit 1 on a problem, 2 on a usage error).
+- `analysis.mjs`: shared code: argument and TSV contracts, the module ranks, declaration identity, and one TypeScript program over the engine files at the ref.
+- `inventory.mjs <repo> <ref> decls|writes|imports|fv`: AST inventories. `writes` resolves fs bindings by symbol, not by spelling, through imports, re-exports and `const` alias chains; `open` counts only when its flags allow writing; a FileHandle counts its write methods; writes to stdio file descriptors 0–2 are excluded.
+- `callgraph.mjs <repo> <ref>`: references between top-level declarations, resolved by the TypeScript checker (lexical scope, aliases, re-export chains such as `core.mjs`), per declarator; top-level statements belong to `<module-init>`; member reads, destructuring and inline `.then` callbacks on a namespace or dynamically imported module are resolved.
+- `assign.mjs <decls.tsv> a|b`: the frozen ownership table, for option (a) or (b). Exits 1 on any missing, duplicate or unknown declaration.
+- `writesites.mjs owned <owners.tsv> <writes.tsv>` and `writesites.mjs wrapper-calls <owners.tsv> <writes.tsv> <edges.tsv>`: checked joins of write sites with owners, and of callers with the 13 curated write wrappers; fails if a wrapper is missing or reaches no write.
+- `modgraph.mjs <owners.tsv> <edges.tsv> [--layer-order=w>x>y>z] [--samples]`: aggregates edges into module edges, marks violations against the layer ranks, and reports SCCs and 2-cycles. Refuses to run while `LAYER_ORDER` is set in the environment.
+- `test/`: 62 tests (`node --test docs/architecture/phase0/tools/test/`), including byte-identity and superset checks against BASE.
+
+### E.1 Analysis limitations
+
+- **Fail closed.** A construct a tool cannot classify makes the run fail; it is never dropped silently. This covers default exports, top-level destructuring, syntax errors, unresolved relative specifiers and non-literal `import()` specifiers. In `writes` it also covers: `open` flags that are not literal (numeric values differ by platform); a write primitive or FileHandle used as a value; computed fs access; `require` or `import()` of fs; and a namespace or dynamic import of an engine module that exports an fs write alias or re-exports fs. In `callgraph` it also covers a module namespace, a loader returning one, or an object holding one when any of these: is passed on; is stored anywhere other than a binding or an object literal; is read by computed key; is consumed by a named or parameter-less `.then` callback; is returned from a class member; or is typed by JSDoc in a way that hides the module. None of these occur at BASE: every tool exits 0 there.
+- **Not detected by design:** writes made by child processes, writes to non-fs streams (stdout, sockets, HTTP responses), and writes made inside third-party packages or Node built-ins other than fs (for example, the signer store's SQLite writes after `openSignerStore` creates the file).
+- **References, not executions:** an edge means the caller's code mentions the callee, whether or not that line runs; `count` is the number of mentions.
+- **Frozen ownership:** a new declaration, or top-level statements in a file without a `<module-init>` owner, make `assign.mjs` exit 1 until the table is updated. The layer ranks are fixed in `analysis.mjs`; only the middle-tier order is a parameter.
 
 ## Appendix F — Re-run outputs (M1, M4, M6c)
 
-Re-run on 2026-10-10 from `docs/architecture/phase0/` with the commands in §1 (`BASE=05e604992f10b239753a74246a9ac5a45d9b2fed`, Node v26.8.2). All three match §1.
+Re-run on 2026-10-10 for revision 2.1, from `docs/architecture/phase0/` with the commands in §1 (`BASE=05e604992f10b239753a74246a9ac5a45d9b2fed`, Node v26.8.2). All three match §1.
 
 ```text
 $ git -C $R ls-tree -r --name-only $BASE packages/migration-engine/src | grep '\.mjs$' | while read f; do git -C $R show $BASE:$f; done | wc -l
@@ -1024,5 +1078,5 @@ $ node $T/inventory.mjs $R $BASE imports | awk -F'\t' '$3 ~ /resumable-migration
 $ node $T/inventory.mjs $R $BASE imports | awk -F'\t' '$3 ~ /resumable-migration\.mjs$/ && $1!="core.mjs" {n=split($4,a,","); for(i=1;i<=n;i++) print a[i]}' | sort -u | wc -l
 71
 $ node $T/inventory.mjs $R $BASE fv | wc -l
-57
+51
 ```

@@ -204,9 +204,11 @@ artifact/run-artifact.mjs	29	E	fn	parseArtifactArguments	55
 artifact/run-artifact.mjs	93	E	fn	artifactDirective	13
 artifact/run-artifact.mjs	107	I	fn	render	25
 artifact/run-artifact.mjs	133	E	fn	runArtifactCli	46
+artifact/run-artifact.mjs	180	I	module-init	<module-init>	6
 cli/advance-migration.mjs	27	E	fn	parseAdvanceArguments	28
 cli/advance-migration.mjs	56	I	fn	directive	4
 cli/advance-migration.mjs	65	E	fn	runAdvanceCli	96
+cli/advance-migration.mjs	162	I	module-init	<module-init>	9
 cli/discover-module.mjs	36	E	fn	normalizePonytailArgument	11
 cli/discover-module.mjs	49	I	fn	sliceList	11
 cli/discover-module.mjs	61	E	fn	parseDiscoverArguments	81
@@ -214,6 +216,7 @@ cli/discover-module.mjs	143	E	fn	renderExecutionPreview	20
 cli/discover-module.mjs	164	I	fn	renderSliceAmendment	12
 cli/discover-module.mjs	177	I	fn	directive	8
 cli/discover-module.mjs	197	E	fn	runDiscoverCli	183
+cli/discover-module.mjs	381	I	module-init	<module-init>	6
 cli/run-migration.mjs	55	E	fn	parseRunArguments	46
 cli/run-migration.mjs	108	I	fn	discoverArguments	2
 cli/run-migration.mjs	111	I	fn	advanceArguments	5
@@ -224,15 +227,19 @@ cli/run-migration.mjs	174	E	fn	decisionCandidates	2
 cli/run-migration.mjs	193	I	fn	operatorApproval	6
 cli/run-migration.mjs	235	I	fn	recordedPrefix	2
 cli/run-migration.mjs	244	E	fn	runMigration	324
+cli/run-migration.mjs	569	I	module-init	<module-init>	9
 cli/toolkit-identity.mjs	30	I	value	COMMANDS	1
 cli/toolkit-identity.mjs	32	E	fn	parseToolkitIdentityArguments	39
 cli/toolkit-identity.mjs	72	I	fn	artifactEngine	1
 cli/toolkit-identity.mjs	74	I	fn	reportChange	14
 cli/toolkit-identity.mjs	89	E	fn	runToolkitIdentityCli	70
+cli/toolkit-identity.mjs	160	I	module-init	<module-init>	6
 cli/update-migration-registry.mjs	16	E	fn	parseRegistryArguments	30
 cli/update-migration-registry.mjs	47	E	fn	runRegistryCli	36
+cli/update-migration-registry.mjs	84	I	module-init	<module-init>	6
 cli/validate-migration.mjs	12	E	fn	parseValidateArguments	30
 cli/validate-migration.mjs	43	E	fn	runValidateCli	17
+cli/validate-migration.mjs	61	I	module-init	<module-init>	6
 core.mjs	17	E	reexport	export { assertOptionCombination, exitCodeFor, isAutoAuthority, maySelfConfirm, MIGRATION_MODES, MIGRATION_OUTCOMES, nextOutcome, } from "./migration-policy.mjs	9
 core.mjs	28	E	reexport	export { ARTIFACT_DELEGATION_FORMAT, CAPABILITY_OWNERSHIP_FORMAT, DESIGN_SOURCE_FORMAT, DIRECT_LEDGER_DECISIONS_FORMAT, DISCOVERY_COMPLETENESS_FORMAT, FINAL_GAT	29
 core.mjs	59	E	reexport	export { assertDiscoveryCompletenessFormat, BLOCKED_EXIT_CODE, compatibilityBlocker, DEFAULT_MODE, renderLoopDirective, upgradeCommandFor, } from "./resumable-m	8
@@ -350,6 +357,7 @@ mcp-server.mjs	649	E	fn	handleMessage	34
 mcp-server.mjs	684	I	fn	respond	10
 mcp-server.mjs	696	I	fn	answeredId	10
 mcp-server.mjs	718	E	fn	serve	61
+mcp-server.mjs	780	I	module-init	<module-init>	6
 migration-policy.mjs	25	E	reexport	export { isAutoAuthority };	1
 migration-policy.mjs	27	E	value	MIGRATION_MODES	1
 migration-policy.mjs	29	I	value	MODE_MESSAGE	1
@@ -481,6 +489,7 @@ operator-approval.mjs	107	E	fn	approveWithOperator	44
 operator-signer-service.mjs	32	E	value	SERVICE_CONFIG_FILE	1
 operator-signer-service.mjs	34	I	fn	writeOperatorOnly	4
 operator-signer-service.mjs	39	E	fn	runSignerService	33
+operator-signer-service.mjs	73	I	module-init	<module-init>	6
 operator-signer.mjs	36	E	value	PRODUCTION_ATTESTED_WRITES	1
 operator-signer.mjs	37	E	value	ACTIVATION_MANIFEST_FILE	1
 operator-signer.mjs	38	I	value	STORE_FILE	1
@@ -587,6 +596,7 @@ record-decision.mjs	1818	I	fn	verifyRecord	73
 record-decision.mjs	1892	E	fn	runRecordDecisionCli	117
 record-decision.mjs	2011	E	fn	reviewReference	2
 record-decision.mjs	2020	E	fn	relayOperatorDecision	37
+record-decision.mjs	2058	I	module-init	<module-init>	6
 resumable-migration.mjs	107	I	fn	artifactEngine	2
 resumable-migration.mjs	110	E	value	RESUMABLE_CONTRACT_VERSION	1
 resumable-migration.mjs	111	E	value	MIGRATION_FORMAT_VERSION	1
@@ -1114,6 +1124,7 @@ upgrades/upgrade-migration.mjs	766	E	fn	executeRollback	96
 upgrades/upgrade-migration.mjs	863	E	fn	recoverUpgrade	26
 upgrades/upgrade-migration.mjs	890	E	fn	parseUpgradeArguments	37
 upgrades/upgrade-migration.mjs	928	E	fn	runUpgradeCli	66
+upgrades/upgrade-migration.mjs	995	I	module-init	<module-init>	6
 upgrades/upgrade-v4-to-v5.mjs	20	E	value	V5_CONTRACT_VERSION	1
 upgrades/upgrade-v4-to-v5.mjs	21	E	value	V5_FORMAT_VERSION	1
 upgrades/upgrade-v4-to-v5.mjs	22	E	value	V5_WORKFLOW_VERSION	1
