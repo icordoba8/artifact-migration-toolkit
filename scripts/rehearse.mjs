@@ -234,13 +234,30 @@ const diff = (expected, actual) => {
   return out;
 };
 
+/**
+ * The whole CLI contract, matched exactly: no arguments, `--update`, or
+ * `--negative <case>`. Anything else throws before scratch or the golden is touched.
+ */
+export const parseCli = (argv) => {
+  if (argv.length === 0) return { update: false, negative: null };
+  if (argv.length === 1 && argv[0] === "--update") return { update: true, negative: null };
+  if (argv.length === 2 && argv[0] === "--negative" && Object.hasOwn(NEGATIVE, argv[1])) {
+    return { update: false, negative: argv[1] };
+  }
+  throw new Error(`rehearse: unsupported arguments ${JSON.stringify(argv)}; expected none, ` +
+    `\`--update\`, or \`--negative <case>\` with <case> one of ${Object.keys(NEGATIVE).join(", ")}`);
+};
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const started = performance.now();
-  const negative = process.argv.includes("--negative") ? process.argv[process.argv.indexOf("--negative") + 1] : null;
-  if (negative !== null && (!Object.hasOwn(NEGATIVE, negative) || process.argv.includes("--update"))) {
-    console.error(`rehearse: --negative takes one of ${Object.keys(NEGATIVE).join(", ")} and never --update`);
+  let cli;
+  try {
+    cli = parseCli(process.argv.slice(2));
+  } catch (error) {
+    console.error(error.message);
     process.exit(1);
   }
+  const { update, negative } = cli;
   // Fixed so a rerun reuses (and first deletes) only this directory.
   const scratch = assertScratch(path.join(os.tmpdir(), SCRATCH_NAME));
   await rm(scratch, { recursive: true, force: true });
@@ -270,7 +287,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(1);
   }
   const actual = (await readFile(trace, "utf8")).trimEnd().split("\n");
-  if (process.argv.includes("--update")) {
+  if (update) {
     await mkdir(path.dirname(golden), { recursive: true });
     await writeFile(golden, `${actual.join("\n")}\n`);
     console.log(`rehearse: wrote ${actual.length} steps to ${path.relative(repo, golden)}`);
