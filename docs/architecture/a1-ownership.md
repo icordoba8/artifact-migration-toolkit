@@ -23,11 +23,11 @@ Behavior-preserving: every declaration moved verbatim. The only edits inside mov
 | Shape validators (DR6), safe name, ISO clock | shared | `assertPlainObject`, `isPlainObject`, `assertSafeName`, `exactObject`, `now` | — |
 | Read-only git queries, `execFileAsync` (DR26) | shared | `gitRevision`, `dirtyManifest`, `commitsIntroducingBlob`, … | — |
 
-Mechanical checks in the same file: A1-ARCH-1 (outside a module only `index.mjs` is imported, static, re-export and dynamic), A1-ARCH-2 (store imports only `shared/`, `engine-paths.mjs` and `toolkit-identity.mjs`, which must stay leaves; shared imports no engine module and no fs write API; neither has a top-level statement that runs), A1-ARCH-3 (no moved declaration is redeclared at its old site).
+Mechanical checks in the same file: A1-ARCH-1 (outside a module only `index.mjs` is imported, static, re-export and dynamic; it covers `formats/` since A2), A1-ARCH-2 (store imports only `formats/`, `shared/` and `engine-paths.mjs`, which must stay a leaf; formats imports only `shared/` and no `node:fs*`; shared imports no engine module and no fs write API; none has a top-level statement that runs), A1-ARCH-3 (no moved declaration is redeclared at its old site).
 
 Compatibility: `core.mjs`, `migration-utils.mjs`, `resumable-migration.mjs` (`migrationRoot`) and `artifact/artifact-migration.mjs` (`artifactRoot`, `artifactEvidenceDigest`) keep every export name they had at BASE, now as re-exports. Engine files import the module entries directly.
 
-Layout decision taken from the plan: DR24 names store as owner of the record file names, so `HISTORY_FILE` and `INTEGRITY_FILE` live in `store/` and `initialArtifacts.history` reads `HISTORY_FILE`. Owners-b's name rule (R5) put `*_FILE` in formats; A2 should settle which one stands.
+Layout decision, settled in A2 (`a2-ownership.md`): R5 stands. Formats owns the record-layout vocabulary, so `HISTORY_FILE` and `INTEGRITY_FILE` are defined in `formats/record.mjs`. Store owns the persistence, history-chain and integrity behavior over those names. It imports them from `formats/index.mjs` and keeps exporting them from `store/record.mjs` and `store/index.mjs` as compatibility re-exports with the same values. Store may now import `formats/index.mjs` (the one downward edge A2 adds). A1-ARCH-2 allows it and no longer allows `toolkit-identity.mjs`, whose record vocabulary is in formats too.
 
 ## Not moved, with the blocker
 
@@ -35,7 +35,7 @@ Store-owned declarations whose move would create an upward edge or a cycle with 
 
 | Declarations | Blocked by |
 |---|---|
-| `resumable-migration.mjs` `decisionsAnchorNow`, `autoDecisionsAnchorNow`, `renderIntegrityNow`, `assertDecisionsAppendOnly`, `assertHistoryAppendOnly` | formats constants in the monolith: `DECISIONS_FILE`, `AUTO_DECISIONS_FILE`, `ANCHORED_FORMAT_VERSION` (A2) |
+| `resumable-migration.mjs` `decisionsAnchorNow`, `autoDecisionsAnchorNow`, `renderIntegrityNow`, `assertDecisionsAppendOnly`, `assertHistoryAppendOnly` | formats constants: no longer a blocker. They are in `formats/` since A2, and the anchor comparisons call `usesIntegrityAnchor`. The functions themselves have not moved yet (store work, not A2). |
 | `assertIntegrityAnchor`, `appendHistoryOnce` | the above plus `readAdvanceJournal` (lifecycle, A8) |
 | pins: `DERIVED_PINS`, `pinnedSourcePath`, `hashPinnedArtifact`, `isBytePinned`, `pinnedArtifactMatches`, `resolveStepPins`, `completedArtifactHashes`, `validateCompletedHashes`, and their vocabulary `REOPEN_ROOT`, `BASELINE_ROWS_PIN`, `IMMUTABLE_BEHAVIOR_ROW_FIELDS`, `DISCOVERY_PIN`, `IMMUTABLE_STEP_ARTIFACTS` | `assertLateDecisionsAreAppendable` (decisions), `reworkPathParts` (slices), `ADOPTION_ROOT` (lifecycle), `isBrownfield` (census), step-file constants (formats) |
 | `readState`, `assertStateGraph`, `stateMappingMismatch`, `readContext` | formats, visual, census and lifecycle reads |

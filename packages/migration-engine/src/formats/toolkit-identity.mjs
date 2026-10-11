@@ -1,0 +1,193 @@
+/**
+ * Formats: the toolkit identity a record pins -- its shape, comparison and the
+ * refusal text. Reading the running build's own identity is not here: that
+ * reads disk, so `activeToolkitIdentity` stays in `toolkit-identity.mjs`.
+ */
+
+import { createHash } from "node:crypto";
+
+/** The whole identity. Four fields, exactly; no optional ones, ever. */
+export const TOOLKIT_IDENTITY_KEYS = ["name", "version", "commit", "contentHash"];
+
+/** Written into a release bundle by `scripts/release.mjs`, never committed. */
+export const BUILD_IDENTITY_FILE = "build-identity.json";
+
+export const TOOLKIT_NAME = "artifact-migration-tools";
+
+// Toolkit SemVer is an independent axis from every migration version. Nothing
+// in this file derives a format, contract or workflow number from it, and
+// nothing derives it from them -- `test/unit/toolkit-identity.test.mjs` proves
+// both directions.
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+const CONTENT_HASH = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * Strict parse. Every rejection is a refusal to run, never a downgrade to
+ * "unidentified": a malformed identity on a record or in an install tree is
+ * tampering or a broken build, and both must stop the command.
+ */
+export const validateToolkitIdentity = (value, label = "toolkitIdentity") => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const keys = Object.keys(value).sort();
+  if (JSON.stringify(keys) !== JSON.stringify([...TOOLKIT_IDENTITY_KEYS].sort())) {
+    throw new Error(
+      `${label} must contain exactly ${TOOLKIT_IDENTITY_KEYS.join(", ")}.`,
+    );
+  }
+  if (value.name !== TOOLKIT_NAME) {
+    throw new Error(`${label}.name must be '${TOOLKIT_NAME}'.`);
+  }
+  if (typeof value.version !== "string" || !SEMVER.test(value.version)) {
+    throw new Error(`${label}.version must be an exact SemVer string.`);
+  }
+  if (typeof value.commit !== "string" || !COMMIT_SHA.test(value.commit)) {
+    throw new Error(`${label}.commit must be a full 40-character Git commit SHA.`);
+  }
+  if (typeof value.contentHash !== "string" || !CONTENT_HASH.test(value.contentHash)) {
+    throw new Error(`${label}.contentHash must be 'sha256:' plus 64 hex characters.`);
+  }
+  return value;
+};
+
+/**
+ * The canonical byte form of an identity: fixed key order, so comparison and
+ * digesting never depend on how a JSON file happened to be written.
+ */
+export const toolkitIdentityKey = (identity) =>
+  identity === null || identity === undefined
+    ? null
+    : JSON.stringify(
+        Object.fromEntries(TOOLKIT_IDENTITY_KEYS.map((key) => [key, identity[key]])),
+      );
+
+/** Exact equality on all four fields. A version match alone is not a match. */
+export const sameToolkitIdentity = (left, right) =>
+  left !== null &&
+  left !== undefined &&
+  right !== null &&
+  right !== undefined &&
+  toolkitIdentityKey(left) === toolkitIdentityKey(right);
+
+export const digestToolkitIdentity = (identity) =>
+  identity === null || identity === undefined
+    ? null
+    : createHash("sha256").update(toolkitIdentityKey(identity)).digest("hex");
+
+/** One-line rendering for operator-facing messages. Never persisted. */
+export const renderToolkitIdentity = (identity) =>
+  identity === null || identity === undefined
+    ? "unidentified (source checkout, no build-identity.json)"
+    : `${identity.name}@${identity.version} commit ${identity.commit.slice(0, 12)} ${identity.contentHash}`;
+
+export const TOOLKIT_IDENTITY_EVENTS = [
+  "TOOLKIT_IDENTITY_ADOPTED",
+  "TOOLKIT_IDENTITY_CHANGED",
+];
+
+/**
+ * The one reason a mutation may be refused for identity, as a message, or
+ * `null` to proceed. Read-only paths call `toolkitIdentityStatus` instead and
+ * never this: status must report and never block, mutation must block and
+ * never write.
+ *
+ * `adoptCommand` is rendered by the caller through `engineCommand`, so the
+ * operator is always given this engine's own installed executable rather than
+ * a guess about where the toolkit lives.
+ */
+export const toolkitIdentityBlocker = (recorded, active, { action, adoptCommand, updateCommand }) => {
+  if (!recorded) {
+    // An unstamped record refuses every mutation until a toolkit is explicitly
+    // adopted, and *which* toolkit is running does not soften that. An earlier
+    // version exempted the unidentified runtime on the grounds that nothing had
+    // been pinned yet, which is true and beside the point: the exemption made
+    // "delete build-identity.json" -- or simply run from a checkout -- a way to
+    // write to a record no build has claimed, which is the silent swap this
+    // gate exists to refuse, dressed as the absence of a swap. So the refusal is
+    // unconditional and only the remedy differs. A released toolkit can be
+    // adopted, so it is told the one command. A source checkout has no identity
+    // to stamp -- `changeModuleToolkitIdentity` refuses it too -- so telling it
+    // to adopt would name a command that cannot succeed; it is told to install a
+    // release instead. Reading the record stays open in both cases.
+    return active
+      ? `This record carries no toolkit identity, so ${action} is refused until the running toolkit is explicitly adopted. Nothing was written. Adopt it with: ${adoptCommand}`
+      : `This record carries no toolkit identity, and the running engine is a source checkout with no ${BUILD_IDENTITY_FILE}, so it has no identity to adopt. ${action} is refused and nothing was written. Install a released toolkit bundle and adopt it against this record. Reading the record is unaffected.`;
+  }
+  if (!active) {
+    return `This record pins toolkit ${renderToolkitIdentity(recorded)}, but the running engine is a source checkout with no ${BUILD_IDENTITY_FILE} and cannot prove it is that release. ${action} is refused and nothing was written.`;
+  }
+  if (!sameToolkitIdentity(recorded, active)) {
+    return `This record pins toolkit ${renderToolkitIdentity(recorded)}, but the running toolkit is ${renderToolkitIdentity(active)}. ${action} is refused and nothing was written. Install the pinned release, or update explicitly with: ${updateCommand ?? adoptCommand.replace(/\badopt\b/, "update")}`;
+  }
+  return null;
+};
+
+const parseToolkitVersion = (version) => {
+  const [noBuild] = String(version).split("+");
+  const dash = noBuild.indexOf("-");
+  const core = dash === -1 ? noBuild : noBuild.slice(0, dash);
+  const [major, minor, patch] = core.split(".").map(Number);
+  return {
+    major,
+    minor,
+    patch,
+    prerelease: dash === -1 ? null : noBuild.slice(dash + 1),
+  };
+};
+
+/**
+ * Strictly newer by SemVer precedence, and nothing looser. Two prereleases of
+ * the same core are deliberately *not* ordered here: their precedence rules are
+ * real but the answer is not obvious to a reader, and an unobvious answer is
+ * the wrong basis for a gate that decides whether a build may write.
+ */
+const isNewerToolkitVersion = (active, recorded) => {
+  const left = parseToolkitVersion(active);
+  const right = parseToolkitVersion(recorded);
+  for (const key of ["major", "minor", "patch"]) {
+    if (left[key] !== right[key]) return left[key] > right[key];
+  }
+  return right.prerelease !== null && left.prerelease === null;
+};
+
+/**
+ * Whether `--mode auto` may move this record's pin on its own authority, and
+ * what kind of move it is: `"adopt"`, `"update"`, or `null` for "it may not".
+ *
+ * The user-facing rule is "compatible and verifiable transitions are adopted,
+ * unsafe ones are blocked", and this is where the line sits:
+ *
+ * - **no identity to stamp** (`active === null`, a source checkout) -- `null`.
+ *   Nothing can be verified, so nothing is adopted. A genuine external blocker:
+ *   the remedy is to install a released toolkit, and no approval substitutes.
+ * - **unstamped record** -- `"adopt"`. Nothing is being overridden, and the
+ *   running release is the authoritative source for its own identity.
+ * - **already this build** -- `null`. There is no transition.
+ * - **a strictly newer release of the same toolkit** -- `"update"`. The forward
+ *   direction is the one a release stream actually takes and it is verifiable
+ *   from the two version strings alone.
+ * - **anything else** -- `null`, and the gate refuses. A downgrade, a different
+ *   toolkit, and above all *the same version with a different commit or content
+ *   hash* -- two builds claiming one version is precisely the silent swap this
+ *   whole module exists to refuse, and "automatically" is the worst possible
+ *   way to resolve it.
+ */
+export const autoAdoptableToolkitTransition = (recorded, active) => {
+  if (!active) return null;
+  if (!recorded) return "adopt";
+  if (sameToolkitIdentity(recorded, active)) return null;
+  if (recorded.name !== active.name) return null;
+  return isNewerToolkitVersion(active.version, recorded.version) ? "update" : null;
+};
+
+/** `UNSTAMPED` / `MATCH` / `MISMATCH` / `UNIDENTIFIED_TOOLKIT`, for read-only reporting. */
+export const toolkitIdentityStatus = (recorded, active) => {
+  if (!recorded) return "UNSTAMPED";
+  if (!active) return "UNIDENTIFIED_TOOLKIT";
+  return sameToolkitIdentity(recorded, active) ? "MATCH" : "MISMATCH";
+};

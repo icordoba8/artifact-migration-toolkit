@@ -83,11 +83,13 @@ const names = (node) => {
 
 // -- boundary ----------------------------------------------------------------
 
-const MODULES = ["store", "shared"];
-// store may reach down to shared and the two formats-owned leaf files; shared
-// reaches nothing in the engine. Anything else would be an upward edge or a cycle.
+const MODULES = ["store", "shared", "formats"];
+// store may reach down to formats, shared and the leaf `engine-paths.mjs`;
+// formats only to shared (Track A2, layering option (b)); shared reaches
+// nothing in the engine. Anything else would be an upward edge or a cycle.
 const ALLOWED = {
-  store: new Set(["shared/index.mjs", "engine-paths.mjs", "toolkit-identity.mjs"]),
+  store: new Set(["formats/index.mjs", "shared/index.mjs", "engine-paths.mjs"]),
+  formats: new Set(["shared/index.mjs"]),
   shared: new Set(),
 };
 const FS_WRITES = new Set([
@@ -95,7 +97,7 @@ const FS_WRITES = new Set([
   "mkdtemp", "open", "rename", "rm", "rmdir", "symlink", "truncate", "unlink", "utimes", "writeFile",
 ]);
 
-test("A1-ARCH-1: outside its directory, store/ and shared/ are reached only through index.mjs", async () => {
+test("A1-ARCH-1: outside its directory, store/, shared/ and formats/ are reached only through index.mjs", async () => {
   const offenders = [];
   for (const root of ["packages/migration-engine/src", "packages/migration-engine/test", "test", "scripts"]) {
     for (const file of await sourceFiles(path.join(repo, root))) {
@@ -112,7 +114,7 @@ test("A1-ARCH-1: outside its directory, store/ and shared/ are reached only thro
   for (const module of MODULES) await readFile(path.join(src, module, "index.mjs"));
 });
 
-test("A1-ARCH-2: store/ and shared/ import nothing above them, shared/ writes nothing, neither runs code at import", async () => {
+test("A1-ARCH-2: store/, shared/ and formats/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
   for (const module of MODULES) {
     for (const file of await sourceFiles(path.join(src, module))) {
       const label = path.relative(src, file);
@@ -122,6 +124,8 @@ test("A1-ARCH-2: store/ and shared/ import nothing above them, shared/ writes no
           if (module === "shared" && /^node:fs(\/promises)?$/.test(spec)) {
             assert.deepEqual(imported.filter((name) => FS_WRITES.has(name) || name === "*" || name === "default"), [], `${label} imports a filesystem write from ${spec}`);
           }
+          // Formats is the record model: pure, so no filesystem access at all.
+          assert.ok(module !== "formats" || !/^node:fs(\/|$)/.test(spec), `${label} imports ${spec}`);
           continue;
         }
         assert.ok(spec.startsWith("."), `${label} imports the package ${spec}`);
@@ -131,14 +135,17 @@ test("A1-ARCH-2: store/ and shared/ import nothing above them, shared/ writes no
       for (const statement of sf.statements) {
         assert.ok(
           ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement) ||
-            ts.isVariableStatement(statement) || ts.isFunctionDeclaration(statement),
+            ts.isVariableStatement(statement) || ts.isFunctionDeclaration(statement) ||
+            // A class runs nothing at import unless a static member does.
+            (ts.isClassDeclaration(statement) &&
+              !statement.members.some((member) => ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static)),
           `${label}:${sf.getLineAndCharacterOfPosition(statement.getStart()).line + 1} runs at import time`,
         );
       }
     }
   }
-  // The two formats files store may import must stay leaves, or the edge closes a cycle.
-  for (const [file, allowed] of [["engine-paths.mjs", []], ["toolkit-identity.mjs", ["./engine-paths.mjs"]]]) {
+  // The leaf file store may import must stay a leaf, or the edge closes a cycle.
+  for (const [file, allowed] of [["engine-paths.mjs", []]]) {
     const local = (await specifiers(path.join(src, file))).found.map(({ spec }) => spec).filter((spec) => spec.startsWith("."));
     assert.deepEqual(local, allowed, file);
   }

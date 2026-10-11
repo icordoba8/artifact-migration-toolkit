@@ -5,17 +5,10 @@ import { appendFile, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { assertSecurePath, isPlainObject, now } from "../shared/index.mjs";
-import { digestToolkitIdentity } from "../toolkit-identity.mjs";
+import { digestToolkitIdentity, HISTORY_FILE, INTEGRITY_FILE } from "../formats/index.mjs";
 import { fileExists } from "./files.mjs";
-
-/** The module record's append-only audit log, relative to the record root. */
-export const HISTORY_FILE = "history/history.ndjson";
-
-// P1-1: the integrity anchor for `artifactHashes`, persisted outside
-// `state.json` so pinning an artifact and rewriting its pin stop being the
-// same edit. Written in the same journalled transaction as every advance
-// (and at initialization); never read or written anywhere else.
-export const INTEGRITY_FILE = "integrity.json";
+// Compatibility re-export (Track A2): these names are formats-owned now.
+export { HISTORY_FILE, INTEGRITY_FILE } from "../formats/index.mjs";
 
 export const digestArtifactHashes = (artifactHashes) =>
   createHash("sha256")

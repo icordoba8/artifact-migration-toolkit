@@ -22,8 +22,8 @@ import {
   MIGRATION_OUTCOMES,
   renderLoopDirective,
   renderProgressBlock,
-  assertPonytailTarget,
 } from "../core.mjs";
+import { assertPonytailTarget } from "../formats/index.mjs";
 import { getArtifactStatus, runArtifact } from "./artifact-migration.mjs";
 
 export const parseArtifactArguments = (arguments_) => {

@@ -41,20 +41,18 @@ import { fileURLToPath } from "node:url";
 import { isMainModule } from "./engine-paths.mjs";
 
 import {
-  DESIGN_SOURCES,
   engineCommand,
   exitCodeFor,
   getMigrationStatus,
   MIGRATION_MODES,
   pendingDecisionCandidates,
-  PONYTAIL_TARGETS,
   previewDiscoveryScan,
   renderLoopDirective,
   renderProgressBlock,
   resolveRegistryPath,
   upgradeCommandFor,
-  WORKFLOW_VERSION,
 } from "./core.mjs";
+import { DESIGN_SOURCES, PONYTAIL_TARGETS, WORKFLOW_VERSION } from "./formats/index.mjs";
 import { relayOperatorDecision, runRecordDecisionCli } from "./record-decision.mjs";
 import { runMigration } from "./cli/run-migration.mjs";
 import { getArtifactStatus, runArtifact } from "./artifact/artifact-migration.mjs";

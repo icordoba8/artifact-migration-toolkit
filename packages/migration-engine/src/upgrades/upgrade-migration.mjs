@@ -55,6 +55,15 @@ import {
   V5_FORMAT_VERSION,
   V5_WORKFLOW_VERSION,
 } from "./upgrade-v4-to-v5.mjs";
+import {
+  confirmationIdFor,
+  moduleUpgradeRoot,
+  renderRollbackPreview,
+  renderUpgradePreview,
+  transactionRoot,
+} from "../formats/index.mjs";
+// Compatibility re-export (Track A2): these names are formats-owned now.
+export { renderRollbackPreview, renderUpgradePreview } from "../formats/index.mjs";
 
 const contractPath = fileURLToPath(
   new URL("../../references/v5-contract.md", import.meta.url),
@@ -68,17 +77,8 @@ export const TRANSACTION_STATES = [
   "ROLLED_BACK",
 ];
 
-const upgradesRoot = (targetRoot) =>
-  path.join(targetRoot, ".agents/knowledge/migrations/upgrades");
-
-const moduleUpgradeRoot = (targetRoot, moduleName) =>
-  path.join(upgradesRoot(targetRoot), moduleName);
-
 const lockPathFor = (targetRoot, moduleName) =>
   path.join(moduleUpgradeRoot(targetRoot, moduleName), "upgrade.lock");
-
-const transactionRoot = (targetRoot, moduleName, confirmationId) =>
-  path.join(moduleUpgradeRoot(targetRoot, moduleName), confirmationId);
 
 const readJournal = async (file) => JSON.parse(await readFile(file, "utf8"));
 
@@ -363,39 +363,6 @@ export const previewUpgrade = async ({
       blockers.length === 0 ? confirmationIdFor(preview) : null,
   };
 };
-
-const confirmationIdFor = (preview) =>
-  createHash("sha256")
-    .update(
-      JSON.stringify({
-        sourceManifest: preview.sourceManifest,
-        sourceVersions: preview.sourceVersions,
-        targetVersions: preview.targetVersions,
-        contractDigest: preview.contractDigest,
-        openSpecDigest: preview.openSpecDigest,
-        legacyCommit: preview.legacyCommit,
-        decisions: preview.supportedDecisions,
-        rendered: renderUpgradePreview(preview),
-      }),
-    )
-    .digest("hex")
-    .slice(0, 16);
-
-export const renderUpgradePreview = (preview) =>
-  `Upgrade pre-execution summary\n` +
-  `Migration: ${preview.migration}\n` +
-  `Target: ${preview.target}\n` +
-  `Source: contract ${preview.sourceVersions?.contractVersion ?? "none"} format ${preview.sourceVersions?.formatVersion ?? "none"} workflow ${preview.sourceVersions?.workflowVersion ?? "none"}\n` +
-  `Target: contract ${preview.targetVersions.contractVersion} format ${preview.targetVersions.formatVersion} workflow ${preview.targetVersions.workflowVersion}\n` +
-  `Affected files: ${preview.affectedFiles.length > 0 ? preview.affectedFiles.join(", ") : "none"}\n` +
-  `Step changes: ${preview.stepChanges.length > 0 ? preview.stepChanges.join(", ") : "none"}\n` +
-  `Earliest reopened step: ${preview.reopenedStep ?? "none"}\n` +
-  `Preserved completion: ${preview.preservedCompletedSteps.length > 0 ? preview.preservedCompletedSteps.join(", ") : "none"}\n` +
-  `Invalidated trust: ${preview.invalidatedArtifacts.length > 0 ? preview.invalidatedArtifacts.join(", ") : "none"}\n` +
-  `Superseded files: ${preview.supersededFiles.length > 0 ? preview.supersededFiles.join(", ") : "none"}\n` +
-  `Missing v5 content: ${preview.missingV5Content.length > 0 ? preview.missingV5Content.join("; ") : "none"}\n` +
-  `Supported decisions: none. Ambiguity refuses the upgrade instead of guessing.\n` +
-  `Blockers: ${preview.blockers.length > 0 ? preview.blockers.join("; ") : "none"}\n`;
 
 /**
  * The journalled, recoverable replacement. Upgrade and rollback share it: only
@@ -702,17 +669,6 @@ export const previewRollback = async ({
       .slice(0, 16),
   };
 };
-
-export const renderRollbackPreview = (preview) =>
-  `Rollback pre-execution summary\n` +
-  `Migration: ${preview.migration}\n` +
-  `Restores upgrade: ${preview.restores ?? "none"}\n` +
-  `Snapshot: ${preview.snapshotPath ?? "none"}\n` +
-  `Current: contract ${preview.sourceVersions?.contractVersion ?? "none"} format ${preview.sourceVersions?.formatVersion ?? "none"}\n` +
-  `Restored: contract ${preview.targetVersions?.contractVersion ?? "none"} format ${preview.targetVersions?.formatVersion ?? "none"}\n` +
-  `Restored files: ${preview.affectedFiles.length}\n` +
-  `Note: this is an operational restore, not a contract-5 to contract-4 migrator. Contract 5 refuses the restored tree until it is upgraded again.\n` +
-  `Blockers: ${preview.blockers.length > 0 ? preview.blockers.join("; ") : "none"}\n`;
 
 export const executeRollback = async ({
   registryPath,
