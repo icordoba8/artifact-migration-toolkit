@@ -54,6 +54,7 @@ import {
   runDiscoverCli,
 } from "../../src/cli/discover-module.mjs";
 import {
+  autoMayDecide,
   buildDecision,
   challengeFor,
   parseDecisionArguments,
@@ -153,7 +154,8 @@ import {
 } from "../../src/resumable-migration.mjs";
 import { assertRegistryCoverage, nextIncrement } from "../../src/format-upgrade.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
-import { exitCodeFor, maySelfConfirm } from "../../src/migration-policy.mjs";
+import { approveWithOperator } from "../../src/operator-approval.mjs";
+import { maySelfConfirm } from "../../src/migration-policy.mjs";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import {
   artifactRoot,
@@ -378,7 +380,7 @@ const previewFresh = async (fixture, overrides = {}) => {
   return { resolution, preview };
 };
 
-const initialize = async (fixture, overrides = {}) => {
+const initialize = async (fixture, { currentFormat = false, ...overrides } = {}) => {
   const { resolution, preview } = await previewFresh(fixture, overrides);
   assertExecutionConfirmation(preview, preview.confirmationId);
   const result = await bootstrapMigration({
@@ -389,7 +391,7 @@ const initialize = async (fixture, overrides = {}) => {
     boundInputs: preview.boundInputs,
     ...overrides,
   });
-  result.state = await historicalBootstrap(fixture.migrationRoot, 18);
+  if (!currentFormat) result.state = await historicalBootstrap(fixture.migrationRoot, 18);
   return { resolution, preview, result };
 };
 
@@ -15718,7 +15720,12 @@ test("R-W4-e: editing an accepted path after acceptance re-blocks", async () => 
     );
     assert.equal(after.length, 1);
     assert.equal(after[0].subjectPath, stray);
-    assert.match(after[0].rationale, /bytes changed since/);
+    // F6: re-offered as the same candidate FINALIZE resolves -- bound to the new
+    // bytes, with the plain drift rationale. The staleness is the refusal's
+    // reason, never the candidate's, or a re-acceptance could never apply.
+    assert.equal(after[0].pathDigest, `sha256:${createHash("sha256")
+      .update(await readFile(strayPath)).digest("hex")}`);
+    assert.match(after[0].rationale, /claimed by no validated slice/);
   } finally {
     await fixture.cleanup();
   }
@@ -15856,47 +15863,167 @@ test("R-W5-b / R-W3-f: a terminal PASS older than the newest rework blocks FINAL
   }
 });
 
-test("R-W5-e: a terminal FINALIZE refusal is BLOCKED with exit code 2, not an endless CONTINUE", async () => {
+// --- F6: FINALIZE drift is a decision, not a dead end ------------------------
+
+/** One `run --mode <mode> --json` iteration from the fixture root, no human channel. */
+const runJson = async (fixture, mode = "auto") => {
+  const captured = [];
+  const errors = [];
+  const previousCwd = process.cwd();
+  const previousExitCode = process.exitCode;
+  const stderrWrite = process.stderr.write;
+  process.chdir(fixture.root);
+  // Under --json the directive is a human line: stderr, not the JSON channel.
+  process.stderr.write = (chunk) => (errors.push(String(chunk)), true);
+  try {
+    const result = await runMigration(["auth", "--mode", mode, "--json"], {
+      stdout: { write: (chunk) => (captured.push(String(chunk)), true) },
+      recordTrustedDecision: null,
+    });
+    assert.equal(JSON.parse(captured.join("")).outcome, result.outcome);
+    return { ...result, stderr: errors.join("") };
+  } finally {
+    process.stderr.write = stderrWrite;
+    process.chdir(previousCwd);
+    process.exitCode = previousExitCode;
+  }
+};
+
+const ledgerLines = async (fixture, file) =>
+  (await readFile(path.join(fixture.migrationRoot, `decisions/${file}`), "utf8")
+    .catch((error) => (error.code === "ENOENT" ? "" : Promise.reject(error))))
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+/**
+ * The consumer log's P2: a committed target test that imports removed code is
+ * deleted during the migration. A deletion can be claimed by no slice, so its
+ * only exit is an acceptance -- which must therefore be recordable and apply.
+ */
+const ORPHAN = "src/orphan.spec.ts";
+const commitOrphan = async (fixture) => {
+  await writeFile(path.join(fixture.targetRoot, ORPHAN), "import '../removed';\n");
+  await execFileAsync("git", ["add", "-A"], { cwd: fixture.root });
+  await execFileAsync("git", ["-c", "user.name=Contract Test", "-c",
+    "user.email=contract@example.test", "commit", "-q", "-m", "orphan test"], { cwd: fixture.root });
+};
+const LATE = "src/late-edit.ts";
+const driftAtFinalize = async (fixture, overrides = {}) => {
+  await commitOrphan(fixture);
+  const failure = await driveTo(fixture, "FINALIZE", advance, {
+    ...overrides,
+    beforeFinalize: async () => {
+      await writeFile(path.join(fixture.targetRoot, LATE), "export const late = 1;\n");
+      await rm(path.join(fixture.targetRoot, ORPHAN));
+    },
+  }).catch((error) => error);
+  assert.match(failure?.message ?? "", /UNCLAIMED_TARGET_DRIFT/);
+};
+const DIRECT_LEDGER = {
+  bootstrap: { currentFormat: true },
+  classification: {
+    ...MODULE_CLASSIFICATION,
+    version: 2,
+    moduleRoots: [{ path: "auth", reason: "The module's own slice." }],
+  },
+};
+
+test("F6-a: --mode auto accepts owned FINALIZE drift as AUTO, a deleted file included, and completes", async () => {
   const fixture = await createFixture();
   try {
-    const stray = "src/unclaimed-by-any-slice.ts";
-    await finalizeWith(fixture, async () => {
-      await writeFile(
-        path.join(fixture.targetRoot, stray),
-        "export const stray = true;\n",
-      );
-    }).catch(() => {});
+    await driftAtFinalize(fixture);
+    const before = await state(fixture);
+    assert.equal(before.formatVersion, 18);
 
-    // The hazard SKILL.md names as the one stop condition no command could
-    // detect: an auto-loop re-authoring gates.json forever against a record
-    // that cannot finalize until a human acts.
-    const captured = [];
-    const previousCwd = process.cwd();
-    const previousExitCode = process.exitCode;
-    process.chdir(fixture.root);
-    let result;
-    // Under --json the directive is a human line: stderr, not the JSON channel.
-    const errors = [];
-    const stderrWrite = process.stderr.write;
-    process.stderr.write = (chunk) => (errors.push(String(chunk)), true);
-    try {
-      result = await runMigration(["auth", "--mode", "auto", "--json"], {
-        stdout: { write: (chunk) => (captured.push(chunk), true) },
-        recordTrustedDecision: null,
-      });
-    } finally {
-      process.stderr.write = stderrWrite;
-      process.chdir(previousCwd);
-      process.exitCode = previousExitCode;
-    }
-    assert.equal(result.outcome, "BLOCKED");
-    assert.match(result.blocker, /UNCLAIMED_TARGET_DRIFT/);
-    assert.equal(exitCodeFor(result.outcome), BLOCKED_EXIT_CODE);
-    assert.equal(JSON.parse(captured.join("")).outcome, "BLOCKED");
-    assert.match(errors.join(""), /loop: STOP reason=BLOCKED/);
+    const accepted = await runJson(fixture);
+    assert.equal(accepted.outcome, "CONTINUE", accepted.reason);
+    // Resolved from the ledger at FINALIZE: the pinned classification is never
+    // the place to cite a drift acceptance.
+    assert.match(accepted.reason, /nothing to cite\.$/);
+    const lines = await ledgerLines(fixture, "auto-decisions.ndjson");
+    assert.deepEqual(
+      lines.map((line) => [line.kind, line.subject.path, line.authorizedBy.channel]).sort(),
+      [["TARGET_DRIFT_ACCEPTED", LATE, "AUTO"], ["TARGET_DRIFT_ACCEPTED", ORPHAN, "AUTO"]],
+    );
+    // AUTO never writes the human ledger, and recording authority moves no checkpoint.
+    assert.deepEqual(await ledgerLines(fixture, "operator-decisions.ndjson"), []);
+    assert.deepEqual(await state(fixture), before);
+
+    const done = await runJson(fixture);
+    assert.equal(done.outcome, "COMPLETE", done.reason);
+    assert.equal((await state(fixture)).status, "COMPLETE");
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("F6-b: format-19 FINALIZE drift is a relayable review; relayed acceptances apply, re-offered after an edit", async () => {
+  const fixture = await createFixture();
+  try {
+    await driftAtFinalize(fixture, DIRECT_LEDGER);
+    const before = await state(fixture);
+    assert.equal(before.formatVersion, 19);
+    const relayed = [];
+    let result = await runJson(fixture);
+    while (result.outcome === "OPERATOR_DECISION") {
+      // The stop names the review to relay; nothing is written until it is.
+      assert.match(result.operatorApproval.reference, /^review-[0-9a-f]{32}$/);
+      assert.equal(result.operatorApproval.review.kind, "TARGET_DRIFT_ACCEPTED");
+      assert.deepEqual(await state(fixture), before);
+      const cwd = process.cwd();
+      process.chdir(fixture.root);
+      try {
+        const relay = await runRecordDecisionCli(["auth", "--relay",
+          result.operatorApproval.reference, "--decision", "APPROVE"], { stdout: { write() {} } });
+        assert.equal(relay.outcome, "CONTINUE", relay.reason);
+      } finally {
+        process.chdir(cwd);
+      }
+      relayed.push(result.operatorApproval.review.subject.path);
+      // An acceptance binds the bytes: editing the first accepted path
+      // re-offers it, and the new acceptance is the one FINALIZE resolves.
+      // The gates are bound to the dirty tree, so the edit re-authors them.
+      if (relayed.length === 1) {
+        await writeFile(path.join(fixture.targetRoot, LATE), "export const late = 2;\n");
+        await authorFinalize(fixture);
+      }
+      assert.ok(relayed.length <= 3, `an applied acceptance was re-offered: ${relayed}`);
+      result = await runJson(fixture);
+    }
+    assert.equal(result.outcome, "COMPLETE", result.reason);
+    assert.deepEqual(relayed, [LATE, LATE, ORPHAN]);
+    const lines = await ledgerLines(fixture, "operator-decisions.ndjson");
+    assert.deepEqual(lines.map((line) => [line.principal, line.result]),
+      relayed.map(() => ["AGENT_RELAYED", "APPROVED"]));
+    assert.deepEqual(await ledgerLines(fixture, "auto-decisions.ndjson"), []);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("F6-c: AUTO is offered exactly what its gate accepts; the rest stays a human decision", async () => {
+  const decided = { autoResolvable: true };
+  const ambiguous = { autoResolvable: false };
+  assert.equal(autoMayDecide({ id: "A", ...decided }), true);
+  // A candidate that never derived the flag (every non-drift kind) stays eligible.
+  assert.equal(autoMayDecide({ id: "B" }), true);
+  assert.equal(autoMayDecide({ id: "C", ...ambiguous }), false);
+  // A group is one act over its members: one ambiguous member makes it a human act.
+  assert.equal(autoMayDecide({ id: "G", groupMembers: [decided, ambiguous] }), false);
+
+  const offered = [];
+  const approver = Object.assign(async (id) => {
+    offered.push(id);
+    return { decision: { id: `AUTO-00${offered.length}`, candidateId: id, subject: { path: id } } };
+  }, { channel: "AUTO" });
+  const references = [];
+  const group = { id: "G", groupMembers: [{ id: "C", ...ambiguous }, { id: "D", ...ambiguous }] };
+  const recorded = await approveWithOperator(
+    [{ id: "C", ...ambiguous }, { id: "A", ...decided }, { id: "D", ...ambiguous }],
+    approver, { write() {} }, references, group,
+  );
+  assert.deepEqual(offered, ["A"]);
+  assert.deepEqual(recorded, ["AUTO-001"]);
+  assert.deepEqual(references.map((reference) => reference.candidateId), ["A"]);
 });
 
 // --- W10: format compatibility is derived, not hand-maintained ---------------

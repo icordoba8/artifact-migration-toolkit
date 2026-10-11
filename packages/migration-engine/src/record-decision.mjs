@@ -160,6 +160,16 @@ export const autoApprovalChannel = (reason) =>
   Object.assign(({ challenge }) => challenge, { channel: "AUTO", reason });
 
 /**
+ * Offer == accept for the AUTO principal: the one predicate the AUTO gate in
+ * `withOperatorApproval` refuses on, and the one `approveWithOperator` offers
+ * by. A group is one act over its members, so one member whose question is
+ * underivable makes the whole group a human decision.
+ */
+export const autoMayDecide = (candidate) =>
+  candidate.autoResolvable !== false &&
+  !(candidate.groupMembers ?? []).some((member) => member.autoResolvable === false);
+
+/**
  * Who the recorded statement names. An AUTO line never says "operator": the
  * whole guarantee is that an unattended decision reads as an unattended
  * decision, in the ledger, in the sentence, and in the id.
@@ -955,7 +965,7 @@ const withOperatorApproval = async ({
   // eligible to be asked. A candidate whose question the engine cannot derive
   // is a genuine external blocker under `--mode auto`, and the only honest
   // outcome is to stop and say which candidate and why.
-  if (channelOf(ask) === "AUTO" && selected.autoResolvable === false) {
+  if (channelOf(ask) === "AUTO" && !autoMayDecide(selected)) {
     stdout.write(
       `Candidate '${selected.id}' is not resolvable from repository evidence, so the AUTO principal cannot decide it: ` +
         `${selected.blockers?.join(" ") || "the evidence that would settle it is not derivable from this record."} ` +

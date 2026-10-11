@@ -116,13 +116,12 @@ const advanceArguments = ({ moduleName, mode, slice }) => [
 
 /**
  * Validation refusals that no amount of re-authoring can clear, because they
- * name a human act: preserve or restore evidence, claim a file in the slice it
- * belongs to, record a drift acceptance, or reverify after a rework. Each is
- * raised from exactly one place in the engine and each names its own class in
- * the message, so this list matches on the class token rather than on prose.
+ * name a human act: preserve or restore evidence, or reverify after a rework.
+ * Each is raised from exactly one place in the engine and each names its own
+ * class in the message, so this list matches on the class token rather than on
+ * prose.
  */
 const TERMINAL_VALIDATION_REFUSALS = [
-  /\bUNCLAIMED_TARGET_DRIFT\b/,
   /\bREWORK_EVIDENCE_MISSING\b/,
   /\bREOPEN_EVIDENCE_MISSING\b/,
   /^Unresolved verification blocks FINALIZE/,
@@ -131,6 +130,14 @@ const TERMINAL_VALIDATION_REFUSALS = [
   /^Preserved rework evidence changed after it was pinned/,
   /^Preserved reopen evidence changed after it was pinned/,
 ];
+
+/**
+ * F6. Unclaimed drift is a decision, not a dead end: its candidates are offered
+ * like any other (AUTO resolves the ones its gate accepts, a review is relayed
+ * for the rest). It is terminal only when no candidate is left to offer, which
+ * keeps W5-4's promise that this refusal never becomes an endless CONTINUE.
+ */
+const UNCLAIMED_TARGET_DRIFT = /\bUNCLAIMED_TARGET_DRIFT\b/;
 
 /**
  * D3-5. Diagnostic prose, not contract: only the `loop:` line is. Field order
@@ -401,12 +408,13 @@ export const runMigration = async (
       });
     } catch (error) {
       const step = discovered.result.state.currentStep;
-      // W5-4. A FINALIZE refusal for unresolved verification, unclaimed target
-      // drift, missing preserved evidence, or repaired navigation is a stop
-      // condition, not pending work. Reporting it as CONTINUE would send an
-      // auto-loop back to re-author `gates.json` forever against a record that
-      // cannot be finalized until a human acts, which SKILL.md names as the one
-      // stop condition no command could detect. It is detectable now.
+      // W5-4. A FINALIZE refusal for unresolved verification, missing
+      // preserved evidence, or repaired navigation is a stop condition, not
+      // pending work. Reporting it as CONTINUE would send an auto-loop back to
+      // re-author `gates.json` forever against a record that cannot be
+      // finalized until a human acts, which SKILL.md names as the one stop
+      // condition no command could detect. It is detectable now. Unclaimed
+      // drift joins it below, once its decisions are known to be exhausted.
       const terminal = TERMINAL_VALIDATION_REFUSALS.find((pattern) =>
         pattern.test(error.message),
       );
@@ -452,6 +460,9 @@ export const runMigration = async (
       if (directLedger && decisions?.state === "REJECTED") {
         return finish("BLOCKED", { reason: error.message, next: step });
       }
+      if (approvable.length === 0 && UNCLAIMED_TARGET_DRIFT.test(error.message)) {
+        return finish("BLOCKED", { reason: error.message, next: step, blocker: error.message });
+      }
       if (approvable.length > 0) {
         const approver = moduleApprover(recorderFor({ recordTrustedDecision, mode: options.mode, directLedger, stdout: human }), options.moduleName);
         if (directLedger && (group?.blocked ?? approvable[0].blocked)) {
@@ -483,7 +494,10 @@ export const runMigration = async (
           decisionReferences,
           group,
         );
-        let remaining = approvable.slice(recorded.length);
+        // By what was recorded, not by count: AUTO may skip a candidate it is
+        // not offered, so the recorded ones need not be the first.
+        const decided = new Set(decisionReferences.map((reference) => reference.candidateId));
+        let remaining = approvable.filter((candidate) => !decided.has(candidate.id));
         if (directLedger && recorded.length > 0) {
           const fresh = await pendingDecisionCandidates({ registryPath, moduleName: options.moduleName });
           decisions = fresh.decisions;
@@ -493,12 +507,16 @@ export const runMigration = async (
             return finish("BLOCKED", { reason: "The current candidate was explicitly REJECTED.", next: step });
           }
         }
+        // F6. A drift acceptance is resolved from the ledger at FINALIZE and
+        // cited nowhere: the classification it would be cited in is pinned.
+        const nothingToCite = directLedger ||
+          approvable.every((candidate) => candidate.kind === "TARGET_DRIFT_ACCEPTED");
         if (remaining.length > 0) {
           return finish("OPERATOR_DECISION", {
             reason:
               `${recordedPrefix(recorded)}${remaining.length} operator decision(s) are still pending, ` +
               `each requiring its own operator approval in a new iteration` +
-              (directLedger
+              (nothingToCite
                 ? `. Each recorded decision is resolved from the verified ledger against the current candidate; nothing is cited in ${MODULE_CLASSIFICATION_FILE}.`
                 : `; cite every returned decisionId with its decisionDigest in ${MODULE_CLASSIFICATION_FILE}.`),
             next: step,
@@ -515,7 +533,7 @@ export const runMigration = async (
         return finish("CONTINUE", {
           reason:
             `${error.message} Recorded ${recorded.join(", ")}` +
-            (directLedger
+            (nothingToCite
               ? `; resolved from the verified ledger against the current candidate, nothing to cite.`
               : `; cite each as decisionId with its decisionDigest in ${MODULE_CLASSIFICATION_FILE}.`),
           next: step,
