@@ -6,12 +6,12 @@ import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
 import { maySelfConfirm, MIGRATION_MODES } from "../migration-policy.mjs";
+import { updateRegistry } from "../migration-utils.mjs";
 import {
   previewRegistryUpdate,
   renderRegistryPreview,
   resolveRegistryPath,
-  updateRegistry,
-} from "../migration-utils.mjs";
+} from "../store/index.mjs";
 
 export const parseRegistryArguments = (arguments_) => {
   const { positionals, values } = parseArgs({

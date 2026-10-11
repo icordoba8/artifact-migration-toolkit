@@ -11,7 +11,6 @@
 import { createHash } from "node:crypto";
 import {
   cp,
-  lstat,
   mkdir,
   readdir,
   readFile,
@@ -27,14 +26,23 @@ import { isMainModule } from "../engine-paths.mjs";
 
 import { acquireModuleLock } from "../module-lock.mjs";
 import { writeJournalAtomic } from "../module-lock.mjs";
+import { pendingTransactions } from "../migration-utils.mjs";
 import {
   assertSafeName,
   gitRevision,
-  pendingTransactions,
+  sha256Hex as sha256,
+} from "../shared/index.mjs";
+import {
+  assertNoSymlink,
+  entryExists as exists,
+  manifestOf,
   readRegistry,
-  resolveRegistryPath,
+  readTree,
   resolveModule,
-} from "../migration-utils.mjs";
+  resolveRegistryPath,
+  sameManifest,
+  writeTree,
+} from "../store/index.mjs";
 import {
   assertToolkitIdentityNotMismatched,
   loadOpenSpecAuthority,
@@ -60,8 +68,6 @@ export const TRANSACTION_STATES = [
   "ROLLED_BACK",
 ];
 
-const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");
-
 const upgradesRoot = (targetRoot) =>
   path.join(targetRoot, ".agents/knowledge/migrations/upgrades");
 
@@ -73,61 +79,6 @@ const lockPathFor = (targetRoot, moduleName) =>
 
 const transactionRoot = (targetRoot, moduleName, confirmationId) =>
   path.join(moduleUpgradeRoot(targetRoot, moduleName), confirmationId);
-
-const exists = async (target) => {
-  try {
-    await lstat(target);
-    return true;
-  } catch (error) {
-    if (error.code === "ENOENT") return false;
-    throw error;
-  }
-};
-
-const assertNoSymlink = async (target) => {
-  const details = await lstat(target);
-  if (details.isSymbolicLink()) {
-    throw new Error(`Refusing symlinked migration path: ${target}`);
-  }
-  if (!details.isDirectory()) {
-    throw new Error(`Migration path is not a directory: ${target}`);
-  }
-};
-
-/** Reads a whole tree as UTF-8 text, rejecting symlinks anywhere inside it. */
-const readTree = async (root) => {
-  const entries = await readdir(root, { recursive: true, withFileTypes: true });
-  const files = {};
-  for (const entry of entries) {
-    const absolute = path.join(entry.parentPath ?? entry.path, entry.name);
-    if (entry.isSymbolicLink()) {
-      throw new Error(`Refusing symlinked migration file: ${absolute}`);
-    }
-    if (!entry.isFile()) continue;
-    const relative = path.relative(root, absolute).split(path.sep).join("/");
-    files[relative] = await readFile(absolute, "utf8");
-  }
-  return files;
-};
-
-const manifestOf = (files) =>
-  Object.keys(files)
-    .sort()
-    .map((relative) => {
-      const buffer = Buffer.from(files[relative], "utf8");
-      return { path: relative, bytes: buffer.byteLength, sha256: sha256(buffer) };
-    });
-
-const writeTree = async (root, files) => {
-  for (const relative of Object.keys(files).sort()) {
-    const destination = path.join(root, ...relative.split("/"));
-    await mkdir(path.dirname(destination), { recursive: true });
-    await writeFile(destination, files[relative], "utf8");
-  }
-};
-
-const sameManifest = (left, right) =>
-  JSON.stringify(left) === JSON.stringify(right);
 
 const readJournal = async (file) => JSON.parse(await readFile(file, "utf8"));
 

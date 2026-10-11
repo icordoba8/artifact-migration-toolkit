@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
 
-import { renderRegistryPreview, resolveRegistryPath } from "../migration-utils.mjs";
+import { renderRegistryPreview, resolveRegistryPath } from "../store/index.mjs";
 import {
   assertOptionCombination,
   exitCodeFor,

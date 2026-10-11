@@ -46,22 +46,16 @@
  */
 
 import { createHash } from "node:crypto";
-import { constants as fsConstants, writeSync } from "node:fs";
-import { appendFile, mkdir, open, readFile } from "node:fs/promises";
+import { writeSync } from "node:fs";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import {
-  assertSafeName,
-  assertSecurePath,
-  resolveRegistryPath,
-} from "./migration-utils.mjs";
-import {
-  engineCommand,
-  isMainModule,
-} from "./engine-paths.mjs";
+import { assertSafeName, assertSecurePath } from "./shared/index.mjs";
+import { appendDurably, resolveRegistryPath } from "./store/index.mjs";
+import { engineCommand, isMainModule } from "./engine-paths.mjs";
 import { withModuleLock } from "./module-lock.mjs";
 import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 import {
@@ -1393,28 +1387,6 @@ const attestedBinding = async (candidate, locked, result) => {
     groupMembersDigest: group ? protocol.groupMembersDigestOf(candidate.boundTo.members) : null,
     groupMemberCount: group ? candidate.boundTo.members.length : 0,
   };
-};
-
-const appendDurably = async (targetRoot, file, text, onBoundary) => {
-  await assertSecurePath(targetRoot, file);
-  await mkdir(path.dirname(file), { recursive: true });
-  const handle = await open(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600);
-  try {
-    const bytes = Buffer.from(text, "utf8");
-    await onBoundary("during-append", { writePrefix: (length) => handle.write(bytes, 0, length) });
-    for (let offset = 0; offset < bytes.length;) {
-      offset += (await handle.write(bytes, offset, bytes.length - offset)).bytesWritten;
-    }
-    await onBoundary("after-append");
-    await handle.sync();
-    await onBoundary("after-fsync");
-  } finally {
-    await handle.close();
-  }
-  if (process.platform !== "win32") {
-    const directory = await open(path.dirname(file), fsConstants.O_RDONLY);
-    try { await directory.sync(); } finally { await directory.close(); }
-  }
 };
 
 /** Fresh review data for the companion: the same derivation the writer uses. */

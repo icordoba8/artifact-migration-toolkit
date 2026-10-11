@@ -16,11 +16,8 @@
 import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
-import { resolveRegistryPath } from "../migration-utils.mjs";
-import {
-  changeModuleToolkitIdentity,
-  getMigrationStatus,
-} from "../resumable-migration.mjs";
+import { resolveRegistryPath } from "../store/index.mjs";
+import { changeModuleToolkitIdentity, getMigrationStatus } from "../resumable-migration.mjs";
 import {
   activeToolkitIdentity,
   renderToolkitIdentity,

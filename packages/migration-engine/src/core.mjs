@@ -73,12 +73,12 @@ export {
   DECISIONS_FILE,
   DISCOVERY_PIN,
   DISCOVERY_SCAN_FILE,
-  migrationRoot,
   MODULE_CLASSIFICATION_FILE,
   TARGET_BASELINE_FILE,
   TARGET_DIRTY_SCOPE,
   UI_REMEDIATION_FILE,
 } from "./resumable-migration.mjs";
+export { migrationRoot } from "./store/index.mjs";
 
 // -- the canonical progress projection every front end renders (Plan 09).
 // Derived data: `migrationProgress` reads a record and returns one, and
@@ -216,23 +216,30 @@ export {
 
 // -- registry: core functions that happen to live in `migration-utils.mjs`
 // (D2-3). They contain no argv, stdout, or TTY; the file's name is the only
-// thing that ever suggested otherwise.
+// thing that ever suggested otherwise. Registry persistence moved to `store/`
+// and the path and git primitives to `shared/` (Track A1); `updateRegistry`
+// stays until the module lock it holds leaves lifecycle.
 export {
   assertFigmaSource,
   assertNoPendingTransaction,
-  assertProjectRootContainment,
-  assertSafeName,
   assertPonytailTarget,
-  assertSecurePath,
-  atomicWrite,
-  committedChangesSince,
   DESIGN_SOURCES,
-  dirtyManifest,
-  gitRevision,
   PONYTAIL_TARGETS,
   resolveDesignSource,
   resolveLegacySources,
   pendingTransactions,
+  updateRegistry,
+} from "./migration-utils.mjs";
+export {
+  assertProjectRootContainment,
+  assertSafeName,
+  assertSecurePath,
+  committedChangesSince,
+  dirtyManifest,
+  gitRevision,
+} from "./shared/index.mjs";
+export {
+  atomicWrite,
   persistProjectRegistryBinding,
   previewProjectRegistryBinding,
   previewRegistryUpdate,
@@ -241,8 +248,7 @@ export {
   renderRegistryPreview,
   resolveModule,
   resolveRegistryPath,
-  updateRegistry,
-} from "./migration-utils.mjs";
+} from "./store/index.mjs";
 
 // -- content identity: the one cross-platform policy that decides what an
 // ordinary file pin means. Both engines import it from here; neither owns a
@@ -252,12 +258,14 @@ export {
   CONTENT_IDENTITY_TEXT,
   contentIdentity,
   contentIdentityMatches,
-  fileContentIdentity,
-  fileContentIdentityMatches,
   isContentIdentity,
   isTextIdentityEligible,
   parseContentIdentity,
-} from "./migration-utils.mjs";
+} from "./shared/index.mjs";
+export {
+  fileContentIdentity,
+  fileContentIdentityMatches,
+} from "./store/index.mjs";
 
 // -- the exclusive per-module lock every mutating operation runs inside
 export { lockPathFor, withModuleLock } from "./module-lock.mjs";
