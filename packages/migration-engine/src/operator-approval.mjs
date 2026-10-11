@@ -2,7 +2,7 @@ import {
   decisionLineDigest,
   isAutoAuthority,
 } from "./resumable-migration.mjs";
-import { autoApprovalChannel, renderDecisionReview, runRecordDecisionCli } from "./record-decision.mjs";
+import { autoApprovalChannel, autoMayDecide, renderDecisionReview, runRecordDecisionCli } from "./record-decision.mjs";
 
 export const renderGroupBlock = (group) =>
   `  One approval covers all ${group.boundTo.members.length}:\n` +
@@ -133,6 +133,12 @@ export const approveWithOperator = async (
     }
     return decisions.map((decision) => decision.id);
   };
+  // Offer == accept: AUTO is offered only what its gate records. The rest stays
+  // pending, and the caller reports it for a human.
+  if (approver.channel === "AUTO") {
+    candidates = candidates.filter(autoMayDecide);
+    if (group && !autoMayDecide(group)) group = null;
+  }
   const first = group ?? candidates[0];
   if (!first) return [];
   const recorded = await record(first);

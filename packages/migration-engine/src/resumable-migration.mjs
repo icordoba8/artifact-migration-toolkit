@@ -10756,6 +10756,22 @@ const claimedTargetPaths = async (root, slices, roots) => {
 const UNDERIVABLE_OWNERSHIP_REASON =
   "the slice plan declares no target owner, so whether this path belongs to the migration cannot be derived; only a human can say";
 
+/**
+ * F6. The one spelling of a drift candidate's facts, read by the offer
+ * (`pendingTargetDriftCandidates`) and by the FINALIZE resolver
+ * (`acceptsDrift`), so the decision recorded over the offered candidate is the
+ * decision FINALIZE resolves. Neither reads a finding's display `reason`:
+ * whether an earlier acceptance went stale is an outcome of this resolution,
+ * not an input to it. A deleted path digests as zeroes, so its deletion is
+ * what gets accepted and recreating the file re-blocks like any edit.
+ */
+const driftCandidateFacts = async (targetRoot, relative, autoResolvable) => ({
+  pathDigest: `sha256:${await hashFile(path.join(targetRoot, relative)).catch(() => "0".repeat(64))}`,
+  rationale: autoResolvable
+    ? `${relative} was modified in the target but is claimed by no validated slice, no authorized rework, and no delegated artifact.`
+    : UNDERIVABLE_OWNERSHIP_REASON,
+});
+
 const classifyTargetDrift = async (root, state, roots, slices) => {
   if (!usesSliceRework(state) || !roots?.targetRoot) return [];
   if (!DRIFT_OWNERSHIP_STEPS.has(state.currentStep)) return [];
@@ -10835,20 +10851,17 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
    * byte binding *and* the full direct-ledger resolution -- candidate digest,
    * pinned policy, required principal, group authority, no receipt.
    */
-  const acceptsDrift = async (relative, currentDigest) => {
+  const acceptsDrift = async (relative) => {
+    const { pathDigest, rationale } = await driftCandidateFacts(roots.targetRoot, relative, autoResolvable);
     if (!usesDirectLedgerDecisions(state)) {
-      return currentDigest !== null && currentDigest === accepted.get(relative);
+      return pathDigest === accepted.get(relative);
     }
     const candidate = await moduleDecisionCandidate(state, roots.targetRoot, {
       kind: "TARGET_DRIFT_ACCEPTED",
       subjectType: "TARGET_FILE",
       subjectPath: relative,
-      // The same rationale `pendingTargetDriftCandidates` offered for this
-      // path, so the candidate resolved here is the candidate reviewed there.
-      rationale: autoResolvable
-        ? `${relative} was modified in the target but is claimed by no validated slice, no authorized rework, and no delegated artifact.`
-        : UNDERIVABLE_OWNERSHIP_REASON,
-      boundTo: { ...driftBinding, pathDigest: currentDigest },
+      rationale,
+      boundTo: { ...driftBinding, pathDigest },
     });
     try {
       await requireModuleDecision({
@@ -10936,10 +10949,7 @@ const classifyTargetDrift = async (root, state, roots, slices) => {
       // W4-5: the acceptance binds to the bytes. Editing the file after
       // acceptance invalidates the decision, exactly as a classification
       // approval stops applying when its candidate changes.
-      const current = await hashFile(path.join(roots.targetRoot, relative)).catch(
-        () => null,
-      );
-      if (await acceptsDrift(relative, current && `sha256:${current}`)) {
+      if (await acceptsDrift(relative)) {
         findings.push({ path: relative, class: DRIFT_CLASSES.OPERATOR_ACCEPTED });
         continue;
       }
@@ -11293,16 +11303,11 @@ export const pendingTargetDriftCandidates = async (root, state, roots) => {
   return Promise.all(
     unclaimed.map(async (finding) => ({
       subjectPath: finding.path,
-      pathDigest: `sha256:${await hashFile(
-        path.join(roots.targetRoot, finding.path),
-      ).catch(() => "0".repeat(64))}`,
       // Carried, not recomputed: whether ownership was derivable is a fact
       // about the plan `classifyTargetDrift` already read, and re-deriving it
       // here is how the two answers drift apart.
       autoResolvable: finding.autoResolvable !== false,
-      rationale:
-        finding.reason ??
-        `${finding.path} was modified in the target but is claimed by no validated slice, no authorized rework, and no delegated artifact.`,
+      ...(await driftCandidateFacts(roots.targetRoot, finding.path, finding.autoResolvable !== false)),
     })),
   );
 };
