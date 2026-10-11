@@ -47,11 +47,13 @@ import {
   pendingTransactions,
   persistProjectRegistryBinding,
   previewProjectRegistryBinding,
+  previewRegistryUpdate,
   readRegistry,
   registryIdentity,
   resolveDesignSource,
   resolveLegacySources,
   resolveModule,
+  updateRegistry,
 } from "./migration-utils.mjs";
 import { withModuleLock, writeJournalAtomic } from "./module-lock.mjs";
 import {
@@ -6478,6 +6480,7 @@ const validateCapabilityOwnership = async (root, state, roots, baselineIds) => {
   }
   assertUniqueIds(rows, "Capability ownership rows");
   let supportingConsumers;
+  let pinnedScan;
   for (const row of rows) {
     assertNonEmpty(row.capability, `${row.id}.capability`);
     assertNonEmpty(row.rationale, `${row.id}.rationale`);
@@ -6546,6 +6549,7 @@ const validateCapabilityOwnership = async (root, state, roots, baselineIds) => {
               ),
           ),
         );
+        pinnedScan = scan;
       }
       // The no-blind-promotion rule. One consumer is feature-local by
       // definition; shared ownership is proven by other consumers, not claimed.
@@ -6572,9 +6576,76 @@ const validateCapabilityOwnership = async (root, state, roots, baselineIds) => {
         (consumer) => !supportingConsumers.has(consumer),
       );
       if (absent.length > 0) {
-        throw new Error(
-          `${row.id} names consumer(s) absent from the pinned discovery supporting census: ${absent.join(", ")}. Shared ownership must be proven by the discovery scan, not free text.`,
+        // shortcut: external import edges must be committed, add a discovery-time global edge pin if dirty consumers must qualify.
+        const sources = legacyEvidence.map((claim) =>
+          legacyRelativePath(claim, roots, `${row.id}.legacyEvidence`),
         );
+        const { runDiscoveryScan } = await import("./discovery-scan.mjs");
+        const proof = await runDiscoveryScan({
+          legacyRoot: roots.legacyRoot,
+          moduleRoots: sources,
+          algorithmVersion: pinnedScan.algorithmVersion,
+        });
+        const dirty = await dirtyManifest(roots.legacyRoot);
+        const dirtyPaths = new Set(dirty.entries.map((entry) => entry.path));
+        const edges = new Map();
+        for (const edge of proof.edges) {
+          if (!edges.has(edge.from)) edges.set(edge.from, new Set());
+          edges.get(edge.from).add(edge.to);
+        }
+        const reachesSource = (file) => {
+          if (dirtyPaths.has(file)) return false;
+          const seen = new Set();
+          const pending = [...(edges.get(file) ?? [])];
+          while (pending.length > 0) {
+            const next = pending.pop();
+            if (seen.has(next)) continue;
+            if (dirtyPaths.has(next)) continue;
+            if (sources.includes(next)) return true;
+            seen.add(next);
+            pending.push(...(edges.get(next) ?? []));
+          }
+          return false;
+        };
+        const pinnedRevision =
+          (await gitRevision(roots.legacyRoot)).revision ===
+          state.legacyRevision.revision;
+        const pinnedResolution =
+          JSON.stringify(proof.resolution) ===
+          JSON.stringify(pinnedScan.resolution);
+        const directories = new Set(
+          (await Promise.all(absent.map(async (consumer) =>
+            (await lstat(path.join(roots.legacyRoot, consumer)).catch((error) => {
+              if (error.code === "ENOENT") return null;
+              throw error;
+            }))?.isDirectory()
+              ? consumer
+              : null,
+          ))).filter(Boolean),
+        );
+        const proven = absent.filter((consumer) =>
+          pinnedRevision &&
+          pinnedResolution &&
+          ![...dirtyPaths].some((file) => file === "package.json" || file.endsWith("/package.json")) &&
+          directories.has(consumer) &&
+          !sources.some((source) => source.startsWith(`${consumer}/`)) &&
+          proof.edges.some(({ from }) =>
+            (from === consumer || from.startsWith(`${consumer}/`)) &&
+            reachesSource(from)
+          ),
+        );
+        if (
+          proven.length !== absent.length ||
+          [...external].some((consumer) =>
+            [...external].some((other) =>
+              other !== consumer && consumer.startsWith(`${other}/`)
+            )
+          )
+        ) {
+          throw new Error(
+            `${row.id} names consumer(s) without pinned legacy import evidence: ${absent.filter((consumer) => !proven.includes(consumer)).join(", ") || absent.join(", ")}. Shared ownership must be proven by repository imports, not free text.`,
+          );
+        }
       }
     }
     if (
@@ -16154,6 +16225,9 @@ export const previewAdvance = async ({
   const currentStep = step ?? state.currentStep;
   const activeSlice = slice ?? state.activeSlice;
   const blockers = [];
+  if (stateMappingMismatch(state, resolved)) {
+    blockers.push("Migration state mapping does not match the registry.");
+  }
   if (state.status !== "ACTIVE") {
     blockers.push(`Cannot advance migration with status '${state.status}'.`);
   }
@@ -16573,7 +16647,9 @@ const previewProgress = (state, mode, blockers) =>
 
 export const advanceMigration = async ({
   registryPath,
+  projectRoot,
   moduleName,
+  mode,
   step,
   slice,
   confirmAdvance,
@@ -16588,6 +16664,7 @@ export const advanceMigration = async ({
     moduleName,
     step,
     slice,
+    mode,
   });
   if (!preview.requiresConfirmation) {
     throw new Error(preview.blockers.join("; "));
@@ -16600,14 +16677,39 @@ export const advanceMigration = async ({
       "Advance confirmation is missing or expired. Show the current advance pre-execution summary and ask the user to confirm again.",
     );
   }
-  return withModuleLock(registryData.targetRoot, resolved.canonical, () =>
-    advanceUnderLock({ registryData, resolved, step, slice, preview, hooks }),
+  const result = await withModuleLock(registryData.targetRoot, resolved.canonical, () =>
+    advanceUnderLock({ registryData, resolved, projectRoot, mode, step, slice, preview, hooks }),
   );
+  if (!result.registrationPreview || mode !== "auto") return result;
+  const { maySelfConfirm } = await import("./migration-policy.mjs");
+  if (
+    !maySelfConfirm({ command: "registry", mode }) ||
+    !maySelfConfirm({ command: "advance", mode })
+  ) return result;
+  const registration = result.registrationPreview;
+  const registered = await updateRegistry({
+    registryPath: registration.registryPath,
+    projectRoot,
+    moduleName: registration.moduleName,
+    target: registration.target,
+    confirmExecution: registration.confirmationId,
+  });
+  const continuedPreview = await previewAdvance({
+    registryPath, moduleName, step, slice, mode,
+  });
+  const continued = await advanceMigration({
+    registryPath, projectRoot, moduleName, step, slice,
+    confirmAdvance: continuedPreview.confirmationId,
+    hooks,
+  });
+  return { ...continued, registration: registered };
 };
 
 const advanceUnderLock = async ({
   registryData,
   resolved,
+  projectRoot,
+  mode,
   step,
   slice,
   preview,
@@ -16621,6 +16723,9 @@ const advanceUnderLock = async ({
   );
   const context = await readState(registryData.targetRoot, resolved.canonical);
   const state = context.state;
+  if (stateMappingMismatch(state, resolved)) {
+    throw new Error("Migration state mapping does not match the registry.");
+  }
   assertRecordToolkitIdentity(state, resolved.canonical, "Advancing this migration");
   // Identity first, then the format upgrade, then the lifecycle. An active
   // increment freezes the checkpoint tuple: no advance shares an invocation
@@ -16721,11 +16826,20 @@ const advanceUnderLock = async ({
   let pendingSlices = [...state.pendingSlices];
   let completedSlices = [...state.completedSlices];
   let nextSlice = activeSlice;
-
   if (currentStep === "BUILD_BASELINE" && !resolved.registered) {
-    throw new Error(
-      "Baseline is valid, but the migration mapping is not registered. Run update-migration-registry.mjs before advancing.",
-    );
+    if (mode !== "auto" && mode !== "step") {
+      throw new Error(
+        "Baseline is valid, but the migration mapping is not registered. Use --mode auto or the public registry command before advancing.",
+      );
+    }
+    const registration = {
+      registryPath: registryData.registryPath,
+      projectRoot,
+      moduleName: state.migrationId,
+      target: state.targetModule,
+    };
+    const registryPreview = await previewRegistryUpdate(registration);
+    return { registrationPreview: registryPreview };
   }
   if (currentStep === "PLAN") {
     const { slices } = validated;
