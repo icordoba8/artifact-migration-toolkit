@@ -149,7 +149,8 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     };
     const run = async () => {
       const stdout = await command("artifact-migration-run", ["auth", "--mode", "auto", "--json"]);
-      const result = JSON.parse(stdout.slice(stdout.indexOf('{\n  "outcome"'), stdout.lastIndexOf("\nloop:")));
+      // Under --json stdout is the one result document: no slicing, no cleanup.
+      const result = JSON.parse(stdout);
       assert.ok(["CONTINUE", "COMPLETE"].includes(result.outcome), stdout);
       return result;
     };

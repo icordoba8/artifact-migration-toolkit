@@ -15680,19 +15680,25 @@ test("R-W5-e: a terminal FINALIZE refusal is BLOCKED with exit code 2, not an en
     const previousExitCode = process.exitCode;
     process.chdir(fixture.root);
     let result;
+    // Under --json the directive is a human line: stderr, not the JSON channel.
+    const errors = [];
+    const stderrWrite = process.stderr.write;
+    process.stderr.write = (chunk) => (errors.push(String(chunk)), true);
     try {
       result = await runMigration(["auth", "--mode", "auto", "--json"], {
         stdout: { write: (chunk) => (captured.push(chunk), true) },
         recordTrustedDecision: null,
       });
     } finally {
+      process.stderr.write = stderrWrite;
       process.chdir(previousCwd);
       process.exitCode = previousExitCode;
     }
     assert.equal(result.outcome, "BLOCKED");
     assert.match(result.blocker, /UNCLAIMED_TARGET_DRIFT/);
     assert.equal(exitCodeFor(result.outcome), BLOCKED_EXIT_CODE);
-    assert.match(captured.join(""), /loop: STOP reason=BLOCKED/);
+    assert.equal(JSON.parse(captured.join("")).outcome, "BLOCKED");
+    assert.match(errors.join(""), /loop: STOP reason=BLOCKED/);
   } finally {
     await fixture.cleanup();
   }

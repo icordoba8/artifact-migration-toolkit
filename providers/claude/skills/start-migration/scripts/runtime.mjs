@@ -5,7 +5,7 @@
 // ownership stay in the release's provider adapter.
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { access, constants as fsConstants, cp, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -722,7 +722,20 @@ async function main(argv) {
   process.stdout.write(`${JSON.stringify(await ensureRuntime(values), null, 2)}\n`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+/**
+ * `isMainModule` from packages/migration-engine/src/engine-paths.mjs, inlined:
+ * this file ships alone inside each skill. Run through a symlinked skill
+ * directory, argv[1] is the link path, so only its realpath equals this file.
+ */
+const isMainModule = () => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const self = fileURLToPath(import.meta.url);
+  if (path.resolve(entry) === self) return true;
+  try { return realpathSync(path.resolve(entry)) === self; } catch { return false; }
+};
+
+if (isMainModule()) {
   main(process.argv.slice(2)).catch(error => {
     // The typed state too, machine-readable, for an MCP caller reading stderr:
     // a refusal has to be actionable without parsing an English sentence.

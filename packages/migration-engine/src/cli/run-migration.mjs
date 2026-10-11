@@ -248,6 +248,9 @@ export const runMigration = async (
   { stdout = process.stdout, recordTrustedDecision, emitProgress = true } = {},
 ) => {
   const options = parseRunArguments(arguments_);
+  // Under --json stdout carries the one result document; every human line --
+  // previews, reviews, prompts, progress and the directive -- goes to stderr.
+  const human = options.json ? process.stderr : stdout;
   // The most recent persisted record this iteration saw. It is only ever read
   // to project progress from -- `finish` never writes it and never consults it
   // to decide anything -- so an iteration that failed before reaching a record
@@ -287,7 +290,7 @@ export const runMigration = async (
     // agent to re-render: stderr under --json so stdout's JSON stays untouched.
     const block = emitProgress ? renderProgressBlock(result) : "";
     if (options.json) {
-      process.stderr.write(block);
+      human.write(block);
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
       if (result.request?.summary) {
@@ -295,7 +298,7 @@ export const runMigration = async (
       }
       stdout.write(block);
     }
-    stdout.write(
+    human.write(
       renderLoopDirective({
         moduleName: options.moduleName,
         mode: options.mode,
@@ -311,7 +314,7 @@ export const runMigration = async (
     //    still writes, on the same path, in the same order.
     const discovered = await runDiscoverCli(discoverArguments(arguments_), {
       emitDirective: false,
-      stdout,
+      stdout: human,
     });
     latestState = discovered.result?.state ?? latestState;
     latestPreview = discovered.preview ?? latestPreview;
@@ -351,11 +354,11 @@ export const runMigration = async (
       const binding = delegated.artifactMigration;
       nextWork = { kind: "RUN_ARTIFACT", artifactMigration: binding };
       if (options.mode === "step" && delegated.nextWorkKind === "RUN_ARTIFACT") {
-        stdout.write(`Artifact prerequisite: ${binding.command}\n`);
+        human.write(`Artifact prerequisite: ${binding.command}\n`);
         return finish("CONTINUE", { reason: delegated.reason });
       }
       const child = await runArtifactCli(binding.arguments, {
-        stdout,
+        stdout: human,
         emitDirective: false,
         recordTrustedDecision,
       });
@@ -454,7 +457,7 @@ export const runMigration = async (
         if (directLedger && (group?.blocked ?? approvable[0].blocked)) {
           const review = group?.review ?? approvable[0].review;
           const blocked = group?.blocked ?? approvable[0].blocked;
-          stdout.write(renderDecisionReview(review));
+          human.write(renderDecisionReview(review));
           return finish("BLOCKED", {
             reason: `${blocked.state}: ${blocked.reason}`,
             next: step,
@@ -465,7 +468,7 @@ export const runMigration = async (
         if (directLedger && approver?.channel === "AUTO") {
           const blocked = { state: "RELAY_CHANNEL_UNAVAILABLE", requiredPrincipal: "AGENT_RELAYED",
             reason: "The trusted policy requires AGENT_RELAYED; --mode auto cannot silently become a relayed decision." };
-          stdout.write(renderDecisionReview(group?.review ?? approvable[0].review));
+          human.write(renderDecisionReview(group?.review ?? approvable[0].review));
           return finish("BLOCKED", {
             reason: `${blocked.state}: ${blocked.reason}`, next: step,
             operatorApproval: operatorApproval(approvable, group), blocked,
@@ -476,7 +479,7 @@ export const runMigration = async (
         const recorded = await approveWithOperator(
           approvable,
           approver,
-          stdout,
+          human,
           decisionReferences,
           group,
         );
@@ -545,7 +548,7 @@ export const runMigration = async (
     // 5. Advance. One checkpoint, one lock, one history event.
     const advanced = await runAdvanceCli(advanceArguments(options), {
       emitDirective: false,
-      stdout,
+      stdout: human,
     });
     latestState = advanced.result?.state ?? latestState;
     const advance = nextOutcome({
@@ -572,6 +575,10 @@ if (isMainModule(import.meta.url)) {
   // no directive, non-zero exit.
   runMigration(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error.message}\n`);
+    // An argument refusal still owes a --json caller its one document.
+    if (process.argv.includes("--json")) {
+      process.stdout.write(`${JSON.stringify({ outcome: "FAILED", reason: error.message }, null, 2)}\n`);
+    }
     process.exitCode = exitCodeFor("FAILED");
   });
 }

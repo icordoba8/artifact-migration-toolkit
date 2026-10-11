@@ -9,6 +9,10 @@ export const digest = bytes => `sha256:${createHash('sha256').update(bytes).dige
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const optional = file => readFile(file).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+// A typed refusal: the message is unchanged, `code` and `state` are for a
+// machine reader (the bootstrap prints `state` to stderr as JSON).
+const refuse = (code, message, state = {}) => Object.assign(new Error(message), { code, state: { code, ...state } });
+const conflict = (file, message = 'Conflicting or modified MCP configuration') => refuse('INSTALL_REGISTRATION_CONFLICT', message, { file });
 const layouts = {
   claude: { project: ['skills', null, '.mcp.json', 'mcpServers'], user: ['skills', null, '.mcp.json', 'mcpServers'] },
   codex: { project: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null], user: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null] },
@@ -130,7 +134,7 @@ async function historicalOwned(receipt, provider, layout) {
           !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
     for (const legacy of provider === 'opencode' ? [false, true] : [false]) {
-      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release) });
+      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release), release: item.release, pin: item.pin, manifest });
     }
   }
   return owned;
@@ -163,11 +167,11 @@ function mergeConfig(raw, layout, previous, server, historical = []) {
       else {
         const matches = historical.filter(owned => typeof owned === 'string' && text.split(owned).length === 2);
         if (matches.length === 1) { text = text.replace(matches[0], ''); stale = true; }
-        else if (ownedBlock.test(text)) throw new Error('Owned MCP configuration was modified');
+        else if (ownedBlock.test(text)) throw conflict(layout[2], 'Owned MCP configuration was modified');
         else missing = true;
       }
     }
-    if (/start-migration|BEGIN artifact-migration-tools|END artifact-migration-tools/.test(text)) throw new Error('Conflicting MCP configuration');
+    if (/start-migration|BEGIN artifact-migration-tools|END artifact-migration-tools/.test(text)) throw conflict(layout[2], 'Conflicting MCP configuration');
     const separator = text && !text.endsWith('\n') ? '\n' : '';
     const fresh = server ? `${begin}[mcp_servers.start-migration]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n${end}` : null;
     // Restoring re-emits the receipt's own bytes, so the repair adds nothing of
@@ -185,11 +189,11 @@ function mergeConfig(raw, layout, previous, server, historical = []) {
   if (!config || Array.isArray(config) || typeof config !== 'object' || notObject(config[key]) || (nested && notObject(config[key]?.[nested]))) throw new Error('MCP config must be an object');
   const legacy = nested ? config[key]?.['start-migration'] : undefined;
   const found = [(nested ? config[key]?.[nested] : config[key])?.['start-migration'], legacy].filter(entry => entry !== undefined);
-  if (found.length > 1 || (raw?.toString().match(/"start-migration"\s*:/g) ?? []).length !== found.length) throw new Error('Conflicting or modified MCP configuration');
+  if (found.length > 1 || (raw?.toString().match(/"start-migration"\s*:/g) ?? []).length !== found.length) throw conflict(layout[2]);
   const [existing] = found;
   const missing = Boolean(previous) && existing === undefined;
   const stale = previous && existing !== undefined && !same(existing, previous) && historical.some(owned => same(existing, owned));
-  if (!missing && !stale && (previous ? !same(existing, previous) : existing !== undefined)) throw new Error('Conflicting or modified MCP configuration');
+  if (!missing && !stale && (previous ? !same(existing, previous) : existing !== undefined)) throw conflict(layout[2]);
   if (legacy !== undefined) delete config[key]['start-migration'];
   if (server) {
     config[key] ??= {};
@@ -211,21 +215,21 @@ function mergeAgents(raw, previous, server, historical, provider) {
   if (!config || Array.isArray(config) || typeof config !== 'object' ||
       !entries || Array.isArray(entries) || typeof entries !== 'object' ||
       (config.targets !== undefined && (!Array.isArray(config.targets) || !config.targets.every(target => typeof target === 'string')))) {
-    if (existing !== undefined || raw.includes('"start-migration"')) throw new Error('Conflicting or modified MCP configuration');
+    if (existing !== undefined || raw.includes('"start-migration"')) throw conflict('.agents/mcp.json');
     return null;
   }
   if (existing === undefined) return null;
-  if (!previous) throw new Error('Conflicting or modified MCP configuration');
+  if (!previous) throw conflict('.agents/mcp.json');
   if ((raw.toString().match(/"start-migration"\s*:/g) ?? []).length !== 1 ||
-      (config.targets && !config.targets.includes(provider))) throw new Error('Conflicting or modified MCP configuration');
-  if (!existing || Array.isArray(existing) || typeof existing !== 'object') throw new Error('Conflicting or modified MCP configuration');
+      (config.targets && !config.targets.includes(provider))) throw conflict('.agents/mcp.json');
+  if (!existing || Array.isArray(existing) || typeof existing !== 'object') throw conflict('.agents/mcp.json');
   const { targets, ...registration } = existing;
   if (targets !== undefined && (!Array.isArray(targets) || !targets.includes(provider) ||
       !targets.every(target => typeof target === 'string' && target.length > 0) || new Set(targets).size !== targets.length)) {
-    throw new Error('Conflicting or modified MCP configuration');
+    throw conflict('.agents/mcp.json');
   }
   const current = serverFor('claude', previous.release);
-  if (!same(registration, current) && !historical.some(item => same(registration, item.agents))) throw new Error('Conflicting or modified MCP configuration');
+  if (!same(registration, current) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
   const desired = server ? serverFor('claude', server) : null;
   if (!desired || same(registration, desired)) return null;
   entries['start-migration'] = { ...desired, ...(targets && { targets }) };
@@ -282,6 +286,66 @@ async function validateSelection(receipt, provider, layout) {
   if (!same(Object.keys(receipt.files).sort(), expectedFiles.sort())) throw new Error('Invalid ownership manifest');
 }
 
+/** The consumer files a verified release's adapter writes, rendered for `release` in the store. */
+async function renderFiles(bundle, manifest, provider, layout, mode, release) {
+  const writes = new Map();
+  const source = JSON.parse(await readFile(await safePath(bundle, `providers/${provider}/adapter.json`)));
+  const engine = path.join(release, 'packages/migration-engine');
+  const pkg = JSON.parse(await readFile(path.join(bundle, 'packages/migration-engine/package.json')));
+  const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(engine, entry)]]));
+  const mcp = serverFor('claude', release);
+  for (const relative of mode === 'runtime' ? [] : source.files) {
+    let destination;
+    if (relative.startsWith('skills/')) destination = `${layout[0]}/${relative.slice(7)}`;
+    else if (/^(prompts|commands)\//.test(relative) && layout[1]) destination = `${layout[1]}/${relative.split('/').at(-1)}`;
+    else continue;
+    if (!ownedPath(destination, provider, layout)) throw new Error(`Unexpected adapter path: ${relative}`);
+    if (!manifest.files[`providers/${provider}/${relative}`]) throw new Error(`Unverified adapter file: ${relative}`);
+    let text = await readFile(await safePath(bundle, `providers/${provider}/${relative}`), 'utf8');
+    if (relative.endsWith('/scripts/runtime.mjs')) {
+      writes.set(destination, Buffer.from(text));
+      continue;
+    }
+    text = text.replaceAll('{{ENGINE_MCP_ENTRY}}', mcp.args[0]);
+    // Render installed CLI paths too: skill invocation never depends on PATH.
+    for (const [name, argv] of Object.entries(commands).sort(([a], [b]) => b.length - a.length)) {
+      const quote = value => process.platform === 'win32' ? `"${value.replaceAll('"', '""')}"` : `'${value.replaceAll("'", "'\\''")}'`;
+      text = text.replace(new RegExp(`(?<![\\w-])${name}(?![\\w-])`, 'g'), () => argv.map(quote).join(' '));
+    }
+    writes.set(destination, Buffer.from(text));
+  }
+  if (provider === 'claude' && mode !== 'runtime') writes.set('.claude-plugin/plugin.json', Buffer.from(json({ name: 'artifact-migration-tools', version: manifest.toolkit.version, description: 'Pinned migration skills and MCP engine' })));
+  return { writes, source, commands };
+}
+
+/**
+ * No receipt, but a registration may still be there: the receipt folder was
+ * deleted, or the consumer is a fresh checkout of a configured repository. It
+ * is ours only when it is exactly what this installer writes for the release
+ * being installed or for a verified release in this same store; that release
+ * then stands in for the missing receipt. Anything else -- another store, an
+ * edited entry, an unverifiable release -- is left to the conflict checks.
+ *
+ * Restoration after adoption is byte-exact to the adopted file minus our block:
+ * a separator newline the original install added cannot be told apart from
+ * one the consumer wrote, so it stays.
+ */
+async function adoptRegistration(provider, layout, store, current, rawConfig, rawAgents) {
+  const names = await readdir(store).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  const releases = names.filter(name => /^\d+\.\d+\.\d+-[a-f0-9]{64}$/.test(name)).map(name => ({ release: path.join(store, name), pin: `sha256:${name.slice(-64)}` }));
+  const candidates = [
+    ...(provider === 'opencode' ? [false, true] : [false]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
+    ...await historicalOwned({ ...current, store, releases }, provider, layout),
+  ];
+  const parse = raw => { try { return JSON.parse(raw); } catch { return null; } };
+  const native = layout[3] === null ? null : serversIn(parse(rawConfig ?? '{}') ?? {}, layout[3])['start-migration'];
+  const nativeMatch = layout[3] === null
+    ? item => (rawConfig?.toString() ?? '').split(item.native).length === 2
+    : item => native !== undefined && same(native, item.native);
+  const { targets, ...agents } = parse(rawAgents)?.mcpServers?.['start-migration'] ?? {};
+  return candidates.find(nativeMatch) ?? candidates.find(item => rawAgents && same(agents, item.agents));
+}
+
 async function applyAdapter(provider, { action = 'install', scope, root, store, bundle, pin, runtimeOnly = false, pinned, requiredBy } = {}) {
   const layout = layouts[provider]?.[scope];
   if (!layout || !root || !store) throw new Error('Supported scope, explicit root and external store are required');
@@ -291,13 +355,19 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const rawReceipt = await optional(receiptFile);
   const previous = rawReceipt ? JSON.parse(rawReceipt) : null;
   const mode = runtimeOnly ? 'runtime' : 'provider';
-  if (previous && (previous.provider !== provider || previous.scope !== scope || previous.root !== root || previous.store !== store || (previous.mode ?? 'provider') !== mode)) throw new Error('Installation selection conflict');
+  if (previous && (previous.provider !== provider || previous.scope !== scope || previous.root !== root || previous.store !== store || (previous.mode ?? 'provider') !== mode)) {
+    throw refuse('INSTALL_SELECTION_CONFLICT', 'Installation selection conflict', {
+      recorded: { provider: previous.provider, scope: previous.scope, root: previous.root, store: previous.store, mode: previous.mode ?? 'provider' },
+      requested: { provider, scope, root, store, mode },
+    });
+  }
   if (!['install', 'update', 'rollback', 'remove', 'doctor'].includes(action)) throw new Error(`Unknown action: ${action}`);
   if (previous) await validateSelection(previous, provider, layout);
   const history = previous ? await historicalOwned(previous, provider, layout) : [];
   const historical = history.map(item => item.native);
   if (action !== 'install' && !previous) throw new Error('No installation selected');
-  if (action === 'install' && previous) throw new Error('Already installed; select update explicitly');
+  // Reinstalling is an update: the same ownership checks, the new bundle.
+  if (action === 'install' && previous) action = 'update';
   const configFile = await safePath(root, layout[2]);
   const rawConfig = await optional(configFile);
   const agentsFile = scope === 'project' ? await safePath(root, '.agents/mcp.json') : null;
@@ -327,41 +397,31 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     const servers = layout[3] ? serversIn(JSON.parse(merged.bytes), layout[3]) : { 'start-migration': previous.mcp };
     return { ...previous, outcome: 'OK', mcpRepair, mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
   }
-  const writes = new Map();
+  let writes = new Map();
   let receipt = null;
   let server = null;
+  let adopted = null;
   if (action !== 'remove') {
     const manifest = await verifyBundle(bundle, pin);
-    const source = JSON.parse(await readFile(await safePath(bundle, `providers/${provider}/adapter.json`)));
-    if (!same(source.toolkit, manifest.toolkit)) throw new Error('Adapter identity mismatch');
     const release = path.join(store, `${manifest.toolkit.version}-${pin.slice(7)}`);
     if (action === 'rollback' && !(previous.releases ?? []).some(item => item.release === release && item.pin === pin)) throw new Error('Rollback requires a previously installed exact release');
-    const engine = path.join(release, 'packages/migration-engine');
-    const pkg = JSON.parse(await readFile(path.join(bundle, 'packages/migration-engine/package.json')));
-    const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(engine, entry)]]));
-    const mcp = serverFor('claude', release);
+    const rendered = await renderFiles(bundle, manifest, provider, layout, mode, release);
+    if (!same(rendered.source.toolkit, manifest.toolkit)) throw new Error('Adapter identity mismatch');
+    ({ writes } = rendered);
+    const { commands } = rendered;
     server = serverFor(provider, release);
-    for (const relative of mode === 'runtime' ? [] : source.files) {
-      let destination;
-      if (relative.startsWith('skills/')) destination = `${layout[0]}/${relative.slice(7)}`;
-      else if (/^(prompts|commands)\//.test(relative) && layout[1]) destination = `${layout[1]}/${relative.split('/').at(-1)}`;
-      else continue;
-      if (!ownedPath(destination, provider, layout)) throw new Error(`Unexpected adapter path: ${relative}`);
-      if (!manifest.files[`providers/${provider}/${relative}`]) throw new Error(`Unverified adapter file: ${relative}`);
-      let text = await readFile(await safePath(bundle, `providers/${provider}/${relative}`), 'utf8');
-      if (relative.endsWith('/scripts/runtime.mjs')) {
-        writes.set(destination, Buffer.from(text));
-        continue;
+    if (!previous) {
+      adopted = await adoptRegistration(provider, layout, store, { release, pin }, rawConfig, rawAgents);
+      // Its files are ours too, where they are exactly what it (or this bundle) writes.
+      if (adopted) {
+        const theirs = adopted.manifest ? (await renderFiles(adopted.release, adopted.manifest, provider, layout, mode, adopted.release)).writes : writes;
+        adopted.files = {};
+        for (const relative of new Set([...writes.keys(), ...theirs.keys()])) {
+          const bytes = await optional(await safePath(root, relative));
+          if (bytes && (bytes.equals(writes.get(relative) ?? Buffer.alloc(0)) || bytes.equals(theirs.get(relative) ?? Buffer.alloc(0)))) adopted.files[relative] = digest(bytes);
+        }
       }
-      text = text.replaceAll('{{ENGINE_MCP_ENTRY}}', mcp.args[0]);
-      // Render installed CLI paths too: skill invocation never depends on PATH.
-      for (const [name, argv] of Object.entries(commands).sort(([a], [b]) => b.length - a.length)) {
-        const quote = value => process.platform === 'win32' ? `"${value.replaceAll('"', '""')}"` : `'${value.replaceAll("'", "'\\''")}'`;
-        text = text.replace(new RegExp(`(?<![\\w-])${name}(?![\\w-])`, 'g'), () => argv.map(quote).join(' '));
-      }
-      writes.set(destination, Buffer.from(text));
     }
-    if (provider === 'claude' && mode !== 'runtime') writes.set('.claude-plugin/plugin.json', Buffer.from(json({ name: 'artifact-migration-tools', version: manifest.toolkit.version, description: 'Pinned migration skills and MCP engine' })));
     // Rollback is the one action that *creates* intent: it is an explicit,
     // out-of-band operator decision about the skill set in place at the time,
     // and it would be meaningless if the next ordinary invocation undid it. The
@@ -377,7 +437,8 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     const intent = action === 'rollback'
       ? { version: manifest.toolkit.version, by: 'rollback', at: new Date().toISOString(), againstSkill: previous.requiredBy ?? null }
       : pinned;
-    receipt = { provider, scope, mode, root, store, toolkit: manifest.toolkit, skills: manifest.skills, release, pin, commands, mcp: server, files: Object.fromEntries([...writes].map(([name, bytes]) => [name, digest(bytes)])), releases: [...(previous?.releases ?? []).filter(item => item.release !== release), { release, pin }] };
+    const prior = previous?.releases ?? (adopted ? [{ release: adopted.release, pin: adopted.pin }] : []);
+    receipt = { provider, scope, mode, root, store, toolkit: manifest.toolkit, skills: manifest.skills, release, pin, commands, mcp: server, files: Object.fromEntries([...writes].map(([name, bytes]) => [name, digest(bytes)])), releases: [...prior.filter(item => item.release !== release), { release, pin }] };
     // Both are selection *intent*, recorded so that two installed skills cannot
     // silently flip the active runtime back and forth between invocations, and
     // so a rollback survives one. Omitted rather than written null when absent,
@@ -387,14 +448,15 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     if (requiredBy ?? previous?.requiredBy) receipt.requiredBy = requiredBy ?? previous.requiredBy;
     // Check ownership/config before staging any release or changing a consumer.
   }
-  const merged = mergeConfig(rawConfig, layout, previous?.configOwned, server, historical);
-  const agents = mergeAgents(rawAgents, previous, receipt?.release, history, provider);
+  const merged = mergeConfig(rawConfig, layout, previous?.configOwned ?? adopted?.native, server, historical);
+  const agents = mergeAgents(rawAgents, previous ?? adopted, receipt?.release, history, provider);
   if (receipt) receipt.configOwned = merged.owned;
+  const owned = previous?.files ?? adopted?.files ?? {};
   const backups = new Map();
-  for (const relative of new Set([...Object.keys(previous?.files ?? {}), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `.artifact-migration-tools/${provider}.json`])) {
+  for (const relative of new Set([...Object.keys(owned), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `.artifact-migration-tools/${provider}.json`])) {
     const file = await safePath(root, relative);
     const bytes = await optional(file);
-    if (writes.has(relative) && bytes && !previous?.files[relative]) throw new Error(`Unowned file exists: ${relative}`);
+    if (writes.has(relative) && bytes && !owned[relative]) throw refuse('INSTALL_UNOWNED_FILE', `Unowned file exists: ${relative}`, { file: relative });
     backups.set(file, bytes);
   }
   if (receipt) {
@@ -413,7 +475,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     }
   }
   try {
-    for (const relative of Object.keys(previous?.files ?? {})) if (!writes.has(relative)) await rm(await safePath(root, relative));
+    for (const relative of Object.keys(owned)) if (!writes.has(relative)) await rm(await safePath(root, relative));
     for (const [relative, bytes] of writes) await replace(await safePath(root, relative), bytes);
     await replace(configFile, merged.bytes);
     if (agents) await replace(agentsFile, agents);

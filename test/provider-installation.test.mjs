@@ -4,6 +4,7 @@ import { cp, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } f
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { adapter, digest, verifyBundle } from '../providers/install-support.mjs';
 import { buildRelease } from '../scripts/release.mjs';
 import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
@@ -325,6 +326,129 @@ test('v1.0.0 stores without a mode or SHA256SUMS remain valid, updatable and rem
   assert.equal(next.toolkit.version, '1.1.1');
   assert.equal((await adapter('codex', { ...options, action: 'rollback' })).pin, b.pin);
   assert.equal((await adapter('codex', { ...options, action: 'remove' })).removed, true);
+});
+
+// Fix A, F3/Fix B: reinstall is an update, and with no receipt a registration
+// is adopted only when it is exactly what this installer wrote into this store.
+const receiptOf = async (root, provider) => JSON.parse(await readFile(path.join(root, `.artifact-migration-tools/${provider}.json`), 'utf8'));
+const dropReceipts = root => rm(path.join(root, '.artifact-migration-tools'), { recursive: true });
+/** Every consumer file by content, receipts aside: what an install changed. */
+async function consumerTree(root, prefix = '') {
+  const tree = {};
+  for (const item of await readdir(path.join(root, prefix), { withFileTypes: true }).catch(() => [])) {
+    const relative = prefix ? `${prefix}/${item.name}` : item.name;
+    if (relative === '.artifact-migration-tools') continue;
+    if (item.isDirectory()) Object.assign(tree, await consumerTree(root, relative));
+    else tree[relative] = digest(await readFile(path.join(root, relative)));
+  }
+  return tree;
+}
+const configOf = provider => (provider === 'codex' ? '.codex/config.toml' : '.mcp.json');
+const unrelated = { codex: 'model = "consumer"\n', claude: `${JSON.stringify({ mcpServers: { other: { command: 'other' } } }, null, 2)}\n` };
+const refusal = code => error => error.code === code && error.state?.code === code;
+
+for (const provider of ['codex', 'claude']) {
+  test(`${provider}: reinstall is an idempotent update that keeps unrelated configuration`, async () => {
+    const b = await bundles();
+    const root = path.join(scratch, `${provider} reinstall`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} reinstall store`) };
+    await mkdir(path.dirname(path.join(root, configOf(provider))), { recursive: true });
+    await writeFile(path.join(root, configOf(provider)), unrelated[provider]);
+    await adapter(provider, { ...options, bundle: b.second, pin: b.nextPin });
+    // A plain install over an existing receipt updates instead of refusing.
+    const updated = await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    assert.equal(updated.toolkit.version, b.identity.version);
+    assert.deepEqual(updated.releases.map(item => item.pin), [b.nextPin, b.pin]);
+    const settled = await consumerTree(root);
+    assert.deepEqual(await adapter(provider, { ...options, bundle: b.first, pin: b.pin }), updated);
+    assert.deepEqual(await adapter(provider, { ...options, bundle: b.first, pin: b.pin }), updated);
+    assert.deepEqual(await consumerTree(root), settled);
+    // A different selection over the receipt still refuses, typed and naming both sides.
+    await assert.rejects(adapter(provider, { ...options, store: path.join(scratch, `${provider} other store`), bundle: b.first, pin: b.pin }),
+      error => refusal('INSTALL_SELECTION_CONFLICT')(error) && error.state.recorded.store === updated.store);
+    assert.equal((await adapter(provider, { ...options, action: 'remove' })).removed, true);
+    assert.equal(await readFile(path.join(root, configOf(provider)), 'utf8'), unrelated[provider]);
+  });
+
+  test(`${provider}: without a receipt, its own current or historical registration is adopted`, async () => {
+    const b = await bundles();
+    const root = path.join(scratch, `${provider} adopt`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} adopt store`) };
+    await mkdir(path.dirname(path.join(root, configOf(provider))), { recursive: true });
+    await writeFile(path.join(root, configOf(provider)), unrelated[provider]);
+    // The current release: the receipt comes back identical, nothing else moves.
+    const first = await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    const installed = await consumerTree(root);
+    await dropReceipts(root);
+    assert.deepEqual(await adapter(provider, { ...options, bundle: b.first, pin: b.pin }), first);
+    assert.deepEqual(await consumerTree(root), installed);
+    assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK');
+    // A historical release in the same store: adopted, then updated in one step,
+    // and recorded so it stays a rollback target.
+    assert.equal((await adapter(provider, { ...options, action: 'remove' })).removed, true);
+    await adapter(provider, { ...options, bundle: b.second, pin: b.nextPin });
+    await dropReceipts(root);
+    const adopted = await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    assert.deepEqual(adopted.releases.map(item => item.pin), [b.nextPin, b.pin]);
+    assert.deepEqual(await consumerTree(root), installed);
+    const back = await adapter(provider, { ...options, action: 'rollback', bundle: b.second, pin: b.nextPin });
+    assert.equal(back.toolkit.version, '1.1.1');
+    assert.equal((await adapter(provider, { ...options, action: 'remove' })).removed, true);
+    assert.equal(await readFile(path.join(root, configOf(provider)), 'utf8'), unrelated[provider]);
+  });
+
+  test(`${provider}: without a receipt, a modified, foreign-store or unowned-file registration fails closed and writes nothing`, async () => {
+    const b = await bundles();
+    const root = path.join(scratch, `${provider} refuse`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} refuse store`), bundle: b.first, pin: b.pin };
+    await adapter(provider, options);
+    await dropReceipts(root);
+    const config = path.join(root, configOf(provider));
+    const original = await readFile(config, 'utf8');
+    const settled = () => assert.rejects(receiptOf(root, provider), { code: 'ENOENT' });
+    // Another store's registration is not provably ours.
+    const before = await consumerTree(root);
+    await assert.rejects(adapter(provider, { ...options, store: path.join(scratch, `${provider} refuse other store`) }),
+      error => refusal('INSTALL_REGISTRATION_CONFLICT')(error) && error.state.file === configOf(provider));
+    assert.deepEqual(await consumerTree(root), before);
+    await settled();
+    // An edited registration is never adopted.
+    await writeFile(config, original.replace('mcp-server.mjs', 'mcp-server.mjs.edited'));
+    const edited = await consumerTree(root);
+    await assert.rejects(adapter(provider, options), refusal('INSTALL_REGISTRATION_CONFLICT'));
+    assert.deepEqual(await consumerTree(root), edited);
+    await settled();
+    // Our registration, but an edited owned file: the file is not adopted.
+    await writeFile(config, original);
+    const skill = Object.keys(await consumerTree(root)).find(relative => relative.endsWith('/SKILL.md'));
+    await writeFile(path.join(root, skill), 'edited by owner');
+    const touched = await consumerTree(root);
+    await assert.rejects(adapter(provider, options), error => refusal('INSTALL_UNOWNED_FILE')(error) && error.state.file === skill);
+    assert.deepEqual(await consumerTree(root), touched);
+    await settled();
+  });
+}
+
+test('without a receipt, a foreign .agents/mcp.json start-migration entry is a typed conflict', async () => {
+  const b = await bundles();
+  const root = path.join(scratch, 'agents adopt');
+  const options = { scope: 'project', root, store: path.join(scratch, 'agents adopt store'), bundle: b.first, pin: b.pin };
+  await mkdir(path.join(root, '.agents'), { recursive: true });
+  await writeFile(path.join(root, '.agents/mcp.json'), `${JSON.stringify({ mcpServers: { 'start-migration': { command: 'node', args: ['elsewhere.mjs'] } } }, null, 2)}\n`);
+  await assert.rejects(adapter('codex', options), error => refusal('INSTALL_REGISTRATION_CONFLICT')(error) && error.state.file === '.agents/mcp.json');
+  // The provider CLI prints the same typed state, as JSON on stderr.
+  const cli = await capture(process.execPath, [fileURLToPath(new URL('../providers/codex/install.mjs', import.meta.url)), 'install',
+    '--scope', 'project', '--root', root, '--store', options.store, '--bundle', b.first, '--pin', b.pin], root);
+  assert.equal(cli.code, 1);
+  assert.deepEqual(JSON.parse(cli.stderr.slice(cli.stderr.indexOf('{'))), { code: 'INSTALL_REGISTRATION_CONFLICT', file: '.agents/mcp.json' });
+  // Its own entry for this store is adopted with the rest.
+  await writeFile(path.join(root, '.agents/mcp.json'), '{"mcpServers":{}}\n');
+  const first = await adapter('codex', options);
+  const agents = { mcpServers: { 'start-migration': { ...first.mcp, targets: ['codex'] } } };
+  await writeFile(path.join(root, '.agents/mcp.json'), `${JSON.stringify(agents, null, 2)}\n`);
+  await dropReceipts(root);
+  assert.deepEqual(await adapter('codex', options), first);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), agents);
 });
 
 test('SHA256SUMS disagreeing with the release manifest fails closed', async () => {
