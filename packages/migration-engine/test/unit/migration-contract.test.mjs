@@ -150,8 +150,10 @@ import {
   candidateDigestOf,
   createNewFormatDecisionGroup,
   principalSatisfiesRequirement,
+  sliceDriftFacts,
   validateProtectedDecisionPolicy,
 } from "../../src/resumable-migration.mjs";
+import { pendingTargetDriftCandidates as slicesDriftCandidates } from "../../src/slices/index.mjs";
 import { assertRegistryCoverage, nextIncrement } from "../../src/format-upgrade.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
 import { approveWithOperator } from "../../src/operator-approval.mjs";
@@ -20766,6 +20768,30 @@ test("IMPLEMENT gate: a path no changedFiles entry can spell (a space) is not re
       targetRoot: fixture.targetRoot,
     });
     assert.deepEqual(drift.map((candidate) => candidate.subjectPath), [spaced]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("A4: the decisions seam and the three-argument reader offer the same drift facts; a failed census read refuses only where drift is classified", async () => {
+  const fixture = await createFixture();
+  try {
+    await driftAtFinalize(fixture, DIRECT_LEDGER);
+    const persisted = await state(fixture);
+    assert.equal(usesDirectLedgerDecisions(persisted), true);
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const facts = await sliceDriftFacts(persisted, roots);
+    assert.deepEqual(facts.legacySource, { value: await legacySourceBinding(fixture.legacyRoot) });
+    const offered = await slicesDriftCandidates(fixture.migrationRoot, persisted, roots, facts);
+    assert.deepEqual(offered.map((candidate) => candidate.subjectPath).sort(), [LATE, ORPHAN].sort());
+    assert.deepEqual(await pendingTargetDriftCandidates(fixture.migrationRoot, persisted, roots), offered);
+    const failure = new Error("legacy source unreadable");
+    await assert.rejects(
+      slicesDriftCandidates(fixture.migrationRoot, persisted, roots, { ...facts, legacySource: { error: failure } }),
+      (error) => error === failure,
+    );
+    // Pre-19 drift never reads the legacy binding, so none is supplied.
+    assert.equal((await sliceDriftFacts({ ...persisted, formatVersion: 18 }, roots)).legacySource, null);
   } finally {
     await fixture.cleanup();
   }

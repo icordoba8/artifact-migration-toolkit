@@ -3,7 +3,10 @@
  *
  * Store owns how a record is persisted and proven intact: durable writes and
  * appends, the module record's history chain and integrity anchor, registry
- * persistence and journal recovery, and the artifact record's pins. The
+ * persistence and journal recovery, the artifact record's pins, and whether an
+ * evidence reference names real bytes under the legacy or target root (Track
+ * A4: re-homed here from the lifecycle so census, visual and slices can all
+ * reach it downward). The
  * record-layout names it persists under (`HISTORY_FILE`, `INTEGRITY_FILE`) are
  * formats vocabulary, re-exported here for compatibility (Track A2). It may
  * import `formats/`, `shared/` and the leaf `engine-paths.mjs`, nothing above
@@ -42,6 +45,13 @@ export {
   removeEmptyParents,
 } from "./files.mjs";
 export {
+  assertCommandResults,
+  assertEvidenceReference,
+  assertEvidenceResolves,
+  evidencePathClaim,
+  resolveEvidencePath,
+} from "./evidence.mjs";
+export {
   appendHistory,
   assertHistoryAppendable,
   assertUnanchoredHistoryTail,
@@ -57,6 +67,7 @@ export {
   readIntegrity,
   renderIntegrity,
   renderState,
+  REOPEN_ROOT,
   sealHistoryTail,
   statePathFor,
 } from "./record.mjs";

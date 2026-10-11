@@ -47,8 +47,8 @@ import {
   assertToolkitIdentityNotMismatched,
   loadOpenSpecAuthority,
   migrationRoot,
-  reconcileSliceState,
 } from "../resumable-migration.mjs";
+import { reconcileSliceState } from "../slices/index.mjs";
 import {
   upgradeV4ToV5,
   V5_CONTRACT_VERSION,
