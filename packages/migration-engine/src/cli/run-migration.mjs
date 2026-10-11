@@ -453,7 +453,7 @@ export const runMigration = async (
         return finish("BLOCKED", { reason: error.message, next: step });
       }
       if (approvable.length > 0) {
-        const approver = moduleApprover(recorderFor({ recordTrustedDecision, mode: options.mode, directLedger }), options.moduleName);
+        const approver = moduleApprover(recorderFor({ recordTrustedDecision, mode: options.mode, directLedger, stdout: human }), options.moduleName);
         if (directLedger && (group?.blocked ?? approvable[0].blocked)) {
           const review = group?.review ?? approvable[0].review;
           const blocked = group?.blocked ?? approvable[0].blocked;

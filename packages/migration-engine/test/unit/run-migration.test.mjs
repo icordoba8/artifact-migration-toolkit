@@ -842,13 +842,16 @@ test("run-migration.mjs cannot forge a TTY or hardcode a verdict", async () => {
   // the recorder, and `run` itself never does.
   assert.equal((source.match(/runRecordDecisionCli\(/g) ?? []).length, 0);
   // Two call sites now, one per principal the boundary can be: the terminal
-  // recorder, which passes argv and nothing else, and the AUTO recorder, which
-  // passes argv plus a *declared* channel. Neither composes a verdict, and
-  // neither is reachable from argv -- `autoApprovalChannel` is an in-process
-  // function reference, exactly as `ask` has always been.
+  // recorder, which passes argv and its output stream and nothing else, and the
+  // AUTO recorder, which passes argv plus a *declared* channel. Neither composes
+  // a verdict, and neither is reachable from argv -- `autoApprovalChannel` is an
+  // in-process function reference, exactly as `ask` has always been. The output
+  // stream (stderr under `run --json`) is still probed for a TTY by the recorder,
+  // and no stdin is ever handed in here.
   assert.equal((boundary.match(/runRecordDecisionCli\(/g) ?? []).length, 2);
-  assert.match(boundary, /runRecordDecisionCli\(arguments_\);/);
+  assert.match(boundary, /runRecordDecisionCli\(arguments_, \{ stdout \}\);/);
   assert.match(boundary, /ask: autoApprovalChannel\(/);
+  assert.doesNotMatch(boundary, /stdin:|\{\s*stdin/);
   // The forgery this file must never contain: a fabricated human. No stream
   // override, no injected TTY, and no channel claimed that is not AUTO's own.
   assert.doesNotMatch(source, /\{\s*stdin/);
