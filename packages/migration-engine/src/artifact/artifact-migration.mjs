@@ -125,6 +125,7 @@ import {
   secureHash,
   STATE_ROOT,
 } from "../store/index.mjs";
+import { diffEntries, implementationCoversDrift, migrationChangedFiles } from "../slices/index.mjs";
 // Compatibility re-export (Track A3): these names are decisions-owned now.
 export { artifactDecisionBoundTo, artifactDecisionCandidate } from "../decisions/index.mjs";
 // Compatibility re-export (Track A2): these names are formats-owned now.
@@ -3126,18 +3127,6 @@ const validatePonytailEvidence = async (state, gate, kind) => {
   return ponytailTime(item.producedAt, `${label}.producedAt`);
 };
 
-// Every file this migration wrote, across every planned slice.
-const migrationChangedFiles = async (root, plan) => {
-  const files = new Set();
-  for (const id of plan.ids) {
-    const document = await readJsonAt(root, `slices/${id}.json`, `slice implementation '${id}'`);
-    for (const item of arrayOf(document.changedFiles, `slice '${id}'.changedFiles`)) {
-      files.add(normalizeRelative(item.path, `slice '${id}' changed file`));
-    }
-  }
-  return files;
-};
-
 const validateFinal = async (root, state) => {
   const baseline = await validateBaseline(root, state, { final: true });
   const plan = await validatePlan(root, state);
@@ -3439,24 +3428,6 @@ const runCheckpointValidation = async (root, state, capability) => {
       : { ready: false, outcome: "CONTINUE", reason: error.message };
   }
 };
-
-const diffEntries = (before, after) => {
-  const left = new Map(before.map((entry) => [entry.path, canonical(entry)]));
-  const right = new Map(after.map((entry) => [entry.path, canonical(entry)]));
-  return [...new Set([...left.keys(), ...right.keys()])]
-    .filter((key) => left.get(key) !== right.get(key))
-    .sort();
-};
-
-const implementationCoversDrift = (changedFiles, drift) =>
-  drift.every((driftPath) =>
-    changedFiles.some(
-      (changed) =>
-        changed === driftPath ||
-        changed.startsWith(`${driftPath}/`) ||
-        driftPath.startsWith(`${changed}/`),
-    ),
-  );
 
 const freshness = async (root, state, validation = null) => {
   const [source, target] = await Promise.all([

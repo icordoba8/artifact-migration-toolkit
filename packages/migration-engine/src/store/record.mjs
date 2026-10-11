@@ -323,3 +323,12 @@ export const readHistoryEvents = async (root, integrity, pendingJournal) => {
   }
   return events;
 };
+/**
+ * `--reopen-complete` only. Where a COMPLETE record's superseded verification
+ * evidence is preserved, byte-for-byte, before its pin is released:
+ * `reopen/<n>/evidence/<slice>/result.json` plus `reopen/<n>/record.json`,
+ * which names the operator, the reason and the authoritative post-finalization
+ * evidence that proved the finalized contract wrong. Both stay pinned for life,
+ * exactly like a preserved rework attempt.
+ */
+export const REOPEN_ROOT = "reopen";

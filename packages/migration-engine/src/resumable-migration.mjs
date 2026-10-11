@@ -6,13 +6,10 @@ import {
   open,
   readdir,
   readFile,
-  realpath,
   rename,
   rm,
-  stat,
 } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   CENSUS_ALGORITHM_VERSION,
@@ -109,16 +106,10 @@ import {
   assertSafeName,
   assertSecurePath,
   assertUniqueIds,
-  commitsIntroducingBlob,
-  commitsTouchingSince,
-  committedChangesSince,
-  commonAncestor,
   contentIdentity,
   dirtyManifest,
-  fileAtRevision,
   gitRevision,
   headRevision,
-  isAncestorCommit,
   isContentIdentity,
   isPlainObject,
   isResolvedWithin as isWithin,
@@ -126,15 +117,18 @@ import {
   recordRelative,
   sameFile,
   sha256Hex as hashContent,
-  withoutExtension,
 } from "./shared/index.mjs";
 import {
   appendHistory,
+  assertCommandResults,
+  assertEvidenceReference,
+  assertEvidenceResolves,
   assertHistoryAppendable,
   assertUnanchoredHistoryTail,
   atomicWrite,
   contentIdentityMatchesSource,
   digestArtifactHashes,
+  evidencePathClaim,
   fileExists,
   fileIdentity,
   fileIdentityMatches,
@@ -156,6 +150,8 @@ import {
   removeEmptyParents,
   renderIntegrity,
   renderState,
+  REOPEN_ROOT,
+  resolveEvidencePath,
   resolveModule,
   sealHistoryTail,
   statePathFor,
@@ -203,6 +199,56 @@ import {
   requireModuleDecision,
   sequenceAuthorizationEvidence,
 } from "./decisions/index.mjs";
+import {
+  anySliceVerified,
+  assertGatesCoverSliceScenarios,
+  assertNoUnclaimedTargetDrift,
+  assertNoUnresolvedVerification,
+  assertPostAnchorEvidence,
+  assertSharedPrerequisitesBuilt,
+  assertSlicePassed,
+  assertSliceStateConsistent,
+  completeSliceAmendment,
+  draftSliceAmendment,
+  implementationDigests,
+  inspectSliceArtifacts,
+  legacyRelativePath,
+  pendingTargetDriftCandidates,
+  planSliceRework,
+  portableRoot,
+  readTargetBaseline,
+  reconcileSliceState,
+  renderTargetBaseline,
+  REWORK_ROOT,
+  reworkAttemptsOf,
+  reworkLimitBlocker,
+  reworkPathParts,
+  settleFact,
+  SLICE_AMENDMENT_ROOT,
+  TARGET_DIRTY_SCOPE,
+  targetBaselineDrift,
+  targetRelativePath,
+  TERMINAL_DESIGN_SYSTEM,
+  unlistedSliceCandidates,
+  validateSliceImplementation,
+  validateSlicePlan,
+} from "./slices/index.mjs";
+
+// Compatibility re-export (Track A4): store-owned (A1), re-homed in A4.
+export { REOPEN_ROOT } from "./store/index.mjs";
+// Compatibility re-export (Track A4): these names are slices-owned now.
+export {
+  delegatedChangedFilesSatisfiedByChild,
+  inspectSliceArtifacts,
+  reconcileSliceState,
+  renderTargetBaseline,
+  REWORK_ROOT,
+  reworkLimitBlocker,
+  reworkPathParts,
+  SLICE_AMENDMENT_ROOT,
+  TARGET_DIRTY_SCOPE,
+  unclaimedTargetDrift,
+} from "./slices/index.mjs";
 
 // Compatibility re-export (Track A3): these names are decisions-owned now.
 export {
@@ -474,13 +520,6 @@ const PARITY_STATUSES = new Set(["PENDING", ...TERMINAL_PARITY]);
  */
 const SLICE_EARNED_PARITY = new Set(["VERIFIED", "REDESIGNED_VERIFIED"]);
 
-/** Whether any slice has been verified yet, so a row could have earned it. */
-const anySliceVerified = (state) =>
-  (state?.completedSlices?.length ?? 0) > 0 ||
-  ["VERIFY_SLICES", "FINALIZE", "COMPLETE"].includes(state?.currentStep);
-
-const TERMINAL_DESIGN_SYSTEM = new Set(["COMPLIANT", "EXCEPTION_APPROVED"]);
-
 const UI_KINDS = new Set([
   "INFORMATION_HIERARCHY",
   "TABLE_LIST",
@@ -619,12 +658,6 @@ const CAPABILITY_DISPOSITIONS = {
   DO_NOT_MIGRATE: "NONE",
 };
 
-/** Rows a slice must own at PLAN. The other two classifications are terminal. */
-const NON_TERMINAL_CAPABILITIES = new Set([
-  "SHARED_PREREQUISITE",
-  "FEATURE_LOCAL",
-]);
-
 /** The minimum number of *other* consumers that proves a capability is shared. */
 const SHARED_CONSUMER_THRESHOLD = 2;
 // Where the authority's own captures live. P4: nothing under here may be cited
@@ -759,15 +792,6 @@ const pinsAuthorityContext = (state, relative) =>
   !AUTHORITY_CONTEXT_FILES.has(relative) ||
   visualAuthorityOf(state)?.contextFile === relative;
 export const ADOPTION_ROOT = "visual-contract-adoption";
-/**
- * `--reopen-complete` only. Where a COMPLETE record's superseded verification
- * evidence is preserved, byte-for-byte, before its pin is released:
- * `reopen/<n>/evidence/<slice>/result.json` plus `reopen/<n>/record.json`,
- * which names the operator, the reason and the authoritative post-finalization
- * evidence that proved the finalized contract wrong. Both stay pinned for life,
- * exactly like a preserved rework attempt.
- */
-export const REOPEN_ROOT = "reopen";
 
 export const STEP_DEPENDENCIES = {
   RESOLVE: ["steps/01-resolve.md"],
@@ -1158,108 +1182,6 @@ const assertHistoryAppendOnly = async (root, state, anchor) => {
   assertUnanchoredHistoryTail(state, content.subarray(anchor.bytes));
 };
 
-// The engine's own workspace is excluded from the target dirty manifest: the
-// migration tree's authored artifacts are already pinned by `artifactHashes`,
-// and the lock/journal files this transaction itself creates live there, so
-// including them would invalidate every confirmation the moment it is used.
-export const TARGET_DIRTY_SCOPE = {
-  exclude: [".agents/knowledge/migrations/"],
-};
-
-const portableRoot = (value) => path.resolve(value).split(path.sep).join("/");
-
-/** One digested entry per dirty path, deduplicated (a rename reports both). */
-const baselineDirtyEntries = (dirty) => {
-  const byPath = new Map();
-  for (const entry of dirty.entries) {
-    if (byPath.has(entry.path)) continue;
-    byPath.set(entry.path, {
-      path: entry.path,
-      digest: entry.sha256 === null ? null : `sha256:${entry.sha256}`,
-    });
-  }
-  return [...byPath.values()].sort((left, right) =>
-    left.path.localeCompare(right.path),
-  );
-};
-
-/**
- * The immutable pre-migration picture of the target tree: committed history
- * plus every uncommitted path and its bytes.
- *
- * Per-path digests, not `dirtyManifest`'s aggregate: the aggregate answers "did
- * anything change", and the question `changedFiles` asks is "did *this* file
- * change". Both producers are the pair `legacySourceBinding` already trusts for
- * the legacy side, pointed at the target root.
- */
-export const renderTargetBaseline = async (targetRoot) => {
-  const [revision, dirty] = await Promise.all([
-    gitRevision(targetRoot),
-    dirtyManifest(targetRoot, TARGET_DIRTY_SCOPE),
-  ]);
-  return `${JSON.stringify(
-    {
-      version: 1,
-      revision: revision.revision,
-      dirty: baselineDirtyEntries(dirty),
-    },
-    null,
-    2,
-  )}\n`;
-};
-
-const validateTargetBaselineShape = (baseline) => {
-  assertPlainObject(baseline, "Target baseline");
-  if (!/^[0-9a-f]{40}$/.test(baseline.revision ?? "")) {
-    throw new Error("Target baseline revision must be a full Git SHA-1.");
-  }
-  for (const [index, entry] of assertArray(
-    baseline.dirty,
-    "Target baseline dirty",
-  ).entries()) {
-    const at = `Target baseline dirty[${index}]`;
-    assertPlainObject(entry, at);
-    assertNonEmpty(entry.path, `${at}.path`);
-    if (entry.digest !== null && !/^sha256:[a-f0-9]{64}$/.test(entry.digest)) {
-      throw new Error(`${at}.digest must be a SHA-256 digest or null.`);
-    }
-  }
-  return baseline;
-};
-
-/**
- * `changed(targetRelativePath)` -- whether this migration, and not whoever was
- * working in the tree before it, is responsible for the file's current bytes.
- *
- * Three cases, and the third is why `revision` is in the baseline at all:
- * currently dirty with the recorded bytes means untouched; recorded dirty but
- * clean now means the pre-existing edit went away; and a file clean at both
- * ends can still have been rewritten by a commit in between.
- */
-const targetBaselineDrift = async (targetRoot, baseline) => {
-  const [current, dirty] = await Promise.all([
-    gitRevision(targetRoot),
-    dirtyManifest(targetRoot, TARGET_DIRTY_SCOPE),
-  ]);
-  const recorded = new Map(
-    baseline.dirty.map((entry) => [entry.path, entry.digest]),
-  );
-  const now = new Map(
-    baselineDirtyEntries(dirty).map((entry) => [entry.path, entry.digest]),
-  );
-  // Skipped entirely in the common case: the engine's working assumption is
-  // that nothing is committed before FINALIZE, so the revision usually holds.
-  const committed =
-    current.revision === baseline.revision
-      ? new Set()
-      : await committedChangesSince(targetRoot, baseline.revision);
-  return (relativePath) =>
-    committed.has(relativePath) ||
-    (now.has(relativePath)
-      ? now.get(relativePath) !== recorded.get(relativePath)
-      : recorded.has(relativePath));
-};
-
 /**
  * What RESOLVE pins, for whatever this record is: the step document always, and
  * the target baseline when the record adopted an existing implementation.
@@ -1268,14 +1190,6 @@ const resolveStepPins = (state) =>
   IMMUTABLE_STEP_ARTIFACTS.RESOLVE.filter(
     (relative) => relative !== TARGET_BASELINE_FILE || isBrownfield(state),
   );
-
-/** The pinned baseline of a brownfield record, or null for a greenfield one. */
-const readTargetBaseline = async (root, state) =>
-  isBrownfield(state)
-    ? validateTargetBaselineShape(
-        await readJson(path.join(root, TARGET_BASELINE_FILE), "Target baseline"),
-      )
-    : null;
 
 /** The exact brief bytes the preview authorizes, not just its path. */
 const briefDigestFor = async (targetRoot, brief) => {
@@ -2509,25 +2423,6 @@ const validateCompletedHashes = async (root, state) => {
   }
 };
 
-// Fix E (candidate change; analysis/inventory.md Defect
-// "reconcileSliceState/inspectSliceArtifacts... only wired up inside the
-// one-time v4->v5 upgrade coordinator"): resume never revalidated that
-// state.json's navigation fields (`currentStep`, `activeSlice`,
-// `pendingSlices`) actually agree with what `slices/*.json` and
-// `evidence/*/result.json` record. This runs the existing reconciliation
-// logic in read-only/verify mode: if it would produce any repair, resume
-// throws a named inconsistency instead of silently trusting state.json.
-// Normal resume never auto-repairs; that stays a one-time upgrade-coordinator
-// operation.
-const assertSliceStateConsistent = async (root, state) => {
-  const { repairs } = await reconcileSliceState(root, state);
-  if (repairs.length > 0) {
-    throw new Error(
-      `Migration state is inconsistent with slice/evidence artifacts and was not auto-repaired: ${repairs.join("; ")}. Investigate state.json and the slice/evidence records before continuing.`,
-    );
-  }
-};
-
 const assertStepDocumentComplete = async (root, step) => {
   const relativePath = STEP_FILES[step];
   const content = await readFile(path.join(root, relativePath), "utf8");
@@ -2539,56 +2434,7 @@ const assertStepDocumentComplete = async (root, step) => {
   }
 };
 
-// Evidence was validated as "a nonempty string", so arbitrary prose and paths
-// that never existed reached BUILD_BASELINE and were then hash-pinned as
-// authoritative. Hash pinning protects fabricated claims from later change; it
-// does not make them true. A reference that *claims* to be a file -- it names a
-// path with a file extension -- must resolve to bytes that exist.
-//
-// ponytail: only path-shaped claims are resolved. Prose evidence stays legal
-// (the contract allows it) and line ranges are ignored, so the rule adds no new
-// authoring burden and cannot pass a path that is simply not there. Ceiling:
-// prose is still unverifiable. Upgrade path: a machine-readable evidence
-// checklist with typed locations, which is the full P1-7 repair.
-const PATH_CLAIM = /^[^\s]*\/[^\s/]+\.[A-Za-z0-9]+$/;
-
-const evidencePathClaim = (value) => {
-  if (typeof value !== "string") return null;
-  const [head] = value.trim().split(/\s+/);
-  // Strip a trailing `:12`, `:12-40`, or `:12,18-40` locator.
-  const candidate = head.replace(/:[0-9][0-9,\-:]*$/, "");
-  return PATH_CLAIM.test(candidate) ? candidate : null;
-};
-
-const resolveEvidencePath = async (claim, roots) => {
-  if (!roots?.legacyRoot || !roots?.targetRoot) return null;
-  const bases = [
-    roots.legacyRoot,
-    roots.targetRoot,
-    commonAncestor(roots.legacyRoot, roots.targetRoot),
-  ];
-  for (const base of bases) {
-    const absolute = path.resolve(base, claim);
-    if (isWithin(base, absolute) && (await fileExists(absolute))) {
-      return absolute;
-    }
-  }
-  return null;
-};
-
-const assertEvidenceResolves = async (values, label, roots) => {
-  for (const value of values) {
-    const claim = evidencePathClaim(value);
-    if (!claim) continue;
-    if (!(await resolveEvidencePath(claim, roots))) {
-      throw new Error(
-        `${label} references '${claim}', which does not exist under the legacy or target repository. Evidence must point at real observations.`,
-      );
-    }
-  }
-};
-
-// P1-7 machine-readable evidence checklist. `assertEvidenceResolves` above
+// P1-7 machine-readable evidence checklist. `assertEvidenceResolves` (store/)
 // only closes "the path must exist"; `DISCOVERY-TARGET-UNDERVALIDATION` also
 // exploited the absence of fixed categories, an evidence kind, and OpenSpec
 // requirement/scenario lineage -- arbitrary prose with no structure reached
@@ -2725,45 +2571,6 @@ const assertTargetAssessmentChecklist = async (root, roots, authority) => {
     roots,
     authority,
   );
-};
-
-// P1-7: VERIFY_SLICES accepted bare, unverifiable command strings. Each
-// command result must now be a structured record whose captured output is a
-// real, hash-verified file -- the same tamper-evidence pattern as
-// `assertEvidenceReference` below for FINALIZE gates.
-// ponytail: this proves the *recorded* output wasn't fabricated after the
-// fact; it does not re-execute the command itself (no sandboxed trusted
-// runner here). Live re-execution belongs with P1-10's FINALIZE evidence
-// producers, not this finding -- not implemented, not this finding's scope.
-const assertCommandResults = async (commands, label, roots) => {
-  const list = assertArray(commands, label);
-  if (list.length === 0) {
-    throw new Error(`${label} requires at least one executed command result.`);
-  }
-  for (const [index, entry] of list.entries()) {
-    const at = `${label}[${index}]`;
-    assertPlainObject(entry, at);
-    assertNonEmpty(entry.command, `${at}.command`);
-    if (entry.exitCode !== 0) {
-      throw new Error(
-        `${at} ('${entry.command}') recorded exitCode ${entry.exitCode}; a verification command must exit 0.`,
-      );
-    }
-    assertIsoTimestamp(entry.executedAt, `${at}.executedAt`);
-    assertNonEmpty(entry.runner, `${at}.runner`);
-    const claim = evidencePathClaim(entry.outputPath);
-    const resolved = claim && (await resolveEvidencePath(claim, roots));
-    if (!resolved) {
-      throw new Error(
-        `${at}.outputPath '${entry.outputPath}' does not exist under the legacy or target repository. Record the captured output as a real file.`,
-      );
-    }
-    if (!(await fileIdentityMatches(entry.outputDigest, resolved))) {
-      throw new Error(
-        `${at}.outputDigest does not match '${entry.outputPath}': recorded ${entry.outputDigest}, actual ${await fileIdentity(resolved)}.`,
-      );
-    }
-  }
 };
 
 const validateLegacyInventory = async (root, roots, state) => {
@@ -3973,62 +3780,6 @@ const isUnderFeature = (normalized, targetModule) => {
   return normalized === prefix.slice(0, -1) || normalized.startsWith(prefix);
 };
 
-/**
- * The one canonical form ownership comparisons use: target-root-relative,
- * forward slashes. `changedFiles` and every evidence field already accept both
- * `src/x` and `<target-dir>/src/x`, because `resolveEvidencePath` resolves
- * against the common ancestor of the two roots -- so an ownership prefix check
- * that compares raw strings rejects a correctly-built capability over how its
- * path happened to be spelled.
- *
- * Existence-based resolution is deliberately not reused here: `targetOwner`
- * names a directory that does *not* exist yet at BUILD_BASELINE, which is the
- * whole point of a SHARED_PREREQUISITE. So the repository-relative prefix is
- * stripped by path math, and the result is still required to land inside the
- * target root -- which is what rejects `../` traversal and absolute paths.
- */
-const rootRelativePath = (claim, root, siblingRoot, label, repositoryLabel) => {
-  const normalized = claim.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!root) return normalized.replace(/\/+$/, "");
-  let candidate = normalized.replace(/\/+$/, "");
-  if (siblingRoot) {
-    const prefix = path
-      .relative(commonAncestor(siblingRoot, root), root)
-      .replaceAll(path.sep, "/");
-    if (prefix && !prefix.startsWith("..")) {
-      if (candidate === prefix) candidate = "";
-      else if (candidate.startsWith(`${prefix}/`)) {
-        candidate = candidate.slice(prefix.length + 1);
-      }
-    }
-  }
-  const absolute = path.resolve(root, candidate);
-  if (!isWithin(root, absolute)) {
-    throw new Error(
-      `${label} '${claim}' is outside the ${repositoryLabel} repository.`,
-    );
-  }
-  return path.relative(root, absolute).replaceAll(path.sep, "/");
-};
-
-const targetRelativePath = (claim, roots, label) =>
-  rootRelativePath(
-    claim,
-    roots?.targetRoot,
-    roots?.legacyRoot,
-    label,
-    "target",
-  );
-
-const legacyRelativePath = (claim, roots, label) =>
-  rootRelativePath(
-    claim,
-    roots?.legacyRoot,
-    roots?.targetRoot,
-    label,
-    "legacy",
-  );
-
 export const artifactBindingFor = async (row, roots) => {
   const { artifactArgumentsFor, artifactCommandFor, artifactIdFor } =
     await artifactEngine();
@@ -4584,7 +4335,7 @@ const validateBaseline = async (root, { final = false, roots, state } = {}) => {
   const adoptionBaseline = behaviorRows.some(
     (row) => row.verificationStatus === "ADOPTED_VERIFIED",
   )
-    ? await readTargetBaseline(root, state)
+    ? await readTargetBaseline(root, isBrownfield(state))
     : null;
   const adoptionDrift = adoptionBaseline
     ? await targetBaselineDrift(roots.targetRoot, adoptionBaseline)
@@ -4845,244 +4596,15 @@ const validateBaseline = async (root, { final = false, roots, state } = {}) => {
   };
 };
 
-// Contract 5 decision 1.2: requirementIds, scenarioIds, and traceIds are
-// disjoint and separately owned. acceptanceScenarios stays authored prose.
-// Format 11 adds capabilityIds as a fourth separately-owned list; a pre-11
-// record has no capability matrix, so the list is absent rather than empty.
-const traceLists = (record, label, state) => ({
-  requirementIds: assertArray(record.requirementIds, `${label}.requirementIds`),
-  scenarioIds: assertArray(record.scenarioIds, `${label}.scenarioIds`),
-  traceIds: assertArray(record.traceIds, `${label}.traceIds`),
-  ...(usesCapabilityOwnership(state)
-    ? {
-        capabilityIds: assertArray(
-          record.capabilityIds,
-          `${label}.capabilityIds`,
-        ),
-      }
-    : {}),
-});
-
-const assertCoversPlanned = (planned, actual, label, verb) => {
-  for (const field of Object.keys(planned)) {
-    const covered = new Set(actual[field]);
-    for (const id of planned[field]) {
-      if (!covered.has(id)) {
-        throw new Error(`${label} did not ${verb} '${id}' from ${field}.`);
-      }
-    }
-  }
-};
-
-const validatePlan = async (root, state, roots) => {
-  const baseline = await validateBaseline(root, { roots, state });
-  const index = assertPlainObject(
-    await readJson(path.join(root, initialArtifacts.slices), "Slice index"),
-    "Slice index",
-  );
-  const slices = assertArray(index.slices, "Slices");
-  if (slices.length === 0) throw new Error("Plan requires at least one slice.");
-  const sliceIds = assertUniqueIds(slices, "Slices");
-  const authority = state?.requirementsAuthority;
-  for (const slice of slices) {
-    assertSafeName(slice.id.toLowerCase(), "slice id");
-    const lists = traceLists(slice, slice.id, state);
-    if (lists.traceIds.length === 0) {
-      throw new Error(
-        `${slice.id} must own at least one baseline row in traceIds.`,
-      );
-    }
-    if (
-      assertArray(slice.acceptanceScenarios, `${slice.id}.acceptanceScenarios`)
-        .length === 0
-    ) {
-      throw new Error(`${slice.id} requires acceptance scenarios.`);
-    }
-    if (authority) {
-      for (const [field, allowed] of [
-        ["requirementIds", authority.requirementIds],
-        ["scenarioIds", authority.scenarioIds],
-      ]) {
-        for (const id of lists[field]) {
-          if (!allowed.includes(id)) {
-            throw new Error(
-              `${slice.id}.${field} references '${id}', which the OpenSpec authority does not define.`,
-            );
-          }
-        }
-      }
-    }
-  }
-  const required = [
-    ...baseline.behaviorRows
-      .filter((row) => !TERMINAL_PARITY.has(row.verificationStatus))
-      .map((row) => row.id),
-    ...baseline.routeRows
-      .filter((row) => row.verificationStatus !== "VERIFIED")
-      .map((row) => row.id),
-    // A target-native row that is not yet PRESERVED still needs implementation
-    // or verification, so it belongs to exactly one slice like any other row.
-    ...baseline.nativeRows
-      .filter((row) => row.verificationStatus !== "PRESERVED")
-      .map((row) => row.id),
-    ...baseline.designRows
-      .filter(
-        (row) =>
-          !TERMINAL_DESIGN_SYSTEM.has(row.status) ||
-          row.verificationStatus !== "VERIFIED",
-      )
-      .map((row) => row.id),
-  ];
-  const ownership = new Map();
-  for (const slice of slices) {
-    for (const traceId of slice.traceIds) {
-      if (ownership.has(traceId)) {
-        throw new Error(
-          `Baseline row '${traceId}' is assigned to multiple slices.`,
-        );
-      }
-      ownership.set(traceId, slice.id);
-    }
-  }
-  for (const traceId of required) {
-    if (!ownership.has(traceId)) {
-      throw new Error(
-        `Plan does not assign baseline row '${traceId}' to a slice.`,
-      );
-    }
-  }
-  if (usesUiVerification(state)) {
-    const mismatchByBehavior = new Map(
-      baseline.target.uiMismatches.map((row) => [row.uiBehaviorId, row]),
-    );
-    for (const uiBehavior of baseline.legacy.uiBehaviors) {
-      if (
-        !uiBehaviorIsRequired(uiBehavior, mismatchByBehavior.get(uiBehavior.id))
-      ) {
-        continue;
-      }
-      const parityRow = baseline.behaviorRows.find(
-        (row) => row.behaviorId === uiBehavior.behaviorId,
-      );
-      const ownerId = parityRow && ownership.get(parityRow.id);
-      const owner = slices.find((slice) => slice.id === ownerId);
-      if (!owner) {
-        throw new Error(
-          `Required UI behavior '${uiBehavior.id}' does not trace through a behavior-parity row to a slice.`,
-        );
-      }
-      for (const [field, ids] of [
-        ["requirementIds", uiBehavior.requirementIds],
-        ["scenarioIds", uiBehavior.scenarioIds],
-      ]) {
-        for (const id of ids) {
-          if (!owner[field].includes(id)) {
-            throw new Error(
-              `Required UI behavior '${uiBehavior.id}' traces to ${owner.id}, but ${owner.id}.${field} omits '${id}'.`,
-            );
-          }
-        }
-      }
-    }
-  }
-  await assertCapabilityPlan(slices, baseline.capabilityRows, state, roots);
-  return {
-    index,
-    slices,
-    sliceIds,
-    capabilityRows: baseline.capabilityRows,
-  };
-};
-
-/**
- * Format 11. PLAN is where a proven shared prerequisite stops being an
- * observation and becomes a scheduled slice. A SHARED_PREREQUISITE does not
- * have to be *implemented* before PLAN closes -- it has to be deterministically
- * ordered ahead of the feature work that depends on it.
- *
- * Ordering rides on declaration order rather than a new scheduler:
- * `pendingSlices` is derived from `index.slices` order, so requiring every
- * dependency to be declared earlier makes declaration order a valid topological
- * order and makes cycles structurally impossible.
- */
-const assertCapabilityPlan = async (slices, capabilityRows, state, roots) => {
-  if (!usesCapabilityOwnership(state)) return;
-  const declaredAt = new Map(slices.map((slice, index) => [slice.id, index]));
-  for (const slice of slices) {
-    await assertEvidenceResolves(
-      assertArray(
-        slice.architectureAuthorities,
-        `${slice.id}.architectureAuthorities`,
-      ),
-      `${slice.id}.architectureAuthorities`,
-      roots,
-    );
-    assertArray(slice.targetPaths, `${slice.id}.targetPaths`);
-    for (const dependency of assertArray(
-      slice.dependencies,
-      `${slice.id}.dependencies`,
-    )) {
-      if (dependency === slice.id) {
-        throw new Error(`${slice.id}.dependencies references itself.`);
-      }
-      if (!declaredAt.has(dependency)) {
-        throw new Error(
-          `${slice.id}.dependencies references unknown slice '${dependency}'.`,
-        );
-      }
-      if (declaredAt.get(dependency) > declaredAt.get(slice.id)) {
-        throw new Error(
-          `${slice.id} depends on '${dependency}', which is declared after it. Slices execute in declaration order, so a dependency must be declared first.`,
-        );
-      }
-    }
-  }
-
-  const rowsById = new Map(capabilityRows.map((row) => [row.id, row]));
-  const owner = new Map();
-  for (const slice of slices) {
-    for (const capabilityId of slice.capabilityIds) {
-      if (!rowsById.has(capabilityId)) {
-        throw new Error(
-          `${slice.id}.capabilityIds references '${capabilityId}', which the capability ownership matrix does not define.`,
-        );
-      }
-      if (owner.has(capabilityId)) {
-        throw new Error(
-          `Capability '${capabilityId}' is assigned to multiple slices.`,
-        );
-      }
-      owner.set(capabilityId, slice.id);
-    }
-  }
-  for (const row of capabilityRows) {
-    if (!NON_TERMINAL_CAPABILITIES.has(row.classification)) continue;
-    if (!owner.has(row.id)) {
-      throw new Error(
-        `Plan does not assign capability '${row.id}' (${row.classification}) to a slice. A shared prerequisite must be planned before the feature slices that depend on it.`,
-      );
-    }
-  }
-
-  // Any slice building a proven shared capability is a prerequisite for the
-  // rest of the plan. Blunt on purpose: the capability was discovered as a
-  // dependency of the module being migrated, so the feature work needs it.
-  const prerequisites = slices.filter((slice) =>
-    slice.capabilityIds.some(
-      (id) => rowsById.get(id)?.classification === "SHARED_PREREQUISITE",
-    ),
-  );
-  for (const slice of slices) {
-    if (prerequisites.includes(slice)) continue;
-    for (const prerequisite of prerequisites) {
-      if (!slice.dependencies.includes(prerequisite.id)) {
-        throw new Error(
-          `${slice.id} must declare '${prerequisite.id}' in dependencies: it builds a SHARED_PREREQUISITE capability this slice relies on.`,
-        );
-      }
-    }
-  }
-};
+// Track A4: the plan rules live in slices/. This seam reads the BUILD_BASELINE
+// matrices first, where the rules always did, and supplies the two facts they
+// read but slices/ does not own: the lifecycle's terminal parity statuses and
+// the visual UI-requirement predicate.
+const validatePlan = async (root, state, roots) =>
+  validateSlicePlan(root, state, roots, await validateBaseline(root, { roots, state }), {
+    terminalParity: TERMINAL_PARITY,
+    uiBehaviorIsRequired,
+  });
 
 const artifactOptions = (binding) => ({
   id: binding.artifactId,
@@ -5170,470 +4692,39 @@ export const assertArtifactPrerequisites = async (state, roots, options) => {
   );
 };
 
-export const delegatedChangedFilesSatisfiedByChild = (
-  state,
-  capabilityIds,
-  capabilityRows,
-) =>
-  usesArtifactDelegation(state) &&
-  capabilityIds.length > 0 &&
-  capabilityIds.every((capabilityId) => {
-    const row = capabilityRows.find(
-      (candidate) => candidate.id === capabilityId,
-    );
-    return (
-      row?.classification === "SHARED_PREREQUISITE" &&
-      row.artifactMigration !== undefined
-    );
-  });
-
-/**
- * The reopen attempt that currently governs `sliceId`, or null when the slice
- * is not reopened. Newest attempt wins: a second reopen supersedes the first.
- */
-const governingReopen = async (root, sliceId) => {
-  const events = await readHistoryEvents(root);
-  const reopens = events.filter(
-    (event) =>
-      event.event === "COMPLETE_REOPENED" &&
-      Array.isArray(event.slices) &&
-      event.slices.includes(sliceId),
-  );
-  if (reopens.length === 0) return null;
-  return reopens[reopens.length - 1];
-};
-
-/**
- * Proves the preserved evidence of a reopen attempt is exactly the bytes the
- * reopen pinned, and returns the record. Tamper is never a soft signal: a
- * preserved tree that no longer hashes to its pin cannot anchor anything.
- */
-const verifiedReopenRecord = async (root, attempt, sliceId, state) => {
-  const directory = `${REOPEN_ROOT}/${attempt}`;
-  const recordRelative = `${directory}/record.json`;
-  const absolute = path.join(root, recordRelative);
-  if (!(await fileExists(absolute))) {
-    throw new Error(
-      `${sliceId} was reopened as attempt ${attempt} but ${recordRelative} is missing. The reopen provenance a committed slice is proven against cannot be reconstructed; nothing is accepted on trust.`,
-    );
-  }
-  const bytes = await readFile(absolute);
-  const record = assertPlainObject(
-    JSON.parse(bytes.toString("utf8")),
-    recordRelative,
-  );
-  const preserved = assertPlainObject(record.preserved, `${recordRelative}.preserved`);
-  // The record's own pin is added to the pin set *after* its bytes are
-  // serialized, so it lives in the integrity-sealed state, never inside the
-  // file. That is the stronger place to check it from: the record cannot
-  // restate its own hash, and the state it is checked against is itself sealed.
-  const selfPin = state?.artifactHashes?.[recordRelative];
-  if (typeof selfPin !== "string" || !selfPin) {
-    throw new Error(
-      `${recordRelative} is not pinned by the migration state, so the reopen provenance ${sliceId}'s committed ownership rests on cannot be trusted. Nothing is accepted on trust.`,
-    );
-  }
-  if (!(await fileIdentityMatches(selfPin, absolute))) {
-    throw new Error(
-      `${recordRelative} no longer matches the hash the migration state pinned. Reopen provenance is tamper-evident; a committed ownership claim anchored on an altered record is refused.`,
-    );
-  }
-  for (const [relative, pin] of Object.entries(preserved)) {
-    if (relative === recordRelative) continue;
-    const preservedPath = path.join(root, relative);
-    if (!(await fileExists(preservedPath))) {
-      throw new Error(
-        `${recordRelative} pins preserved evidence '${relative}', which is missing. The reopened slice's superseded PASS is the anchor's proof and must survive for life.`,
-      );
-    }
-    if (!(await fileIdentityMatches(pin, preservedPath))) {
-      throw new Error(
-        `Preserved reopen evidence '${relative}' no longer matches the hash ${recordRelative} pinned. Reopen provenance is tamper-evident; a committed ownership claim anchored on altered evidence is refused.`,
-      );
-    }
-  }
-  return record;
-};
-
-/**
- * The anchor commit a reopened slice's committed work is proven against.
- *
- * New records carry `targetAnchor` outright. Records written before the field
- * existed -- including migrations reopened in the field -- resolve it from the
- * pinned preserved evidence: the unique commit that *introduced* those exact
- * PASS bytes. Merely containing an unchanged blob is not origin, and anything
- * short of exactly one defensible origin fails closed rather than guessing.
- */
-const resolveReopenAnchor = async (root, record, sliceId, roots, attempt) => {
-  if (typeof record.targetAnchor === "string" && record.targetAnchor) {
-    return { revision: record.targetAnchor, resolvedFrom: "RECORD" };
-  }
-  const recordRelative = `${REOPEN_ROOT}/${attempt}/record.json`;
-  const evidenceRelative = `${REOPEN_ROOT}/${attempt}/evidence/${sliceId}/result.json`;
-  const pin = record.preserved?.[evidenceRelative];
-  if (typeof pin !== "string" || !pin) {
-    throw new Error(
-      `${recordRelative} carries no targetAnchor and does not pin '${evidenceRelative}', so the committed state ${sliceId} was proven against cannot be established. Reopen provenance is required before a committed ownership claim is accepted.`,
-    );
-  }
-  // The preserved copy is a copy; the pinned bytes originate at the slice's own
-  // evidence path, which is what history records.
-  const originRelative = repoRelative(
-    roots.targetRoot,
-    path.join(root, `evidence/${sliceId}/result.json`),
-  );
-  const origins = await commitsIntroducingBlob(
-    roots.targetRoot,
-    originRelative,
-    pin,
-  );
-  if (origins.length === 0) {
-    throw new Error(
-      `${recordRelative} carries no targetAnchor and the preserved PASS for ${sliceId} matches no commit in the target repository's history, so no anchor can be established. The reopened slice's committed ownership cannot be proven and is refused.`,
-    );
-  }
-  if (origins.length > 1) {
-    throw new Error(
-      `${recordRelative} carries no targetAnchor and the preserved PASS for ${sliceId} originates in ${origins.length} distinct commits (${origins.join(", ")}), so no unique anchor is defensible. Re-reopen the slice to record an explicit anchor rather than accepting an ambiguous one.`,
-    );
-  }
-  return { revision: origins[0], resolvedFrom: "PRESERVED_EVIDENCE" };
-};
-
-/**
- * A path under the target root in the form Git resolves against it. The `./`
- * prefix is load-bearing: `git show <rev>:<path>` reads a bare path from the
- * repository root, which is not always the target root, whereas `:./<path>`
- * resolves relative to the `-C` directory.
- */
-const repoRelative = (targetRoot, absolute) =>
-  `./${path.relative(targetRoot, absolute).replaceAll(path.sep, "/")}`;
-
-/**
- * Committed ownership for a reopened slice: the claims the anchored slice
- * record already made, plus which of them history has moved on from.
- *
- * Returns null when the slice is not reopened, so the live-diff rule stays the
- * only rule for an ordinary active slice.
- */
-// Resolved once per slice per anchor state: the resolver shells out to Git
-// several times, and both the implementation gate and the verification gate
-// need the same answer within one command.
-const anchoredOwnershipCache = new Map();
-
-const anchoredReopenOwnership = async (root, sliceId, state, roots) => {
-  if (!roots?.targetRoot) return null;
-  const head = await headRevision(roots.targetRoot);
-  const key = `${root} ${sliceId} ${head}`;
-  if (!anchoredOwnershipCache.has(key)) {
-    anchoredOwnershipCache.set(
-      key,
-      resolveAnchoredOwnership(root, sliceId, roots, head, state),
-    );
-  }
-  const resolved = await anchoredOwnershipCache.get(key);
-  // Drift is re-derived by whichever gate is running, never carried over.
-  if (resolved) resolved.drift = [];
-  return resolved;
-};
-
-const resolveAnchoredOwnership = async (root, sliceId, roots, head, state) => {
-  const reopen = await governingReopen(root, sliceId);
-  if (!reopen) return null;
-  const attempt = reopen.attempt;
-  const record = await verifiedReopenRecord(root, attempt, sliceId, state);
-  const anchor = await resolveReopenAnchor(root, record, sliceId, roots, attempt);
-  if (!(await isAncestorCommit(roots.targetRoot, anchor.revision, head))) {
-    throw new Error(
-      `The reopen anchor '${anchor.revision}' for ${sliceId} is not reachable from the target repository's HEAD. History was rewritten or the anchor belongs to another lineage; a committed ownership claim is refused.`,
-    );
-  }
-  // What the slice record claimed in the reopened COMPLETE state is the only
-  // committed ownership that exists, and reading it from the working tree on
-  // trust would let a claim added after the fact grant itself provenance.
-  //
-  // The migration record is not part of the target's committed history -- this
-  // tool keeps it uncommitted until FINALIZE -- so the anchor commit cannot
-  // supply it. The pin does: `slices/<id>.json` was hashed into
-  // `artifactHashes` at COMPLETE and a reopen deliberately releases only the
-  // slice's evidence and the FINALIZE artifacts, so that pin still describes
-  // the record exactly as the reopened COMPLETE recorded it.
-  const sliceRelative = `slices/${sliceId}.json`;
-  const slicePin = state?.artifactHashes?.[sliceRelative];
-  if (typeof slicePin !== "string" || !slicePin) {
-    throw new Error(
-      `${sliceId} was reopened but ${sliceRelative} is not pinned by the migration state, so what the slice owned in the reopened COMPLETE state cannot be established. The committed ownership claim is refused.`,
-    );
-  }
-  const slicePath = path.join(root, sliceRelative);
-  const anchoredBytes = await readFile(slicePath);
-  if (!(await fileIdentityMatches(slicePin, slicePath))) {
-    throw new Error(
-      `${sliceRelative} no longer matches the hash the migration state pinned for the reopened COMPLETE state. A reopened slice may not rewrite what it owned and then claim the rewrite as committed provenance.`,
-    );
-  }
-  let anchoredRecord;
-  try {
-    anchoredRecord = JSON.parse(anchoredBytes.toString("utf8"));
-  } catch (error) {
-    throw new Error(
-      `${sliceRelative} is not readable JSON (${error.message}), so ${sliceId}'s committed ownership cannot be established.`,
-    );
-  }
-  const claims = new Set();
-  for (const changed of anchoredRecord?.changedFiles ?? []) {
-    if (typeof changed !== "string" || !changed.trim()) continue;
-    claims.add(changed.trim().split(/\s+/)[0].replaceAll("\\", "/"));
-  }
-  return { attempt, anchor, head, claims, record };
-};
-
-const validateImplementedSlice = async (
-  root,
-  sliceId,
-  state,
-  roots,
-  // An amendment validates the record it is about to write, not the one on
-  // disk: the whole point is to refuse before the prior bytes are replaced.
-  recordOverride,
-) => {
-  const { slices, capabilityRows } = await validatePlan(root, state, roots);
-  const planned = slices.find((slice) => slice.id === sliceId);
-  if (!planned) throw new Error(`Unknown planned slice '${sliceId}'.`);
-  const record = assertPlainObject(
-    recordOverride ??
-      (await readJson(
-        path.join(root, `slices/${sliceId}.json`),
-        `Slice ${sliceId}`,
-      )),
-    `Slice ${sliceId}`,
-  );
-  if (record.id !== sliceId || record.implementationStatus !== "COMPLETE") {
-    throw new Error(`${sliceId} implementation must be COMPLETE.`);
-  }
-  assertCoversPlanned(
-    traceLists(planned, sliceId, state),
-    traceLists(record, sliceId, state),
+// Track A4: the implementation contract lives in slices/. This seam supplies
+// the validated plan and the census fact `isBrownfield`, and keeps the
+// lifecycle's artifact-prerequisite check between the claim rules and the
+// shared-prerequisite rule, where it always ran.
+const validateImplementedSlice = async (root, sliceId, state, roots, recordOverride) => {
+  const plan = await validatePlan(root, state, roots);
+  const { record, changedTargetPaths } = await validateSliceImplementation(
+    root,
     sliceId,
-    "implement",
-  );
-  const changedFiles = assertArray(
-    record.changedFiles,
-    `${sliceId}.changedFiles`,
-  );
-  const delegatedOnly = delegatedChangedFilesSatisfiedByChild(
     state,
-    record.capabilityIds,
-    capabilityRows,
+    roots,
+    recordOverride,
+    plan,
+    isBrownfield(state),
   );
-  // A slice could never be verification-only: proving that already-correct,
-  // already-committed code still holds required touching a file. Derived, not
-  // declared, exactly like `delegatedOnly` -- no new `kind` field and no third
-  // thing to keep consistent with the other two.
-  // isBrownfield already implies usesMultiSource -- no separate check needed.
-  const verificationOnly =
-    isBrownfield(state) &&
-    changedFiles.length === 0 &&
-    Array.isArray(record.commandResults) &&
-    record.commandResults.length > 0;
-  if (verificationOnly) {
-    await assertCommandResults(
-      record.commandResults,
-      `${sliceId}.commandResults`,
-      roots,
-    );
-  }
-  if (changedFiles.length === 0 && !delegatedOnly && !verificationOnly) {
-    throw new Error(
-      `${sliceId} must record its changed files, or the command results that re-prove it without any.`,
-    );
-  }
-  // A declared changed file must be a real path inside the target repository:
-  // the implementation gate previously accepted any nonempty string, so a slice
-  // could claim work it never did, or claim it outside the migration's target.
-  //
-  // P1-7: existence alone still let a slice claim files it never actually
-  // touched. `dirty` is the target repository's real uncommitted diff
-  // (reusing the same `dirtyManifest` this tool already trusts for P1-6);
-  // every declared changed file must be part of it.
-  // The live uncommitted diff is the ownership proof for an ordinary active
-  // slice. It cannot be the only one after a COMPLETE reopen: the slice being
-  // reopened was finalized, so its legitimate implementation is already
-  // committed and is correctly absent from the current diff. A reopened slice
-  // therefore proves ownership against its reopen anchor as well -- the
-  // committed target state whose preserved PASS is being reopened.
-  const anchored = await anchoredReopenOwnership(root, sliceId, state, roots);
-  const dirty = roots?.targetRoot
-    ? await dirtyManifest(roots.targetRoot)
-    : null;
-  const dirtyPaths = dirty
-    ? new Set(dirty.entries.map((entry) => entry.path))
-    : null;
-  // Brownfield: the target repository was already dirty when the record was
-  // created, and the current diff cannot tell those edits apart from this
-  // migration's. The pinned baseline can, per path and per byte, so a file that
-  // was already dirty and still reads the same was not changed by this slice.
-  const baseline =
-    roots?.targetRoot && changedFiles.length > 0
-      ? await readTargetBaseline(root, state)
-      : null;
-  const changedSinceBaseline = baseline
-    ? await targetBaselineDrift(roots.targetRoot, baseline)
-    : null;
-  const reusesExistingUiImplementation =
-    usesUiVerification(state) &&
-    ["IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE", "COMPLETE"].includes(
-      state.currentStep,
-    ) &&
-    Boolean(state.artifacts.uiRemediation);
-  // The canonical target-relative form of every claim, reused below so an
-  // ownership check compares the same shape whichever accepted form was authored.
-  const changedTargetPaths = [];
-  for (const changed of changedFiles) {
-    assertNonEmpty(changed, `${sliceId}.changedFiles entry`);
-    if (!roots?.targetRoot) continue;
-    const claim = changed.trim().split(/\s+/)[0];
-    const direct = path.resolve(roots.targetRoot, claim);
-    const resolved =
-      isWithin(roots.targetRoot, direct) && (await fileExists(direct))
-        ? direct
-        : await resolveEvidencePath(claim, roots);
-    if (!resolved) {
-      throw new Error(
-        `${sliceId}.changedFiles lists '${changed}', which does not exist. Record the files the slice actually changed.`,
-      );
-    }
-    if (!isWithin(roots.targetRoot, resolved)) {
-      throw new Error(
-        `${sliceId}.changedFiles lists '${changed}', which is outside the target repository. A slice may only change target files.`,
-      );
-    }
-    const relative = path
-      .relative(roots.targetRoot, resolved)
-      .replaceAll(path.sep, "/");
-    changedTargetPaths.push(relative);
-    // Ownership: a live claim in the current diff, or an anchored claim the
-    // committed state already carried. Anchored ownership additionally proves
-    // the path existed at the anchor -- a record may not claim provenance for
-    // a file the anchored commit never had.
-    const liveClaim = dirtyPaths ? dirtyPaths.has(relative) : false;
-    const anchoredClaim = Boolean(anchored?.claims.has(relative));
-    if (anchoredClaim && !liveClaim) {
-      const atAnchor = await fileAtRevision(
-        roots.targetRoot,
-        anchored.anchor.revision,
-        `./${relative}`,
-      );
-      if (!atAnchor) {
-        throw new Error(
-          `${sliceId}.changedFiles lists '${changed}', which does not exist at the reopen anchor '${anchored.anchor.revision}'. A reopened slice may only claim files the anchored commit actually carried.`,
-        );
-      }
-      // Historical ownership is not current validity. A path history moved on
-      // from after the anchor keeps its claim, but the reopened slice never
-      // absorbs authorship of those later commits, and the PASS it is working
-      // toward has to rest on evidence bound to the *current* HEAD.
-      const after = await commitsTouchingSince(
-        roots.targetRoot,
-        anchored.anchor.revision,
-        `./${relative}`,
-      );
-      if (after.length > 0) {
-        (anchored.drift ??= []).push({ path: relative, commits: after });
-      }
-    }
-    if (
-      dirtyPaths &&
-      !reusesExistingUiImplementation &&
-      !liveClaim &&
-      !anchoredClaim
-    ) {
-      throw new Error(
-        anchored
-          ? `${sliceId}.changedFiles lists '${changed}', which is neither part of the target repository's current uncommitted diff nor claimed by the slice record at its reopen anchor '${anchored.anchor.revision}'. A reopened slice may only claim work it owns live or owned in the anchored commit.`
-          : `${sliceId}.changedFiles lists '${changed}', which is not part of the target repository's current uncommitted diff. Record only files the slice actually modified.`,
-      );
-    }
-    // The baseline rule answers "is this pre-existing work", which an anchored
-    // committed claim has already answered from history.
-    if (changedSinceBaseline && !anchoredClaim && !changedSinceBaseline(relative)) {
-      throw new Error(
-        `${sliceId}.changedFiles lists '${changed}', which reads exactly as it did when the target baseline was pinned. Pre-existing work is not this migration's work and may not be claimed as slice work.`,
-      );
-    }
-  }
   // Format 11. Without this a slice can claim a SHARED_PREREQUISITE at PLAN and
   // still build it inside the feature: PLAN only proves the capability was
   // scheduled, this proves it landed where the matrix said it would.
   if (usesCapabilityOwnership(state) && roots?.targetRoot) {
     await assertArtifactPrerequisites(state, roots, {
-      capabilityRows,
-      slices,
+      capabilityRows: plan.capabilityRows,
+      slices: plan.slices,
     });
-    for (const capabilityId of record.capabilityIds) {
-      const row = capabilityRows.find(
-        (candidate) => candidate.id === capabilityId,
-      );
-      if (row?.classification !== "SHARED_PREREQUISITE") continue;
-      if (usesArtifactDelegation(state) && row.artifactMigration) continue;
-      const owner = targetRelativePath(
-        row.targetOwner,
-        roots,
-        `${capabilityId}.targetOwner`,
-      );
-      if (
-        !changedTargetPaths.some(
-          (claim) => claim === owner || claim.startsWith(`${owner}/`),
-        )
-      ) {
-        throw new Error(
-          `${sliceId} owns SHARED_PREREQUISITE '${capabilityId}' but changed no file under '${row.targetOwner}'. A shared capability must be built in its declared owner, not inside the feature.`,
-        );
-      }
-    }
+    assertSharedPrerequisitesBuilt(
+      sliceId,
+      state,
+      roots,
+      record,
+      plan.capabilityRows,
+      changedTargetPaths,
+    );
   }
   return record;
-};
-
-/**
- * The two spellings of one composition. `current` composes file identities;
- * `legacy` composes the raw hashes evidence recorded before tagged identities
- * existed. Both are computed from the same files in the same order, so a
- * record bound to either is still bound to these bytes.
- */
-/**
- * The target file one `changedFiles` claim names, or null. Extracted so the
- * amendment resolves a claim exactly as the implementation digest does -- two
- * spellings of "which file is this" is how an amended record ends up disagreeing
- * with the digest that binds it.
- */
-const resolveChangedFile = async (changed, roots) => {
-  const claim = changed.trim().split(/\s+/)[0];
-  const direct = path.resolve(roots.targetRoot, claim);
-  const resolved =
-    isWithin(roots.targetRoot, direct) && (await fileExists(direct))
-      ? direct
-      : await resolveEvidencePath(claim, roots);
-  return resolved && isWithin(roots.targetRoot, resolved) ? resolved : null;
-};
-
-const implementationDigests = async (record, roots) => {
-  const identities = [];
-  const legacy = [];
-  for (const changed of record.changedFiles) {
-    const resolved = await resolveChangedFile(changed, roots);
-    if (!resolved) {
-      throw new Error(`Cannot bind UI evidence to changed file '${changed}'.`);
-    }
-    const relative = path
-      .relative(roots.targetRoot, resolved)
-      .replaceAll(path.sep, "/");
-    identities.push([relative, await fileIdentity(resolved)]);
-    legacy.push([relative, await hashFile(resolved)]);
-  }
-  const compose = (rows) =>
-    `sha256:${hashContent(JSON.stringify(rows.sort(([a], [b]) => a.localeCompare(b))))}`;
-  return { current: compose(identities), legacy: compose(legacy) };
 };
 
 const validateUiRuntimeEvidence = async ({
@@ -6108,112 +5199,6 @@ const validateUiRuntimeEvidence = async ({
   return visualComparison;
 };
 
-/* ------------------------------------------------------------------ *
- * W3. Controlled same-slice rework at VERIFY_SLICES (format 16)
- *
- * A slice that fails verification for a real defect had no legal way back to
- * implementation: `FAIL` was unrepresentable, `expectedNextCheckpoint` offered
- * no same-slice return, and `slices/<id>.json` was hash-pinned once
- * IMPLEMENT_SLICES closed. The remaining options were all bad -- author a false
- * PASS, abandon the migration, or `--refresh --confirm-mismatch`, which the
- * protocol explicitly forbids for a target-side cause.
- *
- * Modelled structurally on `--reopen-ui`: operator-only, refused under
- * `--mode auto`, refused by `run-migration.mjs`, preview-gated, journalled, and
- * it writes a record of *why* the reopen happened.
- *
- * The ordering below is the whole safety property. The failed attempt is
- * preserved byte-for-byte and pinned BEFORE the mutable current-result path is
- * released for rewriting, in one transaction, so there is no reachable state in
- * which the evidence that caused a rework has been freed before it was kept.
- * ------------------------------------------------------------------ */
-
-export const REWORK_ROOT = "rework";
-
-export const reworkLimitBlocker = (sliceId) =>
-  `Slice '${sliceId}' has already been reworked ${MAX_SLICE_REWORKS} times. A slice that cannot be verified in ${MAX_SLICE_REWORKS} attempts is a planning defect, not an implementation one: reopen PLAN or split the slice rather than attempting it again.`;
-
-const REWORK_PATH = /^rework\/(.+)-(\d+)\/(.+)$/;
-
-/** `rework/<slice-id>-<n>/...` -> its slice and attempt, or null. */
-export const reworkPathParts = (relativePath) => {
-  const match = REWORK_PATH.exec(relativePath);
-  return match
-    ? { sliceId: match[1], attempt: Number(match[2]), file: match[3] }
-    : null;
-};
-
-const reworkAttemptsOf = (state, sliceId) =>
-  Number.isInteger(state?.sliceReworks?.[sliceId])
-    ? state.sliceReworks[sliceId]
-    : 0;
-
-/**
- * Where a defect's evidence is preserved. The claim path is kept intact under
- * `evidence/` so provenance survives and two defects naming different files can
- * never collide.
- */
-const preservedEvidencePath = (sliceId, attempt, claim) => {
-  const normalized = claim.replaceAll("\\", "/").replace(/^\.\//, "");
-  if (
-    normalized.startsWith("/") ||
-    normalized.split("/").includes("..") ||
-    normalized.length === 0
-  ) {
-    throw new Error(
-      `A defect evidenceReference must be a repository-relative path; received '${claim}'.`,
-    );
-  }
-  return `${REWORK_ROOT}/${sliceId}-${attempt}/evidence/${normalized}`;
-};
-
-/**
- * W3-1. A `FAIL` is only legal when it is as evidenced as a `PASS`: every
- * defect names what was expected, what was observed, the scenario or trace it
- * belongs to, and a real file whose current bytes hash to what it claims --
- * the same `assertEvidenceReference` rule the FINALIZE gates use.
- *
- * `inspectSliceArtifacts` continues to treat only `PASS` as verified, so a
- * `FAIL` never counts toward completion no matter how well evidenced it is.
- */
-const validateFailedSliceResult = async (root, sliceId, evidence, roots) => {
-  if (evidence.sliceId !== sliceId) {
-    throw new Error(
-      `Evidence for ${sliceId} records sliceId '${evidence.sliceId}'.`,
-    );
-  }
-  if (evidence.result !== "FAIL") {
-    throw new Error(
-      `--rework-slice requires a recorded FAIL for '${sliceId}'; evidence/${sliceId}/result.json records '${evidence.result}'. A slice is reworked because verification found a defect, never because the agent wants another attempt.`,
-    );
-  }
-  const defects = assertArray(evidence.defects, `${sliceId} evidence defects`);
-  if (defects.length === 0) {
-    throw new Error(
-      `${sliceId} evidence records FAIL with no defects[]. A failure with no named defect is not evidence of anything; nothing was written.`,
-    );
-  }
-  const claims = [];
-  for (const [index, defect] of defects.entries()) {
-    const label = `${sliceId} evidence defects[${index}]`;
-    assertPlainObject(defect, label);
-    if (!defect.traceId && !defect.scenarioId) {
-      throw new Error(`${label} requires a traceId or a scenarioId.`);
-    }
-    assertNonEmpty(defect.observed, `${label}.observed`);
-    assertNonEmpty(defect.expected, `${label}.expected`);
-    assertNonEmpty(defect.evidenceReference, `${label}.evidenceReference`);
-    await assertEvidenceReference(
-      { reference: defect.evidenceReference, hash: defect.hash },
-      label,
-      roots,
-      { require: true },
-    );
-    claims.push(evidencePathClaim(defect.evidenceReference));
-  }
-  return { defects, claims };
-};
-
 const validateVerifiedSlice = async (root, sliceId, state, roots) => {
   const implementation = await validateImplementedSlice(
     root,
@@ -6228,25 +5213,7 @@ const validateVerifiedSlice = async (root, sliceId, state, roots) => {
     ),
     `Evidence for ${sliceId}`,
   );
-  if (evidence.sliceId !== sliceId || evidence.result !== "PASS") {
-    // A FAIL is a legal document at format 16, but it never advances a slice.
-    // The refusal names the one transition that can act on it, so a real defect
-    // has a documented way forward instead of a choice between a false PASS and
-    // abandoning the migration.
-    throw new Error(
-      evidence.sliceId === sliceId &&
-      evidence.result === "FAIL" &&
-      usesSliceRework(state)
-        ? `${sliceId} verification recorded FAIL. A failed slice never advances; return it to implementation with '${engineCommand("cli/discover-module.mjs", "<module>", "--rework-slice", sliceId, "--confirm-rework")}', which preserves this attempt before anything is rewritten.`
-        : `${sliceId} verification evidence must be PASS.`,
-    );
-  }
-  assertCoversPlanned(
-    traceLists(implementation, sliceId, state),
-    traceLists(evidence, `${sliceId} evidence`, state),
-    `${sliceId} evidence`,
-    "verify",
-  );
+  assertSlicePassed(implementation, evidence, sliceId, state, engineCommand);
   await assertCommandResults(
     evidence.commands,
     `${sliceId} evidence commands`,
@@ -6335,43 +5302,6 @@ const withUiProofReopenHint = async (root, sliceId, state, roots) => {
   }
 };
 
-/**
- * A reopened slice whose anchored files were committed again after the anchor
- * may not PASS on evidence that predates those commits.
- *
- * The anchored claim proves the slice *owned* the path in the committed state;
- * it says nothing about whether the path still does what the slice proved. When
- * history has moved on, the verification must be bound to the current HEAD --
- * missing, stale or non-PASS evidence all fail closed, and the later commits
- * stay attributed to whoever made them.
- */
-const assertPostAnchorEvidence = async (root, sliceId, state, roots, evidence) => {
-  const anchored = await anchoredReopenOwnership(root, sliceId, state, roots);
-  if (!anchored) return;
-  const drift = [];
-  for (const claim of anchored.claims) {
-    const commits = await commitsTouchingSince(
-      roots.targetRoot,
-      anchored.anchor.revision,
-      `./${claim}`,
-    );
-    if (commits.length > 0) drift.push({ path: claim, commits });
-  }
-  if (drift.length === 0) return;
-  const paths = drift.map((entry) => entry.path).sort();
-  const verifiedAt = evidence.verifiedAtRevision;
-  if (typeof verifiedAt !== "string" || !verifiedAt) {
-    throw new Error(
-      `${sliceId} was reopened against anchor '${anchored.anchor.revision}', and ${paths.join(", ")} ${paths.length === 1 ? "has" : "have"} been committed to since. Its evidence must record 'verifiedAtRevision' proving it was produced against the current target HEAD '${anchored.head}' before it can PASS.`,
-    );
-  }
-  if (verifiedAt !== anchored.head) {
-    throw new Error(
-      `${sliceId} evidence records verifiedAtRevision '${verifiedAt}', but the target repository's HEAD is '${anchored.head}' and ${paths.join(", ")} changed after the reopen anchor '${anchored.anchor.revision}' (${drift.flatMap((entry) => entry.commits).join(", ")}). Stale evidence never proves a reopened slice; reverify against the current HEAD.`,
-    );
-  }
-};
-
 // Contract 5 decision 1.3: typed Ponytail evidence, never a regex over prose.
 const PONYTAIL_GATE_EVIDENCE = {
   full: [["SIMPLIFY_ONCE", "review"]],
@@ -6391,37 +5321,6 @@ const PONYTAIL_GATE_EVIDENCE = {
 // most recently pinned legacy revision or requirements digest -- evidence
 // timestamped before the thing it claims to satisfy was even pinned is stale
 // by construction.
-/**
- * A gate hash was only checked for shape (64 hex characters), so a fabricated
- * digest against a nonexistent file satisfied a PASS gate. When the reference
- * names a real file, the recorded hash must be that file's current digest.
- */
-const assertEvidenceReference = async (entry, label, roots, options = {}) => {
-  const claim = evidencePathClaim(entry.reference);
-  // ponytail: `require` is opt-in so prose references stay legal for the
-  // evidence kinds whose contract allows them. UI runtime evidence opts in:
-  // its whole purpose is proving a browser ran, so "observed in chromium" is
-  // not evidence -- same bar as `assertCommandResults`.
-  if (!claim) {
-    if (!options.require) return;
-    throw new Error(
-      `${label}.reference '${entry.reference}' is not a persisted artifact path. Record the captured runtime evidence as a real file under the legacy or target repository.`,
-    );
-  }
-  const resolved = await resolveEvidencePath(claim, roots);
-  if (!resolved) {
-    throw new Error(
-      `${label}.reference names '${claim}', which does not exist under the legacy or target repository.`,
-    );
-  }
-  if (!(await fileIdentityMatches(entry.hash, resolved))) {
-    throw new Error(
-      `${label}.hash does not match the current bytes of '${claim}'. Recorded ${entry.hash}, actual ${await fileIdentity(resolved)}. Regenerate the evidence against the current tree.`,
-    );
-  }
-  return resolved;
-};
-
 const assertEvidenceEntry = (entry, label, context) => {
   assertPlainObject(entry, label);
   assertNonEmpty(entry.kind, `${label}.kind`);
@@ -8169,81 +7068,16 @@ const validateStep = async (root, state, step, sliceId, roots) => {
     for (const slice of slices) {
       await withUiProofReopenHint(root, slice.id, state, roots);
     }
-    await assertNoUnclaimedTargetDrift(root, state, roots, slices);
+    await assertNoUnclaimedTargetDrift(
+      root,
+      state,
+      roots,
+      slices,
+      await sliceDriftFacts(state, roots),
+      engineCommand,
+    );
     await validateGates(root, state, roots);
     await assertGatesCoverSliceScenarios(root, state, slices);
-  }
-};
-
-/* ------------------------------------------------------------------ *
- * W5. FINALIZE rejects unresolved verification (format 16)
- *
- * Row terminality across the matrices and gate PASS are both
- * presence-of-positive assertions. Absence-of-negative is a different claim,
- * and only the first survives an artifact the engine did not anticipate.
- * ------------------------------------------------------------------ */
-
-/**
- * The terminal result is identified by *location*, not by content: the
- * current-result path holds exactly one attempt -- the terminal one -- and
- * every superseded attempt lives under `rework/<slice>-<n>/`. A slice with k
- * reworks therefore has exactly k preserved attempts plus one terminal result,
- * and FINALIZE never has to disambiguate two documents that both claim to be
- * the slice's verification.
- */
-const assertNoUnresolvedVerification = async (root, state, slices) => {
-  if (!usesSliceRework(state)) return;
-  const unresolved = [];
-  const stale = [];
-  for (const slice of slices) {
-    const terminal = await readOptionalJson(
-      path.join(root, `evidence/${slice.id}/result.json`),
-      `Evidence for ${slice.id}`,
-    );
-    if (terminal?.result !== "PASS") {
-      unresolved.push(
-        `${slice.id} (terminal result is '${terminal?.result ?? "missing"}')`,
-      );
-      continue;
-    }
-    // A preserved FAIL under `rework/` is never itself a blocker -- it is the
-    // required immutable record of a *resolved* failure. An unsuperseded one is.
-    const attempts = reworkAttemptsOf(state, slice.id);
-    if (attempts === 0) continue;
-    const newest = await readOptionalJson(
-      path.join(root, `${REWORK_ROOT}/${slice.id}-${attempts}/record.json`),
-      `Rework record for ${slice.id}`,
-    );
-    if (!newest) {
-      unresolved.push(
-        `${slice.id} (rework attempt ${attempts} has no preserved record)`,
-      );
-      continue;
-    }
-    // Only a reworked slice owes a timestamp. A slice that never failed is
-    // byte-identical to a pre-16 one and is never asked for a field it had no
-    // reason to author.
-    if (typeof terminal.producedAt !== "string" || Number.isNaN(Date.parse(terminal.producedAt))) {
-      stale.push(
-        `${slice.id} (terminal PASS carries no producedAt, so it cannot be proven newer than rework attempt ${attempts})`,
-      );
-      continue;
-    }
-    if (Date.parse(terminal.producedAt) <= Date.parse(newest.at)) {
-      stale.push(
-        `${slice.id} (terminal PASS produced ${terminal.producedAt}, newest rework preserved ${newest.at})`,
-      );
-    }
-  }
-  if (unresolved.length > 0) {
-    throw new Error(
-      `Unresolved verification blocks FINALIZE for: ${unresolved.join(", ")}. A slice reaches COMPLETE only on a terminal PASS at evidence/<slice-id>/result.json.`,
-    );
-  }
-  if (stale.length > 0) {
-    throw new Error(
-      `Stale verification blocks FINALIZE for: ${stale.join(", ")}. A reworked slice must be reverified after its newest rework, not before it.`,
-    );
   }
 };
 
@@ -8283,635 +7117,18 @@ const assertNoNavigationRepairNeeded = async (root, state) => {
 };
 
 /**
- * W5-3. A gate that passes while naming no scenario from a slice is a gate that
- * proved nothing about it.
+ * Track A4: the census facts slices/ drift classification reads -- whether the
+ * record adopted an existing target, and the legacy source binding a format-19
+ * drift candidate is bound to -- read here and handed over as data. The binding
+ * is settled, so a failed read is raised where classification consumes it.
  */
-const assertGatesCoverSliceScenarios = async (root, state, slices) => {
-  if (!usesSliceRework(state)) return;
-  const gates = await readOptionalJson(path.join(root, "gates.json"), "Gates");
-  const covered = new Set();
-  for (const gate of gates?.gates ?? []) {
-    if (!["TARGETED_VERIFY", "FINAL_VERIFY"].includes(gate.id)) continue;
-    for (const entry of gate.evidence ?? []) {
-      for (const scenarioId of entry.scenarioIds ?? []) covered.add(scenarioId);
-    }
-  }
-  // Only assert when the gates actually declare scenario traceability; a record
-  // whose gates predate it is not retroactively held to it.
-  if (covered.size === 0) return;
-  const missing = [];
-  for (const slice of slices) {
-    const scenarioIds = slice.scenarioIds ?? [];
-    if (scenarioIds.length === 0) continue;
-    if (!scenarioIds.some((scenarioId) => covered.has(scenarioId))) {
-      missing.push(`${slice.id} (${scenarioIds.join(", ")})`);
-    }
-  }
-  if (missing.length > 0) {
-    throw new Error(
-      `TARGETED_VERIFY/FINAL_VERIFY evidence names no scenario from: ${missing.join(", ")}. A verification gate that covers no scenario of a slice proved nothing about that slice.`,
-    );
-  }
-};
-
-/* ------------------------------------------------------------------ *
- * W4. One ownership ledger for target bytes (format 16)
- *
- * `validateImplementedSlice` proves every *claimed* file is real, inside the
- * target, currently dirty and different from the pinned baseline. That is a
- * `claimed ⊆ actual` check, and the converse was never run: a target file this
- * migration modified but no slice declares was invisible to every checkpoint
- * and to FINALIZE.
- *
- * Once same-slice rework exists this gets materially worse, because "the tree
- * changed since the last checkpoint" stops being anomalous on its own. So the
- * distinction is decided from records -- never from prose and never from
- * timing.
- * ------------------------------------------------------------------ */
-
-/**
- * W4-3: warn early, block late. Before VERIFY_SLICES no slice has claimed
- * anything, so an unclaimed path carries no information; blocking mid-flight
- * would also make ordinary editing hostile. FINALIZE is where the guarantee has
- * to hold.
- */
-const DRIFT_OWNERSHIP_STEPS = new Set(["VERIFY_SLICES", "FINALIZE"]);
-
-const DRIFT_CLASSES = Object.freeze({
-  ENGINE_AUTHORED: "ENGINE_AUTHORED",
-  AUTHORIZED_REWORK: "AUTHORIZED_REWORK",
-  AUTHORIZED_DELEGATION: "AUTHORIZED_DELEGATION",
-  OPERATOR_ACCEPTED: "OPERATOR_ACCEPTED",
-  // Modified, inside a subtree some planned slice owns, and claimed by none of
-  // them. This migration's business, and the only unaccounted class FINALIZE
-  // refuses.
-  UNCLAIMED_TARGET_DRIFT: "UNCLAIMED_TARGET_DRIFT",
-  // Modified, and outside every subtree any planned slice owns.
-  //
-  // This used to be `UNCLAIMED_TARGET_DRIFT` as well, which made "the migration
-  // cannot account for this file" and "somebody edited an unrelated file in
-  // this repository" the same refusal. They are not the same fact, and
-  // conflating them let an ordinary edit elsewhere in the target -- a README, a
-  // sibling feature's work in progress -- hold COMPLETE hostage until a human
-  // accepted a file the migration never touched.
-  //
-  // The engine reports these and does nothing else with them: it does not
-  // claim them, accept them, modify them, or count them against the guarantee.
-  // The guarantee is about bytes *this migration* changed, and these are not
-  // those bytes.
-  UNRELATED_USER_CHANGE: "UNRELATED_USER_CHANGE",
+export const sliceDriftFacts = async (state, roots) => ({
+  brownfield: isBrownfield(state),
+  legacySource:
+    usesDirectLedgerDecisions(state) && roots?.targetRoot
+      ? await settleFact(legacySourceBinding(roots.legacyRoot))
+      : null,
 });
-
-/**
- * The target subtrees the plan says this migration owns -- `targetOwner` and
- * `targetPaths`, read off the slice plan, never guessed.
- */
-const plannedTargetOwners = (slices) =>
-  slices
-    .flatMap((slice) => [
-      slice.targetOwner,
-      ...(Array.isArray(slice.targetPaths) ? slice.targetPaths : []),
-    ])
-    .filter((owner) => typeof owner === "string" && owner)
-    .map((owner) => owner.replaceAll("\\", "/").replace(/\/+$/, ""));
-
-/**
- * A plan that declares no owners at all cannot answer the ownership question,
- * so every finding stays unclaimed: *unable to tell* is not *outside*, and only
- * one of those may be waved through.
- */
-const withinPlannedScope = (relative, owners) =>
-  owners.length === 0 ||
-  owners.some((owner) => relative === owner || relative.startsWith(`${owner}/`));
-
-/**
- * One `changedFiles` claim in canonical target-relative form, resolved exactly
- * as the implementation digest resolves it -- so `target/src/x.ts` and
- * `src/x.ts` are one claim to every lookup, manual or engine. A v1.3.17
- * `<path> <identity>` entry reads as its path, like any other entry.
- */
-const canonicalClaim = async (changed, roots) => {
-  const resolved = roots?.targetRoot ? await resolveChangedFile(changed, roots) : null;
-  return resolved
-    ? targetRelative(roots, resolved)
-    : changed.trim().split(/\s+/)[0].replaceAll("\\", "/");
-};
-
-/** Every target path any planned slice claims, in canonical target-relative form. */
-const claimedTargetPaths = async (root, slices, roots) => {
-  const claimed = new Set();
-  for (const slice of slices) {
-    const record = await readOptionalJson(
-      path.join(root, `slices/${slice.id}.json`),
-      `Slice ${slice.id}`,
-    );
-    for (const changed of record?.changedFiles ?? []) {
-      if (typeof changed !== "string") continue;
-      const claim = await canonicalClaim(changed, roots);
-      if (claim) claimed.add(claim);
-    }
-  }
-  return claimed;
-};
-
-/**
- * W4-1/W4-2. The set difference over data the engine already holds -- no new
- * scan, no new cost -- and then a classification, because reporting an
- * unclaimed path without saying whose it is just moves the judgement to prose.
- */
-/** One spelling, read by the finding and by the candidate resolved against it. */
-const UNDERIVABLE_OWNERSHIP_REASON =
-  "the slice plan declares no target owner, so whether this path belongs to the migration cannot be derived; only a human can say";
-
-/**
- * F6. The one spelling of a drift candidate's facts, read by the offer
- * (`pendingTargetDriftCandidates`) and by the FINALIZE resolver
- * (`acceptsDrift`), so the decision recorded over the offered candidate is the
- * decision FINALIZE resolves. Neither reads a finding's display `reason`:
- * whether an earlier acceptance went stale is an outcome of this resolution,
- * not an input to it. A deleted path digests as zeroes, so its deletion is
- * what gets accepted and recreating the file re-blocks like any edit.
- */
-const driftCandidateFacts = async (targetRoot, relative, autoResolvable) => ({
-  pathDigest: `sha256:${await hashFile(path.join(targetRoot, relative)).catch(() => "0".repeat(64))}`,
-  rationale: autoResolvable
-    ? `${relative} was modified in the target but is claimed by no validated slice, no authorized rework, and no delegated artifact.`
-    : UNDERIVABLE_OWNERSHIP_REASON,
-});
-
-const classifyTargetDrift = async (root, state, roots, slices) => {
-  if (!usesSliceRework(state) || !roots?.targetRoot) return [];
-  if (!DRIFT_OWNERSHIP_STEPS.has(state.currentStep)) return [];
-  const dirty = await dirtyManifest(roots.targetRoot, TARGET_DIRTY_SCOPE);
-  const baseline = await readTargetBaseline(root, state);
-  const changedSinceBaseline = baseline
-    ? await targetBaselineDrift(roots.targetRoot, baseline)
-    : null;
-  const claimed = await claimedTargetPaths(root, slices, roots);
-
-  // A slice under an active rework legitimately re-touches its own files.
-  const reworked = new Set(
-    Object.keys(state.sliceReworks ?? {}).filter(
-      (sliceId) => reworkAttemptsOf(state, sliceId) > 0,
-    ),
-  );
-  const reworkOwned = new Set();
-  for (const sliceId of reworked) {
-    const planned = slices.find((slice) => slice.id === sliceId);
-    for (const owner of planned?.targetOwner
-      ? [planned.targetOwner]
-      : []) {
-      reworkOwned.add(owner.replaceAll("\\", "/"));
-    }
-  }
-  // A SHARED_PREREQUISITE with a live artifact delegation: the child record
-  // owns those bytes and validates them under its own lifecycle.
-  const delegatedOwners = slices
-    .filter((slice) => slice.artifact || slice.delegatedTo)
-    .map((slice) => String(slice.targetOwner ?? "").replaceAll("\\", "/"))
-    .filter(Boolean);
-
-  // W4-4/W4-5. The acceptance lives in the append-only operator ledger, never
-  // in a CLI flag and never in a state field an agent could author. `boundTo`
-  // carries the path's SHA-256, so editing the file after acceptance
-  // invalidates the decision the same way a changed candidate invalidates a
-  // classification approval.
-  const { decisions } = await readRecordedDecisions(root);
-  const accepted = new Map(
-    decisions
-      .filter(
-        (decision) =>
-          decision.kind === "TARGET_DRIFT_ACCEPTED" &&
-          typeof decision.subject?.path === "string" &&
-          // Pre-19 reads exactly as it always did. At 19 the map is only a
-          // prefilter -- `acceptsDrift` below re-derives the full candidate and
-          // resolves it, so a line that merely names the path authorizes
-          // nothing.
-          (!usesDirectLedgerDecisions(state) || decision.v === 2),
-      )
-      .map((decision) => [decision.subject.path, decision.boundTo?.pathDigest]),
-  );
-
-  // The module binding a format-19 drift candidate is digested over, taken from
-  // the record's own pinned discovery scan rather than from a fresh one: drift
-  // is classified on read-only paths too, and re-scanning there would make
-  // status execute the scanner. FINALIZE proves the pin is still current
-  // (`assertDiscoveryUnchanged`) before it holds anyone to it.
-  const driftBinding = usesDirectLedgerDecisions(state)
-    ? await (async () => {
-        const pinned = await readOptionalJson(
-          path.join(root, DISCOVERY_SCAN_FILE),
-          "Discovery scan",
-        );
-        return {
-          module: state.migrationId,
-          ...(await legacySourceBinding(roots.legacyRoot)),
-          discoveryDigest: pinned?.discoveryDigest,
-          algorithmVersion: pinned?.algorithmVersion,
-        };
-      })()
-    : null;
-
-  /**
-   * Whether an operator decision actually authorizes this drifted path, at this
-   * record's format. Pre-19: the historical byte comparison. 19: the same
-   * byte binding *and* the full direct-ledger resolution -- candidate digest,
-   * pinned policy, required principal, group authority, no receipt.
-   */
-  const acceptsDrift = async (relative) => {
-    const { pathDigest, rationale } = await driftCandidateFacts(roots.targetRoot, relative, autoResolvable);
-    if (!usesDirectLedgerDecisions(state)) {
-      return pathDigest === accepted.get(relative);
-    }
-    const candidate = await moduleDecisionCandidate(state, roots.targetRoot, {
-      kind: "TARGET_DRIFT_ACCEPTED",
-      subjectType: "TARGET_FILE",
-      subjectPath: relative,
-      rationale,
-      boundTo: { ...driftBinding, pathDigest },
-    });
-    try {
-      await requireModuleDecision({
-        state,
-        decisions,
-        row: null,
-        label: `Target drift '${relative}'`,
-        candidate,
-      });
-      return true;
-    } catch {
-      // A refusal here is "not accepted", which the caller already reports as
-      // unclaimed drift with its own message. The resolver's reason surfaces
-      // through the pending-decision projection, not by failing the scan.
-      return false;
-    }
-  };
-
-  // Target files the *record itself* authored, not any slice: the OpenSpec
-  // requirements authority the bootstrap writes, and the brief it was given.
-  // They are accounted for by `requirementsAuthority.digest` and the brief pin
-  // rather than by a slice, so counting them as unattributable drift would make
-  // FINALIZE unreachable for every migration by construction.
-  const engineAuthored = new Set(
-    [state.requirementsAuthority?.source, state.brief?.path]
-      .filter((value) => typeof value === "string" && value)
-      .map((value) => value.replaceAll("\\", "/")),
-  );
-
-  const owners = plannedTargetOwners(slices);
-  // Whether ownership is a question this record can answer at all. With owners,
-  // "inside the migration's scope" and "outside it" are both decidable, and a
-  // finding that lands inside is deterministic drift the AUTO principal may
-  // resolve. With none, neither answer is derivable -- so every finding stays
-  // unclaimed *and* stays a human decision. Ambiguity is the one drift case
-  // `--mode auto` must not decide, and this is where that is recorded.
-  const autoResolvable = owners.length > 0;
-  const laterOwners = plannedTargetOwners(
-    slices.filter(
-      (slice) =>
-        slice.id !== state.activeSlice &&
-        (state.pendingSlices ?? []).includes(slice.id),
-    ),
-  );
-  const withinLaterSlice = (relative) =>
-    laterOwners.length > 0 && withinPlannedScope(relative, laterOwners);
-  const findings = [];
-  for (const entry of dirty.entries) {
-    const relative = entry.path.replaceAll("\\", "/");
-    if (claimed.has(relative)) continue;
-    if (engineAuthored.has(relative)) {
-      findings.push({ path: relative, class: DRIFT_CLASSES.ENGINE_AUTHORED });
-      continue;
-    }
-    // Outside every owned subtree: somebody else's edit. Ordered ahead of the
-    // rework, delegation and acceptance branches so a path this migration never
-    // owned cannot pick up a claim from one of them by accident.
-    if (!withinPlannedScope(relative, owners)) {
-      findings.push({
-        path: relative,
-        class: DRIFT_CLASSES.UNRELATED_USER_CHANGE,
-        reason:
-          "modified outside every target subtree this migration's slice plan owns; preserved and not attributed to this migration",
-      });
-      continue;
-    }
-    // Not drift yet: a later pending slice still scopes this path, and its own
-    // IMPLEMENT gate (`unlistedSliceFiles`) asks that slice to list it.
-    if (withinLaterSlice(relative)) continue;
-    // Brownfield: already dirty before the migration started and unchanged
-    // since is not this migration's doing.
-    if (changedSinceBaseline && !changedSinceBaseline(relative)) continue;
-    if ([...reworkOwned].some((owner) => relative.startsWith(owner))) {
-      findings.push({ path: relative, class: DRIFT_CLASSES.AUTHORIZED_REWORK });
-      continue;
-    }
-    if (delegatedOwners.some((owner) => relative.startsWith(owner))) {
-      findings.push({
-        path: relative,
-        class: DRIFT_CLASSES.AUTHORIZED_DELEGATION,
-      });
-      continue;
-    }
-    if (accepted.has(relative)) {
-      // W4-5: the acceptance binds to the bytes. Editing the file after
-      // acceptance invalidates the decision, exactly as a classification
-      // approval stops applying when its candidate changes.
-      if (await acceptsDrift(relative)) {
-        findings.push({ path: relative, class: DRIFT_CLASSES.OPERATOR_ACCEPTED });
-        continue;
-      }
-      findings.push({
-        path: relative,
-        class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
-        autoResolvable,
-        reason:
-          "an operator accepted this path, but its bytes changed since; the acceptance no longer applies",
-      });
-      continue;
-    }
-    findings.push({
-      path: relative,
-      class: DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
-      autoResolvable,
-      ...(autoResolvable ? {} : { reason: UNDERIVABLE_OWNERSHIP_REASON }),
-    });
-  }
-  return findings;
-};
-
-/* --------------------------------------------------------------------------
- * `--amend-slice`: an add-only correction of a reopened slice's `changedFiles`.
- *
- * A reopen returns a verified slice to VERIFY_SLICES because its UI evidence is
- * stale, not because its implementation was wrong. Sometimes re-verifying it
- * reveals that the implementation always depended on files the pinned record
- * never listed. Failing and reworking the slice would be a lie about what
- * happened; re-planning it would discard verified work. An amendment adds the
- * missing files and nothing else: the prior record is preserved byte-pinned,
- * no step or slice moves, and the plan is untouched.
- * ------------------------------------------------------------------------ */
-
-/** Where `--amend-slice` keeps the slice record it replaces, byte-pinned. */
-export const SLICE_AMENDMENT_ROOT = "slice-amendments";
-
-// The running engine's own skill root: its source and tests are never slice work.
-const ENGINE_SKILL_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
-
-const TEST_LEVEL_SUFFIX = /\.(?:unit|integration|component)\.spec(\.[^./]+)$/;
-const targetRelative = (roots, absolute) =>
-  path.relative(roots.targetRoot, absolute).replaceAll(path.sep, "/");
-
-const eventNamesSlice = (event, sliceId) =>
-  event.slice === sliceId ||
-  (Array.isArray(event.slices) && event.slices.includes(sliceId));
-
-/**
- * `--amend-slice`: every fact the preview shows and the locked execution
- * re-proves, from fresh reads. Each refusal is a named blocker; the amendment
- * itself is computed only once none remain.
- */
-const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
-  const blockers = [];
-  const refuse = (message) =>
-    blockers.push(`--amend-slice '${sliceId}' ${message}`);
-  const blocked = () => ({ blockers, sliceAmendment: null });
-
-  // Lifecycle.
-  if (!usesSliceRework(state)) {
-    refuse(
-      `needs format ${SLICE_REWORK_FORMAT}; this migration is recorded at format ${state.formatVersion}.`,
-    );
-  }
-  if (state.status !== "ACTIVE" || state.currentStep !== "VERIFY_SLICES") {
-    refuse(
-      `is legal only on an ACTIVE record at VERIFY_SLICES; the record is '${state.status}' at '${state.currentStep}'.`,
-    );
-  }
-  if (!Array.isArray(addFiles) || addFiles.length === 0) {
-    refuse("requires at least one --add-file <path>.");
-  }
-  const { slices, capabilityRows } = await validatePlan(root, state, roots);
-  const planned = slices.find((slice) => slice.id === sliceId);
-  if (!planned) refuse("names no planned slice.");
-  if (state.completedSlices.includes(sliceId)) {
-    refuse(
-      "is a verified slice that is not reopened; reopen it with --reopen-ui before amending it.",
-    );
-  } else if (
-    state.activeSlice !== sliceId &&
-    !state.pendingSlices.includes(sliceId)
-  ) {
-    refuse("is neither the active nor a pending slice.");
-  }
-  const events = await readHistoryEvents(root);
-  const reopenedAt = events.findLastIndex(
-    (event) =>
-      event.event === "UI_REMEDIATION_REOPENED" &&
-      eventNamesSlice(event, sliceId),
-  );
-  if (reopenedAt < 0) {
-    refuse(
-      "is not pending because of a reopen. A first implementation pass or a rework edits the slice record directly; only a slice reopened by --reopen-ui is amended.",
-    );
-  } else {
-    if (
-      events
-        .slice(reopenedAt + 1)
-        .some(
-          (event) =>
-            ["REFRESHED", "REOPENED"].includes(event.event) ||
-            (eventNamesSlice(event, sliceId) &&
-              event.event !== "SLICE_SCOPE_AMENDED"),
-        )
-    ) {
-      refuse(
-        "was reverified, reworked or reset after its reopen; amend a reopened slice before it is verified again.",
-      );
-    }
-    if (
-      !events
-        .slice(0, reopenedAt)
-        .some(
-          (event) =>
-            event.event === "STEP_COMPLETED" &&
-            event.step === "VERIFY_SLICES" &&
-            event.slice === sliceId,
-        )
-    ) {
-      refuse("has no verified PASS in history before its reopen.");
-    }
-  }
-  const recordRelative = `slices/${sliceId}.json`;
-  const recordPath = path.join(root, recordRelative);
-  const priorBytes = (await fileExists(recordPath))
-    ? await readFile(recordPath)
-    : null;
-  let prior = null;
-  try {
-    prior = priorBytes ? JSON.parse(priorBytes.toString("utf8")) : null;
-  } catch {
-    prior = null;
-  }
-  if (
-    !isPlainObject(prior) ||
-    prior.implementationStatus !== "COMPLETE" ||
-    !Array.isArray(prior.changedFiles)
-  ) {
-    refuse(`needs a COMPLETE implementation record at ${recordRelative}.`);
-    return blocked();
-  }
-  if (!state.artifactHashes[recordRelative]) {
-    refuse(`needs ${recordRelative} pinned; it is not.`);
-  }
-
-  // Files.
-  const existing = new Set();
-  for (const changed of prior.changedFiles) {
-    if (typeof changed === "string") existing.add(await canonicalClaim(changed, roots));
-  }
-  const recordAuthored = new Set(
-    [state.requirementsAuthority?.source, state.brief?.path]
-      .filter((value) => typeof value === "string" && value)
-      .map((value) => value.replaceAll("\\", "/")),
-  );
-  const realTarget = await realpath(roots.targetRoot);
-  const engineRoot = await realpath(ENGINE_SKILL_ROOT).catch(
-    () => ENGINE_SKILL_ROOT,
-  );
-  const added = [];
-  for (const file of addFiles ?? []) {
-    const direct = path.resolve(roots.targetRoot, String(file));
-    // Symlinks resolved first, so a link cannot smuggle an outside file in.
-    const real = await realpath(direct).catch(() => null);
-    if (real && isWithin(engineRoot, real)) {
-      refuse(`cannot add '${file}': migration-engine source is never slice work.`);
-      continue;
-    }
-    if (!isWithin(roots.targetRoot, direct) || (real && !isWithin(realTarget, real))) {
-      refuse(`cannot add '${file}': it is outside the target repository.`);
-      continue;
-    }
-    if (!real || !(await stat(real)).isFile()) {
-      refuse(`cannot add '${file}': it is not an existing regular file.`);
-      continue;
-    }
-    const relative = targetRelative(roots, direct);
-    if (TARGET_DIRTY_SCOPE.exclude.some((prefix) => relative.startsWith(prefix))) {
-      refuse(`cannot add '${relative}': it is in the migration engine workspace.`);
-      continue;
-    }
-    if (recordAuthored.has(relative)) {
-      refuse(
-        `cannot add '${relative}': the migration record itself authors it (requirements authority or brief).`,
-      );
-      continue;
-    }
-    if (existing.has(relative) || added.includes(relative)) {
-      refuse(
-        `cannot add '${relative}': it is already in ${sliceId}.changedFiles. An amendment only adds files.`,
-      );
-      continue;
-    }
-    added.push(relative);
-  }
-  if (blockers.length > 0) return blocked();
-
-  // Add-only by construction: the prior list, untouched, then the additions.
-  const amended = { ...prior, changedFiles: [...prior.changedFiles, ...added] };
-  try {
-    await validateImplementedSlice(root, sliceId, state, roots, amended);
-  } catch (error) {
-    refuse(`would leave an invalid slice record: ${error.message}`);
-    return blocked();
-  }
-  const amendment =
-    events.filter(
-      (event) =>
-        event.event === "SLICE_SCOPE_AMENDED" && event.slice === sliceId,
-    ).length + 1;
-  const preservesAs = `${SLICE_AMENDMENT_ROOT}/${sliceId}-${amendment}/slice.json`;
-  if (await fileExists(path.join(root, preservesAs))) {
-    refuse(`cannot preserve to ${preservesAs}: it already exists, and preserved slice records are append-only.`);
-    return blocked();
-  }
-
-  // Ownership facts for the operator. The engine proves them; it never decides.
-  const drift = new Map(
-    (await classifyTargetDrift(root, state, roots, slices)).map((finding) => [
-      finding.path,
-      finding.class,
-    ]),
-  );
-  const otherClaims = [];
-  for (const slice of slices) {
-    if (slice.id === sliceId) continue;
-    otherClaims.push([slice.id, await claimedTargetPaths(root, [slice], roots)]);
-  }
-  const amendedStems = new Set();
-  for (const changed of amended.changedFiles) {
-    const resolved =
-      typeof changed === "string"
-        ? await resolveChangedFile(changed, roots)
-        : null;
-    if (resolved) amendedStems.add(withoutExtension(targetRelative(roots, resolved)));
-  }
-  const under = (relative, owner) => {
-    try {
-      const base = targetRelativePath(String(owner), roots, "Owner");
-      return relative === base || relative.startsWith(`${base}/`);
-    } catch {
-      return false;
-    }
-  };
-  const add = [];
-  for (const relative of added) {
-    const testedSource =
-      relative.startsWith("tests/") && TEST_LEVEL_SUFFIX.test(relative)
-        ? `src/${withoutExtension(relative.slice("tests/".length).replace(TEST_LEVEL_SUFFIX, "$1"))}`
-        : null;
-    const claimedBy = otherClaims
-      .filter(([, claims]) => claims.has(relative))
-      .map(([id]) => id);
-    add.push({
-      path: relative,
-      identity: await fileIdentity(path.join(roots.targetRoot, relative)),
-      ownershipBasis: (planned.targetPaths ?? []).some((owner) =>
-        under(relative, owner),
-      )
-        ? "TARGET_PATH"
-        : capabilityRows.some((row) => row.targetOwner && under(relative, row.targetOwner))
-          ? "CAPABILITY_OWNER"
-          : testedSource && amendedStems.has(testedSource)
-            ? "TEST_OF_OWNED_SOURCE"
-            : "OUTSIDE_PLANNED_SCOPE",
-      claimedBy,
-      driftClass:
-        drift.get(relative) ?? (claimedBy.length > 0 ? "CLAIMED" : "NOT_DRIFT"),
-    });
-  }
-  const amendedBytes = `${JSON.stringify(amended, null, 2)}\n`;
-  return {
-    blockers,
-    sliceAmendment: {
-      slice: sliceId,
-      existingChangedFiles: prior.changedFiles,
-      add,
-      implementationDigestBefore: (await implementationDigests(prior, roots))
-        .current,
-      implementationDigestAfter: (await implementationDigests(amended, roots))
-        .current,
-      sliceRecordDigestBefore: `sha256:${hashContent(priorBytes)}`,
-      sliceRecordDigestAfter: `sha256:${hashContent(amendedBytes)}`,
-      preservesAs,
-      amendment,
-    },
-    priorBytes,
-    amendedBytes,
-  };
-};
 
 /**
  * The IMPLEMENT gate. The paths VERIFY_SLICES would report as unclaimed drift
@@ -8922,25 +7139,18 @@ const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
  * cannot list keeps its VERIFY/FINALIZE drift handling.
  */
 const unlistedSliceFiles = async (root, state, roots, sliceId) => {
-  if (!usesSliceRework(state) || !roots?.targetRoot) return [];
-  const plan = await readOptionalJson(path.join(root, initialArtifacts.slices), "Slice index");
-  const slices = Array.isArray(plan?.slices) ? plan.slices : [];
-  const scope = plannedTargetOwners(slices.filter((slice) => slice.id === sliceId));
-  if (scope.length === 0) return [];
-  const record = await readJson(path.join(root, `slices/${sliceId}.json`), `Slice ${sliceId}`);
-  // Classified as the VERIFY_SLICES this advance enters will classify it.
-  const findings = await classifyTargetDrift(
+  const found = await unlistedSliceCandidates(
     root,
-    { ...state, currentStep: "VERIFY_SLICES" },
+    state,
     roots,
-    slices,
+    sliceId,
+    await sliceDriftFacts(state, roots),
   );
   const unlisted = [];
-  for (const { path: relative } of unclaimedTargetDrift(findings)) {
-    if (!withinPlannedScope(relative, scope)) continue;
+  for (const relative of found?.candidates ?? []) {
     const listable = await validateImplementedSlice(root, sliceId, state, roots, {
-      ...record,
-      changedFiles: [...record.changedFiles, relative],
+      ...found.record,
+      changedFiles: [...found.record.changedFiles, relative],
     }).then(() => true, () => false);
     if (listable) unlisted.push(relative);
   }
@@ -8948,70 +7158,43 @@ const unlistedSliceFiles = async (root, state, roots, sliceId) => {
 };
 
 /**
- * The drift candidates an operator may accept, derived under the same rules
- * `classifyTargetDrift` applies. Exported for `record-decision.mjs`, which owns
- * every approval; nothing here records anything.
+ * `--amend-slice`: every fact the preview shows and the locked execution
+ * re-proves, from fresh reads. Each refusal is a named blocker; the amendment
+ * itself is computed only once none remain. Track A4: the rules are in
+ * slices/; this seam supplies the validated plan and the census facts, and
+ * revalidates the amended record as an implementation between the two halves.
  */
-export const pendingTargetDriftCandidates = async (root, state, roots) => {
-  // Only where drift is a meaningful question. Before slices exist nothing can
-  // have claimed a file yet, so every modified path would read as unclaimed and
-  // the operator would be asked to accept the migration's own work.
-  if (!DRIFT_OWNERSHIP_STEPS.has(state.currentStep)) return [];
-  if (!usesSliceRework(state) || !roots?.targetRoot) return [];
-  const plan = await readOptionalJson(
-    path.join(root, initialArtifacts.slices),
-    "Slice index",
+const sliceAmendmentFor = async (root, state, roots, sliceId, addFiles) => {
+  const draft = await draftSliceAmendment(
+    root,
+    state,
+    roots,
+    sliceId,
+    addFiles,
+    await validatePlan(root, state, roots),
   );
-  const slices = Array.isArray(plan?.slices) ? plan.slices : [];
-  const unclaimed = unclaimedTargetDrift(
-    await classifyTargetDrift(root, state, roots, slices),
-  );
-  return Promise.all(
-    unclaimed.map(async (finding) => ({
-      subjectPath: finding.path,
-      // Carried, not recomputed: whether ownership was derivable is a fact
-      // about the plan `classifyTargetDrift` already read, and re-deriving it
-      // here is how the two answers drift apart.
-      autoResolvable: finding.autoResolvable !== false,
-      ...(await driftCandidateFacts(roots.targetRoot, finding.path, finding.autoResolvable !== false)),
-    })),
+  if (!draft.amended) return draft;
+  try {
+    await validateImplementedSlice(root, sliceId, state, roots, draft.amended);
+  } catch (error) {
+    draft.refuse(`would leave an invalid slice record: ${error.message}`);
+    return draft.blocked();
+  }
+  return completeSliceAmendment(
+    root,
+    state,
+    roots,
+    sliceId,
+    draft,
+    await sliceDriftFacts(state, roots),
   );
 };
 
-export const unclaimedTargetDrift = (findings) =>
-  findings.filter(
-    (finding) => finding.class === DRIFT_CLASSES.UNCLAIMED_TARGET_DRIFT,
-  );
-
-/**
- * W4-3. Blocking mid-flight would make ordinary editing hostile, so
- * VERIFY_SLICES only reports. FINALIZE is the guarantee that matters: COMPLETE
- * must mean every byte this migration changed is accounted for by a validated
- * slice, an authorized rework, an authorized delegation, or a ledger-backed
- * operator acceptance.
- */
-const assertNoUnclaimedTargetDrift = async (root, state, roots, slices) => {
-  const unclaimed = unclaimedTargetDrift(
-    await classifyTargetDrift(root, state, roots, slices),
-  );
-  if (unclaimed.length === 0) return;
-  throw new Error(
-    `UNCLAIMED_TARGET_DRIFT: ${unclaimed.length} modified target file(s) are attributable to no validated slice, no authorized rework, no delegated artifact, and no operator acceptance: ${unclaimed
-      .map((finding) =>
-        finding.reason ? `${finding.path} (${finding.reason})` : finding.path,
-      )
-      .join(
-        ", ",
-      )}. Two exits, both legitimate: claim each file in the slice it belongs to with '${engineCommand(
-      "cli/discover-module.mjs",
-      "<module>",
-      "--amend-slice",
-      "<slice>",
-      "--add-file",
-      "<path>",
-    )}' -- add-only, at least one --add-file, on a reopened slice -- or record a TARGET_DRIFT_ACCEPTED operator decision for it. COMPLETE must mean every byte this migration changed is accounted for.`,
-  );
-};
+// Compatibility (Track A4): the BASE three-argument reader, with the census
+// facts read here. `record-decision.mjs` calls slices/ directly.
+const pendingTargetDriftCandidatesCompat = async (root, state, roots) =>
+  pendingTargetDriftCandidates(root, state, roots, await sliceDriftFacts(state, roots));
+export { pendingTargetDriftCandidatesCompat as pendingTargetDriftCandidates };
 
 /**
  * The smaller FINALIZE check: not a re-run of the whole checkpoint, just proof
@@ -9938,144 +8121,6 @@ export const assertExecutionConfirmation = (preview, confirmationId) => {
   return true;
 };
 
-export const inspectSliceArtifacts = async (root) => {
-  const index = await readOptionalJson(
-    path.join(root, initialArtifacts.slices),
-    "Slice index",
-  );
-  const slices = Array.isArray(index?.slices) ? index.slices : [];
-  const plannedSlices = slices
-    .map((slice) => slice?.id)
-    .filter((id) => typeof id === "string" && id.length > 0);
-  const implementedSlices = [];
-  const verifiedSlices = [];
-
-  for (const sliceId of plannedSlices) {
-    const implementation = await readOptionalJson(
-      path.join(root, `slices/${sliceId}.json`),
-      `Slice ${sliceId}`,
-    );
-    const evidence = await readOptionalJson(
-      path.join(root, `evidence/${sliceId}/result.json`),
-      `Evidence for ${sliceId}`,
-    );
-    if (
-      implementation?.id === sliceId &&
-      implementation?.implementationStatus === "COMPLETE"
-    ) {
-      implementedSlices.push(sliceId);
-      if (evidence?.sliceId === sliceId && evidence?.result === "PASS") {
-        verifiedSlices.push(sliceId);
-      }
-    }
-  }
-
-  return {
-    plannedSlices,
-    implementedSlices,
-    verifiedSlices,
-  };
-};
-
-export const reconcileSliceState = async (root, state) => {
-  const inspected = await inspectSliceArtifacts(root);
-  const planReached =
-    MIGRATION_STEPS.indexOf(state.currentStep) >=
-      MIGRATION_STEPS.indexOf("IMPLEMENT_SLICES") ||
-    state.currentStep === "COMPLETE" ||
-    state.completedSteps.includes("PLAN");
-  if (!planReached || inspected.plannedSlices.length === 0) {
-    return {
-      state,
-      repairs: [],
-      inspected,
-    };
-  }
-
-  const verified = new Set(inspected.verifiedSlices);
-  if (state.currentStep === "VERIFY_SLICES" && state.activeSlice) {
-    verified.delete(state.activeSlice);
-  }
-  const implemented = new Set(inspected.implementedSlices);
-  const pendingSlices = inspected.plannedSlices.filter(
-    (sliceId) => !verified.has(sliceId),
-  );
-  const repairs = [];
-  let currentStep = state.currentStep;
-  let activeSlice = state.activeSlice;
-  let status = state.status;
-
-  if (pendingSlices.length > 0) {
-    const activeIsPending =
-      typeof activeSlice === "string" && pendingSlices.includes(activeSlice);
-    const nextSlice = activeIsPending ? activeSlice : pendingSlices[0];
-    const stateCanKeepActiveSlice =
-      activeIsPending &&
-      ["IMPLEMENT_SLICES", "VERIFY_SLICES"].includes(currentStep);
-    if (!stateCanKeepActiveSlice) {
-      activeSlice = nextSlice;
-      currentStep = "IMPLEMENT_SLICES";
-    } else if (currentStep === "VERIFY_SLICES" && !implemented.has(nextSlice)) {
-      currentStep = "IMPLEMENT_SLICES";
-    }
-    if (status === "COMPLETE") status = "ACTIVE";
-  } else if (["IMPLEMENT_SLICES", "VERIFY_SLICES"].includes(currentStep)) {
-    currentStep = "FINALIZE";
-    activeSlice = null;
-  }
-
-  const completedSlices = inspected.plannedSlices.filter((sliceId) =>
-    verified.has(sliceId),
-  );
-  if (
-    JSON.stringify(state.completedSlices) !== JSON.stringify(completedSlices)
-  ) {
-    repairs.push("reconciled completedSlices with PASS evidence");
-  }
-  if (JSON.stringify(state.pendingSlices) !== JSON.stringify(pendingSlices)) {
-    repairs.push("reconciled pendingSlices with planned slice evidence");
-  }
-  if (state.currentStep !== currentStep) {
-    repairs.push(`repaired currentStep ${state.currentStep} -> ${currentStep}`);
-  }
-  if (state.activeSlice !== activeSlice) {
-    repairs.push(
-      `repaired activeSlice ${state.activeSlice ?? "none"} -> ${activeSlice ?? "none"}`,
-    );
-  }
-  if (state.status !== status) {
-    repairs.push(`repaired status ${state.status} -> ${status}`);
-  }
-
-  const completedSteps = new Set(state.completedSteps);
-  const pendingSteps = new Set(state.pendingSteps);
-  if (pendingSlices.length > 0) {
-    completedSteps.delete("IMPLEMENT_SLICES");
-    completedSteps.delete("VERIFY_SLICES");
-    completedSteps.delete("FINALIZE");
-    pendingSteps.add("IMPLEMENT_SLICES");
-    pendingSteps.add("VERIFY_SLICES");
-    pendingSteps.add("FINALIZE");
-  }
-
-  return {
-    state: {
-      ...state,
-      status,
-      currentStep,
-      activeSlice,
-      completedSteps: MIGRATION_STEPS.filter((step) =>
-        completedSteps.has(step),
-      ),
-      pendingSteps: MIGRATION_STEPS.filter((step) => pendingSteps.has(step)),
-      completedSlices,
-      pendingSlices,
-    },
-    repairs,
-    inspected,
-  };
-};
-
 export const repairSliceState = async (targetRoot, moduleName) =>
   withModuleLock(targetRoot, moduleName, async () => {
     const { state, statePath, root } = await readState(targetRoot, moduleName);
@@ -10628,141 +8673,16 @@ const reworkSliceUnderLock = async ({
   state,
   sliceId,
 }) => {
-  const roots = {
-    legacyRoot: registryData.legacyRoot,
-    targetRoot: registryData.targetRoot,
-  };
-  if (!usesSliceRework(state)) {
-    throw new Error(
-      `--rework-slice needs format ${SLICE_REWORK_FORMAT}; migration '${resolved.canonical}' is recorded at format ${state.formatVersion}. A record runs the lifecycle it was born under.`,
-    );
-  }
-  if (state.currentStep !== "VERIFY_SLICES") {
-    throw new Error(
-      `--rework-slice is legal only at VERIFY_SLICES; the current checkpoint is '${state.currentStep}'.`,
-    );
-  }
-  if (state.activeSlice !== sliceId) {
-    throw new Error(
-      `--rework-slice names '${sliceId}', but the active slice is '${state.activeSlice ?? "none"}'. Only the slice currently under verification can be reworked.`,
-    );
-  }
-
-  const resultRelative = `evidence/${sliceId}/result.json`;
-  const resultPath = path.join(root, resultRelative);
-  if (!(await fileExists(resultPath))) {
-    throw new Error(
-      `--rework-slice requires a recorded verification result at ${resultRelative}; none exists. Nothing was written.`,
-    );
-  }
-  // Raw bytes, read once and preserved unchanged. No parse-and-reserialize:
-  // key order, whitespace and line endings are part of what was recorded.
-  const preservedBytes = await readFile(resultPath);
-  const evidence = assertPlainObject(
-    JSON.parse(preservedBytes.toString("utf8")),
-    `Evidence for ${sliceId}`,
-  );
-  const { defects, claims } = await validateFailedSliceResult(
+  const { writes, reworked, event } = await planSliceRework({
     root,
+    state,
     sliceId,
-    evidence,
-    roots,
-  );
-
-  const attempt = reworkAttemptsOf(state, sliceId) + 1;
-  // The preview reports this as a BLOCKED outcome naming the slice; this is the
-  // backstop for a caller that reached the lock without one.
-  if (attempt > MAX_SLICE_REWORKS) {
-    throw new Error(reworkLimitBlocker(sliceId));
-  }
-  const directory = `${REWORK_ROOT}/${sliceId}-${attempt}`;
-  if (await fileExists(path.join(root, directory))) {
-    throw new Error(
-      `${directory} already exists. Rework attempts are append-only and an attempt number is never reused; nothing was written.`,
-    );
-  }
-
-  // Every file the transaction writes, built completely before anything lands.
-  const writes = [[`${directory}/result.json`, preservedBytes]];
-  for (const [index, claim] of claims.entries()) {
-    const source = await resolveEvidencePath(claim, roots);
-    if (!source) {
-      throw new Error(
-        `${sliceId} evidence defects[${index}].evidenceReference names '${claim}', which no longer resolves. Nothing was written.`,
-      );
-    }
-    writes.push([
-      preservedEvidencePath(sliceId, attempt, claim),
-      await readFile(source),
-    ]);
-  }
-  // Bare hex, the same shape every other `artifactHashes` pin uses, so the
-  // standard completed-hash validation covers these without a special case.
-  const preserved = {};
-  for (const [relative, bytes] of writes) {
-    preserved[relative] = hashContent(bytes);
-  }
-  const recordRelative = `${directory}/record.json`;
-  const record = `${JSON.stringify(
-    {
-      version: 1,
-      sliceId,
-      attempt,
-      at: now(),
-      operator: `${process.env.USER ?? process.env.USERNAME ?? "unknown"}@${process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? "unknown-host"}`,
-      // Metadata *about* the preserved bytes. It never stands in for them.
-      priorEvidenceDigest: `sha256:${hashContent(preservedBytes)}`,
-      priorRevision: state.revision,
-      defects: defects.map((defect) => ({
-        traceId: defect.traceId ?? null,
-        scenarioId: defect.scenarioId ?? null,
-        observed: defect.observed,
-        expected: defect.expected,
-        evidenceReference: defect.evidenceReference,
-        hash: defect.hash,
-      })),
-      preserved,
+    roots: {
+      legacyRoot: registryData.legacyRoot,
+      targetRoot: registryData.targetRoot,
     },
-    null,
-    2,
-  )}\n`;
-  writes.push([recordRelative, Buffer.from(record, "utf8")]);
-  preserved[recordRelative] = hashContent(record);
-
-  const artifactHashes = { ...state.artifactHashes, ...preserved };
-  // Released only now, and only after every preserved path is in the pin set.
-  delete artifactHashes[`slices/${sliceId}.json`];
-  delete artifactHashes[resultRelative];
-
-  const reworked = {
-    ...state,
-    status: "ACTIVE",
-    currentStep: "IMPLEMENT_SLICES",
-    activeSlice: sliceId,
-    completedSteps: state.completedSteps.filter(
-      (step) => !["IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE"].includes(step),
-    ),
-    completedSlices: state.completedSlices.filter((id) => id !== sliceId),
-    pendingSlices: [...new Set([sliceId, ...state.pendingSlices])],
-    sliceReworks: { ...(state.sliceReworks ?? {}), [sliceId]: attempt },
-    invalidatedArtifacts: [`slices/${sliceId}.json`, resultRelative],
-    evidenceFreshness: "STALE",
-    nextAction: `Fix the ${defects.length} recorded defect(s) in slice '${sliceId}', then reverify it. Attempt ${attempt} of ${MAX_SLICE_REWORKS}.`,
-    nextCommand: `/start-migration ${resolved.canonical}`,
-    artifactHashes,
-    revision: state.revision + 1,
-    updatedAt: now(),
-  };
-  const event = {
-    event: "SLICE_REWORKED",
-    from: "VERIFY_SLICES",
-    step: "IMPLEMENT_SLICES",
-    slice: sliceId,
-    attempt,
-    defects: defects.length,
-    preserved: Object.keys(preserved).sort(),
-    revision: reworked.revision,
-  };
+    canonical: resolved.canonical,
+  });
 
   const integrityPath = path.join(root, INTEGRITY_FILE);
   const integrityBefore = await readFile(integrityPath, "utf8");

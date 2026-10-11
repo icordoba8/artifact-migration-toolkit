@@ -60,12 +60,13 @@ import {
   BLOCKED_EXIT_CODE,
   legacySourceBinding,
   legacySourcesOf,
-  pendingTargetDriftCandidates,
   pendingVisualUnbackedCandidates,
   previewDiscoveryScan,
   readMigrationContext,
   readState,
+  sliceDriftFacts,
 } from "./resumable-migration.mjs";
+import { pendingTargetDriftCandidates } from "./slices/index.mjs";
 import {
   appendApprovedCandidate,
   appendApprovedGroup,
@@ -227,10 +228,16 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   // visual owners, read here and handed to decisions as data (Track A3). Before
   // A3 they were read between candidate constructions; reading them first
   // changes no candidate, only which of two simultaneous failures is reported.
-  const targetDrift = await pendingTargetDriftCandidates(root, state, {
+  const driftRoots = {
     legacyRoot: registryData.legacyRoot,
     targetRoot: registryData.targetRoot,
-  });
+  };
+  const targetDrift = await pendingTargetDriftCandidates(
+    root,
+    state,
+    driftRoots,
+    await sliceDriftFacts(state, driftRoots),
+  );
   const visualUnbacked = await pendingVisualUnbackedCandidates(root, state);
   return {
     public: await deriveModuleDecisions({
