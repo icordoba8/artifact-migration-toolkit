@@ -14,10 +14,6 @@ import {
   assertSafeName,
   assertSecurePath,
   atomicWrite,
-  createDecisionCandidate,
-  decisionAppliesToCandidate,
-  decisionLineDigest,
-  decisionRationaleDigest,
   dirtyManifest,
   exitCodeFor,
   FINAL_GATES,
@@ -25,12 +21,24 @@ import {
   MIGRATION_MODES,
   MIGRATION_OUTCOMES,
   migrationProgress,
-  readRecordedDecisions,
   renderProgress,
   runDiscoveryScan,
   structuralUnits as structuralUnitsRaw,
   UI_RUNTIME_STATES,
 } from "../core.mjs";
+import {
+  artifactCandidateEvidence,
+  artifactDecisionCandidate,
+  artifactVisualDecisionRows,
+  consumedFrom,
+  createNewFormatDecisionCandidate,
+  decisionAppliesToCandidate,
+  decisionRationaleDigest,
+  projectArtifactDecision,
+  readRecordedDecisions,
+  reconcileArtifactDecisionRows,
+  verifyConsumedHistory,
+} from "../decisions/index.mjs";
 import {
   ARTIFACT_CONTRACT_VERSION,
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
@@ -63,11 +71,7 @@ import {
 import {
   compareVisualFact,
   compareVisualEvidence,
-  createNewFormatDecisionCandidate,
-  DECISION_GROUP_KIND,
   pendingVisualUnbackedCandidates,
-  projectModuleDecision,
-  resolveHistoricalRequiredPrincipal,
   TARGET_VERIFICATION_ROLE,
   validateVisualAcceptance,
   visualAuthorityOf,
@@ -78,7 +82,6 @@ import {
   artifactApprover,
   recorderFor,
 } from "../operator-approval.mjs";
-import { reviewFor } from "../record-decision.mjs";
 
 // Re-export for tests that need to verify the structural census directly.
 export { structuralUnitsRaw as structuralUnits };
@@ -122,6 +125,8 @@ import {
   secureHash,
   STATE_ROOT,
 } from "../store/index.mjs";
+// Compatibility re-export (Track A3): these names are decisions-owned now.
+export { artifactDecisionBoundTo, artifactDecisionCandidate } from "../decisions/index.mjs";
 // Compatibility re-export (Track A2): these names are formats-owned now.
 export {
   ARTIFACT_CONTRACT_VERSION,
@@ -1009,43 +1014,6 @@ export const artifactIdFor = (binding) => {
   );
 };
 
-// An artifact operator decision reuses the module candidate shape verbatim, so
-// the module ledger reader, candidate hash, and challenge all apply unchanged.
-// The binding maps: module=artifactId, legacy revision/dirty from the source
-// binding, discoveryDigest=the source manifest digest.
-export const artifactDecisionBoundTo = (state) => ({
-  module: state.artifactId,
-  legacyRevision: state.bindings.source.revision,
-  legacyDirtyDigest: state.bindings.source.dirtyDigest,
-  discoveryDigest: state.bindings.source.digest,
-  algorithmVersion: ARTIFACT_WORKFLOW_VERSION,
-});
-
-export const artifactDecisionCandidate = (state, row) =>
-  createDecisionCandidate({
-    kind: "ARTIFACT_DECISION",
-    subjectType: "ARTIFACT_DECISION",
-    subjectPath: row.id,
-    rationale: row.subject,
-    targets: [],
-    boundTo: artifactDecisionBoundTo(state),
-  });
-
-const artifactCandidateEvidence = (state, inventory) => ({
-  ...artifactDecisionBoundTo(state),
-  artifactId: state.artifactId,
-  formatVersion: state.formatVersion,
-  status: state.status,
-  currentStep: state.currentStep,
-  revision: state.revision,
-  source: state.source,
-  target: state.target,
-  sourceBinding: state.bindings.source,
-  targetBinding: state.bindings.target,
-  artifactHashes: state.artifactHashes,
-  sourceInventoryDigest: `sha256:${sha256(canonical(inventory))}`,
-});
-
 const assertDirectory = async (root, label) => {
   const details = await lstat(root).catch((error) => {
     if (error.code === "ENOENT") throw new Error(`${label} does not exist: ${root}`);
@@ -1237,111 +1205,6 @@ const ledgerPrefixesFor = async (root) => Object.fromEntries(await Promise.all(
     return [key, { bytes: Buffer.byteLength(content), sha256: sha256(content) }];
   }),
 ));
-
-// Artifact 14 authority is individual only: a group line never projects onto an artifact candidate.
-const projectArtifactDecision = (input) => projectModuleDecision({
-  ...input, decisions: input.decisions.filter((line) => line?.kind !== DECISION_GROUP_KIND),
-});
-
-const consumedFrom = (rows) => rows.filter((row) => row.satisfied).map(({ projection }) => ({
-  candidateDigest: projection.candidateDigest,
-  decisionId: projection.decisionId,
-  decisionDigest: projection.decisionDigest,
-  policyId: projection.policyId,
-  policyDigest: projection.policyDigest,
-  principal: projection.principal,
-  result: projection.result,
-})).sort((left, right) => left.decisionId.localeCompare(right.decisionId));
-
-const verifyConsumedHistory = async (root, state, history) => {
-  const consumedEvents = history.events.filter((event) => Object.hasOwn(event, "consumedDecisions"));
-  if (!usesArtifactDirectLedger(state.formatVersion)) {
-    if (consumedEvents.length || history.events.some((event) => Object.hasOwn(event, "decisionLedgerPrefixes"))) {
-      throw new Error("Artifact 13 history cannot contain consumed decisions.");
-    }
-    return;
-  }
-  if (history.events.some((event) => Object.hasOwn(event, "decisionLedgerPrefixes") !==
-      Object.hasOwn(event, "consumedDecisions"))) {
-    throw new Error("Consumed decision history is missing its identity or ledger prefix.");
-  }
-  for (const [step, file, key] of [
-    ["DISCOVER_LEGACY", "inventories/source.json", "operatorDecisions"],
-    ["BUILD_BASELINE", VISUAL_ACCEPTANCE_FILE, "unbacked"],
-  ]) {
-    const event = history.events.find((entry) => entry.from === step && entry.event === "ADVANCED");
-    if (!event) continue;
-    if (step === "BUILD_BASELINE" && !Object.hasOwn(state.artifactHashes, file)) {
-      if (event.consumedDecisions?.length) throw new Error("Unpinned visual evidence cannot consume decisions.");
-      continue;
-    }
-    const document = await readJsonAt(root, file, `${step} decision evidence`);
-    if (!Array.isArray(document[key]) || document[key].length !== (event.consumedDecisions?.length ?? 0)) {
-      throw new Error(`${step} committed history is missing consumed decision identities.`);
-    }
-  }
-  if (!consumedEvents.length) return;
-  const ledgers = await readRecordedDecisions(root);
-  for (const event of consumedEvents) {
-    const previous = history.events[event.seq - 2];
-    if (!["DISCOVER_LEGACY", "BUILD_BASELINE"].includes(event.from) ||
-        event.event !== "ADVANCED" ||
-        event.to !== (event.from === "DISCOVER_LEGACY" ? "DISCOVERY_COMPLETENESS" : "PLAN") ||
-        previous?.to !== event.from || previous.revision !== event.revision - 1) {
-      throw new Error("Consumed decisions belong only to a decision-bearing checkpoint.");
-    }
-    const prefixes = event.decisionLedgerPrefixes;
-    exactObject(prefixes, "decision ledger prefixes", ["operator", "auto"]);
-    const accepted = {};
-    for (const [key, file] of [["operator", DECISIONS_FILE], ["auto", AUTO_DECISIONS_FILE]]) {
-      const prefix = prefixes[key];
-      exactObject(prefix, `${key} ledger prefix`, ["bytes", "sha256"]);
-      if (!Number.isSafeInteger(prefix.bytes) || prefix.bytes < 0 || !/^[a-f0-9]{64}$/.test(prefix.sha256)) {
-        throw new Error("Consumed decision ledger prefix is malformed.");
-      }
-      const content = await readFile(path.join(root, file), "utf8").catch((error) => {
-        if (error.code === "ENOENT") return "";
-        throw error;
-      });
-      const bytes = Buffer.from(content);
-      if (bytes.length < prefix.bytes || sha256(bytes.subarray(0, prefix.bytes)) !== prefix.sha256 ||
-          (prefix.bytes && bytes[prefix.bytes - 1] !== 10)) {
-        throw new Error("Consumed decision ledger prefix/head no longer matches.");
-      }
-      accepted[key] = new Set(bytes.subarray(0, prefix.bytes).toString("utf8")
-        .split("\n").filter(Boolean).map((line) => JSON.parse(line).id));
-    }
-    const identities = arrayOf(event.consumedDecisions, "consumedDecisions");
-    if (!identities.length || ![...identities.map((item) => item.decisionId)].every((id, index, ids) =>
-      typeof id === "string" && (index === 0 || ids[index - 1] < id))) {
-      throw new Error("Consumed decisions must be nonempty, unique and ordered.");
-    }
-    for (const identity of identities) {
-      exactObject(identity, "consumed decision", ["candidateDigest", "decisionId", "decisionDigest", "policyId", "policyDigest", "principal", "result"]);
-      const line = ledgers.byId.get(identity.decisionId);
-      const requiredPrincipal = line && await resolveHistoricalRequiredPrincipal(
-        line.kind, state.target.root, line.policyId, line.policyDigest);
-      const historicalCandidate = line && {
-        id: line.candidateId, kind: line.kind, subject: line.subject,
-        rationaleDigest: line.rationaleDigest, targets: line.targets, boundTo: line.boundTo,
-        projectRoot: state.target.root, policyId: line.policyId, policyDigest: line.policyDigest,
-        requiredPrincipal,
-      };
-      if (!line || !accepted.operator.has(identity.decisionId) || line.v !== 2 ||
-          line.result !== "APPROVED" || identity.result !== "APPROVED" ||
-          !requiredPrincipal || !decisionAppliesToCandidate(line, historicalCandidate) ||
-          identity.candidateDigest !== line.candidateDigest ||
-          identity.decisionDigest !== decisionLineDigest(line) ||
-          identity.policyId !== line.policyId || identity.policyDigest !== line.policyDigest ||
-          identity.principal !== line.principal ||
-          line.boundTo?.artifactId !== state.artifactId || !usesArtifactDirectLedger(line.boundTo?.formatVersion) ||
-          line.boundTo?.currentStep !== event.from || line.boundTo?.revision !== event.revision - 1 ||
-          line.kind !== (event.from === "DISCOVER_LEGACY" ? "ARTIFACT_DECISION" : "VISUAL_UNBACKED")) {
-        throw new Error("Consumed decision identity is not proven by its accepted ledger prefix.");
-      }
-    }
-  }
-};
 
 const validateIntegrity = async (root, state) => {
   const document = JSON.parse(await readFile(path.join(root, INTEGRITY_FILE), "utf8"));
@@ -2724,6 +2587,9 @@ const artifactVisualAcceptance = async (root, state, source, target) => {
   );
 };
 
+// Visual and lifecycle facts are read here and handed to decisions as data:
+// the unbacked states (visual), the committed matrix, both ledgers and, past
+// BUILD_BASELINE, the identities that checkpoint consumed (lifecycle).
 const artifactVisualDecisions = async (root, state, source) => {
   if (!visualAuthorityOf(strictVisualState(state))) return [];
   const candidates = await pendingVisualUnbackedCandidates(
@@ -2734,72 +2600,9 @@ const artifactVisualDecisions = async (root, state, source) => {
   if (candidates.length === 0) return [];
   const matrix = await readJsonAt(root, VISUAL_ACCEPTANCE_FILE, "Visual acceptance matrix");
   const { byId, decisions } = await readRecordedDecisions(root);
-  if (usesArtifactDirectLedger(state.formatVersion)) {
-    const historical = state.currentStep !== "BUILD_BASELINE"
-      ? await consumedAtCheckpoint(root, "BUILD_BASELINE") : null;
-    if (historical && historical.length !== candidates.length) {
-      throw new Error("Consumed visual decisions do not match the committed visual matrix.");
-    }
-    unique(
-      arrayOf(matrix.unbacked ?? [], "Visual acceptance unbacked").map((item) =>
-        `${item.uiBehaviorId}::${item.state}`),
-      "Visual acceptance unbacked states",
-    );
-    return Promise.all(candidates.map(async (legacy) => {
-      const item = (matrix.unbacked ?? []).find(
-        (row) => `${row.uiBehaviorId}::${row.state}` === legacy.subject.path,
-      );
-      exactObject(item, `Visual acceptance unbacked '${legacy.subject.path}'`, ["uiBehaviorId", "state", "reason"]);
-      nonEmpty(item.reason, `Visual acceptance unbacked '${legacy.subject.path}' reason`);
-      if (!source.document.behaviors.some((behavior) =>
-        behavior.id === item.uiBehaviorId && behavior.runtimeStates?.includes(item.state))) {
-        throw new Error(`Visual acceptance unbacked '${legacy.subject.path}' does not name a source UI state.`);
-      }
-      if (historical) {
-        const matched = historical.filter((identity) => byId.get(identity.decisionId)?.subject?.path === legacy.subject.path);
-        const line = byId.get(matched[0]?.decisionId);
-        if (matched.length !== 1 || line?.kind !== "VISUAL_UNBACKED" ||
-            canonical(line.boundTo?.visualUnbacked) !== canonical(item) ||
-            line.boundTo?.visualMatrixDigest !== `sha256:${sha256(canonical(matrix))}` ||
-            canonical(line.boundTo?.sourceBinding) !== canonical(state.bindings.source)) {
-          throw new Error(`Visual acceptance unbacked '${legacy.subject.path}' has no provable consumed identity.`);
-        }
-        return { id: legacy.id, subject: legacy.subject.path, decisionId: null, candidate: null,
-          satisfied: true, recorded: null, projection: { state: "APPROVED_APPLICABLE" } };
-      }
-      const candidate = await createNewFormatDecisionCandidate({
-        projectRoot: state.target.root,
-        kind: legacy.kind,
-        subjectType: legacy.subject.type,
-        subjectPath: legacy.subject.path,
-        rationale: legacy.rationale,
-        targets: state.bindings.target.paths,
-        boundTo: {
-          ...legacy.boundTo,
-          ...artifactCandidateEvidence(state, source.document),
-          visualMatrixDigest: `sha256:${sha256(canonical(matrix))}`,
-          visualUnbacked: item,
-        },
-      });
-      const projection = await projectArtifactDecision({ decisions, candidate, label: `Visual acceptance unbacked '${legacy.subject.path}'`, row: item });
-      return { id: candidate.id, subject: candidate.subject.path, decisionId: null, candidate,
-        satisfied: projection.state === "APPROVED_APPLICABLE", recorded: null, projection };
-    }));
-  }
-  return candidates.map((candidate) => {
-    const item = (matrix.unbacked ?? []).find(
-      (row) => `${row.uiBehaviorId}::${row.state}` === candidate.subject.path,
-    );
-    const recorded = decisions.find((row) => decisionAppliesToCandidate(row, candidate)) ?? null;
-    return {
-      id: candidate.id,
-      subject: candidate.subject.path,
-      decisionId: item?.decisionId ?? null,
-      candidate,
-      satisfied: decisionAppliesToCandidate(byId.get(item?.decisionId), candidate),
-      recorded,
-    };
-  });
+  const historical = usesArtifactDirectLedger(state.formatVersion) && state.currentStep !== "BUILD_BASELINE"
+    ? await consumedAtCheckpoint(root, "BUILD_BASELINE") : null;
+  return artifactVisualDecisionRows({ state, source, candidates, matrix, ledger: { byId, decisions }, historical });
 };
 
 const validateBaseline = async (root, state, { final = false } = {}) => {
@@ -3522,8 +3325,10 @@ const validateCheckpoint = async (root, state, capability) => {
   return { ...result, executed: capability.execution };
 };
 
-export const reconcileArtifactDecisions = (state, decisions) => {
-  const commandFor = (candidate) =>
+// The approve-command hint is rendered here (transport vocabulary); every
+// reconciliation rule is decisions'.
+export const reconcileArtifactDecisions = (state, decisions) =>
+  reconcileArtifactDecisionRows(state, decisions, (candidate) =>
     engineCommand(
       "record-decision.mjs",
       "--artifact",
@@ -3536,61 +3341,7 @@ export const reconcileArtifactDecisions = (state, decisions) => {
       JSON.stringify(state.target.root),
       "--approve",
       candidate.id,
-    );
-  const pending = decisions.filter((row) => !row.satisfied);
-  if (usesArtifactDirectLedger(state.formatVersion)) {
-    const undecided = pending.filter((row) => row.projection.state !== "REJECTED");
-    return {
-      approvable: undecided,
-      citable: [],
-      references: [],
-      citations: [],
-      projection: {
-        state: pending.some((row) => row.projection.state === "REJECTED") ? "REJECTED"
-          : undecided.some((row) => row.projection.state === "STALE") ? "STALE"
-          : undecided.length ? "AWAITING_HUMAN_DECISION"
-          : decisions.length ? "APPROVED_APPLICABLE" : "READY_TO_ADVANCE",
-        checkpointAdvanced: false,
-        blocked: undecided.some((row) => row.candidate.requiredPrincipal === "HUMAN_ATTESTED")
-          ? { state: "SIGNER_UNAVAILABLE", requiredPrincipal: "HUMAN_ATTESTED" } : null,
-        decisions: decisions.map((row) => row.projection),
-      },
-      candidates: undecided.map((row) => ({ ...row.candidate, approvable: true, blockers: [], review: reviewFor(row.candidate) })),
-      pendingDecisions: undecided.map((row) => ({ id: row.id, subject: row.subject, candidateId: row.candidate.id,
-        state: row.projection.state, blocked: row.candidate.requiredPrincipal === "HUMAN_ATTESTED"
-          ? { state: "SIGNER_UNAVAILABLE", requiredPrincipal: "HUMAN_ATTESTED" } : null,
-        review: reviewFor(row.candidate) })),
-    };
-  }
-  const approvable = pending.filter((row) => !row.recorded);
-  const citable = pending.filter((row) => row.recorded);
-  return {
-    approvable,
-    citable,
-    candidates: approvable.map((row) => ({
-      ...(row.candidate ?? artifactDecisionCandidate(state, row)),
-      approvable: Boolean(String(row.subject ?? "").trim()),
-      blockers: String(row.subject ?? "").trim()
-        ? []
-        : ["The operator decision has no reviewable subject."],
-      command: commandFor(row.candidate ?? artifactDecisionCandidate(state, row)),
-    })),
-    references: citable.map((row) => ({
-      candidateId: (row.candidate ?? artifactDecisionCandidate(state, row)).id,
-      subject: (row.candidate ?? artifactDecisionCandidate(state, row)).subject,
-      decisionId: row.recorded.id,
-      decisionDigest: decisionLineDigest(row.recorded),
-    })),
-    citations: citable.map((row) => ({ id: row.id, decisionId: row.recorded.id })),
-    pendingDecisions: pending.map((row) => ({
-      id: row.id,
-      subject: row.subject,
-      candidateId: (row.candidate ?? artifactDecisionCandidate(state, row)).id,
-      recordedDecisionId: row.recorded?.id ?? null,
-      command: commandFor(row.candidate ?? artifactDecisionCandidate(state, row)),
-    })),
-  };
-};
+  ));
 
 const runCheckpointValidation = async (root, state, capability) => {
   try {

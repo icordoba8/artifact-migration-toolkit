@@ -50,7 +50,7 @@ import {
   moduleApprover,
   recorderFor,
 } from "../operator-approval.mjs";
-import { renderDecisionReview, reviewReference } from "../record-decision.mjs";
+import { renderDecisionReview, reviewReference } from "../decisions/index.mjs";
 
 export const parseRunArguments = (arguments_) => {
   const { positionals, values } = parseArgs({

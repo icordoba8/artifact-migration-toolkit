@@ -52,60 +52,31 @@ import { createInterface } from "node:readline/promises";
 import {
   assertExecutionConfirmation,
   bootstrapMigration,
-  brandSequenceAuthorization,
-  decisionRationaleDigest,
   isAutoAuthority,
-  lifecycleBinding,
   previewMigrationExecution,
   readState,
-  sequenceAuthorizationEvidence,
 } from "./resumable-migration.mjs";
+import {
+  addedFileFact,
+  AMEND_SLICE,
+  brandSequenceAuthorization,
+  challengeForOperationSequence,
+  decisionRationaleDigest,
+  lifecycleBinding,
+  memberFacts,
+  nextExpected,
+  OPERATION_SEQUENCE_KIND,
+  renderOperationSequence,
+  sequenceAuthorizationEvidence,
+} from "./decisions/index.mjs";
 
-export const OPERATION_SEQUENCE_KIND = "OPERATION_SEQUENCE";
-
-/** The only operation a sequence may carry today. */
-export const AMEND_SLICE = "AMEND_SLICE";
-
-/**
- * An amendment moves neither the checkpoint nor the active slice: it re-pins
- * one reopened slice's record and bumps the revision. So the position member k
- * must execute at is derivable in full from the position member k-1 executed
- * at, which is what lets one approval bind to all of them.
- */
-const nextExpected = (expected) => ({
-  ...expected,
-  revision: expected.revision + 1,
-});
-
-/**
- * The facts one member is approved against, and the whole of them. Everything
- * here is either the operator's own input (the slice and its files) or an
- * engine-derived identity, so a member whose bytes, ownership, amendment slot
- * or expected position moved has different facts and a different sequence id.
- */
-const memberFacts = (member) => ({
-  index: member.index,
-  operation: member.operation,
-  slice: member.slice,
-  files: member.files,
-  add: member.add,
-  amendment: member.amendment,
-  preservesAs: member.preservesAs,
-  sliceRecordDigestBefore: member.sliceRecordDigestBefore,
-  sliceRecordDigestAfter: member.sliceRecordDigestAfter,
-  implementationDigestBefore: member.implementationDigestBefore,
-  implementationDigestAfter: member.implementationDigestAfter,
-  expected: member.expected,
-});
-
-/** The ownership and identity facts shown to the human, per added file. */
-const addedFileFact = (file) => ({
-  path: file.path,
-  identity: file.identity,
-  ownershipBasis: file.ownershipBasis,
-  claimedBy: [...(file.claimedBy ?? [])],
-  driftClass: file.driftClass,
-});
+// Compatibility re-export (Track A3): the sequence approval vocabulary is decisions-owned now.
+export {
+  AMEND_SLICE,
+  challengeForOperationSequence,
+  OPERATION_SEQUENCE_KIND,
+  renderOperationSequence,
+} from "./decisions/index.mjs";
 
 /**
  * Derive the sequence from the live record. Read-only: no lock, no write, no
@@ -234,46 +205,6 @@ export const deriveOperationSequence = async ({ operations, ...resolution }) => 
     approvable: blockers.length === 0 && members.length > 0,
   };
 };
-
-/**
- * The phrase a human types, derived from the sequence. `y` approves anything;
- * this approves this ordered set at this record position, and the id it names
- * is content-addressed over every fact rendered below it.
- */
-export const challengeForOperationSequence = (sequence) =>
-  `APPROVE ${sequence.id} ${OPERATION_SEQUENCE_KIND} ${sequence.members.length} ${sequence.module}`;
-
-export const renderOperationSequence = (sequence) =>
-  `Operator operation sequence for migration '${sequence.module}'\n` +
-  `Sequence: ${sequence.id}\n` +
-  `Action: execute ${sequence.members.length} operation(s), in this order\n` +
-  `Bound to: format ${sequence.lifecycle.formatVersion} ` +
-  `revision ${sequence.lifecycle.revision} ` +
-  `${sequence.lifecycle.status}/${sequence.lifecycle.currentStep}` +
-  `${sequence.lifecycle.activeSlice ? `/${sequence.lifecycle.activeSlice}` : ""}\n` +
-  `State hash: ${sequence.lifecycle.stateHash}\n\n` +
-  sequence.members
-    .map(
-      (member) =>
-        `  ${member.index}. ${member.operation} ${member.slice} ` +
-        `(amendment ${member.amendment}, at revision ${member.expected.revision})\n` +
-        member.add
-          .map(
-            (file) =>
-              `       + ${file.path}\n` +
-              `         bytes ${file.identity}\n` +
-              `         basis ${file.ownershipBasis} drift ${file.driftClass} ` +
-              `claimedBy ${file.claimedBy.length > 0 ? file.claimedBy.join(",") : "none"}\n`,
-          )
-          .join("") +
-        `       slice record ${member.sliceRecordDigestBefore} -> ${member.sliceRecordDigestAfter}\n` +
-        `       preserves prior record as ${member.preservesAs}\n`,
-    )
-    .join("") +
-  `\nThis one approval binds to that exact sequence, in that exact order, from\n` +
-  `that exact record state. Each operation is re-derived and re-proven when it\n` +
-  `runs; any change this sequence did not itself cause expires the rest of it.\n` +
-  `Type the challenge phrase to approve the whole sequence, anything else to abort.\n`;
 
 /**
  * The approval boundary, reached exactly as `record-decision.mjs` reaches it,

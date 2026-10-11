@@ -29,7 +29,7 @@ import {
   verifyAssertionProof,
   verifyEnrollment,
 } from "./operator-webauthn.mjs";
-import { DECISION_GROUP_KIND, decisionLineDigest } from "./resumable-migration.mjs";
+import { DECISION_GROUP_KIND, decisionLineDigest } from "./decisions/index.mjs";
 
 // ponytail: hard OFF until the separate gate-3 activation action ships a build
 // that flips this after real-host acceptance. No input can override it.

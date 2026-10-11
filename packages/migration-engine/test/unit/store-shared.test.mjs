@@ -83,11 +83,14 @@ const names = (node) => {
 
 // -- boundary ----------------------------------------------------------------
 
-const MODULES = ["store", "shared", "formats"];
+const MODULES = ["store", "shared", "formats", "decisions"];
 // store may reach down to formats, shared and the leaf `engine-paths.mjs`;
-// formats only to shared (Track A2, layering option (b)); shared reaches
-// nothing in the engine. Anything else would be an upward edge or a cycle.
+// formats only to shared (Track A2, layering option (b)); decisions only to
+// store, formats and shared (Track A3), so it reads no census, slice, visual,
+// lifecycle or transport code, not even lazily; shared reaches nothing in the
+// engine. Anything else would be an upward edge or a cycle.
 const ALLOWED = {
+  decisions: new Set(["store/index.mjs", "formats/index.mjs", "shared/index.mjs"]),
   store: new Set(["formats/index.mjs", "shared/index.mjs", "engine-paths.mjs"]),
   formats: new Set(["shared/index.mjs"]),
   shared: new Set(),
@@ -97,7 +100,7 @@ const FS_WRITES = new Set([
   "mkdtemp", "open", "rename", "rm", "rmdir", "symlink", "truncate", "unlink", "utimes", "writeFile",
 ]);
 
-test("A1-ARCH-1: outside its directory, store/, shared/ and formats/ are reached only through index.mjs", async () => {
+test("A1-ARCH-1: outside its directory, store/, shared/, formats/ and decisions/ are reached only through index.mjs", async () => {
   const offenders = [];
   for (const root of ["packages/migration-engine/src", "packages/migration-engine/test", "test", "scripts"]) {
     for (const file of await sourceFiles(path.join(repo, root))) {
@@ -114,7 +117,7 @@ test("A1-ARCH-1: outside its directory, store/, shared/ and formats/ are reached
   for (const module of MODULES) await readFile(path.join(src, module, "index.mjs"));
 });
 
-test("A1-ARCH-2: store/, shared/ and formats/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
+test("A1-ARCH-2: store/, shared/, formats/ and decisions/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
   for (const module of MODULES) {
     for (const file of await sourceFiles(path.join(src, module))) {
       const label = path.relative(src, file);

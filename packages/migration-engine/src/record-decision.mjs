@@ -45,155 +45,85 @@
  * pinned at RESOLVE.
  */
 
-import { createHash } from "node:crypto";
 import { writeSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { assertSafeName, assertSecurePath } from "./shared/index.mjs";
+import { assertSafeName } from "./shared/index.mjs";
 import { appendDurably, resolveRegistryPath } from "./store/index.mjs";
 import { engineCommand, isMainModule } from "./engine-paths.mjs";
 import { withModuleLock } from "./module-lock.mjs";
-import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 import {
   assertRecordToolkitIdentity,
-  attestationVerifierScope,
-  attestedLineProblem,
   BLOCKED_EXIT_CODE,
-  candidateDigestOf,
-  createDecisionCandidate,
-  createNewFormatDecisionCandidate,
-  createNewFormatDecisionGroup,
-  DECISION_GROUP_KIND,
-  decisionAppliesToCandidate,
-  decisionChannelOf,
-  decisionGroupFor,
-  decisionLineDigest,
-  decisionLineProblem,
-  decisionKindAllowed,
-  decisionRationaleDigest,
-  edgeDecisionSubject,
-  LATE_DECISION_KINDS,
   legacySourceBinding,
   legacySourcesOf,
-  lifecycleBinding,
   pendingTargetDriftCandidates,
   pendingVisualUnbackedCandidates,
   previewDiscoveryScan,
-  projectModuleDecision,
-  readAutoDecisions,
   readMigrationContext,
-  readOperatorDecisions,
-  readRecordedDecisions,
   readState,
 } from "./resumable-migration.mjs";
 import {
+  appendApprovedCandidate,
+  appendApprovedGroup,
+  APPROVAL_EVIDENCE,
+  approvedByPhrase,
+  assertRelayDecision,
+  attestationVerifierScope,
+  buildDecision,
+  candidateDigestOf,
+  channelOf,
+  DECISION_GROUP_KIND,
+  decisionKindAllowed,
+  deriveModuleDecisions,
+  legacyCompatibilityProjection,
+  lifecycleBinding,
+  lockedApprovalCandidate,
+  operatorAnswer,
+  pendingArtifactDecisions,
+  readOperatorDecisions,
+  readRecordedDecisions,
+  relayAnswer,
+  relayedReview,
+  renderDecisionReview,
+  renderGroupApprovalSummary,
+  reviewFor,
+  selectApprovalCandidate,
+  verifyRecord,
+} from "./decisions/index.mjs";
+import {
   assertDiscoveryCompletenessFormat,
   assertNoPendingFormatUpgrade,
-  AUTO_DECISIONS_FILE,
   DECISIONS_FILE,
-  LEGACY_COMPATIBILITY_ACTION_REQUIRED,
   MODULE_CLASSIFICATION_FILE,
   usesArtifactDirectLedger,
   usesDirectLedgerDecisions,
 } from "./formats/index.mjs";
+import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 
-export const DECISION_KINDS = [
-  "EXCLUSION",
-  "DEAD_CONFIRMATION",
-  "EDGE_RESOLUTION",
-  "ROOT_DECLARATION",
-  // W4-4. Some target drift is legitimate and unforeseeable -- a lockfile a
-  // package manager regenerated, a formatter run. It routes through this
-  // recorder like every other operator act, under the same challenge phrase and
-  // the same module lock. Never a CLI flag: a flag nobody has to think about is
-  // exactly what turns a security boundary into a formality.
-  "TARGET_DRIFT_ACCEPTED",
-  // Format 17. A required visual state no COMPLETE Figma evidence designs may
-  // be left without visual acceptance only by an operator, bound to the Figma
-  // context and visual contract the operator was shown.
-  "VISUAL_UNBACKED",
-];
-
-/**
- * A challenge derived from the subject, so approving is a deliberate act about
- * one specific thing. `y` approves anything; this approves this.
- */
-export const challengeFor = (candidate) =>
-  `APPROVE ${candidate.id} ${candidate.kind} ${candidate.subject.path}`;
-
-/**
- * The three principals that can answer a challenge, named once. `TERMINAL` is a
- * human at a TTY, `ELICITATION` a human reached through the host, and `AUTO`
- * the engine itself running under `--mode auto`.
- *
- * `AUTO` is a declared principal, not a forged human. The distinction is the
- * whole point of naming it: the ledger line says which one decided, so an
- * unattended run is auditable as an unattended run rather than being
- * indistinguishable from someone typing. The gate it passes through is the same
- * one -- `answer.trim() === challenge` -- and so is every digest that binds the
- * line to the bytes it approved.
- */
-export const APPROVAL_CHANNELS = Object.freeze(["TERMINAL", "ELICITATION", "AUTO"]);
-
-export const channelOf = (ask) =>
-  ask ? (ask.channel ?? "ELICITATION") : "TERMINAL";
-
-/**
- * An `ask` that answers on the engine's own authority. It is a real answerer
- * held to the real comparison -- it returns the challenge it was handed, and
- * `withOperatorApproval` compares it exactly as it compares a typed one -- so
- * no gate is short-circuited; only the principal differs, and the principal is
- * recorded.
- *
- * `reason` names the evidence the engine decided from and is carried into the
- * decision's rationale, so an `AUTO` line is never just an assertion that the
- * engine felt like it.
- */
-export const autoApprovalChannel = (reason) =>
-  Object.assign(({ challenge }) => challenge, { channel: "AUTO", reason });
-
-/**
- * Offer == accept for the AUTO principal: the one predicate the AUTO gate in
- * `withOperatorApproval` refuses on, and the one `approveWithOperator` offers
- * by. A group is one act over its members, so one member whose question is
- * underivable makes the whole group a human decision.
- */
-export const autoMayDecide = (candidate) =>
-  candidate.autoResolvable !== false &&
-  !(candidate.groupMembers ?? []).some((member) => member.autoResolvable === false);
-
-/**
- * Who the recorded statement names. An AUTO line never says "operator": the
- * whole guarantee is that an unattended decision reads as an unattended
- * decision, in the ledger, in the sentence, and in the id.
- */
-export const approvedByPhrase = (ask) =>
-  channelOf(ask) === "AUTO" ? "by the AUTO principal" : "by operator";
-
-const APPROVAL_EVIDENCE = (ask) =>
-  ({
-    TERMINAL: "at a terminal",
-    ELICITATION:
-      "through a host-originated approval request answered with the candidate confirmation phrase",
-    AUTO: "on the engine's own authority under --mode auto, from repository evidence",
-  })[channelOf(ask)];
-
-const GROUP_APPROVAL_EVIDENCE = (ask) =>
-  ({
-    TERMINAL: "through one group confirmation phrase typed at a terminal",
-    ELICITATION:
-      "through one host-originated approval request answered with the group confirmation phrase",
-    AUTO: "on the engine's own authority under --mode auto, from repository evidence covering the whole group",
-  })[channelOf(ask)];
-
-export const APPROVAL_EVIDENCE_PHRASES = APPROVAL_CHANNELS.flatMap((channel) => {
-  const ask = channel === "TERMINAL" ? null : { channel };
-  return [APPROVAL_EVIDENCE(ask), GROUP_APPROVAL_EVIDENCE(ask)];
-});
+export {
+  APPROVAL_CHANNELS,
+  APPROVAL_EVIDENCE_PHRASES,
+  approvedByPhrase,
+  assertReviewedCandidateCurrent,
+  auditDecisionLedger,
+  autoApprovalChannel,
+  autoMayDecide,
+  buildDecision,
+  challengeFor,
+  channelOf,
+  DECISION_KINDS,
+  groupFactsDigest,
+  ledgerFileForChannel,
+  rationaleDigestOf,
+  renderDecisionReview,
+  reviewFor,
+  reviewReference,
+  SIGNER_UNAVAILABLE,
+} from "./decisions/index.mjs";
 
 export const parseDecisionArguments = (arguments_) => {
   const { positionals, values } = parseArgs({
@@ -264,166 +194,6 @@ export const parseDecisionArguments = (arguments_) => {
   };
 };
 
-const operatorIdentity = () =>
-  `${process.env.USER ?? process.env.USERNAME ?? "unknown"}@${process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? "unknown-host"}`;
-
-/**
- * The rationale digest binds an approval to the exact bytes it approves, so an
- * agent cannot rewrite the justification under an already-granted approval.
- * Normalized for line endings only -- a CRLF checkout is not a new rationale.
- */
-export const rationaleDigestOf = decisionRationaleDigest;
-
-// The local recorder never substitutes for the optional protected signer.
-export const SIGNER_UNAVAILABLE = "SIGNER_UNAVAILABLE";
-
-const blockedFor = (candidate) => candidate.requiredPrincipal === "AGENT_RELAYED"
-  ? null
-  : candidate.requiredPrincipal === "HUMAN_ATTESTED"
-    ? { state: SIGNER_UNAVAILABLE, requiredPrincipal: candidate.requiredPrincipal,
-        reason: "No trusted signer or review companion is available; no host interaction can attest this decision." }
-    : { state: "AUTO_DECISION_UNAVAILABLE", requiredPrincipal: candidate.requiredPrincipal,
-        reason: "No engine-owned automatic decision exists for this judgment; a host cannot supply one." };
-
-const REVIEW_EFFECTS = {
-  EXCLUSION: "Authorize the proposed exclusion of this legacy file.",
-  DEAD_CONFIRMATION: "Authorize the proposed DEAD disposition of this legacy file.",
-  EDGE_RESOLUTION: "Authorize the proposed resolution of this module edge to the listed targets.",
-  ROOT_DECLARATION: "Authorize the proposed additional module root.",
-  TARGET_DRIFT_ACCEPTED: "Authorize acceptance of the currently observed target drift.",
-  VISUAL_UNBACKED: "Authorize the proposed visual-unbacked exception for this subject.",
-};
-
-/** Review data comes only from the already derived, policy-bound candidate. */
-export const reviewFor = (candidate) => ({
-  candidateId: candidate.id,
-  title: candidate.kind === DECISION_GROUP_KIND
-    ? `Review one ${candidate.groupMembers.length}-member ${candidate.groupMembers[0].kind} decision group`
-    : `Review ${candidate.kind} for ${candidate.subject.path}`,
-  kind: candidate.kind,
-  migration: candidate.boundTo.module,
-  worktree: candidate.projectRoot,
-  subject: candidate.subject,
-  why: candidate.kind === DECISION_GROUP_KIND
-    ? "Each ordered member requires operator judgment; this is one indivisible decision."
-    : "The proposed disposition requires operator judgment over the current evidence.",
-  approveEffect: `${candidate.kind === DECISION_GROUP_KIND
-    ? "Authorize the complete ordered member set below as one act."
-    : REVIEW_EFFECTS[candidate.kind] ?? "Authorize only this proposed decision."} This records authority only; it neither changes files nor advances a checkpoint, and other validation must still pass.`,
-  rejectEffect: "Record a candidate-bound REJECTED outcome that blocks this decision until its evidence changes; cancel or host decline records nothing.",
-  targets: candidate.kind === DECISION_GROUP_KIND
-    ? [...new Set(candidate.groupMembers.flatMap((member) => member.targets))]
-    : candidate.targets,
-  rationale: candidate.rationale,
-  evidence: candidate.boundTo,
-  policy: {
-    requiredPrincipal: candidate.requiredPrincipal,
-    policyId: candidate.policyId,
-    policyDigest: candidate.policyDigest,
-  },
-  candidateDigest: candidateDigestOf(candidate),
-  members: candidate.groupMembers?.map((member) => ({
-    id: member.id, kind: member.kind, subject: member.subject,
-    targets: member.targets, rationale: member.rationale,
-    rationaleDigest: member.rationaleDigest, evidence: member.boundTo,
-    candidateDigest: candidateDigestOf(member),
-  })) ?? [],
-});
-
-// Single-line by construction: authored text can never start a new review line.
-const inertText = (value) => String(value).replace(
-  /[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
-  (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-);
-const indentReview = (value) => String(value).split("\n").map((line) => `    ${inertText(line)}`).join("\n");
-const renderEvidence = (value, indent = "  ") =>
-  Object.entries(value ?? {}).map(([name, field]) =>
-    field && typeof field === "object"
-      ? `${indent}${inertText(name)}:\n${renderEvidence(field, `${indent}  `)}`
-      : `${indent}${inertText(name)}: ${JSON.stringify(field)}\n`,
-  ).join("");
-
-export const renderDecisionReview = (review) =>
-  `${inertText(review.title)}\nMigration: ${inertText(review.migration)}\nWorktree: ${inertText(review.worktree)}\n` +
-  `Candidate: ${inertText(review.candidateId)}\n` +
-  `Subject: ${inertText(review.subject.type)} ${inertText(review.subject.path)}\nWhy: ${review.why}\n` +
-  `Approve: ${review.approveEffect}\nReject: ${review.rejectEffect}\n` +
-  `Targets: ${review.targets.map(inertText).join(", ") || "none"}\n` +
-  `Rationale (untrusted proposal):\n${indentReview(review.rationale)}\n` +
-  `Evidence/provenance (inert data):\n${renderEvidence(review.evidence)}` +
-  `Required principal: ${review.policy.requiredPrincipal}\n` +
-  `Trusted policy: ${inertText(review.policy.policyId)} / ${inertText(review.policy.policyDigest)}\n` +
-  `Candidate digest: ${review.candidateDigest}\n` +
-  (review.members.length ? `Ordered group members:\n${review.members.map((member, index) =>
-    `${index + 1}. ${inertText(member.id)} ${inertText(member.kind)} ${inertText(member.subject.type)} ${inertText(member.subject.path)}\n` +
-    `   Targets: ${member.targets.map(inertText).join(", ") || "none"}\n` +
-    `   Rationale (untrusted proposal):\n${indentReview(member.rationale)}\n` +
-    `   Evidence/provenance (inert data):\n${renderEvidence(member.evidence, "     ")}` +
-    `   Candidate digest: ${member.candidateDigest}\n`).join("")}` : "");
-
-export const buildDecision = ({
-  previous,
-  kind,
-  subjectType,
-  subject,
-  statement,
-  rationale,
-  boundTo,
-  candidateId,
-  targets,
-  authorizedBy,
-  at = new Date().toISOString(),
-  operator = operatorIdentity(),
-  // `AUTO-` for the AUTO principal's own ledger. The prefix is the point: the
-  // two ledgers number independently, so without it both would mint `DEC-001`
-  // and a citation would resolve to whichever file was read first. It also
-  // means no AUTO decision can ever be read as a human one -- not in a state
-  // row, not in a history event, not by eye.
-  idPrefix = "DEC",
-  // Schema v2. Absent all v2 fields, the line is today's legacy shape byte for
-  // byte. Present, the line is written only as AGENT_RELAYED: a terminal or
-  // host-relayed answer is never HUMAN_ATTESTED, and AUTO keeps its own shape.
-  principal,
-  result,
-  candidateDigest,
-  policyId,
-  policyDigest,
-}) => {
-  const seq = (previous?.seq ?? 0) + 1;
-  const line = {
-    id: `${idPrefix}-${String(seq).padStart(3, "0")}`,
-    seq,
-    prevDigest: previous ? decisionLineDigest(previous) : "genesis",
-    at,
-    operator,
-    kind,
-    subject: { type: subjectType, path: subject },
-    statement,
-    rationaleDigest: rationaleDigestOf(rationale),
-    ...(candidateId ? { candidateId } : {}),
-    ...(targets ? { targets: [...targets] } : {}),
-    boundTo,
-    ...(authorizedBy ? { authorizedBy } : {}),
-  };
-  if (principal === undefined && result === undefined && candidateDigest === undefined &&
-      policyId === undefined && policyDigest === undefined) {
-    return line;
-  }
-  const v2 = { v: 2, ...line, principal, result, candidateDigest,
-    ...(policyId === undefined && policyDigest === undefined ? {} : { policyId, policyDigest }),
-  };
-  const problem =
-    principal !== "AGENT_RELAYED" || idPrefix !== "DEC"
-      ? `names principal ${JSON.stringify(principal)}, which is not writable; only AGENT_RELAYED v2 lines in ${DECISIONS_FILE} are`
-      : !candidateId
-        ? "carries no candidateId"
-        : decisionLineProblem(v2);
-  if (problem) {
-    throw new Error(`Refusing to build a v2 decision line that ${problem}.`);
-  }
-  return v2;
-};
-
 const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   const { registryData, resolved } = await readMigrationContext({
     registryPath,
@@ -433,11 +203,6 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     registryData.targetRoot,
     resolved.canonical,
   );
-  // Which decision format this record derives is read off the persisted record,
-  // not chosen by the caller: an argument could otherwise ask for new-format
-  // candidates over an 18 record, or legacy ones over a 19, and the "pending"
-  // answer would stop meaning the same thing as the gate's.
-  const directLedger = usesDirectLedgerDecisions(state);
   assertDiscoveryCompletenessFormat(
     state,
     resolved.canonical,
@@ -454,333 +219,39 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
   }
   const scan = await previewDiscoveryScan({ registryPath, moduleName });
   const legacySource = await legacySourceBinding(registryData.legacyRoot);
-  const boundTo = {
-    module: resolved.canonical,
-    ...legacySource,
-    discoveryDigest: scan.discoveryDigest,
-    algorithmVersion: scan.algorithmVersion,
-  };
   // Both ledgers: "is this candidate already decided" has one answer, and the
   // principal that decided it does not change it.
-  const { decisions, byId } = await readRecordedDecisions(root);
-  const candidates = [];
-  const censusClosed = (state.completedSteps ?? []).includes("DISCOVERY_COMPLETENESS");
-  // Ledger-backed receipts for candidates that are already approved but not yet
-  // cited. An approval recorded at a terminal is otherwise invisible to the next
-  // iteration: the candidate stops pending, and the agent has no way to learn
-  // the `decisionId`/`decisionDigest` the classification must carry short of the
-  // operator reading them out of a file. Derived, never authored -- each one is
-  // a line that `decisionAppliesToCandidate` already bound to a live candidate.
-  const references = [];
-  // Every derived candidate with its projected state, including the ones that
-  // are no longer pending. `candidates` is what still needs an operator;
-  // `projected` is what the record's decision gate currently says, which is the
-  // thing status, pending and run have to agree on.
-  const projected = [];
-  const addCandidate = async ({
-    kind,
-    subjectType,
-    subjectPath,
-    rationale,
-    targets = [],
-    decisionId,
-    blockers = [],
-    boundToOverride,
-    // Default true: a candidate the engine derived from evidence it holds is
-    // resolvable by the principal running the engine. Only a candidate whose
-    // *question* is underivable -- today, drift with no ownership to read --
-    // opts out, and it opts out of AUTO alone; a human can still decide it.
-    autoResolvable = true,
-  }) => {
-    if (!decisionKindAllowed(kind, censusClosed)) return;
-    const input = {
-      kind,
-      subjectType,
-      subjectPath,
-      rationale: rationale ?? "",
-      targets,
-      boundTo: boundToOverride ?? boundTo,
-    };
-    const candidate = directLedger
-      ? await createNewFormatDecisionCandidate({
-          projectRoot: registryData.targetRoot,
-          ...input,
-        })
-      : createDecisionCandidate(input);
-    const allBlockers = [...blockers];
-    if (!String(rationale ?? "").trim()) {
-      allBlockers.push("The classification has no operator-reviewable rationale.");
-    }
-    const pending = {
-      ...candidate,
-      approvable: allBlockers.length === 0,
-      autoResolvable,
-      blockers: allBlockers,
-      ...(directLedger ? {
-        review: reviewFor(candidate),
-        blocked: blockedFor(candidate),
-      } : { command: engineCommand(
-        "record-decision.mjs",
-        resolved.canonical,
-        "--approve",
-        candidate.id,
-      ) }),
-    };
-    if (directLedger) {
-      // One resolver, reported rather than thrown. No receipt is consulted: the
-      // row's `decisionId` is not even read here, because a format-19 record
-      // must not carry one and authority comes from the ledger line bound to
-      // this candidate's current digest.
-      const view = await projectModuleDecision({
-        decisions,
-        candidate,
-        label: `Candidate '${candidate.id}' (${kind} ${subjectPath})`,
-      });
-      projected.push({
-        id: candidate.id,
-        kind: candidate.kind,
-        subject: candidate.subject,
-        approvable: pending.approvable,
-        blockers: allBlockers,
-        review: pending.review,
-        blocked: pending.blocked,
-        ...view,
-      });
-      // An applicable approval and a candidate-bound rejection are both decided:
-      // neither is waiting on an operator. A stale line is not -- the facts moved
-      // and the question is open again -- so it stays pending, with the staleness
-      // visible in the projection beside it.
-      if (view.state === "APPROVED_APPLICABLE" || view.state === "REJECTED") return;
-      candidates.push(pending);
-      return;
-    }
-    const applied = [byId.get(decisionId), ...decisions].find((decision) =>
-      decisionAppliesToCandidate(decision, candidate),
-    );
-    if (applied) {
-      references.push({
-        candidateId: candidate.id,
-        subject: candidate.subject,
-        decisionId: applied.id,
-        decisionDigest: decisionLineDigest(applied),
-      });
-      projected.push({
-        id: candidate.id,
-        kind: candidate.kind,
-        subject: candidate.subject,
-        approvable: true,
-        blockers: [],
-        state: "APPROVED_APPLICABLE",
-        reason: null,
-        decisionId: applied.id,
-        decisionDigest: decisionLineDigest(applied),
-      });
-      return;
-    }
-    projected.push({
-      id: candidate.id,
-      kind: candidate.kind,
-      subject: candidate.subject,
-      approvable: pending.approvable,
-      blockers: allBlockers,
-      state: "AWAITING_HUMAN_DECISION",
-      reason: null,
-      decisionId: null,
-      decisionDigest: null,
-    });
-    candidates.push(pending);
-  };
-
-  const roots = Array.isArray(classification.moduleRoots)
-    ? classification.moduleRoots
-    : [];
-  // One implicit root per declared source, exactly as `validateDiscovery-
-  // Completeness` computes it. Keying on `state.legacyModule` alone would flag
-  // every other source's basename-matching root as a pending ROOT_DECLARATION
-  // the validator never asks for. Identical to a single-source record.
-  const implicitRoots = new Set(
-    legacySourcesOf(state)
-      .map(
-        (name) =>
-          [...scan.moduleRoots]
-            .filter((value) => path.posix.basename(value) === name)
-            .sort()[0],
-      )
-      .filter(Boolean),
-  );
-  for (const entry of roots) {
-    const rootPath = typeof entry === "string" ? entry : entry?.path;
-    if (!rootPath || implicitRoots.has(rootPath)) continue;
-    await addCandidate({
-      kind: "ROOT_DECLARATION",
-      subjectType: "MODULE_ROOT",
-      subjectPath: rootPath,
-      rationale: typeof entry === "object" ? entry.reason : "",
-      decisionId: typeof entry === "object" ? entry.decisionId : undefined,
-    });
-  }
-
-  const dispositionKinds = {
-    DEAD: "DEAD_CONFIRMATION",
-    EXCLUDED_APPROVED: "EXCLUSION",
-  };
-  for (const row of Array.isArray(classification.files)
-    ? classification.files
-    : []) {
-    const kind = dispositionKinds[row?.disposition];
-    if (!kind || typeof row?.path !== "string") continue;
-    await addCandidate({
-      kind,
-      subjectType: "FILE",
-      subjectPath: row.path,
-      rationale: row.rationale,
-      decisionId: row.decisionId,
-    });
-  }
-
-  const findingRows = new Map(
-    (Array.isArray(classification.findings) ? classification.findings : [])
-      .filter((row) => typeof row?.id === "string")
-      .map((row) => [row.id, row]),
-  );
+  const ledger = await readRecordedDecisions(root);
   // Unclaimed target drift, derived by the engine from the same set difference
-  // FINALIZE refuses on. The acceptance binds to the path's current bytes, so
-  // editing the file afterwards re-blocks.
-  for (const drift of await pendingTargetDriftCandidates(root, state, {
+  // FINALIZE refuses on, and the unbacked visual states: facts of the slice and
+  // visual owners, read here and handed to decisions as data (Track A3). Before
+  // A3 they were read between candidate constructions; reading them first
+  // changes no candidate, only which of two simultaneous failures is reported.
+  const targetDrift = await pendingTargetDriftCandidates(root, state, {
     legacyRoot: registryData.legacyRoot,
     targetRoot: registryData.targetRoot,
-  })) {
-    await addCandidate({
-      kind: "TARGET_DRIFT_ACCEPTED",
-      subjectType: "TARGET_FILE",
-      subjectPath: drift.subjectPath,
-      rationale: drift.rationale,
-      autoResolvable: drift.autoResolvable,
-      boundToOverride: { ...boundTo, pathDigest: drift.pathDigest },
-    });
-  }
-
-  for (const visual of await pendingVisualUnbackedCandidates(root, state)) {
-    await addCandidate({
-      kind: visual.kind,
-      subjectType: visual.subject.type,
-      subjectPath: visual.subject.path,
-      rationale: visual.rationale,
-      boundToOverride: visual.boundTo,
-    });
-  }
-
-  for (const finding of scan.findings) {
-    const row = findingRows.get(finding.id);
-    const targets = finding.resolvedTargets ?? [];
-    const blockers = [];
-    if (finding.type === "I18N_NAMESPACE") {
-      blockers.push(
-        "The scanner has no proven tracked i18n resource; fix governing configuration before approval.",
-      );
-    } else if (targets.length === 0) {
-      blockers.push(
-        "The unresolved module edge has no concrete tracked target; prose or approval cannot resolve it.",
-      );
-    }
-    await addCandidate({
-      kind: "EDGE_RESOLUTION",
-      subjectType: scan.algorithmVersion >= 2 ? "MODULE_EDGE" : "FILE",
-      subjectPath:
-        scan.algorithmVersion >= 2
-          ? edgeDecisionSubject(finding)
-          : finding.file,
-      rationale: row?.resolution ?? row?.rationale,
-      targets,
-      decisionId: row?.decisionId,
-      blockers,
-    });
-  }
-
-  candidates.sort(
-    (left, right) =>
-      left.kind.localeCompare(right.kind) ||
-      left.subject.path.localeCompare(right.subject.path) ||
-      left.id.localeCompare(right.id),
-  );
-  const lifecycle = await lifecycleBinding(state, path.join(root, "state.json"));
-  const groupable = censusClosed
-    ? candidates.filter((candidate) => LATE_DECISION_KINDS.has(candidate.kind))
-    : candidates;
-  // Offer == accept: the v2 group is one GROUP_APPROVAL line, so the predicate
-  // `appendDecisions` writes under decides whether it is offered at all. When it
-  // refuses, the members stay offered one by one, each a writable late kind.
-  const group = !directLedger
-    ? decisionGroupFor(groupable, lifecycle)
-    : decisionKindAllowed(DECISION_GROUP_KIND, censusClosed)
-      ? await createNewFormatDecisionGroup({
-          candidates: groupable,
-          lifecycle,
-          projectRoot: registryData.targetRoot,
-        })
-      : null;
-  if (directLedger && group) {
-    group.review = reviewFor(group);
-    group.blocked = blockedFor(group);
-    for (const view of projected) {
-      if (group.groupMembers.some((member) => member.id === view.id)) {
-        view.groupReview = group.review;
-      }
-    }
-  }
+  });
+  const visualUnbacked = await pendingVisualUnbackedCandidates(root, state);
   return {
-    public: {
+    public: await deriveModuleDecisions({
       module: resolved.canonical,
-      algorithmVersion: scan.algorithmVersion,
-      discoveryDigest: scan.discoveryDigest,
-      lifecycle,
-      group,
-      candidates,
-      // Legacy wire field. A format-19 record resolves authority from the ledger
-      // against the current candidate digest, so there is no receipt to hand
-      // back and the key stays present and empty rather than disappearing.
-      references,
-      decisions: decisionProjection({ state, directLedger, projected, candidates }),
-    },
+      projectRoot: registryData.targetRoot,
+      root,
+      state,
+      classification,
+      scan,
+      legacySource,
+      legacySources: legacySourcesOf(state),
+      ledger,
+      targetDrift,
+      visualUnbacked,
+      approveCommand: (candidateId) =>
+        engineCommand("record-decision.mjs", resolved.canonical, "--approve", candidateId),
+    }),
     registryData,
     resolved,
     root,
     state,
-  };
-};
-
-/**
- * Which checkpoint the decisions currently in question are consumed by, and
- * whether it has closed. Separate from any decision state on purpose: a
- * recorded approval is `APPROVED_APPLICABLE` the instant it is appended, with
- * `state.json` untouched and this `false`. Conflating the two is what made
- * "approved" and "advanced" indistinguishable and sent callers looking for a
- * restart.
- */
-const decisionCheckpoint = (state) => {
-  const completed = state.completedSteps ?? [];
-  const step = completed.includes("DISCOVERY_COMPLETENESS")
-    ? "FINALIZE"
-    : "DISCOVERY_COMPLETENESS";
-  return { checkpoint: step, checkpointAdvanced: completed.includes(step) };
-};
-
-/** Overall state: the worst thing standing between the record and its gate. */
-const PROJECTION_PRECEDENCE = ["REJECTED", "STALE", "AWAITING_HUMAN_DECISION"];
-
-const decisionProjection = ({ state, directLedger, projected, candidates }) => {
-  const states = new Set(projected.map((entry) => entry.state));
-  // A derived candidate nobody has decided yet is awaiting one even when its
-  // own blockers make it unapprovable: the gate is not clear either way.
-  if (candidates.length > 0) states.add("AWAITING_HUMAN_DECISION");
-  return {
-    directLedger,
-    ...decisionCheckpoint(state),
-    state:
-      PROJECTION_PRECEDENCE.find((value) => states.has(value)) ??
-      "READY_TO_ADVANCE",
-    candidates: projected,
-    ...(directLedger ? { blocked: candidates.find((entry) => entry.blocked)?.blocked ?? null } : {}),
   };
 };
 
@@ -811,17 +282,7 @@ export const projectDecisions = async ({ registryPath, moduleName }) => {
     return (await derivePendingDecisions({ registryPath, moduleName })).public
       .decisions;
   } catch (error) {
-    if (error?.compatibilityAction !== LEGACY_COMPATIBILITY_ACTION_REQUIRED) {
-      throw error;
-    }
-    return {
-      directLedger: true,
-      checkpoint: null,
-      checkpointAdvanced: false,
-      state: LEGACY_COMPATIBILITY_ACTION_REQUIRED,
-      reason: error.message,
-      candidates: [],
-    };
+    return legacyCompatibilityProjection(error);
   }
 };
 
@@ -906,6 +367,20 @@ export const recordNewFormatDecisionGroup = async ({
  * may be short-circuited by a caller: `answer.trim() !== challenge` is the gate,
  * and it is written once.
  */
+/**
+ * The one approval gate. Both ledgers -- the module record and the standalone
+ * artifact record -- run this exact sequence, because two copies of a security
+ * boundary is one more than the number a reviewer can hold at once:
+ *
+ *   select candidate -> assert approvable -> render summary -> obtain an answer
+ *   (TTY or `ask`) -> compare against `challengeFor` -> take the module lock ->
+ *   recompute -> deep-equality check -> `buildDecision` -> O_APPEND.
+ *
+ * Track A3: the decision rules are decisions' (`operatorAnswer`,
+ * `lockedApprovalCandidate`, the appenders); this seam holds what decisions may
+ * not -- the module lock, the recompute over census/slice/visual facts, the
+ * toolkit-identity and format-freeze gates, and the process exit code.
+ */
 const withOperatorApproval = async ({
   selected,
   renderSummary,
@@ -917,92 +392,12 @@ const withOperatorApproval = async ({
   ask,
   onApproved,
 }) => {
-  if (selected.policyId !== undefined) {
-    const review = selected.review ?? reviewFor(selected);
-    stdout.write(renderDecisionReview(review));
-    if (selected.requiredPrincipal !== "AGENT_RELAYED" || channelOf(ask) === "AUTO") {
-      const blocked = selected.blocked ?? blockedFor(selected) ?? {
-        state: "NON_SIGNER_AUTHORITY_REFUSED", requiredPrincipal: selected.requiredPrincipal,
-        reason: "No host channel can claim a signer result; no authority was appended.",
-      };
-      stdout.write(`${blocked.state}: ${blocked.reason}\n`);
-      process.exitCode = BLOCKED_EXIT_CODE;
-      return { blocked };
-    }
-    // The explicit result comes only from this review's operator channel.
-    // A bare accept, auto-permission or inferred intent is never a decision.
-    const answer = ask
-      ? await ask({ candidate: selected, review, summary: renderDecisionReview(review) })
-      : await (async () => {
-          const reader = createInterface({ input: stdin, output: stdout });
-          try { return await reader.question("Choose APPROVE or REJECT (anything else cancels)\n> "); }
-          finally { reader.close(); }
-        })();
-    if (typeof answer !== "string" || !["APPROVE", "REJECT"].includes(answer)) {
-      stdout.write("No explicit operator decision received. Nothing was written.\n");
-      process.exitCode = BLOCKED_EXIT_CODE;
-      return { blocked: { state: "CANCELLED", reason: "No decision was recorded." } };
-    }
-    const result = answer === "APPROVE" ? "APPROVED" : "REJECTED";
-    return withModuleLock(targetRoot, lockName, async () => {
-      const locked = await recompute();
-      assertRecordToolkitIdentity(locked.state, locked.recordName, "Recording an operator decision", locked.recordKind);
-      if (locked.recordKind !== "artifact") {
-        assertNoPendingFormatUpgrade(locked.state, locked.recordName, "Recording an operator decision");
-      }
-      const current = assertReviewedCandidateCurrent(selected, locked.candidates);
-      if (current.requiredPrincipal !== "AGENT_RELAYED") {
-        throw new Error(`Candidate '${selected.id}' changed while its review was open. Nothing was written.`);
-      }
-      return onApproved(current, locked, result);
-    });
-  }
-  // Ahead of the summary, the challenge and the lock, because it is not a
-  // refusal of this answer -- it is a statement that this principal was never
-  // eligible to be asked. A candidate whose question the engine cannot derive
-  // is a genuine external blocker under `--mode auto`, and the only honest
-  // outcome is to stop and say which candidate and why.
-  if (channelOf(ask) === "AUTO" && !autoMayDecide(selected)) {
-    stdout.write(
-      `Candidate '${selected.id}' is not resolvable from repository evidence, so the AUTO principal cannot decide it: ` +
-        `${selected.blockers?.join(" ") || "the evidence that would settle it is not derivable from this record."} ` +
-        `Nothing was written. Decide it with --mode step, or supply the missing evidence.\n`,
-    );
+  const answer = await operatorAnswer({ selected, renderSummary, stdin, stdout, ask });
+  if (answer.refused) {
     process.exitCode = BLOCKED_EXIT_CODE;
-    return { blocked: true };
+    return answer.refused;
   }
-  const challenge = challengeFor(selected);
-  // The same bytes either way: a terminal reads them off stdout, a host reads
-  // them out of the elicitation message. Only the terminal asks for a phrase.
-  const summary = renderSummary(selected);
-  stdout.write(summary);
-  let answer;
-  if (ask) {
-    // The front end owns the human channel; it never owns the verdict. Whatever
-    // comes back is compared against the same phrase a terminal is compared
-    // against, and a non-string is a mismatch rather than a throw.
-    answer = String((await ask({ candidate: selected, challenge, summary })) ?? "");
-  } else {
-    const reader = createInterface({ input: stdin, output: stdout });
-    try {
-      answer = await reader.question(`Challenge: ${challenge}\n> `);
-    } finally {
-      reader.close();
-    }
-  }
-  if (answer.trim() !== challenge) {
-    stdout.write(
-      ask
-        ? "No matching inline confirmation phrase was received. Nothing was written.\n"
-        : "Challenge phrase did not match. Nothing was written.\n",
-    );
-    process.exitCode = BLOCKED_EXIT_CODE;
-    return { blocked: true, ...(answer.trim() === "cancel" ? { reason: "CANCELLED" } : {}) };
-  }
-
   return withModuleLock(targetRoot, lockName, async () => {
-    // Recompute the selected candidate under the lock. Looking up the old id in
-    // an unlocked list is never authority to append a line.
     const locked = await recompute();
     // Appending to the ledger is a mutation, so it obeys the same toolkit
     // identity gate as every other one -- and it is gated here, inside the one
@@ -1026,241 +421,21 @@ const withOperatorApproval = async ({
         "Recording an operator decision",
       );
     }
-    const lockedCandidate = locked.candidates.find(
-      (candidate) => candidate.id === selected.id,
-    );
-    if (
-      !lockedCandidate ||
-      !lockedCandidate.approvable ||
-      JSON.stringify(lockedCandidate) !== JSON.stringify(selected)
-    ) {
-      throw new Error(
-        `Candidate '${selected.id}' changed or ceased to be pending while the challenge was open. Nothing was written; run --pending again.`,
-      );
-    }
-    return onApproved(lockedCandidate, locked);
+    const current = lockedApprovalCandidate(selected, locked.candidates);
+    // The AUTO line's provenance names the running build; decisions reads no
+    // disk identity, so the seam supplies it, only when AUTO answered.
+    const toolkit = channelOf(ask) === "AUTO" ? activeToolkitIdentity() ?? null : undefined;
+    return onApproved(current, { ...locked, toolkit }, answer.result);
   });
-};
-
-/**
- * Which ledger a line belongs in, decided from the line itself and nowhere
- * else. `--mode auto` never reaches the human record: not by a caller passing a
- * path, not by a flag, not by an option combination. There is one expression
- * that maps principal to file and this is it.
- */
-export const ledgerFileForChannel = (channel) =>
-  channel === "AUTO" ? AUTO_DECISIONS_FILE : DECISIONS_FILE;
-
-const appendDecisions = async (locked, decisions, stdout) => {
-  if (locked.recordKind !== "artifact" && decisions.some((decision) =>
-    !decisionKindAllowed(decision.kind, (locked.state.completedSteps ?? []).includes("DISCOVERY_COMPLETENESS")))) {
-    throw new Error("Only post-census decision kinds may be recorded after DISCOVERY_COMPLETENESS closed. Nothing was written.");
-  }
-  const channels = new Set(decisions.map((decision) => decisionChannelOf(decision)));
-  if (channels.size > 1) {
-    throw new Error(
-      `One append may not mix decision principals (${[...channels].sort().join(", ")}); each ledger is one principal's append-only chain.`,
-    );
-  }
-  const file = await assertSecurePath(
-    locked.targetRoot,
-    path.join(locked.root, ledgerFileForChannel([...channels][0])),
-  );
-  await mkdir(path.dirname(file), { recursive: true });
-  await appendFile(
-    file,
-    decisions.map((decision) => `${JSON.stringify(decision)}\n`).join(""),
-    { flag: "a", mode: 0o600 },
-  );
-  for (const decision of decisions) {
-    stdout.write(
-      `Recorded ${decision.id} (${decision.kind}) for ${decision.subject.path}.\n`,
-    );
-  }
-};
-
-export const groupFactsDigest = (facts) =>
-  decisionRationaleDigest(JSON.stringify(facts));
-
-/**
- * The head of the chain this principal extends, and the prefix its ids take.
- * Two ledgers, two independent chains; neither ever reads the other's head, so
- * an AUTO append cannot renumber the human record or vice versa.
- */
-const ledgerHeadFor = async (root, channel) => {
-  const auto = channel === "AUTO";
-  const { decisions } = auto
-    ? await readAutoDecisions(root)
-    : await readOperatorDecisions(root);
-  return { previous: decisions.at(-1) ?? null, idPrefix: auto ? "AUTO" : "DEC" };
-};
-
-/**
- * What an AUTO line must carry: the principal, the decision type, the evidence
- * it was decided from, the scope it covers, and the result. Plus the identity
- * of the build that decided, so provenance names a release and not just "the
- * engine".
- *
- * `undefined` for a human single decision, which keeps today's line shape byte
- * for byte -- `buildDecision` drops an absent `authorizedBy`, so no existing
- * record's digests move. A human *group* decision keeps its own existing
- * `authorizedBy`; this is only the single-decision path.
- */
-const autoAuthorization = (ask, candidate) =>
-  channelOf(ask) === "AUTO"
-    ? {
-        v: 1,
-        principal: "AUTO",
-        channel: "AUTO",
-        decisionType: candidate.kind,
-        evidence: ask.reason,
-        toolkit: activeToolkitIdentity() ?? null,
-        scope: {
-          module: candidate.boundTo?.module ?? null,
-          subject: candidate.subject,
-          targets: [...(candidate.targets ?? [])],
-        },
-        result: "APPROVED",
-        approvedAt: new Date().toISOString(),
-      }
-    : undefined;
-
-const appendGroupDecisions = async ({ group, locked, ask, stdout }) => {
-  const facts = group.boundTo.members;
-  const groupDigest = groupFactsDigest(facts);
-  const approvedAt = new Date().toISOString();
-  const { previous: head, idPrefix } = await ledgerHeadFor(
-    locked.root,
-    channelOf(ask),
-  );
-  let previous = head;
-  const written = group.groupMembers.map((member, index) => {
-    const decision = buildDecision({
-      previous,
-      idPrefix,
-      kind: member.kind,
-      subjectType: member.subject.type,
-      subject: member.subject.path,
-      statement: `Approved stable candidate ${member.id} ${approvedByPhrase(ask)} ${GROUP_APPROVAL_EVIDENCE(ask)}.`,
-      rationale: member.rationale,
-      candidateId: member.id,
-      targets: member.targets,
-      boundTo: member.boundTo,
-      authorizedBy: {
-        v: 1,
-        groupId: group.id,
-        groupDigest,
-        members: facts.length,
-        index: index + 1,
-        channel: channelOf(ask),
-        // AUTO adds its provenance to what the group act already records; a
-        // human group line keeps exactly the fields it has always had.
-        // `approvedAt` last: one group act has one timestamp, whoever made it.
-        ...(autoAuthorization(ask, member) ?? {}),
-        approvedAt,
-      },
-    });
-    previous = decision;
-    return decision;
-  });
-  await appendDecisions(locked, written, stdout);
-  return { decisions: written, group: group.id };
-};
-
-/**
- * The new-format group append: one reviewed group act, one v2 ledger line.
- *
- * Not one line per member. The complete ordered member set, with each member's
- * own evidence binding, is inside `boundTo.members`, and `boundTo.members` is
- * inside the `candidateDigest` this line names -- so the one line *is* the
- * whole group, and there is exactly one result, one principal, one policy
- * binding and one decision identity for it.
- *
- * That is what makes the append crash-atomic. A torn write leaves an
- * unparseable or newline-less last line, which the ledger reader refuses
- * whole, so the interrupted group is simply absent: there is no subset of it
- * left behind to become authority. The legacy N-line group had no such
- * property, which is why it stays behind its own gate rather than being
- * rewritten.
- */
-const appendNewFormatGroupDecision = async ({ group, locked, ask, stdout, result }) => {
-  const candidateDigest = candidateDigestOf(group);
-  // Under the lock, and before writing: a second line over the same reviewed
-  // group would make its outcome ambiguous, and `resolveGroupDecision` would
-  // then refuse the record. Refuse the write instead of creating that record.
-  const { decisions } = await readRecordedDecisions(locked.root);
-  const existing = decisions.find(
-    (decision) => decision?.v === 2 && decision.candidateDigest === candidateDigest,
-  );
-  if (existing) {
-    throw new Error(
-      `Decision group '${group.id}' already has ledger entry ${existing.id} (${existing.result}). A second line over one reviewed group is a duplicate or a conflict, and both fail closed. Nothing was written.`,
-    );
-  }
-  const { previous, idPrefix } = await ledgerHeadFor(
-    locked.root,
-    channelOf(ask),
-  );
-  const decision = buildDecision({
-    previous,
-    idPrefix,
-    kind: group.kind,
-    subjectType: group.subject.type,
-    subject: group.subject.path,
-    statement: `AGENT_RELAYED ${result} of decision group ${group.id} over ${group.boundTo.members.length} ${group.groupMembers[0].kind} candidate(s).`,
-    rationale: group.rationale,
-    candidateId: group.id,
-    targets: group.targets,
-    boundTo: group.boundTo,
-    principal: "AGENT_RELAYED",
-    result,
-    candidateDigest,
-    policyId: group.policyId,
-    policyDigest: group.policyDigest,
-  });
-  await appendDecisions(locked, [decision], stdout);
-  return { decisions: [decision], group: group.id };
-};
-
-export const assertReviewedCandidateCurrent = (selected, candidates) => {
-  const current = candidates.find((candidate) => candidate.id === selected.id);
-  if (!current || !current.approvable || JSON.stringify(current) !== JSON.stringify(selected)) {
-    throw new Error(`Candidate '${selected.id}' changed while its review was open. Nothing was written.`);
-  }
-  return current;
 };
 
 const approveDecisionGroup = async ({ group, ...gate }) =>
   withOperatorApproval({
     ...gate,
     selected: group,
-    renderSummary: (selected) =>
-      `Operator decision group for migration '${selected.boundTo.module}'\n` +
-      `Group: ${selected.id}\n` +
-      `Action: accept ${selected.boundTo.members.length} ${selected.groupMembers[0].kind} decision(s)\n` +
-      selected.boundTo.members
-        .map(
-          (member, index) =>
-            `  ${index + 1}. ${member.id} ${member.kind} ${member.subject.type} ${member.subject.path}` +
-            `${member.pathDigest ? ` ${member.pathDigest}` : ""}\n`,
-        )
-        .join("") +
-      `This one approval binds to that exact ordered set and lifecycle.\n` +
-      `Type the challenge phrase to approve all of them, anything else to abort.\n`,
-    // The new format is selected by the candidate the operator reviewed, not by
-    // a caller: only `createNewFormatDecisionGroup` produces a policy-bound
-    // group, and only a policy-bound group gets the single-line v2 append. An
-    // old-format group keeps its exact existing serialization.
+    renderSummary: renderGroupApprovalSummary,
     onApproved: (lockedGroup, locked, result) =>
-      (lockedGroup.policyId === undefined
-        ? appendGroupDecisions
-        : appendNewFormatGroupDecision)({
-        group: lockedGroup,
-        locked,
-        ask: gate.ask,
-        stdout: gate.stdout,
-        result,
-      }),
+      appendApprovedGroup({ group: lockedGroup, locked, ask: gate.ask, stdout: gate.stdout, result }),
   });
 
 const approveCandidate = async ({
@@ -1268,63 +443,13 @@ const approveCandidate = async ({
   approve,
   statementFor,
   ...gate
-}) => {
-  const selected = candidates.find((candidate) => candidate.id === approve);
-  if (!selected) {
-    throw new Error(
-      `Approval id '${approve}' is stale or is not pending. Run --pending and select an exact current stable id. Nothing was written.`,
-    );
-  }
-  if (!selected.approvable) {
-    throw new Error(
-      `Candidate '${selected.id}' is not approvable: ${selected.blockers.join(" ")} Nothing was written.`,
-    );
-  }
-  return withOperatorApproval({
+}) =>
+  withOperatorApproval({
     ...gate,
-    selected,
-    onApproved: async (lockedCandidate, locked, result) => {
-      if (lockedCandidate.policyId !== undefined) {
-        const { decisions } = await readRecordedDecisions(locked.root);
-        const digest = candidateDigestOf(lockedCandidate);
-        if (decisions.some((decision) => decision.v === 2 && decision.candidateDigest === digest)) {
-          throw new Error(`Candidate '${lockedCandidate.id}' already has a decision. Nothing was written.`);
-        }
-        const { previous, idPrefix } = await ledgerHeadFor(locked.root, channelOf(gate.ask));
-        const decision = buildDecision({
-          previous, idPrefix, kind: lockedCandidate.kind,
-          subjectType: lockedCandidate.subject.type, subject: lockedCandidate.subject.path,
-          statement: `AGENT_RELAYED ${result} of candidate ${lockedCandidate.id}.`,
-          rationale: lockedCandidate.rationale, candidateId: lockedCandidate.id,
-          targets: lockedCandidate.targets, boundTo: lockedCandidate.boundTo,
-          principal: "AGENT_RELAYED", result, candidateDigest: digest,
-          policyId: lockedCandidate.policyId, policyDigest: lockedCandidate.policyDigest,
-        });
-        await appendDecisions(locked, [decision], gate.stdout);
-        return { decision };
-      }
-      const { previous, idPrefix } = await ledgerHeadFor(
-        locked.root,
-        channelOf(gate.ask),
-      );
-      const decision = buildDecision({
-        previous,
-        idPrefix,
-        kind: lockedCandidate.kind,
-        subjectType: lockedCandidate.subject.type,
-        subject: lockedCandidate.subject.path,
-        statement: statementFor(lockedCandidate, gate.ask),
-        rationale: lockedCandidate.rationale,
-        candidateId: lockedCandidate.id,
-        targets: lockedCandidate.targets,
-        boundTo: lockedCandidate.boundTo,
-        authorizedBy: autoAuthorization(gate.ask, lockedCandidate),
-      });
-      await appendDecisions(locked, [decision], gate.stdout);
-      return { decision };
-    },
+    selected: selectApprovalCandidate(candidates, approve),
+    onApproved: (candidate, locked, result) =>
+      appendApprovedCandidate({ candidate, locked, result, ask: gate.ask, stdout: gate.stdout, statementFor }),
   });
-};
 
 /* -- HUMAN_ATTESTED: one locked writer for module 19 and artifact 14 -------- */
 
@@ -1498,31 +623,7 @@ const deriveArtifactDecisions = async (artifact) => {
   );
   const context = await engine.artifactOperatorDecisions(artifact);
   const { decisions } = await readRecordedDecisions(context.root);
-  const candidates = context.decisions
-    .filter(
-      (row) =>
-        !row.satisfied &&
-        (!usesArtifactDirectLedger(context.state.formatVersion) || row.projection.state !== "REJECTED") &&
-        !decisions.some((decision) =>
-          decisionAppliesToCandidate(decision, row.candidate),
-        ),
-    )
-    .map((row) => {
-      const blockers = String(row.subject ?? "").trim()
-        ? []
-        : ["The operator decision has no reviewable subject."];
-      return {
-        ...row.candidate,
-        approvable: blockers.length === 0,
-        blockers,
-        ...(usesArtifactDirectLedger(context.state.formatVersion) ? {
-          review: reviewFor(row.candidate),
-          blocked: blockedFor(row.candidate),
-          projection: row.projection,
-        } : {}),
-      };
-    })
-    .sort((left, right) => left.id.localeCompare(right.id));
+  const candidates = pendingArtifactDecisions(context, decisions);
   return { engine, context, candidates,
     ...(usesArtifactDirectLedger(context.state.formatVersion) ? {
       decisionProjection: engine.reconcileArtifactDecisions(context.state, context.decisions).projection,
@@ -1588,290 +689,6 @@ const runArtifactDecisionCli = async (options, { stdin, stdout, ask }) => {
       };
     },
   });
-};
-
-/**
- * W2-5 / W6-3. The read-only record auditor. It takes no lock, opens no
- * transaction, and advances nothing: it answers "is this record internally
- * consistent" and nothing else.
- *
- * The audit must be answerable by a command, so this re-derives every
- * `prevDigest` itself rather than trusting
- * the chain the record claims, and reports the *first* break plus every line
- * whose recorded `statement` claims an evidence channel it is not entitled to.
- *
- * A line may only claim one of the two phrases `APPROVAL_EVIDENCE` can produce,
- * and either claim is falsifiable: both are only reachable through the single
- * gate in `approveCandidate`, and both require a candidate the engine derived,
- * so a line claiming a channel while carrying no `candidateId` or no complete
- * `boundTo` is describing evidence that cannot have existed.
- */
-const BOUND_TO_FIELDS = [
-  "module",
-  "legacyRevision",
-  "legacyDirtyDigest",
-  "discoveryDigest",
-  "algorithmVersion",
-];
-
-export const auditDecisionLedger = (lines, verifiedAttested = new Set()) => {
-  const findings = [];
-  const groups = [];
-  const v2Positions = new Map();
-  let previous = null;
-  let chainBrokenAt = null;
-  lines.forEach((raw, index) => {
-    const position = index + 1;
-    let decision;
-    try {
-      decision = JSON.parse(raw);
-    } catch (error) {
-      if (chainBrokenAt === null) chainBrokenAt = position;
-      findings.push({
-        position,
-        code: "UNPARSEABLE",
-        detail: error.message,
-      });
-      return;
-    }
-    const expectedPrev = previous ? decisionLineDigest(previous) : "genesis";
-    if (decision.prevDigest !== expectedPrev) {
-      if (chainBrokenAt === null) chainBrokenAt = position;
-      findings.push({
-        position,
-        id: decision.id ?? null,
-        code: "CHAIN_BROKEN",
-        detail: `chains to '${decision.prevDigest}', but the preceding line digests to '${expectedPrev}'`,
-      });
-    }
-    if (decision.seq !== position) {
-      findings.push({
-        position,
-        id: decision.id ?? null,
-        code: "SEQ_MISMATCH",
-        detail: `records seq ${decision.seq} at position ${position}`,
-      });
-    }
-    const missingBinding = () => [
-      ...(decision.candidateId ? [] : ["candidateId"]),
-      ...BOUND_TO_FIELDS.filter(
-        (field) => decision.boundTo?.[field] === undefined,
-      ).map((field) => `boundTo.${field}`),
-    ];
-    // An attested line is consistent only after protected replay verification.
-    const problem = verifiedAttested.has(position) ? null : decisionLineProblem(decision);
-    if (problem) {
-      findings.push({
-        position,
-        id: decision.id ?? null,
-        code: "INVALID_DECISION_PRINCIPAL",
-        detail: problem,
-      });
-    }
-    // A v2 line's authority is its explicit principal/result/candidateDigest;
-    // its statement is description only. A legacy line has only its statement.
-    if (decision?.v === 2) {
-      const missing = missingBinding();
-      if (missing.length > 0) {
-        findings.push({
-          position,
-          id: decision.id ?? null,
-          code: "UNBOUND_EVIDENCE_CLAIM",
-          detail: `records ${decision.principal} ${decision.result} but carries no ${missing.join(", ")}`,
-        });
-      }
-      // One reviewed group act -- its whole ordered member set -- has one
-      // outcome. A second line over the same group digest is a duplicate or a
-      // conflict, and the auditor names it rather than leaving a resolver to
-      // discover it. Single candidates keep their own resolution rules.
-      if (decision.kind === DECISION_GROUP_KIND) {
-        const first = v2Positions.get(decision.candidateDigest);
-        if (first === undefined) {
-          v2Positions.set(decision.candidateDigest, position);
-        } else {
-          findings.push({
-            position,
-            id: decision.id ?? null,
-            code: "AMBIGUOUS_DECISION",
-            detail: `records ${decision.result} over the group digest already decided at line ${first}; duplicate or conflicting group outcomes fail closed`,
-          });
-        }
-      }
-      previous = decision;
-      return;
-    }
-    const statement = String(decision.statement ?? "");
-    const claimed = APPROVAL_EVIDENCE_PHRASES.find((phrase) =>
-      statement.includes(phrase),
-    );
-    if (!claimed) {
-      findings.push({
-        position,
-        id: decision.id ?? null,
-        code: "UNRECOGNISED_EVIDENCE_CHANNEL",
-        detail: `statement names no channel the recorder can produce: ${JSON.stringify(statement)}`,
-      });
-    } else {
-      const missing = missingBinding();
-      if (missing.length > 0) {
-        findings.push({
-          position,
-          id: decision.id ?? null,
-          code: "UNBOUND_EVIDENCE_CLAIM",
-          detail: `claims "${claimed}" but carries no ${missing.join(", ")}; the channel it names can only produce a line bound to a derived candidate`,
-        });
-      }
-    }
-    // `groupId`, not merely `authorizedBy`: an AUTO single decision carries an
-    // authorization block too, and it is not a group of one.
-    if (decision.authorizedBy?.groupId) groups.push({ position, decision });
-    previous = decision;
-  });
-  findings.push(...groupFindings(groups));
-  return {
-    lines: lines.length,
-    chainBrokenAt,
-    findings,
-    outcome: findings.length === 0 ? "CONSISTENT" : "INCONSISTENT",
-  };
-};
-
-const groupFindings = (grouped) => {
-  const findings = [];
-  const byGroup = new Map();
-  for (const entry of grouped) {
-    const groupId = entry.decision.authorizedBy?.groupId ?? "(none)";
-    if (!byGroup.has(groupId)) byGroup.set(groupId, []);
-    byGroup.get(groupId).push(entry);
-  }
-  for (const [groupId, entries] of byGroup) {
-    const first = entries[0];
-    const authorization = first.decision.authorizedBy;
-    const sameAuthorization = entries.every(({ decision }) =>
-      ["v", "groupId", "groupDigest", "members", "channel", "approvedAt"].every(
-        (field) => decision.authorizedBy?.[field] === authorization[field],
-      ),
-    );
-    const contiguous =
-      Number.isInteger(authorization.members) &&
-      authorization.members > 1 &&
-      entries.length === authorization.members &&
-      entries.every(
-        (entry, offset) =>
-          entry.position === first.position + offset &&
-          entry.decision.authorizedBy?.index === offset + 1,
-      );
-    if (!sameAuthorization || !contiguous) {
-      findings.push({
-        position: first.position,
-        id: first.decision.id ?? null,
-        code: "GROUP_INCOMPLETE",
-        detail: `group '${groupId}' is not one contiguous, consistently authorized ${authorization.members}-member append`,
-      });
-      continue;
-    }
-    const facts = entries.map(({ decision }) => ({
-      id: decision.candidateId,
-      kind: decision.kind,
-      subject: {
-        type: decision.subject?.type,
-        path: decision.subject?.path,
-      },
-      rationaleDigest: decision.rationaleDigest,
-      targets: [...(decision.targets ?? [])],
-      pathDigest: decision.boundTo?.pathDigest ?? null,
-    }));
-    const rebuilt = groupFactsDigest(facts);
-    if (authorization.v !== 1 || rebuilt !== authorization.groupDigest) {
-      findings.push({
-        position: first.position,
-        id: first.decision.id ?? null,
-        code: "GROUP_BINDING_MISMATCH",
-        detail: `group '${groupId}' claims ${authorization.groupDigest}, but its ordered member lines re-derive to ${rebuilt}`,
-      });
-    }
-  }
-  return findings;
-};
-
-/**
- * The ledger audit plus the two anchors `integrity.json` pins outside
- * `state.json`. Reading them here rather than through `readState` is
- * deliberate: `--verify` must be able to report a record that `readState`
- * would refuse to open at all.
- */
-const verifyRecord = async (root) => {
-  const linesOf = async (file) =>
-    (
-      await readFile(path.join(root, file), "utf8").catch((error) => {
-        if (error.code === "ENOENT") return "";
-        throw error;
-      })
-    )
-      .split("\n")
-      .filter((line) => line.trim());
-  // Both chains are audited, each against its own genesis. They are separate
-  // records with separate principals, so a finding in one says nothing about
-  // the other and merging them would only hide which is broken.
-  const operatorLines = await linesOf(DECISIONS_FILE);
-  const verifier = attestationVerifierScope.getStore();
-  const verifiedAttested = new Set();
-  for (const [index, raw] of operatorLines.entries()) {
-    let decision;
-    try { decision = JSON.parse(raw); } catch { continue; }
-    if (!verifier || decision?.v !== 2 || decision.principal !== "HUMAN_ATTESTED" || attestedLineProblem(decision)) continue;
-    try {
-      await verifier.verifyDecisionLine(decision, path.join(root, DECISIONS_FILE));
-      verifiedAttested.add(index + 1);
-    } catch {
-      // Left unverified: the audit reports it as an untrusted principal.
-    }
-  }
-  const ledger = auditDecisionLedger(operatorLines, verifiedAttested);
-  const autoLedger = auditDecisionLedger(await linesOf(AUTO_DECISIONS_FILE));
-
-  const anchors = [];
-  const integrity = await readFile(path.join(root, "integrity.json"), "utf8")
-    .then(JSON.parse)
-    .catch(() => null);
-  for (const [name, file, anchor] of [
-    ["history", "history/history.ndjson", integrity?.history],
-    ["decisions", DECISIONS_FILE, integrity?.decisions],
-    ["autoDecisions", AUTO_DECISIONS_FILE, integrity?.autoDecisions],
-  ]) {
-    if (!anchor) {
-      anchors.push({ name, status: "UNANCHORED" });
-      continue;
-    }
-    const content = await readFile(path.join(root, file)).catch((error) => {
-      if (error.code === "ENOENT") return Buffer.alloc(0);
-      throw error;
-    });
-    const prefix = content.subarray(0, anchor.bytes);
-    const intact =
-      content.length >= anchor.bytes &&
-      createHash("sha256").update(prefix).digest("hex") === anchor.sha256;
-    anchors.push({
-      name,
-      status: intact ? "INTACT" : "BROKEN",
-      pinnedBytes: anchor.bytes,
-      actualBytes: content.length,
-      ...(intact ? {} : { detail: `${file} no longer contains the pinned prefix` }),
-    });
-  }
-
-  const broken = anchors.filter((entry) => entry.status === "BROKEN");
-  return {
-    outcome:
-      ledger.outcome === "CONSISTENT" &&
-      autoLedger.outcome === "CONSISTENT" &&
-      broken.length === 0
-        ? "CONSISTENT"
-        : "INCONSISTENT",
-    ledger,
-    autoLedger,
-    anchors,
-  };
 };
 
 export const runRecordDecisionCli = async (
@@ -1992,10 +809,6 @@ export const runRecordDecisionCli = async (
       });
 };
 
-/** Opaque handle for one engine review; any candidate, evidence or policy change yields another. */
-export const reviewReference = (review) =>
-  `review-${createHash("sha256").update(JSON.stringify(review)).digest("hex").slice(0, 32)}`;
-
 /**
  * Relay the operator's explicit conversational APPROVE/REJECT for one open
  * format-19 review. It goes through the same gate as every other answer: the
@@ -2003,27 +816,20 @@ export const reviewReference = (review) =>
  * requiredPrincipal. So it records AGENT_RELAYED or nothing.
  */
 export const relayOperatorDecision = async ({ registryPath, moduleName, reference, decision, stdout = process.stdout }) => {
-  if (!["APPROVE", "REJECT"].includes(decision)) {
-    throw new Error("decision must be APPROVE or REJECT. Nothing was written.");
-  }
+  assertRelayDecision(decision);
   const pending = await pendingDecisionCandidates({ registryPath, moduleName });
-  if (!pending.decisions?.directLedger) {
-    throw new Error(`Record '${moduleName}' does not use direct-ledger decisions; nothing can be relayed. Nothing was written.`);
-  }
   const stale = (reason) => ({
     outcome: "BLOCKED", recorded: [], reason: `STALE_REVIEW: ${reason}`,
     blocked: { state: "STALE_REVIEW", reason },
   });
-  const selected = [pending.group, ...pending.candidates]
-    .find((candidate) => candidate?.approvable !== false && candidate?.review &&
-      typeof reference === "string" && reviewReference(candidate.review) === reference);
+  const selected = relayedReview(pending, reference, moduleName);
   if (!selected) {
     return stale("The reviewed decision is no longer the current pending review. Nothing was written; run the migration again for the current review.");
   }
   let result;
   try {
     result = await runRecordDecisionCli([moduleName, "--approve", selected.id], {
-      stdout, ask: async ({ review }) => (reviewReference(review) === reference ? decision : ""),
+      stdout, ask: relayAnswer(reference, decision),
     });
   } catch (error) {
     if (/changed while its review was open/.test(error.message)) return stale(error.message);
