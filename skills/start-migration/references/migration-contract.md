@@ -272,8 +272,10 @@ the same normal command re-selects the same target deterministically.
 One versioned resolver computes the boundary during `DISCOVER_LEGACY` and again
 from the final editable classification during `DISCOVERY_COMPLETENESS`,
 `--scan`, pending-decision derivation, and `FINALIZE`. Every classification and
-persisted scan records an explicit supported integer `algorithmVersion` (1 or
-2). A missing, non-integer, or unsupported recorded version raises a typed
+persisted scan records an explicit supported integer `algorithmVersion` (1, 2
+or 3). Algorithm 3 also treats a Next.js convention file inside a module root
+(`error.tsx`, `page.tsx`, ...) as a framework entry point, so it needs no
+declaration; algorithm 2 seeded only conventions outside the roots. A missing, non-integer, or unsupported recorded version raises a typed
 scanner-version error before rescanning; it never falls through to the current
 default. `FINALIZE` always passes the version persisted in the scan.
 
@@ -420,7 +422,8 @@ their evidence, relevant runtime URLs, the resolution rules (TypeScript
 version, tsconfig path and digest, `paths`, `baseUrl`, `moduleResolution`,
 `module`, `jsx`, probe extensions, census command), the sorted census, only
 boundary-relevant edges, stable findings, concrete module-edge targets, and
-every relevant unresolved reference. Algorithm 1 retains its original digest
+every relevant unresolved reference. Algorithm 3 uses the same projection.
+Algorithm 1 retains its original digest
 projection byte-for-byte.
 
 Deliberately excluded: per-file content hashes — `legacyRevision` and the dirty
