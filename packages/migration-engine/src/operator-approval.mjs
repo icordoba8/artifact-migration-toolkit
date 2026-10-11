@@ -1,35 +1,15 @@
+import { isAutoAuthority } from "./resumable-migration.mjs";
 import {
+  autoApprovalChannel,
+  autoMayDecide,
   decisionLineDigest,
-  isAutoAuthority,
-} from "./resumable-migration.mjs";
-import { autoApprovalChannel, autoMayDecide, renderDecisionReview, runRecordDecisionCli } from "./record-decision.mjs";
+  renderCandidateBlock,
+  renderDecisionReview,
+} from "./decisions/index.mjs";
+import { runRecordDecisionCli } from "./record-decision.mjs";
 
-export const renderGroupBlock = (group) =>
-  `  One approval covers all ${group.boundTo.members.length}:\n` +
-  `  ${group.id}  ${group.kind}  ${group.subject.path}\n` +
-  group.boundTo.members
-    .map(
-      (member, index) =>
-        `    ${index + 1}. ${member.id}  ${member.kind}  ` +
-        `${member.subject.type} ${member.subject.path}` +
-        `${member.pathDigest ? `  ${member.pathDigest}` : ""}\n`,
-    )
-    .join("") +
-  "\n";
-
-export const renderCandidateBlock = (candidates, group = null) =>
-  `Operator approval required: ${candidates.length} candidate(s). ` +
-  `No approval can be recorded here.\n\n` +
-  (group ? renderGroupBlock(group) : "") +
-  candidates
-    .map(
-      (candidate) =>
-        `  ${candidate.id}  ${candidate.kind}  ` +
-        `${candidate.subject.type} ${candidate.subject.path}\n` +
-        `    ${candidate.command}\n`,
-    )
-    .join("") +
-  "\n";
+// Compatibility re-export (Track A3): the offer renderers are decisions-owned now.
+export { renderCandidateBlock, renderGroupBlock } from "./decisions/index.mjs";
 
 // `stdout` is the caller's human stream: stderr under `run --json`, so the
 // review and challenge prompt never land in the one JSON document.

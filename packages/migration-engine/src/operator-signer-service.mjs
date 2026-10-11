@@ -24,9 +24,9 @@ import {
 import {
   beginAttestedDecision,
   completeAttestedDecision,
-  renderDecisionReview,
   reviewAttestedCandidate,
 } from "./record-decision.mjs";
+import { renderDecisionReview } from "./decisions/index.mjs";
 import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 
 export const SERVICE_CONFIG_FILE = "/etc/artifact-migration-tools/operator-signer/service.json";
