@@ -377,6 +377,53 @@ test("relevant or declared Next.js conventions govern the module boundary", asyn
   }
 });
 
+test("an owned Next.js error boundary is a framework entry without a declaration (I2)", async () => {
+  // The defect: algorithm 2 seeded only convention files OUTSIDE the census,
+  // so a module root containing its own route segment left error.tsx
+  // UNREACHABLE until an operator declared it by hand.
+  const route = "src/app/(dashboard)/billing";
+  const f = await fixture(
+    {
+      [`${route}/page.tsx`]:
+        "import { Invoices } from '@features/billing/invoices';\nexport default () => <Invoices />;\n",
+      [`${route}/error.tsx`]:
+        "'use client';\nimport { ErrorView } from '@features/billing/error-view';\nexport default ({ reset }) => <ErrorView onRetry={reset} />;\n",
+      [`${route}/_components/unused.tsx`]: "export const Unused = () => null;\n",
+      "src/app/(dashboard)/reports/error.tsx": "'use client';\nexport default () => null;\n",
+      "src/app/layout.tsx": "export default ({ children }) => children;\n",
+      "src/features/billing/invoices.tsx": "export const Invoices = () => <div />;\n",
+      "src/features/billing/error-view.tsx": "export const ErrorView = () => <div />;\n",
+    },
+    { tsconfig: ALIASED },
+  );
+  try {
+    const roots = [route, "src/features/billing"];
+    const result = await scan(f.root, roots);
+    assert.equal(result.reachability[`${route}/error.tsx`], "REACHABLE_FROM_ENTRY");
+    assert.equal(result.reachability["src/features/billing/error-view.tsx"], "REACHABLE_FROM_ENTRY");
+    assert.deepEqual(
+      result.entryPoints.map((entry) => [entry.path, entry.discovery]),
+      [
+        [`${route}/error.tsx`, "FRAMEWORK"],
+        [`${route}/page.tsx`, "FRAMEWORK"],
+      ],
+    );
+    assert.deepEqual(result.declaredEntryPoints, []);
+    // Negative: only owned conventions seed. An owned non-convention file
+    // stays UNREACHABLE, and an unrelated route never enters the boundary.
+    assert.equal(result.reachability[`${route}/_components/unused.tsx`], "UNREACHABLE");
+    const boundaryPaths = Object.values(result.boundary).flat().map((entry) => entry.path);
+    assert.ok(!boundaryPaths.some((file) => file.includes("/reports/") || file === "src/app/layout.tsx"));
+
+    // A migration pinned to algorithm 2 keeps its recorded result and digest.
+    const pinned = await scanVersion(f.root, roots, 2);
+    assert.equal(pinned.reachability[`${route}/error.tsx`], "UNREACHABLE");
+    assert.deepEqual(pinned.entryPoints, []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("a declared framework module edge needs concrete targets before it is production-reachable", async () => {
   // The defect: a route is positively discovered as a FRAMEWORK entry point,
   // but its only edge is non-literal, so it can never gain the resolved inbound

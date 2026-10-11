@@ -51,8 +51,8 @@ const execFileAsync = promisify(execFile);
  * FINALIZE recomputes with the version a migration recorded, so an in-flight
  * migration is never silently held to rules that postdate its checkpoint.
  */
-export const CENSUS_ALGORITHM_VERSION = 2;
-export const SUPPORTED_ALGORITHM_VERSIONS = new Set([1, 2]);
+export const CENSUS_ALGORITHM_VERSION = 3;
+export const SUPPORTED_ALGORITHM_VERSIONS = new Set([1, 2, 3]);
 
 export class DiscoveryScannerVersionError extends Error {
   constructor(code, message) {
@@ -2041,8 +2041,23 @@ export const runDiscoveryScan = async ({
   const inboundConsumerSet = new Set(
     [...consumerSet].filter((file) => !frameworkSet.has(file)),
   );
+  // Algorithm 3: an OWNED Next.js convention file is a runtime entry too.
+  // Algorithm 2 seeded only conventions outside the census, so a module root
+  // that contains its own route segment left its error.tsx (and page.tsx)
+  // UNREACHABLE until the operator declared it by hand.
+  const ownedFramework = new Set(
+    algorithmVersion >= 3
+      ? census.filter(
+          (file) =>
+            entryPoints.get(file)?.discovery === "FRAMEWORK" &&
+            !frameworkSet.has(file),
+        )
+      : [],
+  );
   const currentProduction = reachBoundary([
-    ...[...frameworkSet].filter((file) => !TEST_PATTERN.test(file)),
+    ...[...frameworkSet, ...ownedFramework].filter(
+      (file) => !TEST_PATTERN.test(file),
+    ),
     ...[...declaredPaths].filter((file) => !TEST_PATTERN.test(file)),
   ]);
   const currentInbound = reachBoundary(
@@ -2200,9 +2215,17 @@ export const runDiscoveryScan = async ({
         entryPoints.get(entry.path)?.reason ??
         "References the module directly or transitively.",
     })),
+    ...[...ownedFramework].map((file) => ({
+      path: file,
+      discovery: "FRAMEWORK",
+      reason: entryPoints.get(file).reason,
+    })),
     ...[...declaredPaths]
       .filter(
-        (file) => !frameworkSet.has(file) && !inboundConsumerSet.has(file),
+        (file) =>
+          !frameworkSet.has(file) &&
+          !inboundConsumerSet.has(file) &&
+          !ownedFramework.has(file),
       )
       .map((file) => ({
         path: file,
