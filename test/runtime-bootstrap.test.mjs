@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 import { digest } from '../providers/install-support.mjs';
 
@@ -214,6 +215,22 @@ test('both independently installable skills carry the one shared bootstrap sourc
   const source = await readFile(new URL('../scripts/runtime-bootstrap.mjs', import.meta.url));
   for (const skill of ['start-migration', 'migrate-artifact']) {
     assert.deepEqual(await readFile(new URL(`../skills/${skill}/scripts/runtime.mjs`, import.meta.url)), source);
+  }
+});
+
+// F2: a host that links the skill directory runs runtime.mjs through the link.
+// The guard used to compare the link path with the real path and exit 0 having
+// done nothing; a usage refusal (exit 1, on stderr) proves main() actually ran.
+test('runtime.mjs runs both directly and through a symlinked skill directory', async () => {
+  const skill = fileURLToPath(new URL('../skills/start-migration', import.meta.url));
+  const link = path.join(scratch, 'linked skill');
+  await symlink(skill, link, process.platform === 'win32' ? 'junction' : 'dir');
+  for (const entry of [path.join(skill, 'scripts/runtime.mjs'), path.join(link, 'scripts/runtime.mjs')]) {
+    const refused = await execFileAsync(process.execPath, [entry, 'not-a-command']).then(() => null, error => error);
+    assert.ok(refused, `${entry} exited 0 without running`);
+    assert.equal(refused.code, 1, entry);
+    assert.match(refused.stderr, /^Usage: runtime\.mjs ensure /, entry);
+    assert.equal(refused.stdout, '', entry);
   }
 });
 

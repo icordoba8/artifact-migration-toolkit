@@ -4674,11 +4674,11 @@ const CHECKPOINT_DECISION_PASSES = MIGRATION_STEPS.length;
 
 export const runArtifact = async (
   options = {},
-  { recordTrustedDecision } = {},
+  { recordTrustedDecision, stdout } = {},
 ) => {
   let result = await runArtifactIteration(options);
   const recorder = recorderFor({ recordTrustedDecision, mode: options.mode,
-    directLedger: Boolean(result.decisionProjection) });
+    directLedger: Boolean(result.decisionProjection), stdout });
   const approver = recorder
     ? artifactApprover(recorder, {
         source: options.source,

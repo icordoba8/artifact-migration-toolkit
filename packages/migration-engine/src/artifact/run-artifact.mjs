@@ -157,7 +157,7 @@ export const runArtifactCli = async (
   // that may be driven over MCP grows no second interactive code path.
   const result = parsed.status
     ? await getArtifactStatus(options)
-    : await runArtifact(options, { recordTrustedDecision });
+    : await runArtifact(options, { recordTrustedDecision, stdout });
   // stdout stays pure JSON; the engine still shows progress, on stderr.
   if (parsed.json || parsed.status) process.stderr.write(renderProgressBlock(result));
   const output = parsed.json || parsed.status

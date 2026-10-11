@@ -8,6 +8,7 @@ import test from "node:test";
 import { PassThrough, Writable } from "node:stream";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import { runRecordDecisionCli } from "../../src/record-decision.mjs";
+import { runMigration } from "../../src/cli/run-migration.mjs";
 import { advanceMigration, previewAdvance } from "../../src/core.mjs";
 import { candidateDigestOf, DEFAULT_DECISION_POLICY_ID, DEFAULT_DECISION_POLICY_DIGEST,
   resolveHistoricalRequiredPrincipal, resolveRequiredPrincipal, recoverMigrationRecord } from "../../src/resumable-migration.mjs";
@@ -199,6 +200,52 @@ for (const [answer, transport] of ["APPROVE", "REJECT"].flatMap((answer) => [[an
     } finally { process.exitCode = exitCode; await fixture.cleanup(); }
   });
 }
+
+// I1: no injected recorder, so `recorderFor` probes the TTY and the operator is
+// asked for real. Only the stream moves -- the review and the prompt go to
+// stderr -- so a terminal cannot contaminate the one JSON document on stdout.
+test("run --json at a terminal asks the operator on stderr; stdout is one JSON document", async () => {
+  const fixture = await createFixture();
+  const exitCode = process.exitCode;
+  const cwd = process.cwd();
+  const stdin = Object.getOwnPropertyDescriptor(process, "stdin");
+  const { write: outWrite, isTTY: outTty } = process.stdout;
+  const { write: errWrite, isTTY: errTty } = process.stderr;
+  const input = new PassThrough();
+  input.isTTY = true;
+  let stdout = "";
+  let stderr = "";
+  // Answered on whichever stream asks, so a regression fails the parse below instead of hanging.
+  const answer = (chunk) => {
+    if (String(chunk).includes("Choose APPROVE or REJECT")) queueMicrotask(() => input.write("APPROVE\n"));
+    return chunk;
+  };
+  try {
+    await withDecisionPolicy(null, async () => {
+      await atDirectLedgerCompleteness(fixture, EXCLUDED_CLASSIFICATION);
+      let result;
+      try {
+        Object.defineProperty(process, "stdin", { configurable: true, get: () => input });
+        process.stdout.isTTY = true;
+        process.stderr.isTTY = true;
+        process.stdout.write = (chunk) => ((stdout += answer(chunk)), true);
+        process.stderr.write = (chunk) => ((stderr += answer(chunk)), true);
+        process.chdir(fixture.root);
+        result = await runMigration(["auth", "--json"]);
+      } finally {
+        Object.defineProperty(process, "stdin", stdin);
+        Object.assign(process.stdout, { write: outWrite, isTTY: outTty });
+        Object.assign(process.stderr, { write: errWrite, isTTY: errTty });
+        process.chdir(cwd);
+      }
+      assert.match(stderr, /Required principal: AGENT_RELAYED/);
+      assert.match(stderr, /Choose APPROVE or REJECT/);
+      assert.deepEqual(JSON.parse(stdout), JSON.parse(JSON.stringify(result)));
+      const lines = (await decisionLedger(fixture)).trim().split("\n").map(JSON.parse);
+      assert.deepEqual(lines.map((line) => [line.principal, line.result]), [["AGENT_RELAYED", "APPROVED"]]);
+    });
+  } finally { input.end(); process.exitCode = exitCode; await fixture.cleanup(); }
+});
 
 for (const answer of ["APPROVE", "REJECT"]) {
   test(`standard terminal ${answer}: one complete group, one ledger line, no IDs or challenge`, async () => {

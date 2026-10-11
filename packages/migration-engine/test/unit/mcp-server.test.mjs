@@ -1403,11 +1403,13 @@ test("the CLI prints one post-iteration block: stderr under --json, stdout other
     await authorDiscoverLegacy(fixture);
     const bin = path.join(repositoryRoot, "packages/migration-engine/src/cli/run-migration.mjs");
     const json = await execFileAsync(process.execPath, [bin, "auth", "--json"], { cwd: fixture.root });
-    assert.ok(json.stderr.startsWith("auth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE\nprogress: "), json.stderr);
+    // The wrappers' previews precede it on stderr, so it is found, not at the start.
+    assert.ok(json.stderr.includes("\nauth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE\nprogress: "), json.stderr);
     assert.equal(checklists(json.stderr), 1);
     assert.equal(checklists(json.stdout), 0);
-    // The extraction an installed client already performs still reads the result.
-    const result = JSON.parse(json.stdout.slice(json.stdout.indexOf('{\n  "outcome"'), json.stdout.lastIndexOf("\nloop:")));
+    // stdout is the one result document, parsed as is; the directive is on stderr.
+    const result = JSON.parse(json.stdout);
+    assert.match(json.stderr, /^loop: CONTINUE next=\/start-migration auth$/m);
     assert.equal(result.outcome, "CONTINUE");
     assert.ok(json.stderr.includes(result.progressChecklist));
     const text = await execFileAsync(process.execPath, [bin, "auth"], { cwd: fixture.root });
@@ -1416,4 +1418,22 @@ test("the CLI prints one post-iteration block: stderr under --json, stdout other
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("an argument refusal under --json still prints one JSON document; without it stdout stays empty", async () => {
+  const bin = path.join(repositoryRoot, "packages/migration-engine/src/cli/run-migration.mjs");
+  const refused = (args) => execFileAsync(process.execPath, [bin, ...args]).then(
+    () => assert.fail("expected a refusal"),
+    (error) => error,
+  );
+  for (const args of [["--json"], ["auth", "--mode", "bogus", "--json"]]) {
+    const error = await refused(args);
+    assert.equal(error.code, exitCodeFor("FAILED"), args.join(" "));
+    const document = JSON.parse(error.stdout);
+    assert.equal(document.outcome, "FAILED");
+    assert.ok(error.stderr.includes(document.reason), error.stderr);
+  }
+  const text = await refused(["auth", "--mode", "bogus"]);
+  assert.equal(text.code, exitCodeFor("FAILED"));
+  assert.equal(text.stdout, "");
 });

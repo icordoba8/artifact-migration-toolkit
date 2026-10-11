@@ -185,8 +185,9 @@ export const traceStep = async ({ scratch, record, release, name, args, stdout }
   // Kept next to the trace so a stdout difference can be read, not only seen.
   await mkdir(`${process.env.REHEARSE_TRACE}.stdout`, { recursive: true });
   await writeFile(path.join(`${process.env.REHEARSE_TRACE}.stdout`, `${String(step).padStart(2, "0")}-${name}.txt`), output);
-  const at = stdout.indexOf('{\n  "outcome"');
-  const result = at < 0 ? null : JSON.parse(stdout.slice(at, stdout.lastIndexOf("\nloop:")));
+  // A JSON-speaking command (run --json, --relay, --pending) prints one document and nothing else;
+  // under --json a stray human line makes this throw rather than be sliced away.
+  const result = args.includes("--json") || stdout.startsWith("{") ? JSON.parse(stdout) : null;
   const line = {
     step, command: name, args: args.map((arg) => scrub(arg)),
     outcome: result?.outcome ?? null, checkpoint: state?.currentStep ?? null,

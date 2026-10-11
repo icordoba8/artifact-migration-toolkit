@@ -516,7 +516,7 @@ const buildOutputs = async (root, outputs) => {
   for (const provider of providers) {
     emit(provider.name, provider.mcp.output, provider.mcp.render(server));
     emit(provider.name, `providers/${provider.name}/install.mjs`,
-      `#!/usr/bin/env node\n// ${generatedNotice}\nimport { main } from '../install-support.mjs';\nawait main('${provider.name}').catch(error => { console.error(error.message); process.exitCode = 1; });\n`);
+      `#!/usr/bin/env node\n// ${generatedNotice}\nimport { main } from '../install-support.mjs';\nawait main('${provider.name}').catch(error => { console.error(error.message); if (error.state) console.error(JSON.stringify(error.state, null, 2)); process.exitCode = 1; });\n`);
   }
   for (const provider of providers) {
     emit(

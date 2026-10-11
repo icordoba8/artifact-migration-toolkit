@@ -31,16 +31,18 @@ export const renderCandidateBlock = (candidates, group = null) =>
     .join("") +
   "\n";
 
-const terminalDecisionRecorder = (arguments_) =>
-  runRecordDecisionCli(arguments_);
+// `stdout` is the caller's human stream: stderr under `run --json`, so the
+// review and challenge prompt never land in the one JSON document.
+const terminalDecisionRecorder = (stdout) => (arguments_) =>
+  runRecordDecisionCli(arguments_, { stdout });
 
 const AUTO_REASON =
   "Decided under --mode auto from repository evidence: the candidate was " +
   "recomputed under the module lock and the line is bound to its current digests.";
 
-const autoDecisionRecorder = Object.assign(
+const autoDecisionRecorder = (stdout) => Object.assign(
   (arguments_) =>
-    runRecordDecisionCli(arguments_, { ask: autoApprovalChannel(AUTO_REASON) }),
+    runRecordDecisionCli(arguments_, { ask: autoApprovalChannel(AUTO_REASON), stdout }),
   { channel: "AUTO" },
 );
 
@@ -54,12 +56,12 @@ const autoDecisionRecorder = Object.assign(
  * that happens to have a terminal attached must not behave differently from one
  * that does not. `step` keeps the old behaviour exactly: a TTY, or nothing.
  */
-export const recorderFor = ({ recordTrustedDecision, mode, directLedger = false } = {}) => {
+export const recorderFor = ({ recordTrustedDecision, mode, directLedger = false, stdout = process.stdout } = {}) => {
   if (typeof recordTrustedDecision === "function") return recordTrustedDecision;
-  if (!directLedger && isAutoAuthority(mode)) return autoDecisionRecorder;
+  if (!directLedger && isAutoAuthority(mode)) return autoDecisionRecorder(stdout);
   if (recordTrustedDecision !== undefined) return recordTrustedDecision;
   return process.stdin.isTTY && process.stdout.isTTY
-    ? terminalDecisionRecorder
+    ? terminalDecisionRecorder(stdout)
     : null;
 };
 
