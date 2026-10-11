@@ -47,6 +47,7 @@ import {
   updateRegistry,
 } from "../../src/migration-utils.mjs";
 import { parseAdvanceArguments, runAdvanceCli } from "../../src/cli/advance-migration.mjs";
+import { runRegistryCli } from "../../src/cli/update-migration-registry.mjs";
 import {
   parseDiscoverArguments,
   renderExecutionPreview,
@@ -7846,35 +7847,116 @@ const driveUnregisteredToBaseline = async (fixture) => {
   await writeMatrices(fixture);
 };
 
-test("an unregistered mapping stops BUILD_BASELINE with nothing written", async () => {
+test("auto registers a missing mapping and closes BUILD_BASELINE", async () => {
+  const fixture = await createFixture({ modules: { catalog: { target: "catalog" } } });
+  try {
+    await driveUnregisteredToBaseline(fixture);
+    const before = await readJson(fixture.registryPath);
+    const advanced = await advanceCli(fixture, AUTO);
+    assert.equal(advanced.result.state.currentStep, "PLAN");
+    assert.equal(advanced.result.registration.changed, true);
+    assert.match(advanced.stdout, /Registered auth -> auth/);
+    const after = await readJson(fixture.registryPath);
+    assert.deepEqual(after.modules, { auth: { target: "auth" }, catalog: before.modules.catalog });
+    assert.deepEqual(after.projects, before.projects);
+    assert.equal((await historyEvents(fixture)).filter((event) => event.step === "BUILD_BASELINE").length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("public auto run reports registry continuation as JSON", async () => {
+  const fixture = await createFixture({ modules: {} });
+  try {
+    await driveUnregisteredToBaseline(fixture);
+    const run = await runCli(fixture, () => runMigration(["auth", "--mode", "auto", "--json"]));
+    const report = JSON.parse(run.stdout);
+    assert.equal(report.outcome, "CONTINUE");
+    assert.equal((await state(fixture)).currentStep, "PLAN");
+    assert.equal((await readJson(fixture.registryPath)).modules.auth.target, "auth");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("step mode previews registration and requires its own confirmation", async () => {
   const fixture = await createFixture({ modules: {} });
   try {
     await driveUnregisteredToBaseline(fixture);
     const before = await snapshot(fixture.root);
-
-    // The registration gate is not a preflight blocker: the preview is clean
-    // and still offers an ID. The refusal is raised inside the advance
-    // transaction, before any write, and reaches the shell as the generic
-    // failure code rather than BLOCKED_EXIT_CODE.
     const offered = await advanceCli(fixture, STEP);
     assert.equal(offered.awaitingConfirmation, true);
-    assert.deepEqual(offered.preview.blockers, []);
+    assert.deepEqual(await snapshot(fixture.root), before);
+    const waiting = await advanceCli(fixture, [...STEP, "--confirm-advance", offered.preview.confirmationId]);
+    assert.equal(waiting.awaitingConfirmation, true);
+    assert.match(waiting.stdout, /artifact-migration-registry auth --target auth --mode step/);
+    assert.deepEqual(await snapshot(fixture.root), before);
+    await runCli(fixture, () => runRegistryCli([
+      "auth", "--target", "auth", "--mode", "step",
+      "--confirm-execution", waiting.registrationPreview.confirmationId,
+    ]));
+    const resumed = await advanceCli(fixture, AUTO);
+    assert.equal(resumed.result.state.currentStep, "PLAN");
+    assert.equal(resumed.result.registration, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
-    const refused = await execFileAsync(
-      process.execPath,
-      [
-        path.join(scriptsRoot, "cli/advance-migration.mjs"),
-        "auth",
-        "--confirm-advance",
-        offered.preview.confirmationId,
-      ],
-      { encoding: "utf8", cwd: fixture.root },
-    ).catch((error) => error);
-    assert.equal(refused.code, 1);
-    assert.match(refused.stderr, /migration mapping is not registered/);
+test("a correct registry mapping is left untouched at BUILD_BASELINE", async () => {
+  const fixture = await createFixture({ modules: {} });
+  try {
+    await driveUnregisteredToBaseline(fixture);
+    await registerAuth(fixture);
+    const before = await readFile(fixture.registryPath, "utf8");
+    const advanced = await advanceCli(fixture, AUTO);
+    assert.equal(advanced.result.state.currentStep, "PLAN");
+    assert.equal(advanced.result.registration, undefined);
+    assert.equal(await readFile(fixture.registryPath, "utf8"), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
+test("a conflicting registry mapping cannot be overwritten by auto", async () => {
+  const fixture = await createFixture({ modules: {} });
+  try {
+    await driveUnregisteredToBaseline(fixture);
+    const registry = await readJson(fixture.registryPath);
+    registry.modules.auth = { target: "other" };
+    await writeJson(fixture.registryPath, registry);
+    const before = await snapshot(fixture.root);
+    const refused = await advanceCli(fixture, AUTO);
+    assert.equal(refused.blocked, true);
+    assert.match(refused.stdout, /Migration state mapping does not match the registry/);
+    assert.deepEqual(await snapshot(fixture.root), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("failed registry recovery leaves BUILD_BASELINE and unrelated entries unchanged", async () => {
+  const fixture = await createFixture({ modules: { catalog: { target: "catalog" } } });
+  try {
+    await driveUnregisteredToBaseline(fixture);
+    const journal = path.join(fixture.targetRoot, ".agents/knowledge/migrations/registry.journal.json");
+    await writeFile(journal, "{broken\n");
+    const before = await snapshot(fixture.root);
+    await assert.rejects(advanceCli(fixture, AUTO), /Registry transaction journal is unreadable/);
     assert.deepEqual(await snapshot(fixture.root), before);
     assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("direct advance cannot invent a registry authority mode", async () => {
+  const fixture = await createFixture({ modules: {} });
+  try {
+    await driveUnregisteredToBaseline(fixture);
+    const before = await snapshot(fixture.root);
+    await assert.rejects(advance(fixture, { mode: "other" }), /Use --mode auto or the public registry command/);
+    assert.deepEqual(await snapshot(fixture.root), before);
   } finally {
     await fixture.cleanup();
   }
@@ -8239,15 +8321,11 @@ test("explicit --refresh --confirm-mismatch records OPERATOR in auto and step", 
   }
 });
 
-test("--mode auto stops at the registration gate with nothing written", async () => {
+test("--mode auto completes registration through the public advance command", async () => {
   const fixture = await createFixture({ modules: {} });
   try {
     await driveUnregisteredToBaseline(fixture);
-    const before = await snapshot(fixture.root);
-
-    // Auto self-confirms the advance and is refused inside the transaction,
-    // before any write, with the generic failure code.
-    const refused = await execFileAsync(
+    const completed = await execFileAsync(
       process.execPath,
       [
         path.join(scriptsRoot, "cli/advance-migration.mjs"),
@@ -8256,12 +8334,12 @@ test("--mode auto stops at the registration gate with nothing written", async ()
         "auto",
       ],
       { encoding: "utf8", cwd: fixture.root },
-    ).catch((error) => error);
-    assert.equal(refused.code, 1);
-    assert.match(refused.stderr, /migration mapping is not registered/);
-
-    assert.deepEqual(await snapshot(fixture.root), before);
-    assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+    );
+    assert.match(completed.stdout, /Registered auth -> auth/);
+    assert.match(completed.stdout, /Completed: BUILD_BASELINE/);
+    assert.equal(completed.stderr, "");
+    assert.equal((await state(fixture)).currentStep, "PLAN");
+    assert.equal((await readJson(fixture.registryPath)).modules.auth.target, "auth");
   } finally {
     await fixture.cleanup();
   }
@@ -9168,14 +9246,30 @@ const capabilityClassification = {
   })),
 };
 
-const prepareCapabilityCensus = async (fixture) => {
+const prepareCapabilityCensus = async (fixture, realShared = false) => {
   await writeFile(
     path.join(fixture.legacyRoot, "auth/consumers.ts"),
-    'import "../users";\nimport "../partners";\n',
+    realShared
+      ? 'import "../shared/table";\n'
+      : 'import "../users";\nimport "../partners";\n',
   );
-  await writeFile(path.join(fixture.legacyRoot, "users"), "users\n");
-  await writeFile(path.join(fixture.legacyRoot, "partners"), "partners\n");
+  if (realShared) {
+    await mkdir(path.join(fixture.legacyRoot, "shared"));
+    await mkdir(path.join(fixture.legacyRoot, "users"));
+    await mkdir(path.join(fixture.legacyRoot, "partners"));
+    await mkdir(path.join(fixture.legacyRoot, "auth/sub"));
+    await writeFile(path.join(fixture.legacyRoot, "shared/table.ts"), "export const table = {};\n");
+    await writeFile(path.join(fixture.legacyRoot, "users/index.ts"), 'import { table } from "../shared/table";\nvoid table;\n');
+    await writeFile(path.join(fixture.legacyRoot, "partners/index.ts"), 'import { table } from "../shared/table";\nvoid table;\n');
+    await writeFile(path.join(fixture.legacyRoot, "auth/sub/index.ts"), 'import { table } from "../../shared/table";\nvoid table;\n');
+  } else {
+    await writeFile(path.join(fixture.legacyRoot, "users"), "users\n");
+    await writeFile(path.join(fixture.legacyRoot, "partners"), "partners\n");
+  }
   await execFileAsync("git", ["add", "legacy"], { cwd: fixture.root });
+  if (realShared) {
+    await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test", "commit", "-q", "-m", "shared capability"], { cwd: fixture.root });
+  }
   const typescriptLink = path.join(
     fixture.legacyRoot,
     "node_modules/typescript",
@@ -9188,10 +9282,16 @@ const prepareCapabilityCensus = async (fixture) => {
   );
 };
 
-const stagedBaseline = async (fixture) => {
-  await prepareCapabilityCensus(fixture);
+const stagedBaseline = async (fixture, realShared = false) => {
+  await prepareCapabilityCensus(fixture, realShared);
   await driveTo(fixture, "ASSESS_TARGET", advance, {
-    classification: capabilityClassification,
+    classification: realShared
+      ? {
+          ...capabilityClassification,
+          files: [...capabilityClassification.files, { ...capabilityClassification.files.at(-1), path: "auth/sub/index.ts" }],
+          supporting: [{ relation: "SUPPORTING", type: "MODULE", path: "shared/table.ts", requiredBy: ["auth/consumers.ts", "auth/sub/index.ts"] }],
+        }
+      : capabilityClassification,
     formatVersion: 12,
   });
   await completeStepDoc(fixture, "BUILD_BASELINE");
@@ -9313,10 +9413,105 @@ test("a consumer absent from the discovery scan is refused", async () => {
     ]);
     await assert.rejects(
       advance(fixture),
-      /absent from the pinned discovery supporting census: invented/,
+      /without pinned legacy import evidence: invented/,
     );
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("a committed shared component used by two external features is accepted", async () => {
+  const fixture = await createFixture();
+  try {
+    await stagedBaseline(fixture, true);
+    const scan = await readJson(path.join(fixture.migrationRoot, "inventories/discovery-scan.json"));
+    assert.deepEqual(scan.supporting, ["shared/table.ts"]);
+    await writeCapabilities(fixture, [
+      { ...SHARED_CAPABILITY, legacyEvidence: ["legacy/shared/table.ts"], consumers: ["./users/", "partners/"] },
+      FEATURE_CAPABILITY,
+    ]);
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "PLAN");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a consumer nested inside the migrating module is not external", async () => {
+  const fixture = await createFixture();
+  try {
+    await stagedBaseline(fixture, true);
+    await writeCapabilities(fixture, [
+      { ...SHARED_CAPABILITY, legacyEvidence: ["legacy/shared/table.ts"], consumers: ["users", "auth/sub"] },
+      FEATURE_CAPABILITY,
+    ]);
+    const before = await snapshot(fixture.targetRoot);
+    await assert.rejects(advance(fixture), /Shared ownership requires at least 2/);
+    assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("shared consumer aliases and nested claims cannot inflate the count", async () => {
+  for (const consumers of [
+    ["users", "./users", "users/"],
+    ["users", "users/index.ts"],
+  ]) {
+    const fixture = await createFixture();
+    try {
+      await stagedBaseline(fixture, true);
+      await writeCapabilities(fixture, [
+        { ...SHARED_CAPABILITY, legacyEvidence: ["legacy/shared/table.ts"], consumers },
+        FEATURE_CAPABILITY,
+      ]);
+      await assert.rejects(advance(fixture), /Shared ownership requires at least 2|without pinned legacy import evidence/);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("a claimed feature with no import of the shared component is refused", async () => {
+  const fixture = await createFixture();
+  try {
+    await mkdir(path.join(fixture.legacyRoot, "invented"));
+    await writeFile(path.join(fixture.legacyRoot, "invented/index.ts"), "export {};\n");
+    await execFileAsync("git", ["add", "legacy/invented"], { cwd: fixture.root });
+    await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test", "commit", "-q", "-m", "unrelated feature"], { cwd: fixture.root });
+    await stagedBaseline(fixture, true);
+    await writeCapabilities(fixture, [
+      { ...SHARED_CAPABILITY, legacyEvidence: ["legacy/shared/table.ts"], consumers: ["users", "invented"] },
+      FEATURE_CAPABILITY,
+    ]);
+    await assert.rejects(advance(fixture), /without pinned legacy import evidence: invented/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("external consumer proof refuses changes after the pinned legacy revision", async () => {
+  for (const commit of [false, true]) {
+    const fixture = await createFixture();
+    try {
+      await stagedBaseline(fixture, true);
+      await mkdir(path.join(fixture.legacyRoot, "late"));
+      await writeFile(path.join(fixture.legacyRoot, "late/index.ts"), 'import "../shared/table";\n');
+      await execFileAsync("git", ["add", "legacy/late"], { cwd: fixture.root });
+      if (commit) {
+        await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test", "commit", "-q", "-m", "late consumer"], { cwd: fixture.root });
+      }
+      await writeCapabilities(fixture, [
+        { ...SHARED_CAPABILITY, legacyEvidence: ["legacy/shared/table.ts"], consumers: ["users", "late"] },
+        FEATURE_CAPABILITY,
+      ]);
+      const before = await snapshot(fixture.targetRoot);
+      await assert.rejects(advance(fixture), /without pinned legacy import evidence/);
+      assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });
 

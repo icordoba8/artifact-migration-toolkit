@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
 
-import { resolveRegistryPath } from "../migration-utils.mjs";
+import { renderRegistryPreview, resolveRegistryPath } from "../migration-utils.mjs";
 import {
   assertOptionCombination,
   exitCodeFor,
@@ -136,8 +136,23 @@ export const runAdvanceCli = async (
   );
   const result = await advanceMigration({
     ...options,
+    mode: options.mode ?? DEFAULT_MODE,
     confirmAdvance: confirmation,
   });
+  if (result.registrationPreview) {
+    const registration = result.registrationPreview;
+    stdout.write(
+      renderRegistryPreview(registration) +
+      `Confirmation ID: ${registration.confirmationId}\n` +
+      `Register and rerun this advance: artifact-migration-registry ${registration.moduleName} --target ${registration.target} --mode step --confirm-execution ${registration.confirmationId}\n`,
+    );
+    stdout.write(directive(options, "AWAITING_CONFIRMATION", emitDirective));
+    process.exitCode = exitCodeFor("AWAITING_CONFIRMATION");
+    return { preview, registrationPreview: registration, awaitingConfirmation: true };
+  }
+  if (result.registration) {
+    stdout.write(`Registered ${result.registration.moduleName} -> ${result.registration.target}\n`);
+  }
   stdout.write(
     `Completed: ${result.completedStep}` +
       `${result.completedSlice ? ` (${result.completedSlice})` : ""}\n` +
