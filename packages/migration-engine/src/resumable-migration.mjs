@@ -2,8 +2,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
-  access,
-  appendFile,
   link,
   lstat,
   mkdir,
@@ -13,7 +11,6 @@ import {
   realpath,
   rename,
   rm,
-  rmdir,
   stat,
 } from "node:fs/promises";
 import path from "node:path";
@@ -29,32 +26,75 @@ import { engineCommand } from "./engine-paths.mjs";
 import {
   assertNoPendingTransaction,
   assertPonytailTarget,
+  DESIGN_SOURCES,
+  pendingTransactions,
+  resolveDesignSource,
+  resolveLegacySources,
+  updateRegistry,
+} from "./migration-utils.mjs";
+import {
+  assertArray,
+  assertBoolean,
+  assertIsoTimestamp,
+  assertNonEmpty,
+  assertPlainObject,
   assertSafeName,
   assertSecurePath,
-  atomicWrite,
+  assertUniqueIds,
   commitsIntroducingBlob,
   commitsTouchingSince,
   committedChangesSince,
+  commonAncestor,
   contentIdentity,
-  contentIdentityMatches,
-  DESIGN_SOURCES,
   dirtyManifest,
   fileAtRevision,
   gitRevision,
   headRevision,
   isAncestorCommit,
   isContentIdentity,
-  pendingTransactions,
+  isPlainObject,
+  isResolvedWithin as isWithin,
+  now,
+  recordRelative,
+  sameFile,
+  sha256Hex as hashContent,
+  sha256Json,
+  withoutExtension,
+} from "./shared/index.mjs";
+import {
+  appendHistory,
+  assertHistoryAppendable,
+  assertUnanchoredHistoryTail,
+  atomicWrite,
+  contentIdentityMatchesSource,
+  digestArtifactHashes,
+  fileExists,
+  fileIdentity,
+  fileIdentityMatches,
+  hashFile,
+  hashHistoryEvent,
+  HISTORY_FILE,
+  historyAnchorNow,
+  historyAnchorOf,
+  INTEGRITY_FILE,
+  migrationRoot,
   persistProjectRegistryBinding,
+  prepareHistoryEvent,
   previewProjectRegistryBinding,
   previewRegistryUpdate,
+  readHistoryEvents,
+  readIntegrity,
+  readJson,
+  readOptionalJson,
   readRegistry,
   registryIdentity,
-  resolveDesignSource,
-  resolveLegacySources,
+  removeEmptyParents,
+  renderIntegrity,
+  renderState,
   resolveModule,
-  updateRegistry,
-} from "./migration-utils.mjs";
+  sealHistoryTail,
+  statePathFor,
+} from "./store/index.mjs";
 import { withModuleLock, writeJournalAtomic } from "./module-lock.mjs";
 import {
   classifyUpgrade,
@@ -102,6 +142,8 @@ import {
   toolkitIdentityStatus,
   validateToolkitIdentity,
 } from "./toolkit-identity.mjs";
+// Compatibility re-export (Track A1): the record root now lives in store/.
+export { migrationRoot } from "./store/index.mjs";
 
 // Loaded only when a format-13 row delegates work. The artifact engine imports
 // this module's facade for shared policy, so a static reverse import would put
@@ -1014,10 +1056,6 @@ export const VISUAL_AUTHORITIES = Object.freeze({
 const frameKeyOf = (authority, source, field) =>
   authority.normalizeFrameKey(source?.[authority[field]]);
 
-/** A record-relative, forward-slash path, for the two P4 root comparisons. */
-const recordRelative = (root, absolute) =>
-  path.relative(root, absolute).split(path.sep).join("/");
-
 /**
  * P4, target side. A TARGET screenshot, measurement or proof reference may not
  * resolve inside the authority's own capture tree: the authority was pinned at
@@ -1237,94 +1275,6 @@ const KNOWN_STATE_KEYS = new Set([
   "updatedAt",
 ]);
 
-const isPlainObject = (value) =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value);
-
-const assertPlainObject = (value, label) => {
-  if (!isPlainObject(value)) throw new Error(`${label} must be an object.`);
-  return value;
-};
-
-const assertArray = (value, label) => {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
-  return value;
-};
-
-const assertNonEmpty = (value, label) => {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value.trim();
-};
-
-const assertBoolean = (value, label) => {
-  if (typeof value !== "boolean") throw new Error(`${label} must be boolean.`);
-  return value;
-};
-
-const assertUniqueIds = (rows, label) => {
-  const ids = new Set();
-  for (const [index, row] of rows.entries()) {
-    assertPlainObject(row, `${label}[${index}]`);
-    const id = assertNonEmpty(row.id, `${label}[${index}].id`);
-    if (ids.has(id)) throw new Error(`${label} repeats id '${id}'.`);
-    ids.add(id);
-  }
-  return ids;
-};
-
-const isWithin = (root, candidate) => {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-};
-
-const fileExists = async (filePath) => {
-  try {
-    await access(filePath);
-    return true;
-  } catch (error) {
-    if (error.code === "ENOENT") return false;
-    throw error;
-  }
-};
-
-const readJson = async (filePath, label) => {
-  let content;
-  try {
-    content = await readFile(filePath, "utf8");
-  } catch (error) {
-    if (error.code === "ENOENT") {
-      throw new Error(`${label} does not exist: ${filePath}`);
-    }
-    throw error;
-  }
-  try {
-    return JSON.parse(content);
-  } catch (error) {
-    throw new Error(`${label} is invalid JSON: ${error.message}`);
-  }
-};
-
-const hashFile = async (filePath) =>
-  createHash("sha256")
-    .update(await readFile(filePath))
-    .digest("hex");
-
-/**
- * The two ordinary-file-pin primitives. Everything that pins *a file* goes
- * through these; `hashFile` stays exactly where a raw-byte preimage is the
- * point (confirmation snapshots, transaction stateHash, approval candidates,
- * decision subjects, preserved bytes).
- */
-const fileIdentity = async (filePath, options) =>
-  contentIdentity(filePath, await readFile(filePath), options);
-
-const fileIdentityMatches = async (recorded, filePath, options) =>
-  contentIdentityMatches(recorded, filePath, await readFile(filePath), options);
-
 /**
  * Derived pins: a key that is not a file, mapped back to the file it is
  * computed from plus the projection that computes it. Everything else is a
@@ -1494,75 +1444,6 @@ const pinnedArtifactMatches = async (root, relativePath, expected) => {
   });
 };
 
-// P1-1: the integrity anchor for `artifactHashes`, persisted outside
-// `state.json` so pinning an artifact and rewriting its pin stop being the
-// same edit. Written in the same journalled transaction as every advance
-// (and at initialization); never read or written anywhere else.
-const INTEGRITY_FILE = "integrity.json";
-
-const digestArtifactHashes = (artifactHashes) =>
-  createHash("sha256")
-    .update(
-      JSON.stringify(
-        Object.fromEntries(
-          Object.entries(artifactHashes).sort(([left], [right]) =>
-            left < right ? -1 : left > right ? 1 : 0,
-          ),
-        ),
-      ),
-    )
-    .digest("hex");
-
-/**
- * P2-3: `history.ndjson` declares itself the audit record but nothing pinned
- * its bytes -- truncating it reported no blockers, and because gate-evidence
- * freshness reads each event's `at`, dropping or back-dating events *loosened*
- * the freshness floor. This pins how long the record was and what it hashed to
- * at the moment of the state write, so it can only ever have grown since.
- *
- * The audit asked for a length plus a last-line digest; this hashes the whole
- * pinned prefix instead, which is the same one call and also catches an
- * interior line rewritten in place -- `at` is an ISO timestamp, so back-dating
- * one keeps both the byte length and the last line intact, and the history
- * replay ignores `at` entirely.
- *
- * The byte-prefix anchor still stops before the newest append. historyChain's
- * precommitted headHash covers that event through the journaled transaction.
- */
-const historyAnchorOf = (bytes) => ({
-  bytes: bytes.length,
-  sha256: createHash("sha256").update(bytes).digest("hex"),
-});
-
-const historyAnchorNow = async (root) => {
-  const file = path.join(root, initialArtifacts.history);
-  return historyAnchorOf(
-    (await fileExists(file)) ? await readFile(file) : Buffer.alloc(0),
-  );
-};
-
-const renderIntegrity = (state, history, decisions, autoDecisions, historyChain) =>
-  `${JSON.stringify(
-    {
-      revision: state.revision,
-      artifactHashesSha256: digestArtifactHashes(state.artifactHashes),
-      history,
-      decisions,
-      // Last, and omitted entirely on an unstamped record: JSON.stringify drops
-      // an undefined value, so every integrity.json written before toolkit
-      // identity existed stays byte-identical and no existing record is
-      // retroactively invalidated by this field's introduction.
-      toolkitIdentitySha256: digestToolkitIdentity(state.toolkitIdentity) ?? undefined,
-      // Last for the same reason, and dropped on a record with no AUTO ledger:
-      // a record that never ran under `--mode auto` writes the same bytes it
-      // wrote before the AUTO principal existed.
-      autoDecisions: autoDecisions ?? undefined,
-      historyChain: historyChain ?? undefined,
-    },
-    null,
-    2,
-  )}\n`;
-
 /**
  * W6-2. `integrity.json` pinned `artifactHashes` and history but not the
  * decision ledger, so truncating `decisions/operator-decisions.ndjson` removed
@@ -1606,16 +1487,6 @@ const renderIntegrityNow = async (root, state, event) => {
     await autoDecisionsAnchorNow(root),
     historyChain,
   );
-};
-
-const readIntegrity = async (root) => {
-  const file = path.join(root, INTEGRITY_FILE);
-  if (!(await fileExists(file))) return null;
-  try {
-    return JSON.parse(await readFile(file, "utf8"));
-  } catch {
-    return { corrupt: true };
-  }
 };
 
 /**
@@ -1742,47 +1613,6 @@ const assertHistoryAppendOnly = async (root, state, anchor) => {
     );
   }
   assertUnanchoredHistoryTail(state, content.subarray(anchor.bytes));
-};
-
-/**
- * W6-1, closing the documented gap in `historyAnchorOf`: the newest event is
- * appended *after* the state write, so exactly one event may legitimately sit
- * beyond the anchor, and it must be the one that moved the record to its
- * current revision. Two of them means a write path bypassed the transaction; a
- * mismatched revision means the tail was appended by something other than the
- * transaction that moved state. Both were undetected.
- *
- * A trailing fragment a killed process left half-written is not a completed
- * event: `sealTornTail` owns that repair, and asserting over it here would turn
- * a recoverable crash into a refusal.
- */
-const assertUnanchoredHistoryTail = (state, tail) => {
-  const text = tail.toString("utf8");
-  const complete = text.endsWith("\n") ? text : text.slice(0, text.lastIndexOf("\n") + 1);
-  const events = [];
-  for (const line of complete.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line));
-    } catch {
-      return; // a torn line; sealTornTail repairs it before the next append
-    }
-  }
-  if (events.length === 0) return;
-  if (events.length > 1) {
-    throw new Error(
-      `Migration history/history.ndjson has ${events.length} events past the integrity.json anchor, but a transaction pins the anchor before appending exactly one. Events were appended outside the checkpoint transaction; the record is untrusted.`,
-    );
-  }
-  const [tailEvent] = events;
-  if (
-    Object.hasOwn(tailEvent, "revision") &&
-    tailEvent.revision !== state.revision
-  ) {
-    throw new Error(
-      `Migration history/history.ndjson's unanchored trailing event records revision ${tailEvent.revision}, but state.json is at revision ${state.revision}. The tail was appended by something other than the transaction that moved state; restore the record before continuing.`,
-    );
-  }
 };
 
 // The engine's own workspace is excluded from the target dirty manifest: the
@@ -1914,9 +1744,6 @@ const briefDigestFor = async (targetRoot, brief) => {
     return "MISSING";
   }
 };
-
-const hashContent = (content) =>
-  createHash("sha256").update(content).digest("hex");
 
 const OPEN_SPEC_REQUIREMENT =
   /^### Requirement: ([A-Z][A-Z0-9]*-REQ-\d{3,})(?:\s+.+)?$/;
@@ -2120,21 +1947,6 @@ const assertCurrentOpenSpecAuthority = async (targetRoot, state) => {
   return comparable;
 };
 
-/** `fileIdentityMatches` against a target-relative source, or false if absent. */
-const contentIdentityMatchesSource = async (recorded, targetRoot, source) => {
-  const filePath = path.resolve(targetRoot, source);
-  if (!isWithin(targetRoot, filePath)) return false;
-  return fileIdentityMatches(recorded, filePath).catch(() => false);
-};
-
-const now = () => new Date().toISOString();
-
-export const migrationRoot = (targetRoot, moduleName) =>
-  path.join(targetRoot, ".agents/knowledge/migrations/modules", moduleName);
-
-const statePathFor = (targetRoot, moduleName) =>
-  path.join(migrationRoot(targetRoot, moduleName), "state.json");
-
 // A `<module>.md` sibling is a retired contract-2/3 checklist. Contract 2 and 3
 // are unsupported: refuse to bootstrap over one and leave the file untouched.
 const legacyChecklistBlocker = async (targetRoot, moduleName) =>
@@ -2260,8 +2072,6 @@ const resumeGuidance = (state) => {
       : `Continue the persisted ${state.currentStep} checkpoint. A session or model interruption does not require --refresh.`,
   };
 };
-
-const renderState = (state) => `${JSON.stringify(state, null, 2)}\n`;
 
 const renderStep = ({
   number,
@@ -2446,7 +2256,7 @@ const initialArtifacts = {
   capabilityOwnership: CAPABILITY_OWNERSHIP_FILE,
   slices: "slices/index.json",
   gates: "gates.json",
-  history: "history/history.ndjson",
+  history: HISTORY_FILE,
 };
 
 const initialJsonArtifacts = {
@@ -3326,133 +3136,6 @@ const assertStateGraph = async (root, state, pendingJournal) => {
   return null;
 };
 
-// Fix C (candidate change; analysis/inventory.md Defect "history/
-// history.ndjson is read-modify-atomic-rewrite, not append-only at the
-// syscall level"): the original read the whole file, concatenated one line in
-// memory, and rewrote it via temp-file+rename, which is not safe against a
-// concurrent second writer (last rename wins; a racing append can be lost).
-// This appends with a true OS-level append (`O_APPEND`, via the `a` flag),
-// never reading or rewriting existing content, so two concurrent writers
-// cannot silently clobber each other's line. The NDJSON file remains the one
-// module-history record.
-const HISTORY_HASH_DOMAIN = "artifact-migration-tools/module-history/v1\n";
-const historyDigest = (bytes) =>
-  `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-const keyOrder = (left, right) => {
-  const a = Array.from(left), b = Array.from(right);
-  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
-    const diff = a[i].codePointAt(0) - b[i].codePointAt(0);
-    if (diff) return diff;
-  }
-  return a.length - b.length;
-};
-const canonicalHistoryJson = (value) => {
-  if (value === null || typeof value === "string" || typeof value === "boolean" ||
-      (typeof value === "number" && Number.isFinite(value))) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalHistoryJson).join(",")}]`;
-  if (isPlainObject(value)) return `{${Object.keys(value).sort(keyOrder)
-    .map((key) => `${JSON.stringify(key)}:${canonicalHistoryJson(value[key])}`).join(",")}}`;
-  throw new Error("Migration history event contains a non-JSON value; nothing was written.");
-};
-const hashHistoryEvent = (event) => {
-  const { hash, ...payload } = event;
-  return historyDigest(`${HISTORY_HASH_DOMAIN}${canonicalHistoryJson(payload)}`);
-};
-
-const prepareHistoryEvent = async (root, event) => {
-  if (!isPlainObject(event) || Object.hasOwn(event, "hash")) {
-    throw new Error("Migration history event is already chained or invalid; nothing was written.");
-  }
-  const integrity = await readIntegrity(root);
-  const existing = await readHistoryEvents(root, integrity);
-  const bytes = await readFile(path.join(root, initialArtifacts.history));
-  const legacyPrefixSha256 = integrity?.historyChain
-    ? integrity.historyChain.legacyPrefixSha256 : historyDigest(bytes);
-  const previousHash = existing.at(-1)?.hash ?? legacyPrefixSha256;
-  Object.assign(event, { at: event.at ?? now(), seq: existing.length + 1, previousHash });
-  event.hash = hashHistoryEvent(event);
-  return {
-    version: 1,
-    startSeq: integrity?.historyChain?.startSeq ?? event.seq,
-    legacyPrefixSha256,
-    headHash: event.hash,
-  };
-};
-
-const appendHistory = async (targetRoot, root, event) => {
-  const historyPath = path.join(root, initialArtifacts.history);
-  const secureHistoryPath = await assertSecurePath(targetRoot, historyPath);
-  await mkdir(path.dirname(secureHistoryPath), { recursive: true });
-  await appendFile(
-    secureHistoryPath,
-    `${JSON.stringify(event.hash ? event : { at: now(), ...event })}\n`,
-    { flag: "a", mode: 0o600 },
-  );
-};
-
-/**
- * Proves the audit record is appendable before any state is written. Without
- * it, a broken `history/` (replaced by a file, read-only, or on a full disk)
- * was only discovered after `state.json` had already moved -- the checkpoint
- * advanced while the transition it represents was never recorded.
- */
-const assertHistoryAppendable = async (targetRoot, root) => {
-  const historyPath = path.join(root, initialArtifacts.history);
-  const securePath = await assertSecurePath(targetRoot, historyPath);
-  await mkdir(path.dirname(securePath), { recursive: true });
-  const handle = await open(securePath, "a", 0o600);
-  await handle.close();
-};
-
-/**
- * Seals a trailing line a killed process left half-written, so the next append
- * starts on an event boundary.
- *
- * A pending journal can tolerate an unparseable final fragment, but `O_APPEND`
- * does not: the
- * replacement event would be spliced onto the fragment, and the combined line
- * stays unparseable and is ignored forever -- while recovery deletes the only
- * journal that could have retried. Two shapes are possible, and they are not
- * the same repair: a truncated JSON prefix is not an event and is cut, whereas
- * a complete object whose terminator never landed is an event and only gets
- * its newline. Both are decided from the bytes after the last newline, so the
- * repair is deterministic and never touches an anchored prefix.
- *
- * Runs under the module lock, immediately before every append.
- *
- * @returns {Promise<null | "TERMINATED" | "TRUNCATED">} what the tail needed.
- */
-const sealHistoryTail = async (targetRoot, root) => {
-  const historyPath = await assertSecurePath(
-    targetRoot,
-    path.join(root, initialArtifacts.history),
-  );
-  if (!(await fileExists(historyPath))) return null;
-  const content = await readFile(historyPath);
-  // Byte offsets, not character offsets: a UTF-8 path in an event would make
-  // the two disagree and truncate mid-character.
-  const boundary = content.lastIndexOf(0x0a) + 1;
-  const tail = content.subarray(boundary).toString("utf8");
-  if (tail === "") return null;
-  // A strict prefix of `{...}` only parses when it is the whole object, so
-  // parsing proves the event's bytes all landed and only the newline is gone.
-  let complete = false;
-  try {
-    complete = isPlainObject(JSON.parse(tail));
-  } catch {
-    complete = false;
-  }
-  const handle = await open(historyPath, "r+", 0o600);
-  try {
-    if (complete) await handle.write("\n", content.length);
-    else await handle.truncate(boundary);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  return complete ? "TERMINATED" : "TRUNCATED";
-};
-
 /** Appends `event` unless the recorded revision is already present. */
 const appendHistoryOnce = async (targetRoot, root, event) => {
   await sealHistoryTail(targetRoot, root);
@@ -3573,66 +3256,6 @@ const recoverPendingAdvance = async (targetRoot, root, statePath) => {
   );
 };
 
-const readHistoryEvents = async (root, integrity, pendingJournal) => {
-  const historyPath = path.join(root, initialArtifacts.history);
-  if (!(await fileExists(historyPath))) return [];
-  const content = await readFile(historyPath);
-  const events = [];
-  const ends = [];
-  let start = 0;
-  for (let end = content.indexOf(0x0a); end !== -1; end = content.indexOf(0x0a, start)) {
-    const line = content.subarray(start, end).toString("utf8");
-    if (!line.trim()) throw new Error(`Migration history line ${events.length + 1} is blank; restore it before continuing.`);
-    try {
-      const event = JSON.parse(line);
-      if (!isPlainObject(event)) throw new Error("not an event object");
-      events.push(event);
-    } catch {
-      throw new Error(`Migration history line ${events.length + 1} is malformed; restore it before continuing.`);
-    }
-    start = end + 1;
-    ends.push(start);
-  }
-  if (start < content.length &&
-      (!pendingJournal || pendingJournal.corrupt || !isPlainObject(pendingJournal.event))) {
-    throw new Error(`Migration history line ${events.length + 1} is unterminated; recover the pending transaction or restore it.`);
-  }
-  const anchor = integrity === undefined ? (await readIntegrity(root))?.historyChain : integrity?.historyChain;
-  if (anchor) {
-    const digestShape = /^sha256:[0-9a-f]{64}$/;
-    if (anchor.version !== 1 || !Number.isInteger(anchor.startSeq) || anchor.startSeq < 1 ||
-        anchor.startSeq > events.length + 1 || !digestShape.test(anchor.headHash) ||
-        (anchor.startSeq === 1 ? anchor.legacyPrefixSha256 !== null :
-          !digestShape.test(anchor.legacyPrefixSha256))) {
-      throw new Error("Migration integrity.json has an invalid historyChain boundary; restore it before continuing.");
-    }
-    const prefix = content.subarray(0, ends[anchor.startSeq - 2] ?? 0);
-    if (anchor.startSeq > 1 && historyDigest(prefix) !== anchor.legacyPrefixSha256) {
-      throw new Error("Migration history legacy prefix differs from integrity.json; restore it before continuing.");
-    }
-    let previousHash = anchor.startSeq === 1 ? null : anchor.legacyPrefixSha256;
-    for (let i = anchor.startSeq - 1; i < events.length; i += 1) {
-      const event = events[i];
-      if (!isPlainObject(event) || event.seq !== i + 1 || event.previousHash !== previousHash ||
-          !digestShape.test(event.hash) || hashHistoryEvent(event) !== event.hash) {
-        throw new Error(`Migration history line ${i + 1} has an invalid hash, seq, or previousHash; restore it before continuing.`);
-      }
-      previousHash = event.hash;
-    }
-    if (previousHash !== anchor.headHash &&
-        !(pendingJournal?.event?.hash === anchor.headHash &&
-          pendingJournal.event.seq === events.length + 1 &&
-          pendingJournal.event.previousHash === previousHash &&
-          hashHistoryEvent(pendingJournal.event) === anchor.headHash)) {
-      throw new Error("Migration history headHash disagrees with integrity.json; recover the pending journal or restore the record.");
-    }
-  } else if (events.some((event) => Object.hasOwn(event, "hash") ||
-      Object.hasOwn(event, "previousHash") || Object.hasOwn(event, "seq"))) {
-    throw new Error("Migration history has chained events without an integrity.json historyChain boundary.");
-  }
-  return events;
-};
-
 const completedArtifactHashes = async (root, state, step, sliceId) => {
   const relativePaths = (IMMUTABLE_STEP_ARTIFACTS[step] ?? []).filter(
     // A pre-11 record authored no capability matrix and is never promoted into
@@ -3748,16 +3371,6 @@ const evidencePathClaim = (value) => {
   // Strip a trailing `:12`, `:12-40`, or `:12,18-40` locator.
   const candidate = head.replace(/:[0-9][0-9,\-:]*$/, "");
   return PATH_CLAIM.test(candidate) ? candidate : null;
-};
-
-const commonAncestor = (left, right) => {
-  let current = path.resolve(left);
-  while (!isWithin(current, path.resolve(right))) {
-    const parent = path.dirname(current);
-    if (parent === current) return current;
-    current = parent;
-  }
-  return current;
 };
 
 const resolveEvidencePath = async (claim, roots) => {
@@ -4555,8 +4168,6 @@ const JUDGMENT_KINDS = new Set([
   "EXCLUSION", "DEAD_CONFIRMATION", "EDGE_RESOLUTION", "ROOT_DECLARATION",
   "TARGET_DRIFT_ACCEPTED", "VISUAL_UNBACKED", "ARTIFACT_DECISION",
 ]);
-const sha256Json = (value) =>
-  `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 const canonicalPolicy = ({ policyId, projectRoot, revision, rules }) => ({
   policyId, projectRoot, revision,
   rules: Object.fromEntries(Object.entries(rules).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
@@ -8707,13 +8318,6 @@ const PONYTAIL_GATE_EVIDENCE = {
   ],
 };
 
-const assertIsoTimestamp = (value, label) => {
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-    throw new Error(`${label} must be an ISO 8601 timestamp.`);
-  }
-  return value;
-};
-
 // Fix B (candidate change; analysis/inventory.md Defect "Gate evidence has no
 // freshness, hash, or binding enforcement" / `references/migration-contract.md`
 // "Final gates"): each evidence entry is now a structured, bound record
@@ -10994,7 +10598,6 @@ const ENGINE_SKILL_ROOT = path.resolve(
 );
 
 const TEST_LEVEL_SUFFIX = /\.(?:unit|integration|component)\.spec(\.[^./]+)$/;
-const withoutExtension = (relative) => relative.replace(/\.[^./]+$/, "");
 const targetRelative = (roots, absolute) =>
   path.relative(roots.targetRoot, absolute).replaceAll(path.sep, "/");
 
@@ -12317,11 +11920,6 @@ export const sequenceAuthorizationEvidence = (authorization) => {
   return evidence;
 };
 
-const readOptionalJson = async (filePath, label) => {
-  if (!(await fileExists(filePath))) return null;
-  return readJson(filePath, label);
-};
-
 export const inspectSliceArtifacts = async (root) => {
   const index = await readOptionalJson(
     path.join(root, initialArtifacts.slices),
@@ -12532,20 +12130,6 @@ export const repairSliceState = async (targetRoot, moduleName) =>
     return { changed: true, repairs, state: repaired };
   });
 
-const removeEmptyParents = async (start, boundary) => {
-  let current = path.resolve(start);
-  const limit = path.resolve(boundary);
-  while (current !== limit && isWithin(limit, current)) {
-    try {
-      await rmdir(current);
-    } catch (error) {
-      if (["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) return;
-      throw error;
-    }
-    current = path.dirname(current);
-  }
-};
-
 /**
  * Re-reads every mutable input the confirmation ID was bound to, under the
  * lock, immediately before the first write. A confirmation authorizes one exact
@@ -12606,16 +12190,6 @@ const writeOwner = async (file, transactionId) => {
     await handle.sync();
   } finally {
     await handle.close();
-  }
-};
-
-const sameFile = async (left, right) => {
-  try {
-    const [leftStat, rightStat] = await Promise.all([stat(left), stat(right)]);
-    return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
-  } catch (error) {
-    if (error.code === "ENOENT") return false;
-    throw error;
   }
 };
 

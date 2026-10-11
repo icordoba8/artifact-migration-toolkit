@@ -1,6 +1,4 @@
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { execFile } from "node:child_process";
 import {
   access,
   lstat,
@@ -11,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import {
   assertSafeName,
@@ -80,6 +77,40 @@ import {
   toolkitIdentityStatus,
   validateToolkitIdentity,
 } from "../toolkit-identity.mjs";
+import {
+  assertArray as arrayOf,
+  assertBoolean as boolean,
+  assertNonEmpty as nonEmpty,
+  assertPlainObject as plainObject,
+  canonicalJson as canonical,
+  exactObject,
+  execFileAsync,
+  isResolvedWithin as isWithin,
+  jsonBytes,
+  jsonBytesEqual,
+  normalizeRelative,
+  portablePath as portable,
+  sameMembers,
+  samePath,
+  sha256Hex as sha256,
+  unique,
+} from "../shared/index.mjs";
+import {
+  artifactEvidenceDigest,
+  artifactRoot,
+  fileExists as exists,
+  fileHash,
+  HISTORY_EVENT_KEYS,
+  historyPrefixContent,
+  integrityFor,
+  pinDigest,
+  readJsonAt,
+  revalidatePins,
+  secureHash,
+  STATE_ROOT,
+} from "../store/index.mjs";
+// Compatibility re-export (Track A1): artifact record persistence lives in store/.
+export { artifactEvidenceDigest, artifactRoot } from "../store/index.mjs";
 
 // Structural census parsing needs a TypeScript syntax parser, not module
 // resolution, so any resolvable compiler works; load the one nearest this
@@ -222,7 +253,6 @@ const artifactFormatAdmissible = (formatVersion) => {
 // Only extensions that carry runtime or compile-time semantics need validation.
 const CODE_FILE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"]);
 const JS_FILE_EXTENSIONS = new Set([".js", ".jsx", ".mjs"]);
-const execFileAsync = promisify(execFile);
 const hasExecutableCodeFiles = (changedFiles) =>
   changedFiles.some((file) => CODE_FILE_EXTENSIONS.has(path.extname(file).toLowerCase()));
 
@@ -938,8 +968,6 @@ const executeGenericCheck = async (command, targetRoot, label, capability) => {
   }
   return { command, ...invocation, exitCode: result.exitCode };
 };
-
-const STATE_ROOT = ".agents/knowledge/migrations/artifacts";
 const STATE_FILE = "state.json";
 const INTEGRITY_FILE = "integrity.json";
 const HISTORY_FILE = "history/history.ndjson";
@@ -1009,36 +1037,6 @@ const RESOLUTION_KIND = {
   TARGET_EXTEND: "EXTEND",
   MIGRATE_NEW: "NEW",
 };
-
-const portable = (value) => value.split(path.sep).join("/");
-const sha256 = (value) => createHash("sha256").update(value).digest("hex");
-const fileHash = async (file) => sha256(await readFile(file));
-const secureHash = async (root, relative, label = "evidence path") => {
-  const normalized = normalizeRelative(relative, label);
-  const file = path.resolve(root, normalized);
-  await assertSecurePath(root, file);
-  return fileHash(file);
-};
-const canonical = (value) =>
-  JSON.stringify(
-    value && typeof value === "object" && !Array.isArray(value)
-      ? Object.fromEntries(
-          Object.entries(value)
-            .sort(([left], [right]) => left.localeCompare(right))
-            .map(([key, child]) => [key, JSON.parse(canonical(child))]),
-        )
-      : Array.isArray(value)
-        ? value.map((child) => JSON.parse(canonical(child)))
-        : value,
-  );
-const jsonBytes = (value) => `${JSON.stringify(value, null, 2)}\n`;
-const samePath = (left, right) => {
-  const normalize = (value) =>
-    process.platform === "win32"
-      ? path.resolve(value).toLowerCase()
-      : path.resolve(value);
-  return normalize(left) === normalize(right);
-};
 export const artifactArgumentsFor = ({ artifactType, source, target, sourcePaths, sourceBinding, bindings, designSource, figmaSources, ponytail }) => [
   source.path,
   ...(sourcePaths ?? sourceBinding?.paths ?? bindings?.source?.paths ?? [source.path])
@@ -1068,86 +1066,8 @@ export const artifactCommandFor = (binding) =>
   `/migrate-artifact ${artifactArgumentsFor(binding)
     .map((argument) => JSON.stringify(argument))
     .join(" ")}`;
-const isWithin = (root, candidate) => {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-};
-const exists = async (file) =>
-  access(file).then(
-    () => true,
-    (error) => {
-      if (error.code === "ENOENT") return false;
-      throw error;
-    },
-  );
-
-const plainObject = (value, label) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-};
-
-const exactObject = (value, label, required, optional = []) => {
-  plainObject(value, label);
-  const allowed = new Set([...required, ...optional]);
-  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
-  if (unknown.length > 0) {
-    throw new Error(`${label} contains unknown key(s): ${unknown.join(", ")}.`);
-  }
-  const missing = required.filter((key) => !Object.hasOwn(value, key));
-  if (missing.length > 0) {
-    throw new Error(`${label} is missing key(s): ${missing.join(", ")}.`);
-  }
-  return value;
-};
-
-const arrayOf = (value, label) => {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
-  return value;
-};
-const nonEmpty = (value, label) => {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${label} must be a non-empty string.`);
-  }
-  return value.trim();
-};
-const boolean = (value, label) => {
-  if (typeof value !== "boolean") throw new Error(`${label} must be boolean.`);
-  return value;
-};
 const versionOne = (value, label) => {
   if (value !== 1) throw new Error(`${label}.version must be 1.`);
-};
-const unique = (values, label) => {
-  const seen = new Set();
-  for (const value of values) {
-    if (seen.has(value)) throw new Error(`${label} repeats '${value}'.`);
-    seen.add(value);
-  }
-  return seen;
-};
-const sameMembers = (actual, expected, label) => {
-  const left = [...actual].sort();
-  const right = [...expected].sort();
-  if (canonical(left) !== canonical(right)) {
-    throw new Error(`${label} must be exactly [${right.join(", ")}].`);
-  }
-};
-
-const normalizeRelative = (value, label) => {
-  const raw = nonEmpty(value, label).replaceAll("\\", "/");
-  if (path.posix.isAbsolute(raw) || /^[A-Za-z]:\//.test(raw)) {
-    throw new Error(`${label} must be relative to its declared root.`);
-  }
-  const normalized = path.posix.normalize(raw).replace(/^\.\//, "");
-  if (normalized === ".." || normalized.startsWith("../")) {
-    throw new Error(`${label} escapes its declared root.`);
-  }
-  return normalized === "" ? "." : normalized;
 };
 
 const bindingInput = (binding) => {
@@ -1185,13 +1105,6 @@ export const artifactIdFor = (binding) => {
     "artifact id",
   );
 };
-
-export const artifactRoot = (targetRoot, id) =>
-  path.join(
-    path.resolve(nonEmpty(targetRoot, "targetRoot")),
-    STATE_ROOT,
-    assertSafeName(id, "artifact id"),
-  );
 
 // An artifact operator decision reuses the module candidate shape verbatim, so
 // the module ledger reader, candidate hash, and challenge all apply unchanged.
@@ -1451,60 +1364,6 @@ const validateState = (state, expectedId) => {
   return state;
 };
 
-const semanticEvidence = (document) => ({
-  ...document,
-  runtimeEvidence: document.runtimeEvidence.map(({ provider: _provider, sessionId: _session, ...row }) => row),
-});
-
-export const artifactEvidenceDigest = (document) =>
-  sha256(canonical(semanticEvidence(document)));
-
-const immutableProjection = (relative, document) => {
-  if (relative === "matrices/parity.json") {
-    return document.rows.map(({ id, behaviorId, resolution }) => ({ id, behaviorId, resolution }));
-  }
-  if (relative === "matrices/target-native.json") {
-    return document.rows.map(({ id, path: file, description }) => ({ id, path: file, description }));
-  }
-  if (relative === "matrices/design-system.json") {
-    return document.rows.map(({ id, behaviorId, scope, targetComponent, requiredComponent }) => ({
-      id,
-      behaviorId,
-      scope,
-      targetComponent,
-      requiredComponent,
-    }));
-  }
-  if (relative === "matrices/global-contract.json") {
-    return document.rows.map(({ id, sourceContractId, kind, targetPath, consumers }) => ({
-      id,
-      sourceContractId,
-      kind,
-      targetPath,
-      consumers,
-    }));
-  }
-  throw new Error(`No immutable projection exists for ${relative}.`);
-};
-
-const pinDigest = async (root, key) => {
-  if (key.endsWith("#semantic")) {
-    const relative = key.slice(0, -"#semantic".length);
-    await assertSecurePath(root, path.join(root, relative));
-    const document = JSON.parse(await readFile(path.join(root, relative), "utf8"));
-    return artifactEvidenceDigest(document);
-  }
-  if (key.endsWith("#immutable")) {
-    const relative = key.slice(0, -"#immutable".length);
-    await assertSecurePath(root, path.join(root, relative));
-    const document = JSON.parse(await readFile(path.join(root, relative), "utf8"));
-    return sha256(canonical(immutableProjection(relative, document)));
-  }
-  return secureHash(root, key, "pinned artifact path");
-};
-
-const HISTORY_EVENT_KEYS = ["seq", "at", "event", "from", "to", "slice", "revision", "prevDigest", "digest"];
-
 /**
  * The only events allowed to carry anything beyond the fixed nine keys, and the
  * only extra keys they may carry. ADVANCED may record a verified visualComparison;
@@ -1594,15 +1453,6 @@ const replayToolkitIdentity = (events) => {
   }
   return identity;
 };
-
-const integrityFor = (state, historyContent) => ({
-  version: 1,
-  stateSha256: sha256(jsonBytes(state)),
-  historyBytes: Buffer.byteLength(historyContent),
-  historySha256: sha256(historyContent),
-  historyEvents: historyContent.split("\n").filter(Boolean).length,
-  artifactHashesSha256: sha256(canonical(state.artifactHashes)),
-});
 
 const ledgerPrefixesFor = async (root) => Object.fromEntries(await Promise.all(
   [["operator", DECISIONS_FILE], ["auto", AUTO_DECISIONS_FILE]].map(async ([key, file]) => {
@@ -1719,12 +1569,6 @@ const verifyConsumedHistory = async (root, state, history) => {
   }
 };
 
-const revalidatePins = async (root, state) => {
-  for (const [key, digest] of Object.entries(state.artifactHashes)) {
-    if ((await pinDigest(root, key)) !== digest) throw new Error(`Completed artifact changed: ${key}.`);
-  }
-};
-
 const validateIntegrity = async (root, state) => {
   const document = JSON.parse(await readFile(path.join(root, INTEGRITY_FILE), "utf8"));
   exactObject(document, "integrity", ["version", "stateSha256", "historyBytes", "historySha256", "historyEvents", "artifactHashesSha256"]);
@@ -1738,17 +1582,6 @@ const validateIntegrity = async (root, state) => {
   }
   await verifyConsumedHistory(root, state, history);
   await revalidatePins(root, state);
-};
-
-// The exact byte-identical prefix of `content` holding its first `eventCount`
-// history lines. Each appended line is `JSON.stringify(event)\n` (finishTransaction),
-// so slicing on "\n" and rejoining reproduces the original bytes exactly -- no
-// reserialization, so a prefix this reconstructs always hashes identically to
-// the original bytes it was cut from.
-const historyPrefixContent = (content, eventCount) => {
-  if (eventCount === 0) return "";
-  const lines = content.split("\n");
-  return `${lines.slice(0, eventCount).join("\n")}\n`;
 };
 
 export const readArtifactState = async (targetRoot, id) => {
@@ -2019,8 +1852,6 @@ const assertTransactionReplayable = async (root, transaction) => {
   }
   return { history, matching };
 };
-
-const jsonBytesEqual = (raw, value) => raw !== null && value !== null && raw === jsonBytes(value);
 
 // The real writer only ever leaves state.json/integrity.json in one of the
 // crash-window table's phases (write order is: append history, replace state,
@@ -2565,17 +2396,6 @@ export const upgradeArtifactFormat = async ({ confirmationId, ...options } = {})
       event,
     });
   });
-};
-
-const readJsonAt = async (root, relative, label) => {
-  const file = path.join(root, relative);
-  try {
-    await assertSecurePath(root, file);
-    return JSON.parse(await readFile(file, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") throw new Error(`${label} is missing: ${relative}.`);
-    throw new Error(`${label} is invalid JSON: ${error.message}`);
-  }
 };
 
 const validateEvidenceFile = async (root, evidence, label, extra = []) => {

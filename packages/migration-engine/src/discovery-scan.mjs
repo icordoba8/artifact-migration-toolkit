@@ -35,16 +35,17 @@
  */
 
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 
 import { engineSkillRoot } from "./engine-paths.mjs";
-
-const execFileAsync = promisify(execFile);
+import {
+  execFileAsync,
+  isLexicallyWithin as isWithin,
+  portablePath as portable,
+} from "./shared/index.mjs";
 
 /**
  * Bump only when the scan's own rules change what a correct run produces.
@@ -153,8 +154,6 @@ const NEXT_ROOT_FILES = new Set([
 const TEST_PATTERN =
   /(^|\/)(tests?|__tests__|e2e)\/|\.(test|spec|e2e-spec|integration-spec)\.[^/]+$/;
 
-const portable = (value) => value.split(path.sep).join("/");
-
 const extensionOf = (relativePath) => path.extname(relativePath).toLowerCase();
 
 export const kindOf = (relativePath) => {
@@ -175,14 +174,6 @@ const isStyle = (relativePath) =>
   STYLE_EXTENSIONS.includes(extensionOf(relativePath));
 const isParseable = (relativePath) =>
   isScript(relativePath) || isStyle(relativePath);
-
-const isWithin = (root, candidate) => {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-};
 
 /**
  * Discovery owns a pinned classic-API TypeScript, independent of the analyzed

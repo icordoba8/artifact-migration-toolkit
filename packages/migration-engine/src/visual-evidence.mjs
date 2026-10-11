@@ -19,8 +19,8 @@
  * takes bytes and returns values or throws. The verdict stays in the engines.
  */
 
-import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import { sha256Hex as sha256 } from "./shared/index.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -740,8 +740,6 @@ export const variableValueSet = (document, property) => {
 };
 
 // --- Structured Plugin API evidence -----------------------------------------
-
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /** Hash the exact returned bytes; JSON key reordering is not silently erased. */
 export const structuredDigest = (bytes) => {

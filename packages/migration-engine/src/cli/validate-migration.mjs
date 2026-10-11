@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
-import { resolveRegistryPath } from "../migration-utils.mjs";
+import { resolveRegistryPath } from "../store/index.mjs";
 import { assertOptionCombination } from "../migration-policy.mjs";
 import { validateResumableMigration } from "../resumable-migration.mjs";
 

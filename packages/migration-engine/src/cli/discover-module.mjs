@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { isMainModule } from "../engine-paths.mjs";
-import { resolveRegistryPath, runDoctor } from "../migration-utils.mjs";
+import { runDoctor } from "../migration-utils.mjs";
+import { resolveRegistryPath } from "../store/index.mjs";
 import {
   assertOptionCombination,
   exitCodeFor,
