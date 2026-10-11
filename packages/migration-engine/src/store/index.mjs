@@ -3,10 +3,11 @@
  *
  * Store owns how a record is persisted and proven intact: durable writes and
  * appends, the module record's history chain and integrity anchor, registry
- * persistence and journal recovery, and the artifact record's pins. It may
- * import `shared/` and the formats-owned `engine-paths.mjs` and
- * `toolkit-identity.mjs`, nothing above it. Importers outside `store/` use this
- * file only.
+ * persistence and journal recovery, and the artifact record's pins. The
+ * record-layout names it persists under (`HISTORY_FILE`, `INTEGRITY_FILE`) are
+ * formats vocabulary, re-exported here for compatibility (Track A2). It may
+ * import `formats/`, `shared/` and the leaf `engine-paths.mjs`, nothing above
+ * it. Importers outside `store/` use this file only.
  *
  * The write variants are kept as they were, deliberately not merged (DR7, DR8
  * are Track B): `atomicWrite` (secure path, fsync, rename), `writeTree` (plain

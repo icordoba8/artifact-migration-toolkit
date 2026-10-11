@@ -18,11 +18,8 @@ import { parseArgs } from "node:util";
 import { isMainModule } from "../engine-paths.mjs";
 import { resolveRegistryPath } from "../store/index.mjs";
 import { changeModuleToolkitIdentity, getMigrationStatus } from "../resumable-migration.mjs";
-import {
-  activeToolkitIdentity,
-  renderToolkitIdentity,
-  toolkitIdentityStatus,
-} from "../toolkit-identity.mjs";
+import { activeToolkitIdentity } from "../toolkit-identity.mjs";
+import { renderToolkitIdentity, toolkitIdentityStatus } from "../formats/index.mjs";
 
 const COMMANDS = ["status", "adopt", "update", "rollback"];
 

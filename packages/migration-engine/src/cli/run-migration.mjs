@@ -29,7 +29,6 @@ import {
   DEFAULT_MODE,
   exitCodeFor,
   migrationProgress,
-  MODULE_CLASSIFICATION_FILE,
   nextOutcome,
   pendingDecisionCandidates,
   previewAdvance,
@@ -39,6 +38,7 @@ import {
   resolveRegistryPath,
   validateResumableMigration,
 } from "../core.mjs";
+import { MODULE_CLASSIFICATION_FILE } from "../formats/index.mjs";
 import {
   normalizePonytailArgument,
   runDiscoverCli,

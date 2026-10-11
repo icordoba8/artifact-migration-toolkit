@@ -21,8 +21,8 @@ import {
   renderAdvancePreview,
   renderLoopDirective,
   renderProgressChecklist,
-  renderToolkitAdoption,
 } from "../resumable-migration.mjs";
+import { renderToolkitAdoption } from "../formats/index.mjs";
 
 export const parseAdvanceArguments = (arguments_) => {
   const { positionals, values } = parseArgs({

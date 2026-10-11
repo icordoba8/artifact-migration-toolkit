@@ -11,13 +11,8 @@
  * carrying its own copy.
  */
 
-import {
-  BLOCKED_EXIT_CODE,
-  isAutoAuthority,
-  MIGRATION_STEPS,
-} from "./resumable-migration.mjs";
-
-import { DESIGN_SOURCES } from "./migration-utils.mjs";
+import { BLOCKED_EXIT_CODE, isAutoAuthority } from "./resumable-migration.mjs";
+import { DESIGN_SOURCES, MIGRATION_STEPS } from "./formats/index.mjs";
 
 // The policy module is where a front end reads the auto-decision policy from;
 // its definition site is `resumable-migration.mjs` only because an import cycle

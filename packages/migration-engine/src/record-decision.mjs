@@ -59,19 +59,15 @@ import { engineCommand, isMainModule } from "./engine-paths.mjs";
 import { withModuleLock } from "./module-lock.mjs";
 import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 import {
-  assertDiscoveryCompletenessFormat,
-  assertNoPendingFormatUpgrade,
   assertRecordToolkitIdentity,
   attestationVerifierScope,
   attestedLineProblem,
-  AUTO_DECISIONS_FILE,
   BLOCKED_EXIT_CODE,
   candidateDigestOf,
   createDecisionCandidate,
   createNewFormatDecisionCandidate,
   createNewFormatDecisionGroup,
   DECISION_GROUP_KIND,
-  DECISIONS_FILE,
   decisionAppliesToCandidate,
   decisionChannelOf,
   decisionGroupFor,
@@ -81,11 +77,9 @@ import {
   decisionRationaleDigest,
   edgeDecisionSubject,
   LATE_DECISION_KINDS,
-  LEGACY_COMPATIBILITY_ACTION_REQUIRED,
   legacySourceBinding,
   legacySourcesOf,
   lifecycleBinding,
-  MODULE_CLASSIFICATION_FILE,
   pendingTargetDriftCandidates,
   pendingVisualUnbackedCandidates,
   previewDiscoveryScan,
@@ -95,8 +89,17 @@ import {
   readOperatorDecisions,
   readRecordedDecisions,
   readState,
-  usesDirectLedgerDecisions,
 } from "./resumable-migration.mjs";
+import {
+  assertDiscoveryCompletenessFormat,
+  assertNoPendingFormatUpgrade,
+  AUTO_DECISIONS_FILE,
+  DECISIONS_FILE,
+  LEGACY_COMPATIBILITY_ACTION_REQUIRED,
+  MODULE_CLASSIFICATION_FILE,
+  usesArtifactDirectLedger,
+  usesDirectLedgerDecisions,
+} from "./formats/index.mjs";
 
 export const DECISION_KINDS = [
   "EXCLUSION",
@@ -1365,7 +1368,7 @@ const attestedBinding = async (candidate, locked, result) => {
     }
     record = { migrationId: locked.state.migrationId, module: locked.recordName };
   } else {
-    if (locked.state.formatVersion !== 14 || !protocol.ATTESTED_ARTIFACT_KINDS.includes(candidate.kind)) {
+    if (!usesArtifactDirectLedger(locked.state.formatVersion) || !protocol.ATTESTED_ARTIFACT_KINDS.includes(candidate.kind)) {
       throw refused("NOT_ATTESTABLE", "Artifact direct-ledger attestation covers only format-14 ARTIFACT_DECISION and VISUAL_UNBACKED candidates.");
     }
     if (locked.state.artifactId !== locked.recordName) throw refused("WRONG_RECORD", "Artifact identity does not match its record.");
@@ -1499,7 +1502,7 @@ const deriveArtifactDecisions = async (artifact) => {
     .filter(
       (row) =>
         !row.satisfied &&
-        (context.state.formatVersion !== 14 || row.projection.state !== "REJECTED") &&
+        (!usesArtifactDirectLedger(context.state.formatVersion) || row.projection.state !== "REJECTED") &&
         !decisions.some((decision) =>
           decisionAppliesToCandidate(decision, row.candidate),
         ),
@@ -1512,7 +1515,7 @@ const deriveArtifactDecisions = async (artifact) => {
         ...row.candidate,
         approvable: blockers.length === 0,
         blockers,
-        ...(context.state.formatVersion === 14 ? {
+        ...(usesArtifactDirectLedger(context.state.formatVersion) ? {
           review: reviewFor(row.candidate),
           blocked: blockedFor(row.candidate),
           projection: row.projection,
@@ -1521,7 +1524,7 @@ const deriveArtifactDecisions = async (artifact) => {
     })
     .sort((left, right) => left.id.localeCompare(right.id));
   return { engine, context, candidates,
-    ...(context.state.formatVersion === 14 ? {
+    ...(usesArtifactDirectLedger(context.state.formatVersion) ? {
       decisionProjection: engine.reconcileArtifactDecisions(context.state, context.decisions).projection,
     } : {}) };
 };

@@ -26,8 +26,8 @@ import {
   previewMigrationExecution,
   recoverMigrationRecord,
   renderLoopDirective,
-  renderToolkitAdoption,
 } from "../resumable-migration.mjs";
+import { renderToolkitAdoption } from "../formats/index.mjs";
 
 /**
  * `--ponytail` is the one option that is legal bare, so a value has to be
