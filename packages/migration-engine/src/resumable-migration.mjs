@@ -6565,7 +6565,11 @@ const validateCapabilityOwnership = async (root, state, roots, baselineIds) => {
         ),
       );
       const external = new Set(
-        consumers.filter((consumer) => !converging.has(consumer)),
+        consumers.filter(
+          (consumer) =>
+            !converging.has(consumer) &&
+            ![...converging].some((name) => consumer.startsWith(`${name}/`)),
+        ),
       );
       if (external.size < SHARED_CONSUMER_THRESHOLD) {
         throw new Error(

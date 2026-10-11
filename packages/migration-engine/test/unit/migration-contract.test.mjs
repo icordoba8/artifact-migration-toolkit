@@ -9257,9 +9257,11 @@ const prepareCapabilityCensus = async (fixture, realShared = false) => {
     await mkdir(path.join(fixture.legacyRoot, "shared"));
     await mkdir(path.join(fixture.legacyRoot, "users"));
     await mkdir(path.join(fixture.legacyRoot, "partners"));
+    await mkdir(path.join(fixture.legacyRoot, "auth/sub"));
     await writeFile(path.join(fixture.legacyRoot, "shared/table.ts"), "export const table = {};\n");
     await writeFile(path.join(fixture.legacyRoot, "users/index.ts"), 'import { table } from "../shared/table";\nvoid table;\n');
     await writeFile(path.join(fixture.legacyRoot, "partners/index.ts"), 'import { table } from "../shared/table";\nvoid table;\n');
+    await writeFile(path.join(fixture.legacyRoot, "auth/sub/index.ts"), 'import { table } from "../../shared/table";\nvoid table;\n');
   } else {
     await writeFile(path.join(fixture.legacyRoot, "users"), "users\n");
     await writeFile(path.join(fixture.legacyRoot, "partners"), "partners\n");
@@ -9284,7 +9286,11 @@ const stagedBaseline = async (fixture, realShared = false) => {
   await prepareCapabilityCensus(fixture, realShared);
   await driveTo(fixture, "ASSESS_TARGET", advance, {
     classification: realShared
-      ? { ...capabilityClassification, supporting: [{ relation: "SUPPORTING", type: "MODULE", path: "shared/table.ts", requiredBy: ["auth/consumers.ts"] }] }
+      ? {
+          ...capabilityClassification,
+          files: [...capabilityClassification.files, { ...capabilityClassification.files.at(-1), path: "auth/sub/index.ts" }],
+          supporting: [{ relation: "SUPPORTING", type: "MODULE", path: "shared/table.ts", requiredBy: ["auth/consumers.ts", "auth/sub/index.ts"] }],
+        }
       : capabilityClassification,
     formatVersion: 12,
   });
@@ -9426,6 +9432,23 @@ test("a committed shared component used by two external features is accepted", a
     ]);
     await advance(fixture);
     assert.equal((await state(fixture)).currentStep, "PLAN");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a consumer nested inside the migrating module is not external", async () => {
+  const fixture = await createFixture();
+  try {
+    await stagedBaseline(fixture, true);
+    await writeCapabilities(fixture, [
+      { ...SHARED_CAPABILITY, legacyEvidence: ["legacy/shared/table.ts"], consumers: ["users", "auth/sub"] },
+      FEATURE_CAPABILITY,
+    ]);
+    const before = await snapshot(fixture.targetRoot);
+    await assert.rejects(advance(fixture), /Shared ownership requires at least 2/);
+    assert.deepEqual(await snapshot(fixture.targetRoot), before);
+    assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
   } finally {
     await fixture.cleanup();
   }
