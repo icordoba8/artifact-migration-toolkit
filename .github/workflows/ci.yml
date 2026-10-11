@@ -5,20 +5,96 @@ on:
     branches: ["**"]
   pull_request:
 
+# The evidence job reads only GitHub metadata. Main may reuse a fully tested
+# feature-branch tree only if its squash commit carries this exact trailer:
+#   CI-Validated-Review: <full 40-character feature-branch commit SHA>
+# Without a trailer, the usual complete matrix runs on main. Invalid evidence
+# fails closed. The required toolkit (ubuntu-latest) check name never changes.
+permissions:
+  contents: read
+  actions: read
+
 jobs:
-  # The one required check. A matrix job's `needs` result is `success` only if
-  # every shard succeeded; `always()` keeps a failed shard from turning this
-  # job into `skipped`, which branch protection would otherwise count as passing.
+  provenance:
+    name: Verify tested-tree provenance
+    runs-on: ubuntu-latest
+    outputs:
+      reused: ${{ steps.verify.outputs.reused }}
+    steps:
+      - name: Match the squash tree to a successful Ubuntu candidate
+        id: verify
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.setOutput('reused', 'false');
+            if (context.ref !== 'refs/heads/main') return;
+
+            const { owner, repo } = context.repo;
+            const { data: merged } = await github.rest.git.getCommit({
+              owner, repo, commit_sha: context.sha,
+            });
+            const trailers = [...merged.message.matchAll(/^CI-Validated-Review: ([0-9a-f]{40})$/gm)];
+            if (trailers.length === 0) {
+              core.info('No verified-review trailer: run the full matrix on main.');
+              return;
+            }
+            if (trailers.length !== 1 || merged.parents.length !== 1) {
+              throw new Error('Invalid provenance: expected one review SHA and one squash parent.');
+            }
+
+            const reviewSha = trailers[0][1];
+            const { data: review } = await github.rest.git.getCommit({
+              owner, repo, commit_sha: reviewSha,
+            });
+            if (review.parents.length !== 1 ||
+                review.parents[0].sha !== merged.parents[0].sha ||
+                review.tree.sha !== merged.tree.sha) {
+              throw new Error('Squash does not exactly match a one-commit review on its frozen parent.');
+            }
+
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner, repo, workflow_id: 'ci.yml', head_sha: reviewSha,
+              event: 'push', per_page: 100,
+            });
+            const required = [
+              'toolkit shard 1/3 (ubuntu-latest)',
+              'toolkit shard 2/3 (ubuntu-latest)',
+              'toolkit shard 3/3 (ubuntu-latest)',
+              'toolkit (ubuntu-latest)',
+            ];
+            for (const run of runs) {
+              if (run.head_sha !== reviewSha || run.conclusion !== 'success') continue;
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: run.id, per_page: 100,
+              });
+              if (!required.every((name) =>
+                jobs.some((job) => job.name === name && job.conclusion === 'success'))) continue;
+              core.info('Reusing four successful Ubuntu jobs from candidate run ' + run.id);
+              core.setOutput('reused', 'true');
+              return;
+            }
+            throw new Error('No successful complete Ubuntu CI run found for the exact review SHA.');
+
+  # One stable required check for both full CI and verified-tree reuse.
   toolkit:
     name: toolkit (ubuntu-latest)
-    needs: ubuntu
+    needs: [provenance, ubuntu]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require every Ubuntu shard to succeed
-        run: test "${{ needs.ubuntu.result }}" = success
+      - name: Require existing verified evidence or every Ubuntu shard to succeed
+        shell: bash
+        run: |
+          test "${{ needs.provenance.result }}" = success
+          if test "${{ needs.provenance.outputs.reused }}" = true; then
+            test "${{ needs.ubuntu.result }}" = skipped
+          else
+            test "${{ needs.ubuntu.result }}" = success
+          fi
 
   ubuntu:
+    needs: provenance
+    if: ${{ needs.provenance.result == 'success' && needs.provenance.outputs.reused != 'true' }}
     # The engine drives real file locking, atomic renames, `git ls-files`, child
     # processes and path rendering. Windows has no flock (module-lock.mjs) and
     # quotes command tokens differently (engine-paths.mjs), so it is a different
@@ -110,6 +186,8 @@ jobs:
         run: pnpm engine:test:ts
 
   windows:
+    needs: provenance
+    if: ${{ needs.provenance.result == 'success' && needs.provenance.outputs.reused != 'true' }}
     name: toolkit shard ${{ matrix.shard }}/3 (windows-latest)
     strategy:
       fail-fast: false
