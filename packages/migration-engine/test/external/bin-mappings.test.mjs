@@ -117,3 +117,14 @@ test("each bin does real work when invoked through its symlink", async (t) => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the README executables table is exactly the package bin map", async () => {
+  // A9: the table once listed nine commands while the package shipped ten.
+  const readme = await readFile(path.resolve(enginePackage, "../../README.md"), "utf8");
+  const table = readme.slice(readme.indexOf("| Command | Entry module |"));
+  const rows = Object.fromEntries(
+    [...table.slice(0, table.indexOf("\n\n")).matchAll(/^\| `([^`]+)` \| `([^`]+)` \|$/gm)]
+      .map(([, name, entry]) => [name, entry]),
+  );
+  assert.deepEqual(rows, manifest.bin);
+});

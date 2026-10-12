@@ -57,9 +57,10 @@ the absent registry entry is not an error at `DISCOVERY_COMPLETENESS`.
 
 ## Version-5 lifecycle and v5.0 workflow revision
 
-`scripts/resumable-migration.mjs` is the single authority for the three version
+The engine's `formats/` module is the single authority for the three version
 axes, through `RESUMABLE_CONTRACT_VERSION`, `MIGRATION_FORMAT_VERSION`, and
-`WORKFLOW_VERSION`. **SKILL.md carries the one canonical restatement of the
+`WORKFLOW_VERSION` (the `resumable-migration.mjs` compatibility path re-exports
+the same bindings). **SKILL.md carries the one canonical restatement of the
 current values** — do not restate the literal numbers here too; if they
 change, fix the constants and SKILL.md, and this document stays correct by
 reference. `references/v5-contract.md` is the frozen decision record for the
@@ -2061,7 +2062,9 @@ Every digest that identifies *a file* — an `artifactHashes` pin, `brief.digest
 `targetAdoption.baseline.digest`, `requirementsAuthority.digest`, an evidence
 entry's `hash`, a command result's `outputDigest` — is a **content identity**,
 not a raw hash of whatever bytes the checkout happens to hold. One
-implementation owns it: `migration-utils.mjs`, exported through `core.mjs`.
+implementation owns it: the engine's `shared/` module (file reads through
+`store/`), exported through `core.mjs` and the `migration-utils.mjs`
+compatibility path.
 
 New identities are written tagged:
 

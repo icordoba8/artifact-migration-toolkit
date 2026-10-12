@@ -65,6 +65,7 @@ import {
   reconcileArtifactDecisions,
 } from "../../src/artifact/artifact-migration.mjs";
 import { artifactDirective, parseArtifactArguments, runArtifactCli } from "../../src/artifact/run-artifact.mjs";
+import { parseRunArguments } from "../../src/cli/run-migration.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsRoot = path.resolve(
@@ -847,6 +848,31 @@ test("migrate-artifact skill and all four provider examples use executable Ponyt
     const invocation = row.split("|")[2]?.replaceAll("`", "").trim();
     assert.ok(invocation?.includes("migrate-artifact") && invocation.includes("src/shared/button.ts"),
       `${provider} documents the artifact invocation`);
+  }
+});
+
+test("every flag in the command reference argument tables is one its parser declares", async () => {
+  // A9: a documented flag the parser does not declare fails as an unknown
+  // option at the operator's terminal. Values may still be refused; only
+  // declaration is checked here.
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const reference = await readFile(path.join(repositoryRoot, "docs/command-reference.md"), "utf8");
+  const flagsIn = (heading) => {
+    const section = reference.slice(reference.indexOf(heading));
+    return [...section.slice(0, section.indexOf("\n## ")).matchAll(/^\| `(--[a-z-]+)/gm)].map(([, flag]) => flag);
+  };
+  for (const [heading, parse, positional] of [
+    ["## migrate-artifact arguments", parseArtifactArguments, "src/shared/button.ts"],
+    // `artifact-migration-run` declares `--status` too, to refuse it by name.
+    ["## start-migration arguments", parseRunArguments, "auth"],
+  ]) {
+    const flags = flagsIn(heading);
+    assert.ok(flags.length > 5, `${heading} lists its flags`);
+    for (const flag of flags) {
+      let error = null;
+      try { parse([positional, flag]); } catch (caught) { error = caught; }
+      assert.doesNotMatch(String(error?.message), /Unknown option/, `${heading}: ${flag}`);
+    }
   }
 });
 

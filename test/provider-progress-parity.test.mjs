@@ -179,3 +179,51 @@ test("capability metadata cannot reach the engine's progress or state", async ()
     );
   }
 });
+
+/**
+ * A9. The decision-authority rules (start-migration) and the standalone
+ * artifact protocol (migrate-artifact) are pinned by clause the same way, in
+ * the canonical skill and in all four provider trees, so consolidating the
+ * prose can never drop one.
+ */
+const SKILL_CLAUSES = {
+  "start-migration": [
+    "Only when the user's next message is an explicit `APPROVE` or `REJECT`",
+    "Never approve or reject on your own, never in the same turn you asked, and never from an earlier message.",
+    "the user types only `APPROVE` or `REJECT`",
+    "Cancellation, dismissal, timeout, missing response and transport failure append nothing",
+    "No auto-permission, inferred intent or prior conversation may answer the review.",
+    "A provider response never attests a human.",
+    "fails closed with `SIGNER_UNAVAILABLE`, without downgrade",
+    "A `STALE_REVIEW` result means the review changed",
+    "If `blocked` names a required `HUMAN_ATTESTED` principal, report it and stop",
+    "`--mode auto` is a principal, not consent on a human's behalf.",
+    "Never inspect or edit raw state/ledger JSON to authorize a decision",
+    "`AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`",
+  ],
+  "migrate-artifact": [
+    "Before status or any other migration work, run this installed skill's shared runtime preflight",
+    "Stop on preflight failure",
+    "Run `--status` first.",
+    "do not inspect or recreate completed work",
+    "One invocation performs at most one transition.",
+    "Repeat only on `CONTINUE`.",
+    "It never reads or writes module registry, baseline, parent, or module state.",
+    "a tool argument never supplies a decision",
+    "Cancellation, dismissal, timeout or missing response writes nothing.",
+    "fails closed with `SIGNER_UNAVAILABLE` when its signer is absent; never downgrade.",
+    "Do not hand-edit `state.json`, `integrity.json`, or `history/history.ndjson`.",
+    "`/migrate-artifact` MUST always enter the artifact engine/state machine.",
+  ],
+};
+
+test("every provider receives the canonical decision authority and artifact protocol", async () => {
+  for (const [skill, clauses] of Object.entries(SKILL_CLAUSES)) {
+    for (const tree of ["skills", ...Object.keys(providers).map((provider) => `providers/${provider}/skills`)]) {
+      const prose = (await read(`${tree}/${skill}/SKILL.md`)).replace(/\s+/g, " ");
+      for (const clause of clauses) {
+        assert.ok(prose.includes(clause), `${tree}/${skill} lost: ${clause}`);
+      }
+    }
+  }
+});

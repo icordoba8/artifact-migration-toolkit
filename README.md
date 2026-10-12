@@ -74,10 +74,13 @@ skills/
   start-migration/{SKILL.md,references/}     canonical module protocol
   migrate-artifact/{SKILL.md,references/}    canonical artifact protocol
 packages/migration-engine/
-  src/                    9 shared modules
-  src/cli/                5 command entry points
-  src/upgrades/           upgrade preview/execute/recover/rollback + the v4->v5 transform
-  src/artifact/           the artifact state machine and its CLI
+  src/<module>/index.mjs  the nine canonical engine modules (below)
+  src/cli/, src/artifact/run-artifact.mjs, src/record-decision.mjs,
+  src/mcp-server.mjs, src/upgrades/upgrade-migration.mjs
+                          installed command entry points (thin facades)
+  src/*.mjs               compatibility import paths, the doctor, engine paths,
+                          toolkit identity and the optional protected signer
+  src/upgrades/           the frozen v4->v5 transform and its facades
   references/             v5-contract.md, hashed into contractDigest
   test/unit/              contract, policy, decision, registry, MCP, discovery, artifact
   test/integration/       cross-engine delegation and operator-approval authority
@@ -91,6 +94,43 @@ scripts/
 test/providers-sync.test.mjs  provider projection, ownership, and parity
 docs/release.md           release gate, format-bump and approval-boundary rules
 ```
+
+### Engine source layout
+
+Each canonical module under `packages/migration-engine/src/` has one public
+entry, its `index.mjs`; files beside it are private to that module. Imports
+run one way, each module importing only modules listed before it: `shared/`,
+`formats/`, `store/`, `decisions/`, `slices/`, `census/`, `visual/`,
+`lifecycle/`, `transport/`.
+
+| Module | Owns | Ownership record |
+| --- | --- | --- |
+| `shared/` | paths, hashing and content identity, canonical JSON, read-only git | [A1](docs/architecture/a1-ownership.md) |
+| `store/` | durable writes, history chain, integrity anchor, registry and record persistence | [A1](docs/architecture/a1-ownership.md) |
+| `formats/` | contract and format versions, format predicates, historical compatibility, upgrade primitives | [A2](docs/architecture/a2-ownership.md) |
+| `decisions/` | candidate identity and grouping, decision policy and principals, ledger authority, recording rules | [A3](docs/architecture/a3-ownership.md) |
+| `slices/` | slice plans, claims, verification, rework, drift and amendment | [A4](docs/architecture/a4-ownership.md) |
+| `census/` | legacy sources, boundary, inventories, completeness and the discovery scan | [A5](docs/architecture/a5-ownership.md) |
+| `visual/` | UI evidence, visual authority, visual acceptance and runtime proof | [A6](docs/architecture/a6-ownership.md) |
+| `lifecycle/` | the module and artifact state machines, lock and journals, the decision recorder, progress, contract upgrade | [A8](docs/architecture/a8-ownership.md) |
+| `transport/` | CLI argument parsing, command entry and the MCP server (no business rules) | [A7](docs/architecture/a7-ownership.md) |
+
+The artifact engine is the artifact half of `lifecycle/`
+(`lifecycle/artifact-*.mjs`). It owns its own lifecycle, inventories, gates and
+format axis, and shares mode and outcome policy, loop directives, locking,
+safe paths and atomic writes, decision recording, progress projection and the
+format-upgrade primitives with the module engine; neither reimplements the
+other's rules. The engine has no static or lazy import cycle.
+
+Historical paths stay valid **compatibility facades** that re-export the same
+bindings: `resumable-migration.mjs`, `artifact/artifact-migration.mjs`,
+`migration-policy.mjs`, `lifecycle-policy.mjs`, `module-lock.mjs`,
+`decision-recorder.mjs`, `operator-approval.mjs`, `format-upgrade.mjs`,
+`discovery-scan.mjs`, `visual-evidence.mjs`, `migration-utils.mjs` and
+`upgrades/upgrade-coordinator.mjs`. `core.mjs` (the package's `.` export) is
+the front-end surface. Consumers run the installed commands below; they never
+import engine files. Records and older documents that name these paths still
+resolve.
 
 ## Install
 
@@ -246,8 +286,10 @@ in for it.
 
 ### Executables
 
-Installing the engine package exposes nine commands, one per existing entry
+Installing the engine package exposes ten commands, one per existing entry
 point. They take exactly the arguments the underlying modules already took.
+Each entry file is a thin facade over `transport/` (for
+`artifact-migration-decision`, over the recorder in `lifecycle/`).
 
 | Command | Entry module |
 | --- | --- |
@@ -260,9 +302,12 @@ point. They take exactly the arguments the underlying modules already took.
 | `artifact-migration-upgrade` | `src/upgrades/upgrade-migration.mjs` |
 | `artifact-migrate` | `src/artifact/run-artifact.mjs` |
 | `artifact-migration-mcp` | `src/mcp-server.mjs` |
+| `artifact-migration-toolkit` | `src/cli/toolkit-identity.mjs` |
 
 There is no dispatcher and no wrapper framework. `node <path-to-module>` remains
 equally valid, and is what the engine itself renders in operator-facing output.
+[The command reference](docs/command-reference.md#engine-commands-and-mcp-tools)
+maps each MCP tool to its command.
 
 ## Consumer state stays in the consumer
 
@@ -286,9 +331,10 @@ relocates them.
 
 Install one exact version. A mutable branch, a `latest` tag, or an ambiguous
 `PATH` lookup makes it impossible to say which implementation wrote a record.
-Later phases stamp the resolved toolkit identity (name, version, commit,
-content hash) into each record and refuse to mutate a record whose pinned
-identity differs from the running toolkit; until then, pin by commit yourself.
+Each record pins the toolkit identity (name, version, commit, content hash) that
+wrote it, and every mutation refuses under a different identity until an
+operator reconciles it with `artifact-migration-toolkit adopt|update|rollback`
+(see [Toolkit identity](docs/release.md#toolkit-identity)).
 
 Toolkit version and migration format version are independent. Formats 4–19
 (module) and 13–14 (artifact) are properties of the record; the toolkit version is
@@ -297,7 +343,7 @@ a property of the implementation.
 ## Tests
 
 ```bash
-pnpm engine:test      # 15 node:test suites, named explicitly
+pnpm engine:test      # 35 node:test suites, named explicitly
 pnpm engine:test:ts   # the two TypeScript artifact filesystem/recovery specs
 pnpm providers:test   # provider projection, ownership, and parity
 pnpm test             # all three
@@ -305,7 +351,8 @@ pnpm test             # all three
 
 Both runners are mandatory, and both are required on Linux **and** Windows: the
 engine drives real file locking, atomic renames, `git ls-files`, and child
-processes, and Windows has no `flock`.
+processes, and Windows has no `flock`. Windows CI is currently advisory (and
+paused during Track A); see [docs/release.md](docs/release.md).
 
 An unnamed suite is an unrun suite. Adding a suite means adding it to
 `engine:test` in the same change.

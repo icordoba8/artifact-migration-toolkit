@@ -112,7 +112,7 @@ It is read-only: it takes no lock, opens no record, and creates no directory.
 
 | Dependency                          | Purpose                                                                  | Failure mode if absent                                                                 |
 | ----------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| Node.js 20+                         | Runs every script; the suites use modern `node:test`                     | Scripts fail to parse or the suites do not collect                                     |
+| Node.js 22+                         | Runs every script (`engines` in both package manifests)                  | Scripts fail to parse or the suites do not collect                                     |
 | Git                                 | `git ls-files` **is** the census; also `gitRevision`, dirty manifests    | `DISCOVER_LEGACY` and `DISCOVERY_COMPLETENESS` cannot run                              |
 | `ts-discovery-compiler`             | The pinned classic-API TypeScript parser (see below)                     | `DISCOVERY_COMPLETENESS` and every artifact structural census fail on module resolution |
 | The target's own TypeScript         | Type-checks the target in `migrate-artifact` code validation             | Falls back to the pinned parser and stamps `compiler.origin: PINNED_FALLBACK`           |
@@ -265,27 +265,10 @@ installed CLI. Neither front end can attest a module-19 decision.
    plus `cwd` set to the current absolute working directory.
    Omitted `mode` remains `auto`; omitted migration `ponytail` remains disabled,
    regardless of any session-level `/ponytail` mode. It runs the same driver,
-    and may present an engine-owned review. The server is registered in the
-    repository's `.mcp.json`. Read `outcome` from the tool result, not the `log`.
-    For module format 19, status, pending decisions and run use the same fresh,
-    read-only decision projection. Its full candidate-bound review is for
-    presentation, not an instruction to transcribe IDs, digests or a challenge.
-     The engine-owned `STANDARD_LOCAL` policy requires `AGENT_RELAYED`: the
-     operator explicitly selects `APPROVE` or `REJECT` for this review, through
-     native elicitation when the host renders it, otherwise in this conversation.
-     Cancellation, dismissal, timeout, missing response and transport failure
-     append nothing and end at `OPERATOR_DECISION`. No auto-permission, inferred
-     intent or prior conversation may answer the review. A provider response never attests a
-     human. Only an optional protected high-assurance policy requires
-     `HUMAN_ATTESTED`; missing or invalid signer activation then fails closed
-     with `SIGNER_UNAVAILABLE`, without downgrade. A recorded decision
-    becomes visible to the next status/pending/run call in this same session;
-    no restart and no model-carried receipt are required.
-    For module formats ≤18 and artifact 13 only, the historical elicitation or
-    terminal challenge and `decisionReferences`/`decisionId`/`decisionDigest`
-    citation rules still apply. Cite only fields the existing artifact schema
-    accepts (`recordedDecisionId` in its pending rows). One human act records
-    at most one approval per iteration; a host decline records no rejection.
+   and may present an engine-owned review (see Operator decisions). The runtime
+   preflight registers the server in this provider's MCP configuration (see
+   `provider-compatibility.md`). Read `outcome` from the tool result, not the
+   `log`.
 2. **Bash — the fallback when that server is not connected.**
 
    ```bash
@@ -298,8 +281,16 @@ installed CLI. Neither front end can attest a module-19 decision.
 Either way the directive's `next=` repeats the iteration; obey it literally
 through the same front end.
 
+### Operator decisions
+
 **Whenever an iteration ends at `OPERATOR_DECISION`**, follow the typed result.
-For module 19, when `operatorApproval.blocked` is null:
+For module format 19, status, pending decisions and run use the same fresh,
+read-only decision projection. Its full candidate-bound review is for
+presentation, not an instruction to transcribe IDs, digests or a challenge. The
+engine-owned `STANDARD_LOCAL` policy requires `AGENT_RELAYED`: the operator
+explicitly selects `APPROVE` or `REJECT` for this review, through native
+elicitation when the host renders it, otherwise in this conversation. For
+module 19, when `operatorApproval.blocked` is null:
 
 1. Show the user the engine review (`operatorApproval.review`, or the review in
    `log`), ask them to answer `APPROVE` or `REJECT`, and **end your turn**.
@@ -316,13 +307,22 @@ For module 19, when `operatorApproval.blocked` is null:
 Never approve or reject on your own, never in the same turn you asked, and
 never from an earlier message. Never ask the user for IDs, digests, references,
 commands or runtime paths; the user types only `APPROVE` or `REJECT`. Never
-send them to another terminal or any command other than the relay above. A `STALE_REVIEW` result means the review changed: run
-the migration again and ask about the new review. If `blocked` names a
-required `HUMAN_ATTESTED` principal, report it and stop; the relay refuses it.
-For historical formats,
-`reason` names any recorded line and `decisionReferences` carries its citation;
-further pending decisions remain unapproved. Never call a host decline a human
-rejection: no applicable approval arrived.
+send them to another terminal or any command other than the relay above. A
+`STALE_REVIEW` result means the review changed: run the migration again and ask
+about the new review. If `blocked` names a required `HUMAN_ATTESTED` principal,
+report it and stop; the relay refuses it.
+
+Cancellation, dismissal, timeout, missing response and transport failure append
+nothing and end at `OPERATOR_DECISION`. No auto-permission, inferred intent or
+prior conversation may answer the review. A provider response never attests a
+human. Only an optional protected high-assurance policy requires
+`HUMAN_ATTESTED`; missing or invalid signer activation then fails closed with
+`SIGNER_UNAVAILABLE`, without downgrade. A recorded decision becomes visible to
+the next status/pending/run call in this same session; no restart and no
+model-carried receipt are required, and recording one advances no checkpoint.
+One human act records at most one approval per iteration; a host decline
+records no rejection. Never call a host decline a human rejection: no
+applicable approval arrived.
 
 **`--mode auto` is a principal, not consent on a human's behalf.** AUTO is a
 distinct, auditable principal: it decides what it can derive from evidence it
@@ -334,14 +334,21 @@ the historical operator act, while module 19 requires an explicit operator
 decision even in auto mode. Standard decisions need no signer.
 A reported remainder stays unapproved; `--mode step` does not supply attestation.
 
-For historical module formats ≤18 and artifact 13, `operatorApproval` carries
-the pending candidate commands and the exact `cwd` in which to run them; the
-ordinary next iteration returns citation fields for the historical artifacts.
-For module 19, `operatorApproval` instead carries the engine-owned review and
-typed blocked state; no terminal challenge or receipt-copying fallback grants
+**Historical formats (module ≤18, artifact 13).** The historical elicitation or
+terminal challenge and the `decisionReferences`/`decisionId`/`decisionDigest`
+citation rules still apply. `operatorApproval` carries the pending candidate
+commands and the exact `cwd` in which to run them; the ordinary next iteration
+returns citation fields for the historical artifacts. `reason` names any
+recorded line and `decisionReferences` carries its citation; further pending
+decisions remain unapproved. Cite only fields the existing artifact schema
+accepts (`recordedDecisionId` in its pending rows). For module 19,
+`operatorApproval` instead carries the engine-owned review and typed blocked
+state; no terminal challenge or receipt-copying fallback grants
 `HUMAN_ATTESTED`. Never inspect or edit raw state/ledger JSON to authorize a
 decision, pass approval through a tool/CLI argument, or answer a historical
 challenge yourself.
+
+### Operator commands
 
 Everything below is the operator's, either because `run` refuses it by name or
 because a loop can never reach it. Each line names an executable the installed
@@ -391,6 +398,8 @@ migration state, first-setup `--registry`, persisted
 as an optional CI fallback. Conflicting values fail; they never silently
 override state. On first setup only, add `--registry
 <target-root>/.agents/knowledge/migrations/registry.json`.
+
+### Invocation options
 
 - `--mode` defaults to `auto` and selects who supplies each confirmation, never
   what a confirmation authorizes. `auto` eliminates mechanical confirmations,
@@ -801,9 +810,9 @@ any general instruction to open a task list before multi-step work.
 
 A progress row is a display, never a control. No task item, checkbox or todo
 may approve a candidate, close a checkpoint or advance a slice. Operator
-approval for historical formats uses their elicitation/terminal challenge;
-module 19 requires its trusted policy and verified ledger, with attested writes
-unavailable; authorization is never through a model-callable affordance. After a decision is
+approval follows Operator decisions above: historical formats use their
+elicitation/terminal challenge, module 19 its trusted policy and verified
+ledger; authorization is never through a model-callable affordance. After a decision is
 persisted, re-read `migration_status` and re-render; do not edit the rendered
 progress in place.
 
@@ -904,16 +913,14 @@ Full JSON schemas for every artifact below live in
    recomputed census, graph, and findings to author against. A
    production-reachable component, style, image, SVG, or other visual asset is
    never dismissed on agent-authored rationale: it is `BEHAVIOR_BACKED` or
-   `EXCLUDED_APPROVED` with a decision authorized under the record's policy. That
-    happens one decision per iteration. Module 19 validates a policy-bound
-    decision directly against the verified ledger; no challenge or receipt
-     fields are authored in classification version 2. `STANDARD_LOCAL` requires
-     explicit `AGENT_RELAYED` approval; only protected high-assurance policy
-     requires a signer and blocks without one. Historical
-    module formats ≤18 instead retain the terminal/elicitation challenge and
-    require the cited `decisionId` and `decisionDigest` in the classification
-    row after recording. A stale decision cannot authorize the current candidate.
-    Non-literal module edges also require
+   `EXCLUDED_APPROVED` with a decision authorized under the record's policy (see
+   Operator decisions). That happens one decision per iteration. Module 19
+   validates a policy-bound decision directly against the verified ledger; no
+   challenge or receipt fields are authored in classification version 2.
+   Historical module formats ≤18 instead retain the terminal/elicitation
+   challenge and require the cited `decisionId` and `decisionDigest` in the
+   classification row after recording. A stale decision cannot authorize the
+   current candidate. Non-literal module edges also require
    concrete tracked targets; prose and approval never substitute for a target.
    `new URL(expr, import.meta.url)`, safe immutable aliases, and nested module
    URL bases are module-resource edges. Proven HTTP/runtime URLs are recorded
@@ -968,9 +975,9 @@ Full JSON schemas for every artifact below live in
    `SHARED_PREREQUISITE` delegates to its bound artifact migration first. The
    artifact record owns its lifecycle and evidence; the module records no copy
    of child state. The converse also holds: the artifact engine owns only its
-   lifecycle, its inventories, its gates and its own format axis, and imports
-   shared policy, locking, safe paths, atomic writes, decision recording,
-   progress projection and loop directives from this engine's core. Neither
+   lifecycle, its inventories, its gates and its own format axis, and shares
+   policy, locking, safe paths, atomic writes, decision recording, progress
+   projection and loop directives with this engine. Neither
    side reimplements the other's rules — see
    `migrate-artifact/SKILL.md` *Responsibility boundary*. A non-delegated historical shared slice must still change at
    least one file under `targetOwner`. Record `slices/<slice-id>.json` with changed files,
@@ -1280,7 +1287,9 @@ only after it has itself obtained a human answer. `ask` is a function
 reference, never an argv option, an environment variable, or a tool argument —
 `record-decision.mjs` (`artifact-migration-decision`) declares no option that can produce it, and the MCP
 adapter refuses any `tools/call` whose arguments carry an approval-shaped key
-(`/approv|confirm|decision|challenge/i`) on any tool but `migration_run`.
+(`/approv|confirm|decision|challenge/i`) on any tool but
+`migration_relay_decision`, whose `decision` carries only the operator's
+relayed `APPROVE` or `REJECT`.
 
 Both paths end at the same single comparison: `answer.trim() === challengeFor(candidate)`,
 against a candidate recomputed under the module lock. A front end that returns
@@ -1303,13 +1312,9 @@ operator's terminal being able to echo the phrase it was just printed. What it
 does buy is that no default, no enum pick, and no empty auto-accept is ever an
 approval. Do not tell an operator it is stronger than that. This historical
 challenge does not mint `HUMAN_ATTESTED`. Module 19 instead requires a verified
-ledger line bound to the current full candidate and trusted policy. Status,
-pending and run share its fresh projection; a valid append is immediately
-visible without advancing a checkpoint or restarting the session. The
-standard `APPROVE`/`REJECT` review records `AGENT_RELAYED` without infrastructure.
-The optional protected signer/WebAuthn verifier is retained. An explicit
-high-assurance requirement blocks when its signer is unavailable or activation
-invalid; `AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`.
+ledger line bound to the current full candidate and trusted policy, recorded as
+described under Operator decisions; the optional protected signer/WebAuthn
+verifier is retained, and `AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`.
 
 `artifact-migration-decision <module> --verify` audits a record read-only: it takes no
 lock, re-derives every `prevDigest` itself, reports the first chain break, flags

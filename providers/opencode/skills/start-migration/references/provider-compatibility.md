@@ -16,21 +16,14 @@ skill path any provider is configured with. Each adapter installs its generated
 tree into the root its own host supports.
 
 Module default/supported = 19; Artifact default/supported = 14, including
-delegated children. All four providers use the engine-owned `STANDARD_LOCAL`
-policy and candidate-bound review. The operator explicitly selects `APPROVE` or
-`REJECT`, relayed as `AGENT_RELAYED` into the direct ledger. Status/pending/run
-reread the projection immediately. No ID transcription, challenge phrase,
-service, signer, protected policy, authenticator or external network is required.
-Use `migration_run` / `artifact_run` with elicitation when the host renders it.
-Otherwise a module-19 `OPERATOR_DECISION` carries the review and an opaque
-`operatorApproval.reference`: the agent shows the review, the user answers
-`APPROVE` or `REJECT` in the conversation, and the agent relays only that next
-explicit answer through `migration_relay_decision`, or without MCP through
+delegated children. All four providers use the same engine-owned `STANDARD_LOCAL`
+policy, candidate-bound review and relay, exactly as `SKILL.md` *Operator
+decisions* states: elicitation through `migration_run` / `artifact_run` when the
+host renders it; otherwise, for a module-19 `OPERATOR_DECISION`, the user's
+next explicit answer relayed through `migration_relay_decision` or, without MCP,
 `artifact-migration-decision <module> --relay <reference> --decision APPROVE|REJECT`,
-which calls the same engine function. A missing response,
-cancellation, dismissal, timeout or transport failure appends nothing; a stale
-reference or a `HUMAN_ATTESTED` requirement is refused; auto-permission, model
-reasoning and prior conversation never authorize a decision.
+which calls the same engine function. No provider adds, removes or reinterprets
+a decision rule.
 
 GitHub Copilot CLI reads workspace MCP servers only from `.mcp.json` or
 `.github/mcp.json`, and only in a trusted folder; the Copilot adapter registers
@@ -40,13 +33,6 @@ CLI fallback above. Its path sandbox also needs the release store
 `~/.local/share/artifact-migration-tools` elsewhere) passed as
 `copilot --add-dir <store>`, because the engine runs from there.
 
-The optional protected WebAuthn signer provides `HUMAN_ATTESTED`. An explicit
-protected high-assurance policy fails closed without valid signer activation;
-`AGENT_RELAYED` never satisfies it or gets relabeled. Artifact 14 covers only
-`ARTIFACT_DECISION` and `VISUAL_UNBACKED` (no `GROUP_APPROVAL`;
-`EXCEPTION_RECORDED` unchanged). Historical Module ≤18 and Artifact 13 records
-retain their citation/challenge flows and explicit upgrade behavior.
-
 Provider wrappers contain no workflow logic. They load the generated skill and
 forward invocation text, preventing four copies of the workflow from drifting.
 Claude gets no wrapper: its skill is directly user-invocable, so a wrapper would
@@ -54,14 +40,16 @@ be a second entry point to the same document.
 
 ## What a provider tree contains, and what it must never contain
 
-A provider tree contains `SKILL.md` and the skill's references. That is all.
+A provider tree contains `SKILL.md`, the skill's references, its
+`release-identity.json` and its runtime preflight `scripts/runtime.mjs`. That is
+all.
 
 It contains **no** engine source. The migration engine is one versioned package,
 `@artifact-migration-tools/migration-engine`, which every adapter installs or
-bundles as a dependency. `providers-sync.mjs` refuses to project an executable
-module into a provider tree at all, so the failure mode this replaces — four
-provider copies of the state machine, kept in step by hand and by audit — is not
-reachable by editing a canonical file.
+bundles as a dependency. `providers-sync.mjs` refuses to project any executable
+module into a provider tree other than that byte-identical runtime preflight, so
+the failure mode this replaces — four provider copies of the state machine, kept
+in step by hand and by audit — is not reachable by editing a canonical file.
 
 It also contains no engine test suites and no skill-local `package.json`. The
 engine package owns the pinned discovery parser (`ts-discovery-compiler`) and its
@@ -86,7 +74,7 @@ it rather than pick somewhere plausible.
 | OpenCode       | `~/.config/opencode/skills`   | `.opencode/skills`       | `~/.config/opencode/opencode.json` / `opencode.json`         |
 | GitHub Copilot | — (none documented)           | `.github/skills`         | — / `.vscode/mcp.json`                                       |
 
-Two of these are consumer-owned files that carry unrelated entries — Codex's
+Three of these are consumer-owned files that carry unrelated entries — Codex's
 project `config.toml`, OpenCode's `opencode.json`, Copilot's `.vscode/mcp.json`.
 An adapter **merges** its one `start-migration` entry into them and preserves
 everything else. Overwriting a host's configuration is not installation.
