@@ -83,16 +83,20 @@ const names = (node) => {
 
 // -- boundary ----------------------------------------------------------------
 
-const MODULES = ["store", "shared", "formats", "decisions", "slices"];
+const MODULES = ["store", "shared", "formats", "decisions", "census", "slices"];
 // store may reach down to formats, shared and the leaf `engine-paths.mjs`;
 // formats only to shared (Track A2, layering option (b)); decisions only to
 // store, formats and shared (Track A3), so it reads no census, slice, visual,
 // lifecycle or transport code, not even lazily; slices only to decisions,
 // store, formats and shared (Track A4), so census, visual, lifecycle and
-// transport facts reach it only as data from its seams; shared reaches nothing
+// transport facts reach it only as data from its seams; census only to
+// decisions, store, formats, shared and, like store, the leaf `engine-paths.mjs`
+// that names the scanner's installed skill root (Track A5), so visual, slices,
+// lifecycle and transport rules reach it only as data; shared reaches nothing
 // in the engine. Anything else would be an upward edge or a cycle.
 const ALLOWED = {
   slices: new Set(["decisions/index.mjs", "store/index.mjs", "formats/index.mjs", "shared/index.mjs"]),
+  census: new Set(["decisions/index.mjs", "store/index.mjs", "formats/index.mjs", "shared/index.mjs", "engine-paths.mjs"]),
   decisions: new Set(["store/index.mjs", "formats/index.mjs", "shared/index.mjs"]),
   store: new Set(["formats/index.mjs", "shared/index.mjs", "engine-paths.mjs"]),
   formats: new Set(["shared/index.mjs"]),
@@ -103,7 +107,7 @@ const FS_WRITES = new Set([
   "mkdtemp", "open", "rename", "rm", "rmdir", "symlink", "truncate", "unlink", "utimes", "writeFile",
 ]);
 
-test("A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/ and slices/ are reached only through index.mjs", async () => {
+test("A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/, census/ and slices/ are reached only through index.mjs", async () => {
   const offenders = [];
   for (const root of ["packages/migration-engine/src", "packages/migration-engine/test", "test", "scripts"]) {
     for (const file of await sourceFiles(path.join(repo, root))) {
@@ -120,7 +124,7 @@ test("A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/ an
   for (const module of MODULES) await readFile(path.join(src, module, "index.mjs"));
 });
 
-test("A1-ARCH-2: store/, shared/, formats/, decisions/ and slices/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
+test("A1-ARCH-2: store/, shared/, formats/, decisions/, census/ and slices/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
   for (const module of MODULES) {
     for (const file of await sourceFiles(path.join(src, module))) {
       const label = path.relative(src, file);
@@ -165,6 +169,8 @@ const MOVED = {
   "record-decision.mjs": ["appendDurably"],
   "artifact/artifact-migration.mjs": ["portable", "sha256", "canonical", "jsonBytes", "samePath", "isWithin", "exists", "plainObject", "nonEmpty", "normalizeRelative", "secureHash", "pinDigest", "integrityFor", "artifactRoot", "readJsonAt"],
   "discovery-scan.mjs": ["portable", "isWithin", "execFileAsync"],
+  // The scanner moved here in Track A5; the A1 rule follows it.
+  "census/scan.mjs": ["portable", "isWithin", "execFileAsync"],
   "upgrades/upgrade-migration.mjs": ["sha256", "exists", "readTree", "writeTree", "manifestOf"],
   "visual-evidence.mjs": ["sha256"],
 };

@@ -58,14 +58,13 @@ import { withModuleLock } from "./module-lock.mjs";
 import {
   assertRecordToolkitIdentity,
   BLOCKED_EXIT_CODE,
-  legacySourceBinding,
-  legacySourcesOf,
   pendingVisualUnbackedCandidates,
   previewDiscoveryScan,
   readMigrationContext,
   readState,
   sliceDriftFacts,
 } from "./resumable-migration.mjs";
+import { legacySourceBinding, legacySourcesOf } from "./census/index.mjs";
 import { pendingTargetDriftCandidates } from "./slices/index.mjs";
 import {
   appendApprovedCandidate,

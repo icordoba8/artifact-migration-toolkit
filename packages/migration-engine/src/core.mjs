@@ -206,7 +206,7 @@ export {
   parserResolutionError,
   runDiscoveryScan,
   structuralUnits,
-} from "./discovery-scan.mjs";
+} from "./census/index.mjs";
 
 // -- OpenSpec authority
 export {
