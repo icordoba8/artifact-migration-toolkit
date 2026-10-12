@@ -2,8 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-import { maySelfConfirm, MIGRATION_MODES } from "../lifecycle-policy.mjs";
-import { updateRegistry } from "../migration-utils.mjs";
+import { maySelfConfirm, MIGRATION_MODES, updateRegistry } from "../lifecycle/index.mjs";
 import {
   previewRegistryUpdate,
   renderRegistryPreview,

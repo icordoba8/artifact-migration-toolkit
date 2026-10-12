@@ -16,7 +16,7 @@
  */
 
 import { DESIGN_SOURCES, MIGRATION_STEPS } from "../formats/index.mjs";
-import { MIGRATION_MODES } from "../lifecycle-policy.mjs";
+import { MIGRATION_MODES } from "../lifecycle/index.mjs";
 
 const MODE_MESSAGE = "--mode accepts 'auto' or 'step'.";
 

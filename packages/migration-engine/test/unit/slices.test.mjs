@@ -114,7 +114,13 @@ test("A4-ARCH-4: every slices declaration has exactly one live definition, and n
   for (const file of files.filter((file) => !file.startsWith("slices/"))) {
     assert.deepEqual(declared(await parse(file)).filter((name) => owned.has(name)), [], file);
   }
-  for (const [file, moved] of Object.entries(MOVED)) {
+  // Track A8: the monoliths moved into lifecycle/ (the artifact engine's
+  // parser-bound census into census/toolchain.mjs); the old-site rule follows them.
+  const lifecycleFiles = (await readdir(path.join(src, "lifecycle"))).filter((file) => file !== "index.mjs");
+  assert.ok(lifecycleFiles.length > 20);
+  const follow = Object.fromEntries(lifecycleFiles.map((file) => [`lifecycle/${file}`,
+    MOVED[file.startsWith("artifact-") ? "artifact/artifact-migration.mjs" : "resumable-migration.mjs"] ?? []]));
+  for (const [file, moved] of Object.entries({ ...MOVED, ...follow })) {
     const live = new Set(declared(await parse(file)));
     assert.deepEqual(moved.filter((name) => live.has(name)), [], file);
     for (const name of moved) assert.ok(owned.has(name) || Object.hasOwn(store, name) || name === "PATH_CLAIM", `${name} has no new home`);

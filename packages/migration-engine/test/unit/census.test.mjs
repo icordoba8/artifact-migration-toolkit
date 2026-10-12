@@ -137,12 +137,19 @@ test("A5-ARCH-4: every census declaration has exactly one live definition, and n
   // helpers may share a name with an unrelated local elsewhere.)
   // Same name, kept outside on purpose: the module engine's three-argument
   // legacy inventory seam, and the artifact engine's own target inventory
-  // validator (a different record, still behind the parser-bound seam).
-  const seams = { "resumable-migration.mjs": ["validateLegacyInventory"], "artifact/artifact-migration.mjs": ["validateTargetInventory"] };
+  // validator (a different record, a lifecycle checkpoint validator). Both
+  // moved from the monoliths into lifecycle/ in Track A8.
+  const seams = { "lifecycle/validation.mjs": ["validateLegacyInventory"], "lifecycle/artifact-checkpoints.mjs": ["validateTargetInventory"] };
   for (const file of files.filter((file) => !file.startsWith("census/"))) {
     assert.deepEqual(declared(await parse(file)).filter((name) => Object.hasOwn(census, name)), seams[file] ?? [], file);
   }
-  for (const [file, moved] of Object.entries(MOVED)) {
+  // Track A8: the monoliths moved into lifecycle/ (the artifact engine's
+  // parser-bound census into census/toolchain.mjs); the old-site rule follows them.
+  const lifecycleFiles = (await readdir(path.join(src, "lifecycle"))).filter((file) => file !== "index.mjs");
+  assert.ok(lifecycleFiles.length > 20);
+  const follow = Object.fromEntries(lifecycleFiles.map((file) => [`lifecycle/${file}`,
+    MOVED[file.startsWith("artifact-") ? "artifact/artifact-migration.mjs" : "resumable-migration.mjs"] ?? []]));
+  for (const [file, moved] of Object.entries({ ...MOVED, ...follow })) {
     const live = new Set(declared(await parse(file)));
     assert.deepEqual(moved.filter((name) => live.has(name)), [], file);
     for (const name of moved) assert.ok(owned.has(name) || name === "versionOne", `${name} has no new home`);

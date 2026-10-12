@@ -256,8 +256,9 @@ test("R-1 guard: consumer-owned migration state is still addressed by convention
   // The guard above must not be read as "no .agents path may appear anywhere".
   // Records live in the consumer repository at a fixed, consumer-owned path,
   // and that is unchanged by R-1.
+  // Track A8: the record paths are rendered by the lifecycle preview.
   const source = await readFile(
-    path.join(scriptsRoot, "resumable-migration.mjs"),
+    path.join(scriptsRoot, "lifecycle/preview.mjs"),
     "utf8",
   );
   assert.ok(source.includes(".agents/knowledge/migrations/modules"));

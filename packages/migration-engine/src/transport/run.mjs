@@ -20,19 +20,23 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { assertOptionCombination } from "./arguments.mjs";
-import { exitCodeFor, nextOutcome } from "../lifecycle-policy.mjs";
 import {
+  approveWithOperator,
   authoringRequest,
   DEFAULT_MODE,
+  exitCodeFor,
   migrationProgress,
+  moduleApprover,
+  nextOutcome,
+  pendingDecisionCandidates,
   previewAdvance,
+  recorderFor,
+  renderLoopDirective,
   renderProgress,
   renderProgressBlock,
-  renderLoopDirective,
   validateResumableMigration,
-} from "../resumable-migration.mjs";
+} from "../lifecycle/index.mjs";
 import { resolveRegistryPath } from "../store/index.mjs";
-import { pendingDecisionCandidates } from "../decision-recorder.mjs";
 import { MODULE_CLASSIFICATION_FILE } from "../formats/index.mjs";
 import {
   normalizePonytailArgument,
@@ -40,11 +44,6 @@ import {
 } from "./discover.mjs";
 import { runAdvanceCli } from "./advance.mjs";
 import { runArtifactCli } from "./artifact.mjs";
-import {
-  approveWithOperator,
-  moduleApprover,
-  recorderFor,
-} from "../operator-approval.mjs";
 import { renderDecisionReview, reviewReference } from "../decisions/index.mjs";
 
 export const parseRunArguments = (arguments_) => {

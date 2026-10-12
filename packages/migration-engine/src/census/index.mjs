@@ -89,3 +89,13 @@ export {
   validateSourceEvidenceFile,
   validateSourceInventoryDocument,
 } from "./artifact.mjs";
+export {
+  architectureFindings,
+  asEngineFault,
+  engineFault,
+  legacyDependencies,
+  pathKey,
+  sourceRequirements,
+  structuralParser,
+  targetTypeScript,
+} from "./toolchain.mjs";

@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import {
   contentIdentityMatches,
   isContentIdentity,
-} from "../migration-utils.mjs";
+} from "../shared/index.mjs";
 
 export const V5_CONTRACT_VERSION = 5;
 export const V5_FORMAT_VERSION = 4;

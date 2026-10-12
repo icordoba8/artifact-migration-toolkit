@@ -12,7 +12,7 @@ import {
   previewRollback,
   previewUpgrade,
   recoverUpgrade,
-} from "../upgrades/upgrade-coordinator.mjs";
+} from "../lifecycle/index.mjs";
 
 export const parseUpgradeArguments = (arguments_) => {
   const { positionals, values } = parseArgs({

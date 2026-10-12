@@ -43,7 +43,8 @@ const declared = (sf) => sf.statements.flatMap((statement) =>
 // an advance snapshot, formats' the upgrade preview (DR21).
 const SAME_NAME_OTHER_RULE = {
   "upgrades/upgrade-v4-to-v5.mjs": ["HISTORY_FILE", "INTEGRITY_FILE", "STATE_FILE", "STEP_FILES"],
-  "resumable-migration.mjs": ["confirmationIdFor"],
+  // The monolith's copy moved with the module checkpoint readers (Track A8).
+  "lifecycle/checkpoints.mjs": ["confirmationIdFor"],
   // The canonical node-id rule moved with the Figma context validator (Track A6).
   "visual/authority.mjs": ["FIGMA_NODE_ID"],
 };
@@ -87,17 +88,19 @@ test("A2-ARCH-2: engine code imports formats-owned names from formats/index.mjs,
 // behavior. Shrink this table when one moves; never grow it.
 //   census/artifact: resolveArtifact (creation stamp vs ACTIVE/SUPPORTED),
 //     moved from artifact-migration by Track A5.
-//   artifact-migration: pristineFormatUpgrade (`!== 13`, the pristine 13 -> 14 source check),
+//   lifecycle/artifact-transaction (artifact-migration until Track A8):
+//     pristineFormatUpgrade (`!== 13`, the pristine 13 -> 14 source check),
 //     validateTransactionInput (`!== undefined && !== 14`, input admission
 //     with its own message), proveBootstrapTransaction (persisted == input).
-//   upgrade-coordinator (upgrade-migration until Track A7): classify (`=== 3`)
-//     and executeUpgrade (`!== V5_FORMAT_VERSION`) read the frozen v4 -> v5
+//   lifecycle/contract-upgrade (upgrade-migration until Track A7,
+//     upgrade-coordinator until Track A8): classify (`=== 3`) and
+//     executeUpgrade (`!== V5_FORMAT_VERSION`) read the frozen v4 -> v5
 //     snapshot (Q5).
 //   upgrade-v4-to-v5: the frozen snapshot itself.
 const RAW_FORMAT_COMPARISONS = {
-  "artifact/artifact-migration.mjs": 4,
   "census/artifact.mjs": 1,
-  "upgrades/upgrade-coordinator.mjs": 2,
+  "lifecycle/artifact-transaction.mjs": 4,
+  "lifecycle/contract-upgrade.mjs": 2,
   "upgrades/upgrade-v4-to-v5.mjs": 2,
 };
 

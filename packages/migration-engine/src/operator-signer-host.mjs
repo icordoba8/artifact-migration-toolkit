@@ -17,7 +17,7 @@ import {
   beginAttestedDecision,
   completeAttestedDecision,
   reviewAttestedCandidate,
-} from "./decision-recorder.mjs";
+} from "./lifecycle/index.mjs";
 import { renderDecisionReview } from "./decisions/index.mjs";
 import { activeToolkitIdentity } from "./toolkit-identity.mjs";
 

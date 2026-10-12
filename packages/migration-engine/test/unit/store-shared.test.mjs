@@ -185,7 +185,17 @@ const MOVED = {
 };
 
 test("A1-ARCH-3: a moved declaration has no second live implementation at its old site", async () => {
-  for (const [file, moved] of Object.entries(MOVED)) {
+  // Track A8: the monoliths, the recorder and the coordinator moved into
+  // lifecycle/ (and the artifact engine's parser-bound census into
+  // census/toolchain.mjs); the A1 rule follows every one of those files.
+  const follow = Object.fromEntries((await readdir(path.join(src, "lifecycle")))
+    .filter((file) => file !== "index.mjs")
+    .map((file) => [`lifecycle/${file}`, file.startsWith("artifact-") ? MOVED["artifact/artifact-migration.mjs"]
+      : file === "recorder.mjs" ? MOVED["decision-recorder.mjs"]
+      : file === "contract-upgrade.mjs" ? MOVED["upgrades/upgrade-coordinator.mjs"]
+      : MOVED["resumable-migration.mjs"]]));
+  assert.ok(Object.keys(follow).length > 20);
+  for (const [file, moved] of Object.entries({ ...MOVED, ...follow, "census/toolchain.mjs": MOVED["artifact/artifact-migration.mjs"] })) {
     const { sf } = await specifiers(path.join(src, file));
     const declared = new Set(sf.statements.flatMap((statement) =>
       ts.isFunctionDeclaration(statement) ? [statement.name.text]

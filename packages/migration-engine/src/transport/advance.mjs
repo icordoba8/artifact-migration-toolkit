@@ -4,16 +4,18 @@ import { parseArgs } from "node:util";
 
 import { renderRegistryPreview, resolveRegistryPath } from "../store/index.mjs";
 import { assertOptionCombination } from "./arguments.mjs";
-import { exitCodeFor, maySelfConfirm, nextOutcome } from "../lifecycle-policy.mjs";
 import {
   advanceMigration,
   autoAdoptToolkitIdentity,
   DEFAULT_MODE,
+  exitCodeFor,
+  maySelfConfirm,
+  nextOutcome,
   previewAdvance,
   renderAdvancePreview,
   renderLoopDirective,
   renderProgressChecklist,
-} from "../resumable-migration.mjs";
+} from "../lifecycle/index.mjs";
 import { renderToolkitAdoption } from "../formats/index.mjs";
 
 export const parseAdvanceArguments = (arguments_) => {

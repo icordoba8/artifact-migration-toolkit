@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 
 import { resolveRegistryPath } from "../store/index.mjs";
 import { assertOptionCombination } from "./arguments.mjs";
-import { validateResumableMigration } from "../resumable-migration.mjs";
+import { validateResumableMigration } from "../lifecycle/index.mjs";
 
 export const parseValidateArguments = (arguments_) => {
   const { positionals, values } = parseArgs({
