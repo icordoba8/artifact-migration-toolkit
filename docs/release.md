@@ -16,17 +16,14 @@ The exact candidate SHA must have, before any release command runs:
 | Check | Requirement |
 | --- | --- |
 | `ci / toolkit (ubuntu-latest)` | **SUCCESS** — required, blocking; succeeds only if every `toolkit shard N/3 (ubuntu-latest)` succeeded |
-| `ci / toolkit shard 1/3, 2/3, 3/3 (windows-latest)` | **executed and recorded** — advisory, non-blocking |
 
-Windows is temporarily advisory because the repository has no certified green
-Windows baseline and never had one; see
-[Windows advisory status](ci-release-hardening.md#windows-advisory-status) for
-why, the criteria to make it required again, and the bounded stabilization task
-that owns the backlog. A known Windows portability failure does not block
-publication during that period. Windows is **not** currently supported-green,
-and no release note may claim it is. During Track A the `windows` job is
-commented out of `.github/workflows/ci.yml`, so it does not execute; under the
-rule below that blocks a release until the job is restored.
+Ubuntu is the only required CI and release platform. Windows CI is **not**
+mandatory and is not part of routine CI: `.github/workflows/ci.yml` has no
+Windows job. Windows execution is not required for publication, and a missing
+or failing Windows result cannot block a release. Windows compatibility has
+**not** been validated, and no release note may claim it has. See
+[Windows CI status](ci-release-hardening.md#windows-ci-status) for the
+historical failures and the conditions for any future reconsideration.
 
 GitHub required checks enforce the Ubuntu gate before merge; local
 `release:check` cannot query or substitute for those checks.
@@ -36,13 +33,9 @@ GitHub required checks enforce the Ubuntu gate before merge; local
 Every release report states both platforms, verbatim:
 
 ```
-UBUNTU CI:  SUCCESS
-WINDOWS CI: ADVISORY_FAILURE | SUCCESS
+UBUNTU CI: SUCCESS
+WINDOWS CI: NOT_RUN (not required)
 ```
-
-On `ADVISORY_FAILURE`, name the first failing shard, step and test — e.g.
-`first failure: shard 3/3, pnpm engine:test — <suite> / <test name>`. A Windows job that
-did not execute is a release blocker, not an advisory failure: rerun it.
 
 ## The three runners
 
@@ -57,7 +50,7 @@ atomic renames, `git ls-files` and child processes, which a jsdom environment
 cannot host — so they stay on Node's runner and are named **explicitly** by their
 script. An unnamed suite is an unrun suite. Adding a suite means adding it to a
 runner in the same change; `P3-2` asserts every named suite exists and is not
-git-ignored, and CI runs all three on both platforms.
+git-ignored, and CI runs all three on Ubuntu.
 
 The two provider-installation proofs now run in
 `test/provider-installation.test.mjs`: R-W9-a starts the rendered installed MCP
@@ -71,17 +64,17 @@ See [Phase 4 acceptance](phase-4-acceptance.md) for the matrix and limitations.
 ## Release acceptance gate
 
 Development CI runs dependency installation, provider projection, provider and
-engine tests, TypeScript tests, and installed behavior on **both** Ubuntu and
-Windows for the same commit. Ubuntu's result is the gate; Windows' result is
-evidence recorded in the release report. If `MIGRATION_FORMAT_VERSION` or the
+engine tests, TypeScript tests, and installed behavior on Ubuntu for the same
+commit. Ubuntu's result is the gate. If `MIGRATION_FORMAT_VERSION` or the
 approval boundary changed, their owning tests remain part of that CI evidence. A
 skill change must include generated provider trees and `skills-lock.json` in
 that candidate commit.
 
 After the candidate SHA is green on Ubuntu, prepare the release version and
 generated stamps as a new commit, then require CI on that **exact new SHA**:
-Ubuntu success, Windows executed and recorded. The previous commit's checks do
-not transfer to the version commit.
+all three Ubuntu shards executed and succeeded, and `toolkit (ubuntu-latest)`
+succeeded. The previous commit's checks do not transfer to the version commit,
+so the release and version commits carry no `CI-Validated-Review` trailer.
 For the green release SHA, run `pnpm release:check`, `pnpm release:build`,
 `pnpm release:verify <staged-dir>`, and one installed smoke against the staged
 bundle. These prove clean identity and packaging. Do not rerun the entire

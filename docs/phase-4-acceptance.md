@@ -127,7 +127,8 @@ clean committed release and protected tag remain separate release gates.
 These are automated filesystem/configuration and engine/MCP acceptance
 checks on Linux. They do not claim interactive discovery in all four
 native host UIs, a marketplace installation, signing ownership approval, or a
-Windows execution result. CI owns Windows execution. Production Claude namespace
+Windows execution result. CI does not run Windows; see
+[Windows CI status](ci-release-hardening.md#windows-ci-status). Production Claude namespace
 and marketplace/signing approval remain release-owner decisions from the plan.
 
 ## Remaining Phase 5 work

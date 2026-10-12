@@ -2742,7 +2742,7 @@ const CONSOLIDATED_FINDINGS = [
   "P1-11",
 ];
 
-test("P2-5: every consolidated P0/P1 scenario is owned by this suite, and engine:test runs it on both platforms", async () => {
+test("P2-5: every consolidated P0/P1 scenario is owned by this suite, and engine:test runs it in CI", async () => {
   const suite = path
     .relative(repositoryRoot, fileURLToPath(import.meta.url))
     .split(path.sep)
@@ -2767,20 +2767,14 @@ test("P2-5: every consolidated P0/P1 scenario is owned by this suite, and engine
     `engine:test must execute ${suite}`,
   );
 
-  // CI is the other half of "repository-owned": the suite drives real file
-  // locking, atomic renames, and path handling, so Windows and Linux are
-  // different systems under test, not the same one twice.
+  // CI is the other half of "repository-owned". Ubuntu is the one required
+  // platform; Windows CI was removed (docs/ci-release-hardening.md).
   const workflow = await readFile(
     path.join(repositoryRoot, ".github/workflows/ci.yml"),
     "utf8",
   );
   assert.match(workflow, /run: pnpm engine:test/);
-  for (const platform of ["ubuntu-latest", "windows-latest"]) {
-    assert.ok(
-      workflow.includes(platform),
-      `CI must run on ${platform}`,
-    );
-  }
+  assert.ok(workflow.includes("ubuntu-latest"), "CI must run on ubuntu-latest");
 });
 
 // --- P2-6: CI can actually run the generator check --------------------------
