@@ -349,10 +349,10 @@ pnpm providers:test   # provider projection, ownership, and parity
 pnpm test             # all three
 ```
 
-Both runners are mandatory, and both are required on Linux **and** Windows: the
-engine drives real file locking, atomic renames, `git ls-files`, and child
-processes, and Windows has no `flock`. Windows CI is currently advisory (and
-paused during Track A); see [docs/release.md](docs/release.md).
+Both runners are mandatory, and CI runs them on Ubuntu, the only required CI and
+release platform. Windows CI is not run and not required for release, and
+Windows compatibility has not been validated; see
+[docs/release.md](docs/release.md).
 
 An unnamed suite is an unrun suite. Adding a suite means adding it to
 `engine:test` in the same change.
