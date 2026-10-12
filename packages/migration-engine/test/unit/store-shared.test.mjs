@@ -83,7 +83,7 @@ const names = (node) => {
 
 // -- boundary ----------------------------------------------------------------
 
-const MODULES = ["store", "shared", "formats", "decisions", "census", "slices"];
+const MODULES = ["store", "shared", "formats", "decisions", "census", "slices", "visual"];
 // store may reach down to formats, shared and the leaf `engine-paths.mjs`;
 // formats only to shared (Track A2, layering option (b)); decisions only to
 // store, formats and shared (Track A3), so it reads no census, slice, visual,
@@ -92,9 +92,12 @@ const MODULES = ["store", "shared", "formats", "decisions", "census", "slices"];
 // transport facts reach it only as data from its seams; census only to
 // decisions, store, formats, shared and, like store, the leaf `engine-paths.mjs`
 // that names the scanner's installed skill root (Track A5), so visual, slices,
-// lifecycle and transport rules reach it only as data; shared reaches nothing
+// lifecycle and transport rules reach it only as data; visual only to census,
+// decisions, store, formats and shared (Track A6), so slice, lifecycle and
+// transport facts reach it only as data from its seams; shared reaches nothing
 // in the engine. Anything else would be an upward edge or a cycle.
 const ALLOWED = {
+  visual: new Set(["census/index.mjs", "decisions/index.mjs", "store/index.mjs", "formats/index.mjs", "shared/index.mjs"]),
   slices: new Set(["decisions/index.mjs", "store/index.mjs", "formats/index.mjs", "shared/index.mjs"]),
   census: new Set(["decisions/index.mjs", "store/index.mjs", "formats/index.mjs", "shared/index.mjs", "engine-paths.mjs"]),
   decisions: new Set(["store/index.mjs", "formats/index.mjs", "shared/index.mjs"]),
@@ -107,7 +110,7 @@ const FS_WRITES = new Set([
   "mkdtemp", "open", "rename", "rm", "rmdir", "symlink", "truncate", "unlink", "utimes", "writeFile",
 ]);
 
-test("A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/, census/ and slices/ are reached only through index.mjs", async () => {
+test("A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/, census/, slices/ and visual/ are reached only through index.mjs", async () => {
   const offenders = [];
   for (const root of ["packages/migration-engine/src", "packages/migration-engine/test", "test", "scripts"]) {
     for (const file of await sourceFiles(path.join(repo, root))) {
@@ -124,7 +127,7 @@ test("A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/, c
   for (const module of MODULES) await readFile(path.join(src, module, "index.mjs"));
 });
 
-test("A1-ARCH-2: store/, shared/, formats/, decisions/, census/ and slices/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
+test("A1-ARCH-2: store/, shared/, formats/, decisions/, census/, slices/ and visual/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import", async () => {
   for (const module of MODULES) {
     for (const file of await sourceFiles(path.join(src, module))) {
       const label = path.relative(src, file);
@@ -173,6 +176,8 @@ const MOVED = {
   "census/scan.mjs": ["portable", "isWithin", "execFileAsync"],
   "upgrades/upgrade-migration.mjs": ["sha256", "exists", "readTree", "writeTree", "manifestOf"],
   "visual-evidence.mjs": ["sha256"],
+  // The visual primitives moved here in Track A6; the A1 rule follows them.
+  "visual/evidence.mjs": ["sha256"],
 };
 
 test("A1-ARCH-3: a moved declaration has no second live implementation at its old site", async () => {

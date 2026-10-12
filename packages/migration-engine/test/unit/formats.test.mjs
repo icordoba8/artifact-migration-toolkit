@@ -43,7 +43,9 @@ const declared = (sf) => sf.statements.flatMap((statement) =>
 // an advance snapshot, formats' the upgrade preview (DR21).
 const SAME_NAME_OTHER_RULE = {
   "upgrades/upgrade-v4-to-v5.mjs": ["HISTORY_FILE", "INTEGRITY_FILE", "STATE_FILE", "STEP_FILES"],
-  "resumable-migration.mjs": ["confirmationIdFor", "FIGMA_NODE_ID"],
+  "resumable-migration.mjs": ["confirmationIdFor"],
+  // The canonical node-id rule moved with the Figma context validator (Track A6).
+  "visual/authority.mjs": ["FIGMA_NODE_ID"],
 };
 
 test("A2-ARCH-1: every formats declaration has exactly one live definition, inside formats/", async () => {
