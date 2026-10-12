@@ -38,8 +38,8 @@ import {
   figmaStroke,
   figmaShadows,
   strokeFromComputedStyle,
-} from "../../src/visual-evidence.mjs";
-import { compareVisualFact } from "../../src/resumable-migration.mjs";
+  compareVisualFact,
+} from "../../src/visual/index.mjs";
 import { structuredNodes } from "../support/structured-figma-fixture.mjs";
 
 const raster = (scale = 1, shift = 0, alpha = 255) => {

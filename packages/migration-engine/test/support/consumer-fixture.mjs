@@ -16,12 +16,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { removeTree } from "./portability.mjs";
 
-import { resolveRegistryPath } from "../../src/migration-utils.mjs";
+import { resolveRegistryPath } from "../../src/store/index.mjs";
 import {
   assertExecutionConfirmation,
   bootstrapMigration,
   previewMigrationExecution,
-} from "../../src/resumable-migration.mjs";
+} from "../../src/lifecycle/index.mjs";
 
 export { SPEC, LEGACY_INVENTORY, MODULE_CLASSIFICATION };
 

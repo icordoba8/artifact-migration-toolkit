@@ -24,7 +24,7 @@ import {
   runDiscoveryScan,
   structuralUnits,
   VISUAL_KINDS,
-} from "../../src/discovery-scan.mjs";
+} from "../../src/census/index.mjs";
 
 const execFileAsync = promisify(execFile);
 

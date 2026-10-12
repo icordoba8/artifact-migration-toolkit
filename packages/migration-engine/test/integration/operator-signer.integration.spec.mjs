@@ -22,7 +22,7 @@ import {
   renderDecisionReview,
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
-import { attestationVerifierScope, candidateDigestOf } from "../../src/resumable-migration.mjs";
+import { attestationVerifierScope, candidateDigestOf } from "../../src/decisions/index.mjs";
 import { createOperatorSigner, openSignerStore, startReviewCompanion } from "../../src/operator-signer.mjs";
 import {
   addLegacyFiles,

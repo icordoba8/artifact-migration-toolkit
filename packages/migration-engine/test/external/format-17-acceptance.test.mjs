@@ -26,7 +26,10 @@ import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 import { createUnstampedRecord } from "../support/consumer-fixture.mjs";
 import { downgradeToV4, readTree } from "../support/downgrade-v4.mjs";
 import { stopChild } from "../support/portability.mjs";
-import { MIGRATION_FORMAT_VERSION, REQUIRED_OBSERVATIONS_FORMAT } from "../../src/resumable-migration.mjs";
+import {
+  MIGRATION_FORMAT_VERSION,
+  REQUIRED_OBSERVATIONS_FORMAT,
+} from "../../src/formats/index.mjs";
 import { validateToolkitIdentity } from "../../src/toolkit-identity.mjs";
 
 const execFileAsync = promisify(execFile);

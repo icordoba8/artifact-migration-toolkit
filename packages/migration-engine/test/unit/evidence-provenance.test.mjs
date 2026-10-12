@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sourceOfEvidence } from "../../src/resumable-migration.mjs";
+import { sourceOfEvidence } from "../../src/census/index.mjs";
 
 const SOURCES = ["catalog-source", "catalog-target"];
 

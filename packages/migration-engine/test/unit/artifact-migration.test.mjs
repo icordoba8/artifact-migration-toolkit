@@ -29,12 +29,32 @@ import {
   parserResolutionError,
   runDiscoveryScan,
 } from "../../src/core.mjs";
-import { artifactPrerequisiteWork, candidateDigestOf, createNewFormatDecisionGroup } from "../../src/resumable-migration.mjs";
+import {
+  artifactPrerequisiteWork,
+  lockPathFor,
+  artifactArgumentsFor,
+  artifactCommandFor,
+  artifactOperatorDecisions,
+  getArtifactStatus,
+  previewArtifact,
+  previewArtifactFormatUpgrade,
+  hasCodeValidationCheck,
+  artifactCheckpointArtifacts as checkpointArtifacts,
+  progressState,
+  readArtifactState,
+  runArtifact,
+  upgradeArtifactFormat,
+  validateArtifactComplete,
+  reconcileArtifactDecisions,
+} from "../../src/lifecycle/index.mjs";
+import {
+  candidateDigestOf,
+  createNewFormatDecisionGroup,
+  attestationVerifierScope,
+} from "../../src/decisions/index.mjs";
 import { assertReviewedCandidateCurrent, beginAttestedDecision, buildDecision, completeAttestedDecision, runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { ATTESTED_ARTIFACT_KINDS } from "../../src/operator-webauthn.mjs";
-import { attestationVerifierScope } from "../../src/resumable-migration.mjs";
 import { enrolledSigner } from "../support/signer-fixture.mjs";
-import { lockPathFor } from "../../src/module-lock.mjs";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import {
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
@@ -42,28 +62,18 @@ import {
   ARTIFACT_FORMAT_UPGRADE_FLOOR,
   ARTIFACT_FORMAT_VERSION,
   artifactFormatUpgrade,
-  artifactArgumentsFor,
-  artifactCommandFor,
+} from "../../src/formats/index.mjs";
+import {
   artifactEvidenceDigest,
-  artifactIdFor,
   artifactRoot,
-  artifactOperatorDecisions,
-  getArtifactStatus,
-  previewArtifact,
-  previewArtifactFormatUpgrade,
+} from "../../src/store/index.mjs";
+import {
+  artifactIdFor,
   architectureFindings,
-  hasCodeValidationCheck,
   legacyDependencies,
-  checkpointArtifacts,
-  progressState,
-  readArtifactState,
-  runArtifact,
   structuralUnits,
   targetTypeScript,
-  upgradeArtifactFormat,
-  validateArtifactComplete,
-  reconcileArtifactDecisions,
-} from "../../src/artifact/artifact-migration.mjs";
+} from "../../src/census/index.mjs";
 import { artifactDirective, parseArtifactArguments, runArtifactCli } from "../../src/artifact/run-artifact.mjs";
 import { parseRunArguments } from "../../src/cli/run-migration.mjs";
 

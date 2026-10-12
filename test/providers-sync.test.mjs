@@ -1282,6 +1282,8 @@ const CURRENT_GUIDANCE = [
   "docs/command-reference.md",
   "docs/release.md",
   "docs/architecture/a9-instructions.md",
+  "docs/architecture/a10-tests.md",
+  "OWNERSHIP.md",
   ...SKILLS.map((skill) => `skills/${skill}/SKILL.md`),
   "skills/migrate-artifact/references/artifact-contract.md",
   "skills/start-migration/references/discovery-checklist.md",

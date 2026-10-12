@@ -43,7 +43,7 @@ import {
   readRecordedDecisions,
   resolveGroupDecision,
   validateProtectedDecisionPolicy,
-} from "../../src/resumable-migration.mjs";
+} from "../../src/decisions/index.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.resolve(

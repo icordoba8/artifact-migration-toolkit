@@ -175,6 +175,13 @@ jobs:
         if: ${{ matrix.shard == 2 }}
         run: pnpm rehearse:negative
 
+      # Module entries, dependency direction, cycles, facades, provider trees,
+      # filesystem writers, size pins, test imports and suite registration
+      # (docs/architecture/a10-tests.md). Its own tests are in providers:test:3.
+      - name: Check the engine architecture
+        if: ${{ matrix.shard == 3 }}
+        run: pnpm architecture:check
+
       # Lifecycle, formats, decisions, integrity, MCP, discovery, artifact, and
       # the external-installation / rendered-command path suites.
       - name: Run the engine suites

@@ -13,13 +13,11 @@ import { promisify } from "node:util";
 import { FINAL_GATES } from "../../../../src/core.mjs";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error -- untyped production JS module, consumed directly for real fixture behavior.
-import {
-  artifactEvidenceDigest,
-  artifactIdFor,
-  artifactRoot,
-  readArtifactState,
-  runArtifact,
-} from "../../../../src/artifact/artifact-migration.mjs";
+import { artifactEvidenceDigest, artifactRoot } from "../../../../src/store/index.mjs";
+// @ts-expect-error -- untyped production JS module.
+import { artifactIdFor } from "../../../../src/census/index.mjs";
+// @ts-expect-error -- untyped production JS module.
+import { readArtifactState, runArtifact } from "../../../../src/lifecycle/index.mjs";
 
 const execFileAsync = promisify(execFile);
 

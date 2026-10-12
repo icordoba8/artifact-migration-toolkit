@@ -16,7 +16,7 @@ import {
   isContentIdentity,
   isTextIdentityEligible,
   parseContentIdentity,
-} from "../../src/migration-utils.mjs";
+} from "../../src/shared/index.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const text = (value) => Buffer.from(value, "utf8");
