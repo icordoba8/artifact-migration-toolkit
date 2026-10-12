@@ -4,12 +4,13 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { linkPackageDependencies } from "../packages/migration-engine/test/support/dependency-links.mjs";
 import { checkArchitecture, format } from "../scripts/check-architecture.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -88,7 +89,7 @@ const gateCopy = async (t, prefix) => {
   for (const entry of [`${ENGINE}/package.json`, SRC, `${ENGINE}/test`, "providers", "test", "scripts/runtime-bootstrap.mjs", "scripts/engine-test.mjs", "package.json", "vitest.config.ts", "OWNERSHIP.md", "docs/architecture"]) {
     await cp(path.join(repo, entry), path.join(root, entry), { recursive: true, verbatimSymlinks: true });
   }
-  await symlink(path.join(repo, ENGINE, "node_modules"), path.join(root, ENGINE, "node_modules"), "junction");
+  await linkPackageDependencies(root, ENGINE);
   return root;
 };
 
