@@ -25,8 +25,16 @@ or failing Windows result cannot block a release. Windows compatibility has
 [Windows CI status](ci-release-hardening.md#windows-ci-status) for the
 historical failures and the conditions for any future reconsideration.
 
-GitHub required checks enforce the Ubuntu gate before merge; local
-`release:check` cannot query or substitute for those checks.
+**Current enforcement:** Ubuntu CI runs on every push and provides the
+`toolkit (ubuntu-latest)` gate, but GitHub does **not** currently require it:
+the `main` rulesets restrict updates to the owner and block deletion and
+force-push, and require no status check. Nothing in GitHub prevents a red or
+unrun SHA from landing on `main`. The release operator must independently
+confirm that all three `toolkit shard N/3 (ubuntu-latest)` jobs executed and
+succeeded, and that `toolkit (ubuntu-latest)` succeeded, on the exact release
+SHA. Local `release:check` cannot query or substitute for that evidence.
+The recommended future ruleset configuration is described in
+[Release preconditions](ci-release-hardening.md#release-preconditions).
 
 ### Release report
 
@@ -236,7 +244,8 @@ refuses mutable releases and assets without GitHub's SHA-256 digest.
 `pnpm release:verify <dir>` re-hashes
 a staged bundle against its own manifest. `pnpm release:check` is the local
 identity gate: a clean tree, agreeing versions, fully committed payload. The
-required GitHub checks are separate evidence for that exact SHA.
+Ubuntu shard and gate results, verified by the release operator, are separate
+evidence for that exact SHA.
 
 The content hash is **acyclic**. Inputs: canonical skills, engine payload,
 lockfile, and the committed provider payload with its placeholders *unrendered*.
