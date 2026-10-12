@@ -7768,7 +7768,7 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   // A record with no decision-bearing census -- too early, or a format whose
   // candidates cannot be derived at all -- reports null rather than failing a
   // status read: nothing here may block saying where the record stands.
-  const decisions = await import("./record-decision.mjs")
+  const decisions = await import("./decision-recorder.mjs")
     .then((module_) =>
       module_.projectDecisions({ registryPath, moduleName }),
     )
@@ -8392,7 +8392,7 @@ export const advanceMigration = async ({
     advanceUnderLock({ registryData, resolved, projectRoot, mode, step, slice, preview, hooks }),
   );
   if (!result.registrationPreview || mode !== "auto") return result;
-  const { maySelfConfirm } = await import("./migration-policy.mjs");
+  const { maySelfConfirm } = await import("./lifecycle-policy.mjs");
   if (
     !maySelfConfirm({ command: "registry", mode }) ||
     !maySelfConfirm({ command: "advance", mode })

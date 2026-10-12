@@ -823,12 +823,14 @@ test("no run invocation without a TTY ever writes the operator decision ledger",
 // --- 04 §11.3 run forges no TTY ---------------------------------------------
 
 test("run-migration.mjs cannot forge a TTY or hardcode a verdict", async () => {
+  // The driver's source is transport's since Track A7; its installed path is a facade.
   const source = await readFile(
-    path.join(scriptsRoot, "cli/run-migration.mjs"),
+    path.join(scriptsRoot, "transport/run.mjs"),
     "utf8",
   );
   // §14: no refusal, no self-confirm expression, and no exit-code literal live
-  // here -- each has exactly one definition site in `migration-policy.mjs`.
+  // here -- each has exactly one definition site, in `transport/arguments.mjs`
+  // or `lifecycle-policy.mjs` (both re-exported by `migration-policy.mjs`).
   assert.doesNotMatch(source, /maySelfConfirm|confirmationId/);
   assert.doesNotMatch(source, /process\.exitCode\s*=\s*\d/);
   // `--step` is never forwarded: the core defaults it from `state.currentStep`.

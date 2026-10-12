@@ -5021,8 +5021,9 @@ test("R-W7-c: --mode step emits no directive from the artifact front end either"
 });
 
 test("R-W7-d: the artifact front ends carry no second copy of a shared rule", async () => {
+  // The CLI's source is transport's since Track A7; run-artifact.mjs is its facade.
   const sources = await Promise.all(
-    ["run-artifact.mjs", "artifact-migration.mjs"].map(async (file) => [
+    ["../transport/artifact.mjs", "artifact-migration.mjs"].map(async (file) => [
       file,
       await readFile(path.join(scriptsRoot, file), "utf8"),
     ]),
@@ -5052,7 +5053,7 @@ test("R-W7-d: the artifact front ends carry no second copy of a shared rule", as
 
   // The consent regex is gone: "what counts as approval" has one answer, and it
   // is not a pattern match in a CLI.
-  const cli = sources.find(([file]) => file === "run-artifact.mjs")[1];
+  const cli = sources.find(([file]) => file === "../transport/artifact.mjs")[1];
   assert.doesNotMatch(cli, /yes\|y\|si/i, "the artifact CLI decides consent by regex");
   assert.doesNotMatch(cli, /createInterface/, "the artifact CLI prompts interactively");
 

@@ -6,7 +6,7 @@ import {
   renderCandidateBlock,
   renderDecisionReview,
 } from "./decisions/index.mjs";
-import { runRecordDecisionCli } from "./record-decision.mjs";
+import { runRecordDecisionCli } from "./decision-recorder.mjs";
 
 // Compatibility re-export (Track A3): the offer renderers are decisions-owned now.
 export { renderCandidateBlock, renderGroupBlock } from "./decisions/index.mjs";

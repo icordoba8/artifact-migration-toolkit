@@ -153,10 +153,11 @@ test("no pseudo-interactive prompt is reachable under the AUTO principal", async
 });
 
 test("the step-mode stop prose names the mode that caused it", async () => {
+  // The front ends' source is transport's since Track A7.
   for (const front of [
-    "cli/discover-module.mjs",
-    "cli/advance-migration.mjs",
-    "cli/update-migration-registry.mjs",
+    "transport/discover.mjs",
+    "transport/advance.mjs",
+    "transport/registry.mjs",
   ]) {
     const text = await readFile(path.join(sourceRoot, front), "utf8");
     assert.match(
