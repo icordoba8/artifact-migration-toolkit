@@ -17,7 +17,8 @@ into `providers:test:1..3` (never within a file); every shard first asserts the
 three lists partition `providers:test` exactly, and shard 3 also runs the engine
 suites. The `toolkit` job, named `toolkit (ubuntu-latest)`, needs every Ubuntu
 shard, runs `if: always()`, and succeeds only when `needs.ubuntu.result` is
-`success` — so it stays the one required check:
+`success` — so it is the one gate result to check (GitHub does not currently
+require it; see *Release preconditions*):
 
 | Gate | PR | Main | Release SHA | Reason |
 | --- | --- | --- | --- | --- |
@@ -149,12 +150,24 @@ The candidate and final version commits each need, on their **own exact SHA**:
 - Windows: not required. The release report states `WINDOWS CI: NOT_RUN (not
   required)`.
 
-Never call a SHA with red Ubuntu release-ready. Configure GitHub branch
-protection on `main` to require exactly one status check:
-`ci / toolkit (ubuntu-latest)`. Repository code cannot configure branch
-protection. No workflow or local script verifies remote check status; the
-release operator must read all three Ubuntu shard conclusions and the gate for
-the release SHA before running `release:check`.
+Never call a SHA with red Ubuntu release-ready.
+
+**Current enforcement.** Ubuntu CI runs and provides the
+`toolkit (ubuntu-latest)` gate, but GitHub does not require it. The `main`
+rulesets (`main-owner-only`, `main-safety`) restrict updates to the owner and
+block deletion and non-fast-forward pushes; neither requires a status check,
+and `main` has no classic branch protection. No workflow or local script
+verifies remote check status. The release operator must independently read
+all three Ubuntu shard conclusions and the gate for the exact release SHA
+before running `release:check`.
+
+**Recommended future configuration (not in effect).** Add a
+`required_status_checks` rule to a `main` ruleset requiring exactly one check:
+`toolkit (ubuntu-latest)`. Repository code cannot configure rulesets; only the
+owner can. Note that a required check also blocks directly pushing a new squash
+SHA to `main` (its check cannot have run yet), so adopting it means changing
+the integration flow or granting a bypass. Until such a rule exists, the
+manual verification above is the only enforcement.
 
 ## Release validation
 
