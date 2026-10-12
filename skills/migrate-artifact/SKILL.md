@@ -169,21 +169,13 @@ its own gates, and its own format axis (contract 1 / active format 14 /
 supported format 14 / workflow 1.0,
 deliberately independent of the module engine's).
 
-Everything else is **imported from the module core**
-(`@artifact-migration-tools/migration-engine`, whose entry point is `core.mjs`)
-and must never be reimplemented here:
-
-| Concern | Owner |
-| --- | --- |
-| Mode vocabulary and option combinations | `migration-policy.mjs` (`MIGRATION_MODES`, `assertOptionCombination("artifact", …)`) |
-| The closed outcome set and exit codes | `migration-policy.mjs` (`MIGRATION_OUTCOMES`, `exitCodeFor`) |
-| Loop directives | `resumable-migration.mjs` (`renderLoopDirective`) |
-| Two-phase confirmation | the agent, under `start-migration/SKILL.md` — never a regex in a CLI |
-| Module locking | `module-lock.mjs` (`withModuleLock`) |
-| Safe paths and atomic writes | `migration-utils.mjs` |
-| Operator decision recording | `record-decision.mjs` — one gate, two ledgers |
-| Progress projection | `resumable-migration.mjs` (`migrationProgress`, `renderProgress`) |
-| Format-upgrade primitives | `format-upgrade.mjs` (`nextIncrement`, `classifyUpgrade`, `assertRegistryCoverage`, `upgradeProjection`) |
+Everything else — mode and outcome vocabulary, option combinations, loop
+directives, locking and journals, safe paths and atomic writes, operator
+decision recording (one gate, two ledgers), progress projection and the
+format-upgrade primitives — is the same shared engine code the module engine
+uses, and must never be reimplemented for artifacts. Two-phase confirmation
+belongs to the agent, under `start-migration/SKILL.md`, never to a regex in a
+CLI. The README's *Engine source layout* names the owning modules.
 
 ### Format upgrades on this axis
 
@@ -203,12 +195,8 @@ A rule with two definition sites has two answers, and the second one is the one
 nobody re-reads. This engine once carried its own loop renderer and could emit
 `loop: STOP reason=CONTINUE` — a token outside the closed stop set — at the one
 place the protocol requires a provider to obey literally. A contract test now
-fails the build if any of these literals reappear in the artifact scripts.
-
-The dependency direction is fixed: this engine imports the module core, and the
-module core imports this engine lazily (to delegate a `SHARED_PREREQUISITE`) so
-the static module graph stays acyclic. Never add a static import in that
-direction.
+fails the build if the artifact front end or lifecycle carries its own loop
+directive, mode literal or outcome-to-exit-code mapping again.
 
 ## Provider Short-Circuit Invariant
 

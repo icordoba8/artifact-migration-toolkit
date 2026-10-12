@@ -164,6 +164,14 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
     "migration_scan",
     "migration_status",
   ]);
+  // A9: the command reference maps every exposed tool, and only those, to its
+  // installed command.
+  const reference = await readFile(path.join(repositoryRoot, "docs/command-reference.md"), "utf8");
+  const mapped = reference.slice(reference.indexOf("| MCP tool | Installed command |"));
+  assert.deepEqual(
+    [...mapped.slice(0, mapped.indexOf("\n\n")).matchAll(/^\| `([a-z_]+)` \|/gm)].map(([, name]) => name).sort(),
+    tools.map((tool) => tool.name).sort(),
+  );
   const run = tools.find((tool) => tool.name === "migration_run");
   const readOnlyTools = tools.filter((tool) => tool !== run && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
   for (const tool of readOnlyTools) {

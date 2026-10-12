@@ -1270,3 +1270,65 @@ test("a committed skill identity that disagrees with the root manifest blocks th
   assert.equal(blockerFor(drifted, "start-migration").length, 1, drifted.blockers.join("; "));
   assert.deepEqual(blockerFor(drifted, "migrate-artifact"), []);
 });
+
+/**
+ * A9. Current operator and agent guidance -- not the historical plans and
+ * snapshots under docs/ -- may only link to files and headings that exist, and
+ * may only name repository source paths that exist. v5-contract.md is frozen
+ * persisted material, so it is not current guidance either.
+ */
+const CURRENT_GUIDANCE = [
+  "README.md",
+  "docs/command-reference.md",
+  "docs/release.md",
+  "docs/architecture/a9-instructions.md",
+  ...SKILLS.map((skill) => `skills/${skill}/SKILL.md`),
+  "skills/migrate-artifact/references/artifact-contract.md",
+  "skills/start-migration/references/discovery-checklist.md",
+  "skills/start-migration/references/migration-contract.md",
+  "skills/start-migration/references/provider-compatibility.md",
+];
+
+// GitHub's heading anchors: lower-case, punctuation dropped, spaces to hyphens,
+// repeated headings numbered.
+const headingAnchors = (markdown) => {
+  const seen = new Map();
+  const anchors = new Set();
+  for (const [, heading] of markdown.replace(/```[\s\S]*?```/g, "").matchAll(/^#{1,6} (.+)$/gm)) {
+    const slug = heading.toLowerCase().replace(/[^\p{L}\p{N} _-]/gu, "").replaceAll(" ", "-");
+    const count = seen.get(slug) ?? 0;
+    seen.set(slug, count + 1);
+    anchors.add(count ? `${slug}-${count}` : slug);
+  }
+  return anchors;
+};
+
+test("current guidance links and named source paths resolve", async () => {
+  const problems = [];
+  for (const document of CURRENT_GUIDANCE) {
+    const text = await readText(repositoryRoot, document);
+    const directory = path.posix.dirname(document);
+    for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+      if (/^(https?:|mailto:|<)/.test(target)) continue;
+      const [file, anchor] = target.split("#");
+      const resolved = file ? path.posix.normalize(path.posix.join(directory, file)) : document;
+      if (!(await pathExists(repositoryRoot, resolved))) {
+        problems.push(`${document}: link ${target} names a missing file`);
+      } else if (anchor && !resolved.endsWith("/") && resolved.endsWith(".md") &&
+        !headingAnchors(await readText(repositoryRoot, resolved)).has(anchor)) {
+        problems.push(`${document}: link ${target} names a missing heading`);
+      }
+    }
+    const skillDirectory = document.startsWith("skills/") ? document.split("/").slice(0, 2).join("/") : null;
+    for (const [, named] of text.matchAll(/`((?:packages|scripts|docs|providers|test|src)\/[\w./-]+\.(?:mjs|md|json))`/g)) {
+      if (named.startsWith("src/") && !named.endsWith(".mjs")) continue;
+      // Written only into a staged release, never committed (docs/release.md).
+      if (named.endsWith("/build-identity.json")) continue;
+      // A skill-relative path (`scripts/runtime.mjs`) resolves in either skill.
+      const roots = [".", directory, skillDirectory ?? "skills/start-migration", "packages/migration-engine"];
+      const found = await Promise.all(roots.map((root) => pathExists(repositoryRoot, path.posix.join(root, named))));
+      if (!found.includes(true)) problems.push(`${document}: names missing path ${named}`);
+    }
+  }
+  assert.deepEqual(problems, []);
+});

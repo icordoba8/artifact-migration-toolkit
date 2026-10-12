@@ -1,5 +1,10 @@
 # start-migration — Architecture Improvement Plan
 
+> Historical plan. Track A carried out its engine split as the nine modules in
+> the [current architecture](../README.md#engine-source-layout); each track's
+> ownership record is under [`docs/architecture/`](architecture/). The status,
+> metrics and schedule below are as written.
+
 **Status:** proposal, not started.
 **Precondition:** Priority 1 (functional skill) must be met first. See Phase 0.
 **Window:** 5 working days maximum, with Day 5 as buffer and release.

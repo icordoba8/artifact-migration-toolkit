@@ -110,6 +110,65 @@ For a module migration that follows Figma visuals:
 
 Recovery switches such as `--refresh`, `--reopen-discovery`, and `--reopen-ui` belong to the separate `artifact-migration-discover` operator command. They are not ordinary `start-migration` run arguments. Use them only when the engine reports the matching recovery need.
 
+Two explicit artifact operations are not ordinary run arguments either:
+`artifact-migrate <primary-source> --upgrade-format 14` previews the pristine
+historical 13 → 14 upgrade, and repeating it with `--confirm-format <id>`
+executes exactly that preview. Neither combines with `--status`. See
+[the artifact format axis](../skills/migrate-artifact/references/artifact-contract.md#format-axis-and-upgrades).
+
+## Engine commands and MCP tools
+
+The skills run the engine through its MCP server when the `start-migration`
+server is connected, and through the installed commands otherwise. Both reach
+the same engine functions. The runtime preflight returns each command's
+absolute path; run every command from the repository being migrated.
+
+| MCP tool | Installed command | Writes |
+| --- | --- | --- |
+| `migration_status` | `artifact-migration-discover <module> --status` | nothing |
+| `migration_scan` | `artifact-migration-discover <module> --scan` | nothing |
+| `migration_pending_decisions` | `artifact-migration-decision <module> --pending` | nothing |
+| `migration_run` | `artifact-migration-run <module> [options] --json` | at most one advance |
+| `migration_relay_decision` | `artifact-migration-decision <module> --relay <reference> --decision APPROVE\|REJECT` | one relayed operator decision |
+| `artifact_status` | `artifact-migrate <primary-source> --status` | nothing |
+| `artifact_run` | `artifact-migrate <primary-source> [options] --json` | at most one transition |
+
+Supply `cwd`, the absolute working directory of the migration, on every MCP
+call. `migration_relay_decision` relays only the operator's explicit
+answer to the review it names; no other tool accepts an approval-shaped
+argument.
+
+The operator-only commands have no MCP tool: bootstrap, refresh, reopen,
+rework and amendment (`artifact-migration-discover`), `--approve`, `--list` and
+`--verify` (`artifact-migration-decision`), `artifact-migration-registry`,
+`artifact-migration-upgrade`, `artifact-migration-validate`,
+`artifact-migration-advance` and `artifact-migration-toolkit`. A tool request
+named for one of those acts is refused with the command to run instead. The
+[start-migration skill](../skills/start-migration/SKILL.md#operator-commands)
+lists their syntax.
+
+### Outcomes and errors
+
+Every run ends with one typed outcome, which the `--json` output and the MCP
+result carry as `outcome`:
+
+| Outcome | Exit code | Directive |
+| --- | --- | --- |
+| `CONTINUE` | 0 | `loop: CONTINUE next=<command>` |
+| `FORMAT_UPGRADED` | 0 | `loop: CONTINUE next=<command>` |
+| `AWAITING_CONFIRMATION` | 0 | `loop: STOP reason=AWAITING_CONFIRMATION` |
+| `COMPLETE` | 0 | `loop: STOP reason=COMPLETE` |
+| `FAILED` | 1 | `loop: STOP reason=FAILED` |
+| `OPERATOR_DECISION` | 2 | `loop: STOP reason=OPERATOR_DECISION` |
+| `BLOCKED` | 2 | `loop: STOP reason=BLOCKED` |
+| `FORMAT_UPGRADE` | 2 | `loop: STOP reason=FORMAT_UPGRADE` |
+
+`--mode step` prints no directive. A command that exits non-zero without a
+directive has failed. Invalid arguments are refused before anything is written,
+with the reason on stderr. Runtime preflight refusals are typed codes listed in
+the [README](../README.md#when-the-preflight-refuses). Relay a refusal and its
+remedy; never work around it.
+
 ## Provider invocation
 
 The argument contract above is the same in each provider. Only the way you invoke an installed skill changes.

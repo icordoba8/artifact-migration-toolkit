@@ -24,7 +24,9 @@ Windows baseline and never had one; see
 why, the criteria to make it required again, and the bounded stabilization task
 that owns the backlog. A known Windows portability failure does not block
 publication during that period. Windows is **not** currently supported-green,
-and no release note may claim it is.
+and no release note may claim it is. During Track A the `windows` job is
+commented out of `.github/workflows/ci.yml`, so it does not execute; under the
+rule below that blocks a release until the job is restored.
 
 GitHub required checks enforce the Ubuntu gate before merge; local
 `release:check` cannot query or substitute for those checks.
@@ -93,7 +95,9 @@ Bumping `MIGRATION_FORMAT_VERSION` requires editing **one constant plus one
 table row**. If you find yourself editing a third place, the derivation is
 broken — fix the derivation, not the third place.
 
-1. Add the constant and its `usesX(state)` predicate in `resumable-migration.mjs`.
+1. Add the constant and its `usesX(state)` predicate in
+   `packages/migration-engine/src/formats/module.mjs` (the
+   `resumable-migration.mjs` compatibility path re-exports it).
 2. Add one row to `FORMAT_FEATURES`, highest-first.
 3. If the bump is non-promoting, add it to `NON_PROMOTING_FORMAT_VERSIONS` with
    the reason at its definition.
@@ -123,10 +127,13 @@ toolkit release.
 
 ## Approval boundary
 
-Any change to `src/record-decision.mjs`, `src/mcp-server.mjs`'s elicitation
-path, or `src/cli/run-migration.mjs`'s approval handling requires the full
-`R-W2-*` set plus both integration specs under
-`packages/migration-engine/test/integration/`.
+Any change to the decision recorder (`src/lifecycle/recorder.mjs`, run by
+`artifact-migration-decision` through `src/record-decision.mjs`), the offer loop
+(`src/lifecycle/approval.mjs`), the recording rules in `src/decisions/`, the MCP
+elicitation path (`src/transport/mcp.mjs`, run by `src/mcp-server.mjs`), or the
+run front end's approval handling (`src/transport/run.mjs`, run by
+`src/cli/run-migration.mjs`) requires the full `R-W2-*` set plus both
+integration specs under `packages/migration-engine/test/integration/`.
 
 Non-negotiable properties, each with an owning test:
 
@@ -138,7 +145,8 @@ Non-negotiable properties, each with an owning test:
 - One recorder body serves both ledgers. Two copies of a security boundary is
   one more than can be reviewed at once.
 - Refusal by *shape* as well as by name: an approval-shaped argument on any tool
-  but `migration_run` is refused.
+  but `migration_relay_decision` (whose `decision` is the operator's relayed
+  `APPROVE`/`REJECT`) is refused.
 
 The confirmation phrase is a transcription barrier against schema-derived
 auto-answers, **not** proof of humanity. Do not describe it to an operator as
@@ -156,19 +164,22 @@ Never weaken these without a plan revision:
 - `COMPLETE` means every modified target byte is attributable to a validated
   slice, an authorized rework, an authorized delegation, an engine-authored
   file, or a ledger-backed operator acceptance.
-- Drift acceptance is an operator decision under the standard challenge phrase,
-  bound to the path's SHA-256 — never a CLI flag. A flag is what turns a
+- Drift acceptance is an operator decision (the historical challenge phrase for
+  module formats ≤18, the policy-bound direct ledger for module 19), bound to
+  the path's SHA-256 — never a CLI flag. A flag is what turns a
   security boundary into a formality.
 
 ## The v5 upgrade contract is a hashed input
 
-`src/upgrades/upgrade-migration.mjs` hashes `references/v5-contract.md` into
-every upgrade transaction's `contractDigest`. That file is therefore **persisted
+The contract upgrade (`src/lifecycle/contract-upgrade.mjs`, run by
+`artifact-migration-upgrade` through `src/upgrades/upgrade-migration.mjs`) hashes
+`references/v5-contract.md` into every upgrade transaction's `contractDigest`. That file is therefore **persisted
 material, not documentation**: editing a byte changes a digest recorded in
 consumer state. `packages/migration-engine/references/v5-contract.md` is the
 runtime copy the engine reads; `skills/start-migration/references/v5-contract.md`
 is the canonical operator-facing copy. They are asserted byte-identical by
-`test/unit/v5-contract-parity.test.mjs`. Change both or neither.
+`packages/migration-engine/test/unit/v5-contract-parity.test.mjs`. Change both
+or neither.
 
 ## Versioning
 
