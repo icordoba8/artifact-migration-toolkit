@@ -276,7 +276,7 @@ test("STEP exposes the child command without creating child state", async () => 
       "NOT_STARTED",
     );
     assert.deepEqual(await manifest(current.targetRoot), before);
-    const driver = await readFile(path.join(scriptsRoot, "cli/run-migration.mjs"), "utf8");
+    const driver = await readFile(path.join(scriptsRoot, "transport/run.mjs"), "utf8");
     assert.match(
       driver,
       /if \(options\.mode === "step" && delegated\.nextWorkKind === "RUN_ARTIFACT"\)[\s\S]*return finish\("CONTINUE"/,
@@ -461,8 +461,8 @@ test("independent prerequisites follow module declaration order without inventin
 });
 
 test("MCP artifact iteration uses the shared recorder and exposes no approval tool", async () => {
-  const mcp = await readFile(path.join(scriptsRoot, "mcp-server.mjs"), "utf8");
-  const driver = await readFile(path.join(scriptsRoot, "cli/run-migration.mjs"), "utf8");
+  const mcp = await readFile(path.join(scriptsRoot, "transport/mcp.mjs"), "utf8");
+  const driver = await readFile(path.join(scriptsRoot, "transport/run.mjs"), "utf8");
   const artifact = await readFile(
     path.join(scriptsRoot, "artifact/artifact-migration.mjs"),
     "utf8",
@@ -578,8 +578,8 @@ test("OPERATOR-CHILD uses the trusted recorder and rejects wrong or replayed cha
 });
 
 test("OPERATOR-MCP routes parent and child decisions through one host recorder", async () => {
-  const mcp = await readFile(path.join(scriptsRoot, "mcp-server.mjs"), "utf8");
-  const driver = await readFile(path.join(scriptsRoot, "cli/run-migration.mjs"), "utf8");
+  const mcp = await readFile(path.join(scriptsRoot, "transport/mcp.mjs"), "utf8");
+  const driver = await readFile(path.join(scriptsRoot, "transport/run.mjs"), "utf8");
   assert.equal((mcp.match(/recordTrustedDecision:/g) ?? []).length, 2);
   assert.match(mcp, /trustedDecisionRecorder\(session, buffer\)/);
   assert.match(driver, /runArtifactCli\(binding\.arguments,[\s\S]*recordTrustedDecision/);

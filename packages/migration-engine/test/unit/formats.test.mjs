@@ -90,13 +90,14 @@ test("A2-ARCH-2: engine code imports formats-owned names from formats/index.mjs,
 //   artifact-migration: pristineFormatUpgrade (`!== 13`, the pristine 13 -> 14 source check),
 //     validateTransactionInput (`!== undefined && !== 14`, input admission
 //     with its own message), proveBootstrapTransaction (persisted == input).
-//   upgrade-migration: classify (`=== 3`) and executeUpgrade
-//     (`!== V5_FORMAT_VERSION`) read the frozen v4 -> v5 snapshot (Q5).
+//   upgrade-coordinator (upgrade-migration until Track A7): classify (`=== 3`)
+//     and executeUpgrade (`!== V5_FORMAT_VERSION`) read the frozen v4 -> v5
+//     snapshot (Q5).
 //   upgrade-v4-to-v5: the frozen snapshot itself.
 const RAW_FORMAT_COMPARISONS = {
   "artifact/artifact-migration.mjs": 4,
   "census/artifact.mjs": 1,
-  "upgrades/upgrade-migration.mjs": 2,
+  "upgrades/upgrade-coordinator.mjs": 2,
   "upgrades/upgrade-v4-to-v5.mjs": 2,
 };
 

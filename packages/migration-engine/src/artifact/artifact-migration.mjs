@@ -10,17 +10,8 @@ import {
 import { createRequire } from "node:module";
 import path from "node:path";
 
-import {
-  assertSafeName,
-  assertSecurePath,
-  atomicWrite,
-  exitCodeFor,
-  FINAL_GATES,
-  MIGRATION_MODES,
-  MIGRATION_OUTCOMES,
-  migrationProgress,
-  renderProgress,
-} from "../core.mjs";
+import { exitCodeFor, MIGRATION_MODES, MIGRATION_OUTCOMES } from "../lifecycle-policy.mjs";
+import { FINAL_GATES, migrationProgress, renderProgress } from "../resumable-migration.mjs";
 import {
   artifactCandidateEvidence,
   artifactDecisionCandidate,
@@ -118,6 +109,8 @@ import {
   assertArray as arrayOf,
   assertNonEmpty as nonEmpty,
   assertPlainObject as plainObject,
+  assertSafeName,
+  assertSecurePath,
   canonicalJson as canonical,
   exactObject,
   execFileAsync,
@@ -135,6 +128,7 @@ import {
 import {
   artifactEvidenceDigest,
   artifactRoot,
+  atomicWrite,
   fileExists as exists,
   fileHash,
   HISTORY_EVENT_KEYS,

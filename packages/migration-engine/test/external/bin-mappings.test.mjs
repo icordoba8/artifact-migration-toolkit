@@ -54,8 +54,10 @@ test("every bin names a module inside the package", async () => {
       /^#!\/usr\/bin\/env node\n/,
       `${name} -> ${relative} needs a shebang: a bin is a symlink on POSIX`,
     );
+    // Track A7: each bin is a facade whose one startup call asks the
+    // symlink-safe `isMainModule` (transport/entry.mjs).
     assert.ok(
-      source.includes("isMainModule(import.meta.url)"),
+      source.includes("startCommand(import.meta.url"),
       `${name} -> ${relative} must use the symlink-safe main guard`,
     );
   }

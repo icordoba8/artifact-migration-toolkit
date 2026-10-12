@@ -440,7 +440,9 @@ test("provider, TTY and MCP surfaces cannot attest, even beside an active protec
       await assert.rejects(runRecordDecisionCli(["auth", "--approve", candidate.id, "--webauthn", "{}"]), /Unknown option/);
     } finally { process.chdir(previousCwd); }
     assert.equal(await decisionLedger(fixture), null);
-    for (const file of ["mcp-server.mjs", "operator-approval.mjs", "cli/run-migration.mjs", "cli/advance-migration.mjs"]) {
+    // Track A7: the MCP and CLI code lives in transport/; the old paths are facades.
+    for (const file of ["mcp-server.mjs", "operator-approval.mjs", "cli/run-migration.mjs", "cli/advance-migration.mjs",
+      "transport/mcp.mjs", "transport/run.mjs", "transport/advance.mjs"]) {
       const source = await readFile(path.join(SRC, file), "utf8");
       assert.doesNotMatch(source, /operator-signer|completeAttestedDecision|beginAttestedDecision|beginEnrollment/, file);
     }

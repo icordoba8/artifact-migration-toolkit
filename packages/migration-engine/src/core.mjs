@@ -15,14 +15,14 @@
 
 // -- policy: every deterministic rule the front ends must not own (D2-4, D2-5)
 export {
-  assertOptionCombination,
   exitCodeFor,
   isAutoAuthority,
   maySelfConfirm,
   MIGRATION_MODES,
   MIGRATION_OUTCOMES,
   nextOutcome,
-} from "./migration-policy.mjs";
+} from "./lifecycle-policy.mjs";
+export { assertOptionCombination } from "./transport/index.mjs";
 
 // -- versions and lifecycle
 export {
@@ -164,13 +164,13 @@ export { LATE_DECISION_KINDS } from "./resumable-migration.mjs";
 // `03` D3-6: the lock-free, read-only candidate reader `run` narrows
 // `OPERATOR_DECISION` with. Reading candidates is not approving one -- the TTY
 // gate that governs approval lives in `runRecordDecisionCli` and is untouched.
-export { pendingDecisionCandidates } from "./record-decision.mjs";
+export { pendingDecisionCandidates } from "./decision-recorder.mjs";
 
 // The canonical fresh decision projection. One read-only view over current
 // candidates, trusted policy, both verified ledgers and checkpoint state --
 // status, pending decisions and run all consume this, so a consumer cannot
 // construct a second opinion by reading something else.
-export { projectDecisions } from "./record-decision.mjs";
+export { projectDecisions } from "./decision-recorder.mjs";
 export {
   DECISION_PROJECTION_STATES,
   projectModuleDecision,

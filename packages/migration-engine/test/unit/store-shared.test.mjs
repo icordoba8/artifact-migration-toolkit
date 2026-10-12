@@ -170,11 +170,15 @@ const MOVED = {
   "migration-utils.mjs": ["portablePath", "comparablePath", "samePath", "isWithin", "assertSecurePath", "assertProjectRootContainment", "assertPlainObject", "SAFE_NAME", "assertSafeName", "sha256Hex", "contentIdentity", "contentIdentityMatches", "execFileAsync", "gitRevision", "dirtyManifest", "atomicWrite", "fileContentIdentity", "fileContentIdentityMatches", "readRegistry", "resolveRegistryPath", "previewRegistryUpdate", "recoverRegistryJournal", "canonical"],
   "resumable-migration.mjs": ["isWithin", "isPlainObject", "assertPlainObject", "assertNonEmpty", "hashContent", "sha256Json", "now", "fileExists", "readJson", "hashFile", "fileIdentity", "migrationRoot", "INTEGRITY_FILE", "digestArtifactHashes", "renderIntegrity", "readIntegrity", "historyDigest", "canonicalHistoryJson", "hashHistoryEvent", "prepareHistoryEvent", "appendHistory", "sealHistoryTail", "readHistoryEvents", "assertUnanchoredHistoryTail", "removeEmptyParents"],
   "record-decision.mjs": ["appendDurably"],
+  // Track A7: the recorder moved here; the A1 rule follows it.
+  "decision-recorder.mjs": ["appendDurably"],
   "artifact/artifact-migration.mjs": ["portable", "sha256", "canonical", "jsonBytes", "samePath", "isWithin", "exists", "plainObject", "nonEmpty", "normalizeRelative", "secureHash", "pinDigest", "integrityFor", "artifactRoot", "readJsonAt"],
   "discovery-scan.mjs": ["portable", "isWithin", "execFileAsync"],
   // The scanner moved here in Track A5; the A1 rule follows it.
   "census/scan.mjs": ["portable", "isWithin", "execFileAsync"],
   "upgrades/upgrade-migration.mjs": ["sha256", "exists", "readTree", "writeTree", "manifestOf"],
+  // Track A7: the coordinator moved here; the A1 rule follows it.
+  "upgrades/upgrade-coordinator.mjs": ["sha256", "exists", "readTree", "writeTree", "manifestOf"],
   "visual-evidence.mjs": ["sha256"],
   // The visual primitives moved here in Track A6; the A1 rule follows them.
   "visual/evidence.mjs": ["sha256"],
