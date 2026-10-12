@@ -58,7 +58,6 @@ import { withModuleLock } from "./module-lock.mjs";
 import {
   assertRecordToolkitIdentity,
   BLOCKED_EXIT_CODE,
-  pendingVisualUnbackedCandidates,
   previewDiscoveryScan,
   readMigrationContext,
   readState,
@@ -66,6 +65,7 @@ import {
 } from "./resumable-migration.mjs";
 import { legacySourceBinding, legacySourcesOf } from "./census/index.mjs";
 import { pendingTargetDriftCandidates } from "./slices/index.mjs";
+import { pendingVisualUnbackedCandidates } from "./visual/index.mjs";
 import {
   appendApprovedCandidate,
   appendApprovedGroup,
