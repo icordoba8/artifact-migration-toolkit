@@ -12,7 +12,7 @@ import {
   engineSkillRoot,
 } from "./engine-paths.mjs";
 import { withModuleLock, writeJournalAtomic } from "./module-lock.mjs";
-import { assertSafeName, execFileAsync } from "./shared/index.mjs";
+import { execFileAsync } from "./shared/index.mjs";
 import {
   atomicWrite,
   persistProjectRegistryBinding,
@@ -21,6 +21,8 @@ import {
   recoverRegistryJournal,
   registryJournalPathFor,
 } from "./store/index.mjs";
+// Compatibility re-export (Track A5): this name is census-owned now.
+export { resolveLegacySources } from "./census/index.mjs";
 // Compatibility re-export (Track A2): these names are formats-owned now.
 export {
   assertFigmaSource,
@@ -66,22 +68,6 @@ export {
   resolveModule,
   resolveRegistryPath,
 } from "./store/index.mjs";
-
-/**
- * A direct twin of `resolveDesignSource` for `--legacy`: a repeatable flag
- * normalized into the persisted array, shared by the bootstrap and the
- * read-only preview so both agree on what gets pinned.
- *
- * Ordering is derived, never operator-controlled. `--legacy b --legacy a` and
- * `--legacy a --legacy b` must produce byte-identical state, because state
- * feeds the confirmation-ID snapshot; sorting here is what makes that true, and
- * it means nobody has to decide which source is "first".
- */
-export const resolveLegacySources = (legacy) => {
-  const names = Array.isArray(legacy) ? legacy : legacy ? [legacy] : [];
-  for (const name of names) assertSafeName(name, "legacy source");
-  return [...new Set(names)].sort();
-};
 
 /**
  * Unfinished upgrade transactions for one module. A non-DONE journal must stop
@@ -292,7 +278,7 @@ export const runDoctor = async ({
       "discovery-parser",
       "ts-discovery-compiler resolvable from the skill",
       async () => {
-        const { loadTypeScript } = await import("./discovery-scan.mjs");
+        const { loadTypeScript } = await import("./census/index.mjs");
         return `ts-discovery-compiler ${loadTypeScript().version}`;
       },
     ),

@@ -61,4 +61,5 @@ export {
   now,
   sameMembers,
   unique,
+  versionOne,
 } from "./values.mjs";

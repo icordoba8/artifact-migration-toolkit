@@ -72,6 +72,10 @@ export const exactObject = (value, label, required, optional = []) => {
   return value;
 };
 
+export const versionOne = (value, label) => {
+  if (value !== 1) throw new Error(`${label}.version must be 1.`);
+};
+
 export const unique = (values, label) => {
   const seen = new Set();
   for (const value of values) {

@@ -83,15 +83,17 @@ test("A2-ARCH-2: engine code imports formats-owned names from formats/index.mjs,
 // The raw `formatVersion` comparisons left outside formats/, each named: they
 // are not format-feature decisions a predicate could own without changing
 // behavior. Shrink this table when one moves; never grow it.
-//   artifact-migration: resolveArtifact (creation stamp vs ACTIVE/SUPPORTED),
-//     pristineFormatUpgrade (`!== 13`, the pristine 13 -> 14 source check),
+//   census/artifact: resolveArtifact (creation stamp vs ACTIVE/SUPPORTED),
+//     moved from artifact-migration by Track A5.
+//   artifact-migration: pristineFormatUpgrade (`!== 13`, the pristine 13 -> 14 source check),
 //     validateTransactionInput (`!== undefined && !== 14`, input admission
 //     with its own message), proveBootstrapTransaction (persisted == input).
 //   upgrade-migration: classify (`=== 3`) and executeUpgrade
 //     (`!== V5_FORMAT_VERSION`) read the frozen v4 -> v5 snapshot (Q5).
 //   upgrade-v4-to-v5: the frozen snapshot itself.
 const RAW_FORMAT_COMPARISONS = {
-  "artifact/artifact-migration.mjs": 5,
+  "artifact/artifact-migration.mjs": 4,
+  "census/artifact.mjs": 1,
   "upgrades/upgrade-migration.mjs": 2,
   "upgrades/upgrade-v4-to-v5.mjs": 2,
 };
