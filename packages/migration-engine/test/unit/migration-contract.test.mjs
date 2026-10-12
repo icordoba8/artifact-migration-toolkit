@@ -1283,6 +1283,39 @@ test("P0-1: a LIVE_MOVED transaction blocks preview and bootstrap with zero writ
   }
 });
 
+// Track A8 regression: the reopen, rework and repair transitions read the
+// record through the same lifecycle gate, so an unfinished upgrade transaction
+// refuses each of them before any lock-held write.
+test("P0-1: a LIVE_MOVED transaction blocks reopen, rework and repair with zero writes", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "DISCOVER_LEGACY");
+    await plantLiveMoved(fixture);
+    const before = await snapshot(fixture.root);
+    const resolution = await resolutionFor(fixture);
+    for (const transition of [
+      { refresh: true },
+      { reopenDiscovery: true, reopenReason: "a8" },
+      { reopenUi: ["auth-001"], reopenReason: "a8" },
+      { reopenComplete: ["auth-001"], reopenReason: "a8" },
+      { reworkSlice: "auth-001", reopenReason: "a8" },
+    ]) {
+      const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", openSpecProposal: SPEC, ...transition });
+      assert.equal(preview.requiresConfirmation, false, JSON.stringify(transition));
+      assert.equal(preview.confirmationId, null, JSON.stringify(transition));
+      assert.match(preview.blockers.join("\n"), /unfinished upgrade transaction/, JSON.stringify(transition));
+      await assert.rejects(
+        bootstrapMigration({ ...resolution, moduleName: "auth", openSpecProposal: SPEC, boundInputs: { any: "value" }, ...transition }),
+        /unfinished upgrade transaction/,
+      );
+    }
+    await assert.rejects(repairSliceState(fixture.targetRoot, "auth"), /unfinished upgrade transaction/);
+    assert.deepEqual(await snapshot(fixture.root), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("P0-1: the same hole through an absent state.json with no migration tree", async () => {
   const fixture = await createFixture();
   try {

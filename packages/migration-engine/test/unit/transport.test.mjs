@@ -184,6 +184,10 @@ test("A7-ARCH-4: one live implementation per transport declaration; the facades 
     "upgrades/upgrade-coordinator.mjs": ["parseUpgradeArguments", "runUpgradeCli"],
     "lifecycle-policy.mjs": ["assertOptionCombination", "MODE_MESSAGE", "RUN_REFUSED_OPTIONS", "assertMode", "assertStepName"],
     "operator-signer-host.mjs": ["startCommand"],
+    // Track A8: the split domain files moved into lifecycle/; the rule follows them.
+    "lifecycle/recorder.mjs": ["startCommand"],
+    "lifecycle/contract-upgrade.mjs": ["parseUpgradeArguments", "runUpgradeCli"],
+    "lifecycle/policy.mjs": ["assertOptionCombination", "MODE_MESSAGE", "RUN_REFUSED_OPTIONS", "assertMode", "assertStepName"],
   };
   for (const [file, names] of Object.entries(left)) {
     assert.deepEqual(declared(await parse(file)).filter((name) => names.includes(name)), [], file);
@@ -259,25 +263,41 @@ test("A7-ARCH-6: all ten bins keep their paths, shebangs and startup, and answer
 // What transport may reach of the decision authority: the recorder entry
 // (which compares the answer under the module lock), the relay, the offer loop
 // and read-only views. Nothing that builds, appends or answers a decision.
+// Track A8: the recorder and the offer loop live in lifecycle/, and transport
+// reaches them through lifecycle/index.mjs; each name is attributed to the file
+// the entry re-exports it from.
 const AUTHORITY_IMPORTS = {
-  "decision-recorder.mjs": ["pendingDecisionCandidates", "relayOperatorDecision", "runRecordDecisionCli"],
-  "operator-approval.mjs": ["approveWithOperator", "moduleApprover", "recorderFor"],
+  "lifecycle/recorder.mjs": ["pendingDecisionCandidates", "relayOperatorDecision", "runRecordDecisionCli"],
+  "lifecycle/approval.mjs": ["approveWithOperator", "moduleApprover", "recorderFor"],
   "decisions/index.mjs": ["renderDecisionReview", "reviewReference"],
 };
 
 test("A7-ARCH-7: MCP and the CLI reach decisions only through the recorder; no tool or argument can approve", async () => {
   const reached = {};
+  const lifecycleOrigin = new Map();
+  for (const statement of (await parse("lifecycle/index.mjs")).statements) {
+    if (!ts.isExportDeclaration(statement)) continue;
+    const origin = path.posix.join("lifecycle", statement.moduleSpecifier.text);
+    for (const element of statement.exportClause.elements) lifecycleOrigin.set(element.name.text, origin);
+  }
   for (const file of (await engineFiles()).filter((file) => file.startsWith("transport/"))) {
     for (const statement of (await parse(file)).statements) {
       if (!ts.isImportDeclaration(statement) || !statement.moduleSpecifier.text.startsWith(".")) continue;
       const target = path.posix.join(path.posix.dirname(file), statement.moduleSpecifier.text);
       const bindings = statement.importClause?.namedBindings;
       const names = bindings && ts.isNamedImports(bindings) ? bindings.elements.map((element) => (element.propertyName ?? element.name).text) : ["*"];
+      if (target === "lifecycle/index.mjs") {
+        for (const name of names) {
+          const origin = lifecycleOrigin.get(name);
+          assert.ok(origin, `${file}: ${name} is not a lifecycle export`);
+          if (/^lifecycle\/(recorder|approval|lock)\.mjs$/.test(origin)) (reached[origin] ??= new Set()).add(name);
+        }
+      }
       if (Object.hasOwn(AUTHORITY_IMPORTS, target) || /^decisions\//.test(target)) (reached[target] ??= new Set()) && names.forEach((name) => reached[target].add(name));
       if (target === "store/index.mjs") assert.deepEqual(names.filter((name) => /write|append|journal|remove|seal|commit/i.test(name)), [], file);
     }
     const sf = await parse(file);
-    for (const target of targets(file, sf)) assert.ok(!/^(module-lock|operator-signer|operator-webauthn)/.test(target), `${file} -> ${target}`);
+    for (const target of targets(file, sf)) assert.ok(!/^(module-lock|operator-signer|operator-webauthn|lifecycle\/(?!index\.mjs$))/.test(target), `${file} -> ${target}`);
   }
   assert.deepEqual(Object.fromEntries(Object.entries(reached).map(([target, names]) => [target, [...names].sort()])), AUTHORITY_IMPORTS);
   // At runtime: the tool list names no approval, and no schema accepts an approval-shaped key.

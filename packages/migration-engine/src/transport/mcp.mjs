@@ -37,23 +37,23 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { engineCommand } from "../engine-paths.mjs";
-import { exitCodeFor, MIGRATION_MODES } from "../lifecycle-policy.mjs";
 import {
+  exitCodeFor,
+  getArtifactStatus,
   getMigrationStatus,
+  MIGRATION_MODES,
+  pendingDecisionCandidates,
   previewDiscoveryScan,
+  relayOperatorDecision,
   renderLoopDirective,
   renderProgressBlock,
+  runArtifact,
+  runRecordDecisionCli,
   upgradeCommandFor,
-} from "../resumable-migration.mjs";
+} from "../lifecycle/index.mjs";
 import { resolveRegistryPath } from "../store/index.mjs";
 import { DESIGN_SOURCES, PONYTAIL_TARGETS, WORKFLOW_VERSION } from "../formats/index.mjs";
-import {
-  pendingDecisionCandidates,
-  relayOperatorDecision,
-  runRecordDecisionCli,
-} from "../decision-recorder.mjs";
 import { runMigration } from "./run.mjs";
-import { getArtifactStatus, runArtifact } from "../artifact/artifact-migration.mjs";
 import { artifactDirective } from "./artifact.mjs";
 
 const SERVER_NAME = "start-migration";

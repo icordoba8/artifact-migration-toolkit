@@ -5022,8 +5022,11 @@ test("R-W7-c: --mode step emits no directive from the artifact front end either"
 
 test("R-W7-d: the artifact front ends carry no second copy of a shared rule", async () => {
   // The CLI's source is transport's since Track A7; run-artifact.mjs is its facade.
+  // The engine's source is lifecycle's since Track A8; artifact-migration.mjs is its facade.
   const sources = await Promise.all(
-    ["../transport/artifact.mjs", "artifact-migration.mjs"].map(async (file) => [
+    ["../transport/artifact.mjs", "../lifecycle/artifact-record.mjs", "../lifecycle/artifact-execution.mjs",
+      "../lifecycle/artifact-checkpoints.mjs", "../lifecycle/artifact-transaction.mjs",
+      "../lifecycle/artifact-status.mjs", "../lifecycle/artifact-run.mjs"].map(async (file) => [
       file,
       await readFile(path.join(scriptsRoot, file), "utf8"),
     ]),

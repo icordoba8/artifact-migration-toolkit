@@ -352,8 +352,9 @@ test("a stale child blocks the parent", async () => {
       assertArtifactPrerequisites(state(), current, { ...plan(), all: true }),
       /STALE|drift/i,
     );
+    // Track A8: the module checkpoint validators live in lifecycle/validation.mjs.
     const engine = await readFile(
-      path.join(scriptsRoot, "resumable-migration.mjs"),
+      path.join(scriptsRoot, "lifecycle/validation.mjs"),
       "utf8",
     );
     assert.equal((engine.match(/await assertArtifactPrerequisites\(/g) ?? []).length, 2);
@@ -463,20 +464,21 @@ test("independent prerequisites follow module declaration order without inventin
 test("MCP artifact iteration uses the shared recorder and exposes no approval tool", async () => {
   const mcp = await readFile(path.join(scriptsRoot, "transport/mcp.mjs"), "utf8");
   const driver = await readFile(path.join(scriptsRoot, "transport/run.mjs"), "utf8");
+  // Track A8: the artifact run loop and the offer loop live in lifecycle/.
   const artifact = await readFile(
-    path.join(scriptsRoot, "artifact/artifact-migration.mjs"),
+    path.join(scriptsRoot, "lifecycle/artifact-run.mjs"),
     "utf8",
   );
   const boundary = await readFile(
-    path.join(scriptsRoot, "operator-approval.mjs"),
+    path.join(scriptsRoot, "lifecycle/approval.mjs"),
     "utf8",
   );
   assert.match(mcp, /name:\s*["']artifact_run/);
   assert.doesNotMatch(mcp, /name:\s*["']artifact_approve/);
   assert.match(mcp, /recordTrustedDecision/);
   assert.match(driver, /recordTrustedDecision/);
-  assert.match(driver, /from "\.\.\/operator-approval\.mjs"/);
-  assert.match(artifact, /from "\.\.\/operator-approval\.mjs"/);
+  assert.match(driver, /\bapproveWithOperator,[^}]*\} from "\.\.\/lifecycle\/index\.mjs"/);
+  assert.match(artifact, /\bapproveWithOperator,[^}]*\} from "\.\/approval\.mjs"/);
   assert.equal((boundary.match(/export const approveWithOperator/g) ?? []).length, 1);
   assert.doesNotMatch(mcp, /approve:\s*\{\s*type:/);
 });

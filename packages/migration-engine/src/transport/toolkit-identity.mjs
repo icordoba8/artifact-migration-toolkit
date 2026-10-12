@@ -14,7 +14,7 @@
 import { parseArgs } from "node:util";
 
 import { resolveRegistryPath } from "../store/index.mjs";
-import { changeModuleToolkitIdentity, getMigrationStatus } from "../resumable-migration.mjs";
+import { changeModuleToolkitIdentity, getMigrationStatus } from "../lifecycle/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { renderToolkitIdentity, toolkitIdentityStatus } from "../formats/index.mjs";
 
@@ -60,7 +60,7 @@ export const parseToolkitIdentityArguments = (arguments_) => {
   };
 };
 
-const artifactEngine = () => import("../artifact/artifact-migration.mjs");
+const artifactEngine = () => import("../lifecycle/index.mjs");
 
 const reportChange = (stdout, label, result) => {
   if (!result.changed) {

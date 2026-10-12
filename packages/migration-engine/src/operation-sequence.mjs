@@ -55,7 +55,7 @@ import {
   isAutoAuthority,
   previewMigrationExecution,
   readState,
-} from "./resumable-migration.mjs";
+} from "./lifecycle/index.mjs";
 import {
   addedFileFact,
   AMEND_SLICE,

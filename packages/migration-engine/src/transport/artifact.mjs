@@ -13,10 +13,15 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { assertOptionCombination } from "./arguments.mjs";
-import { exitCodeFor, MIGRATION_OUTCOMES } from "../lifecycle-policy.mjs";
-import { renderLoopDirective, renderProgressBlock } from "../resumable-migration.mjs";
+import {
+  exitCodeFor,
+  getArtifactStatus,
+  MIGRATION_OUTCOMES,
+  renderLoopDirective,
+  renderProgressBlock,
+  runArtifact,
+} from "../lifecycle/index.mjs";
 import { assertPonytailTarget } from "../formats/index.mjs";
-import { getArtifactStatus, runArtifact } from "../artifact/artifact-migration.mjs";
 
 export const parseArtifactArguments = (arguments_) => {
   const { positionals, values } = parseArgs({

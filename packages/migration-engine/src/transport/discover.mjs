@@ -5,21 +5,23 @@ import { parseArgs } from "node:util";
 import { runDoctor } from "../migration-utils.mjs";
 import { resolveRegistryPath } from "../store/index.mjs";
 import { assertOptionCombination } from "./arguments.mjs";
-import { exitCodeFor, maySelfConfirm, nextOutcome } from "../lifecycle-policy.mjs";
 import {
   adoptUiObservations,
   assertExecutionConfirmation,
   autoAdoptToolkitIdentity,
+  BLOCKED_EXIT_CODE,
   bootstrapMigration,
   commitFormatUpgrade,
+  exitCodeFor,
   getMigrationStatus,
+  maySelfConfirm,
+  nextOutcome,
   previewDiscoveryScan,
-  previewUiObservationsAdoption,
-  BLOCKED_EXIT_CODE,
   previewMigrationExecution,
+  previewUiObservationsAdoption,
   recoverMigrationRecord,
   renderLoopDirective,
-} from "../resumable-migration.mjs";
+} from "../lifecycle/index.mjs";
 import { renderToolkitAdoption } from "../formats/index.mjs";
 
 /**

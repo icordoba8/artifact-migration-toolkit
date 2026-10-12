@@ -836,8 +836,9 @@ test("run-migration.mjs cannot forge a TTY or hardcode a verdict", async () => {
   // `--step` is never forwarded: the core defaults it from `state.currentStep`.
   assert.doesNotMatch(source, /"--step"/);
   assert.match(source, /exitCodeFor\(/);
+  // Track A8: the boundary's implementation is lifecycle/approval.mjs.
   const boundary = await readFile(
-    path.join(scriptsRoot, "operator-approval.mjs"),
+    path.join(scriptsRoot, "lifecycle/approval.mjs"),
     "utf8",
   );
   // D4-1: the shared module/artifact boundary is the only place that reaches
