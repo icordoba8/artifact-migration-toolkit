@@ -41,11 +41,50 @@ import { comparisonPath, renderedCommandPattern } from "../support/portability.m
 import {
   dirtyManifest,
   gitRevision,
+} from "../../src/shared/index.mjs";
+import {
   previewRegistryUpdate,
   readRegistry,
   resolveRegistryPath,
+  artifactRoot,
+} from "../../src/store/index.mjs";
+import {
   updateRegistry,
-} from "../../src/migration-utils.mjs";
+  acquireModuleLock,
+  lockPathFor,
+  advanceMigration,
+  assertExecutionConfirmation,
+  BASELINE_ROWS_PIN,
+  bootstrapMigration,
+  BLOCKED_EXIT_CODE,
+  compatibilityBlocker,
+  getMigrationStatus,
+  previewDiscoveryScan,
+  previewAdvance,
+  pendingTargetDriftCandidatesCompat as pendingTargetDriftCandidates,
+  previewMigrationExecution,
+  readState,
+  recoverMigrationRecord,
+  renderProgress,
+  renderProgressChecklist,
+  migrationProgress,
+  CHECKPOINT_STATES,
+  FINAL_GATES,
+  validateResumableMigration,
+  artifactBindingFor,
+  adoptUiObservations,
+  commitNoOpFormatUpgrade,
+  pendingFormatUpgrade,
+  repairSliceState,
+  previewUiObservationsAdoption,
+  FORMAT_UPGRADERS,
+  DECISION_PROJECTION_STATES,
+  sliceDriftFacts,
+  approveWithOperator,
+  maySelfConfirm,
+  getArtifactStatus,
+  runArtifact,
+} from "../../src/lifecycle/index.mjs";
 import { parseAdvanceArguments, runAdvanceCli } from "../../src/cli/advance-migration.mjs";
 import { runRegistryCli } from "../../src/cli/update-migration-registry.mjs";
 import {
@@ -61,9 +100,8 @@ import {
   pendingDecisionCandidates,
   runRecordDecisionCli,
 } from "../../src/record-decision.mjs";
-import { acquireModuleLock, lockPathFor } from "../../src/module-lock.mjs";
 import { engineCommand, quoteCommandToken } from "../../src/engine-paths.mjs";
-import { digestToolkitIdentity } from "../../src/toolkit-identity.mjs";
+import { downgradeToFormat9 } from "../support/downgrade-format9.mjs";
 import {
   AMEND_SLICE,
   authorizeOperationSequence,
@@ -72,7 +110,11 @@ import {
   operationSequenceRunner,
 } from "../../src/operation-sequence.mjs";
 import { downgradeToV4 } from "../support/downgrade-v4.mjs";
-import { runDiscoveryScan } from "../../src/discovery-scan.mjs";
+import {
+  runDiscoveryScan,
+  legacySourceBinding,
+  readCanonicalModuleBoundary,
+} from "../../src/census/index.mjs";
 import {
   executeUpgrade,
   pendingTransactions,
@@ -80,90 +122,60 @@ import {
   recoverUpgrade,
 } from "../../src/upgrades/upgrade-migration.mjs";
 import {
-  advanceMigration,
-  assertExecutionConfirmation,
-  BASELINE_ROWS_PIN,
-  bootstrapMigration,
-  BLOCKED_EXIT_CODE,
   CAPABILITY_OWNERSHIP_FILE,
-  compareVisualFact,
-  compareVisualEvidence,
-  validateVisualAcceptance,
-  validateFigmaContext,
-  compatibilityBlocker,
-  createDecisionCandidate,
-  createNewFormatDecisionCandidate,
-  DEFAULT_DECISION_POLICY_DIGEST,
-  DEFAULT_DECISION_POLICY_ID,
-  resolveRequiredPrincipal,
-  getMigrationStatus,
   MIGRATION_FORMAT_VERSION,
-  decisionLineDigest,
-  legacySourceBinding,
-  previewDiscoveryScan,
-  previewAdvance,
   formatIsPromoting,
   formatIsSupported,
   MAX_SLICE_REWORKS,
   NON_PROMOTING_FORMAT_VERSIONS,
-  pendingTargetDriftCandidates,
   SLICE_REWORK_FORMAT,
   VISUAL_ACCEPTANCE_FORMAT,
   SUPPORTED_FORMAT_VERSIONS,
-  previewMigrationExecution,
-  readCanonicalModuleBoundary,
-  readState,
-  recoverMigrationRecord,
-  reconcileSliceState,
-  renderProgress,
-  renderProgressChecklist,
-  migrationProgress,
-  CHECKPOINT_STATES,
-  FINAL_GATES,
   LEGACY_MIGRATION_STEPS,
   MIGRATION_STEPS,
-  TARGET_DIRTY_SCOPE,
-  validateResumableMigration,
-  artifactBindingFor,
-  adoptUiObservations,
-  assertRequiredObservations,
-  commitNoOpFormatUpgrade,
   FORMAT_UPGRADE_FLOOR,
   isUiObservationsAdoption,
-  pendingFormatUpgrade,
-  repairSliceState,
-  previewUiObservationsAdoption,
   REQUIRED_OBSERVATIONS_FORMAT,
   assertDirectLedgerEligible,
   assertNoPendingFormatUpgrade,
   directLedgerAdoptionPreview,
   DIRECT_LEDGER_DECISIONS_FORMAT,
   FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
-  FORMAT_UPGRADERS,
   LEGACY_COMPATIBILITY_ACTION_REQUIRED,
   MIGRATION_FORMAT_SUPPORTED,
-  resolveApplicableDecision,
-  projectModuleDecision,
-  DECISION_PROJECTION_STATES,
   stampedFormatVersion,
   usesDirectLedgerDecisions,
+  assertRegistryCoverage,
+  nextIncrement,
+} from "../../src/formats/index.mjs";
+import {
+  compareVisualFact,
+  compareVisualEvidence,
+  validateVisualAcceptance,
+  validateFigmaContext,
+  assertRequiredObservations,
+} from "../../src/visual/index.mjs";
+import {
+  createDecisionCandidate,
+  createNewFormatDecisionCandidate,
+  DEFAULT_DECISION_POLICY_DIGEST,
+  DEFAULT_DECISION_POLICY_ID,
+  resolveRequiredPrincipal,
+  decisionLineDigest,
+  resolveApplicableDecision,
+  projectModuleDecision,
   candidateDigestOf,
   createNewFormatDecisionGroup,
   principalSatisfiesRequirement,
-  sliceDriftFacts,
   validateProtectedDecisionPolicy,
-} from "../../src/resumable-migration.mjs";
-import { pendingTargetDriftCandidates as slicesDriftCandidates } from "../../src/slices/index.mjs";
-import { assertRegistryCoverage, nextIncrement } from "../../src/format-upgrade.mjs";
-import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
-import { approveWithOperator } from "../../src/operator-approval.mjs";
-import { maySelfConfirm } from "../../src/migration-policy.mjs";
-import { createSession, handleMessage } from "../../src/mcp-server.mjs";
+} from "../../src/decisions/index.mjs";
 import {
-  artifactRoot,
-  getArtifactStatus,
-  runArtifact,
-} from "../../src/artifact/artifact-migration.mjs";
+  reconcileSliceState,
+  TARGET_DIRTY_SCOPE,
+} from "../../src/slices/index.mjs";
+import { pendingTargetDriftCandidates as slicesDriftCandidates } from "../../src/slices/index.mjs";
+import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
+import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsRoot = path.resolve(
@@ -7197,94 +7209,6 @@ test("a missing recorded scanner version fails as a typed version error before r
 });
 
 // --- backward compatibility with format 9 -----------------------------------
-
-/**
- * Rewrites a fixture into exactly what a record born before format 10 looks
- * like: eight checkpoints, no DISCOVERY_COMPLETENESS event, no discovery
- * artifacts, and a matching integrity anchor.
- */
-const downgradeToFormat9 = async (fixture) => {
-  const root = fixture.migrationRoot;
-  const events = (await historyEvents(fixture))
-    .filter((event) => event.step !== "DISCOVERY_COMPLETENESS")
-    .map(({ seq, previousHash, hash, ...event }) =>
-      event.nextStep === "DISCOVERY_COMPLETENESS"
-        ? { ...event, nextStep: "ASSESS_TARGET" }
-        : { ...event },
-    );
-  let revision = 1;
-  for (const event of events.slice(1)) {
-    revision += 1;
-    if (Number.isInteger(event.revision)) event.revision = revision;
-  }
-  const history = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
-  await writeFile(path.join(root, "history/history.ndjson"), history);
-
-  const persisted = await state(fixture);
-  const artifactHashes = { ...persisted.artifactHashes };
-  for (const key of [
-    "steps/02a-discovery-completeness.md",
-    "inventories/module-classification.json",
-    "inventories/discovery-scan.json#discovery",
-  ]) {
-    delete artifactHashes[key];
-  }
-  for (const relative of [
-    "steps/02a-discovery-completeness.md",
-    "inventories/module-classification.json",
-    "inventories/discovery-scan.json",
-  ]) {
-    await rm(path.join(root, relative), { force: true });
-  }
-  // A real format-9 record predates the format-15 keys entirely, so a
-  // downgraded fixture that kept them would not be a format-9 record at all.
-  //
-  // Toolkit identity is the opposite case and is deliberately *kept*: it is
-  // metadata about the build, not about the format, and an old-format record
-  // that an operator adopted is an ordinary state -- the only one from which
-  // these tests' subject, the eight-checkpoint lifecycle, can still be driven.
-  // The anchor below therefore carries its digest, exactly as the engine writes.
-  delete persisted.legacySources;
-  delete persisted.targetAdoption;
-  const downgraded = {
-    ...persisted,
-    formatVersion: 9,
-    currentStep:
-      persisted.currentStep === "DISCOVERY_COMPLETENESS"
-        ? "ASSESS_TARGET"
-        : persisted.currentStep,
-    completedSteps: persisted.completedSteps.filter(
-      (s) => s !== "DISCOVERY_COMPLETENESS",
-    ),
-    pendingSteps: persisted.pendingSteps.filter(
-      (s) => s !== "DISCOVERY_COMPLETENESS",
-    ),
-    artifactHashes,
-    revision,
-  };
-  await writeJson(path.join(root, "state.json"), downgraded);
-  const bytes = Buffer.from(history, "utf8");
-  await writeJson(path.join(root, "integrity.json"), {
-    revision: downgraded.revision,
-    toolkitIdentitySha256: digestToolkitIdentity(downgraded.toolkitIdentity) ?? undefined,
-    artifactHashesSha256: createHash("sha256")
-      .update(
-        JSON.stringify(
-          Object.fromEntries(
-            Object.entries(artifactHashes).sort(([l], [r]) =>
-              l < r ? -1 : l > r ? 1 : 0,
-            ),
-          ),
-        ),
-      )
-      .digest("hex"),
-    history: {
-      bytes: bytes.length,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-    },
-  });
-  return downgraded;
-};
 
 test("a format-9 record keeps the eight-checkpoint lifecycle and never runs the new code", async () => {
   const fixture = await createFixture();

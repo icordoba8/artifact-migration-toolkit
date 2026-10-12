@@ -16,27 +16,25 @@ import {
   nextIncrement,
   upgradeIsActive,
   upgradeProjection,
-} from "../../src/format-upgrade.mjs";
-import {
   DIRECT_LEDGER_DECISIONS_FORMAT,
   FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
   FORMAT_UPGRADE_FLOOR,
-  FORMAT_UPGRADERS,
   MIGRATION_FORMAT_SUPPORTED,
   NON_PROMOTING_FORMAT_VERSIONS,
   REQUIRED_OBSERVATIONS_FORMAT,
   VISUAL_ACCEPTANCE_FORMAT,
   formatIsPromoting,
-  renderLoopDirective,
-} from "../../src/resumable-migration.mjs";
-import {
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
   ARTIFACT_FORMAT_SUPPORTED,
   ARTIFACT_FORMAT_UPGRADE_FLOOR,
-  ARTIFACT_FORMAT_UPGRADERS,
   ARTIFACT_FORMAT_VERSION,
   artifactFormatUpgrade,
-} from "../../src/artifact/artifact-migration.mjs";
+} from "../../src/formats/index.mjs";
+import {
+  FORMAT_UPGRADERS,
+  renderLoopDirective,
+  ARTIFACT_FORMAT_UPGRADERS,
+} from "../../src/lifecycle/index.mjs";
 import { supportedMigrationVersions } from "../../../../scripts/release.mjs";
 
 /** A structurally valid row; the tests bend exactly one field at a time. */

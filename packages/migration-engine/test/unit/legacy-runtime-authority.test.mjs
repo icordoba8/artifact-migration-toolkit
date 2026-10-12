@@ -13,20 +13,22 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { resolveDesignSource } from "../../src/migration-utils.mjs";
+import {
+  resolveDesignSource,
+  LEGACY_RUNTIME_CONTEXT_FILE,
+  UI_PROOF_FORMAT,
+  VISUAL_ACCEPTANCE_FILE,
+  VISUAL_ACCEPTANCE_FORMAT,
+} from "../../src/formats/index.mjs";
 import {
   compareVisualFact,
   LEGACY_AUTHORITY_ROLE,
-  LEGACY_RUNTIME_CONTEXT_FILE,
   TARGET_VERIFICATION_ROLE,
-  UI_PROOF_FORMAT,
   validateLegacyRuntimeContext,
   validateVisualAcceptance,
-  VISUAL_ACCEPTANCE_FILE,
-  VISUAL_ACCEPTANCE_FORMAT,
   VISUAL_AUTHORITIES,
   visualAuthorityOf,
-} from "../../src/resumable-migration.mjs";
+} from "../../src/visual/index.mjs";
 
 const REVISION = "a".repeat(40);
 const FRAME_ID = "UIB-1::DEFAULT";

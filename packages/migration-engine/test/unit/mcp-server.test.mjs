@@ -50,6 +50,7 @@ import {
   decisionLedger,
 } from "../integration/approval.fixture.mjs";
 import { renderedCommandPattern } from "../support/portability.mjs";
+import { downgradeToFormat9 } from "../support/downgrade-format9.mjs";
 import { withDecisionPolicy } from "../support/decision-policy-fixture.mjs";
 
 /**
@@ -830,35 +831,35 @@ test("an unauthored checkpoint returns CONTINUE with an authoring request and no
 
 // --- §11.10 the pre-10 live record -------------------------------------------
 
-test("the format-9 auth record is refused by scan and pending_decisions, unchanged", async (t) => {
-  const record = path.join(
-    repositoryRoot,
-    "sample-target-app/.agents/knowledge/migrations/modules/auth",
-  );
-  const recorded = await readJson(path.join(record, "state.json")).catch(
-    () => null,
-  );
-  if (!recorded) {
-    t.skip("the live auth record is not present in this working tree");
-    return;
-  }
-  assert.ok(
-    recorded.formatVersion < 10,
-    `this test needs a pre-10 record; auth is format ${recorded.formatVersion}`,
-  );
-  const before = await snapshot(record);
+test("the format-9 auth record is refused by scan and pending_decisions, unchanged", async () => {
+  // A10: the live sample-target-app record this case once read is not part of
+  // this repository, so the case skipped on every run. The record is now made
+  // the way the CLI backward-compatibility suite makes one.
+  const fixture = await createFixture();
+  try {
+    await atDiscoveryCompleteness(fixture, MODULE_CLASSIFICATION);
+    const recorded = await downgradeToFormat9(fixture);
+    assert.ok(
+      recorded.formatVersion < 10,
+      `this test needs a pre-10 record; auth is format ${recorded.formatVersion}`,
+    );
+    const before = await snapshot(fixture.migrationRoot);
 
-  const { raw } = await converse(null, [
-    call(1, "migration_scan", { module: "auth" }),
-    call(2, "migration_pending_decisions", { module: "auth" }),
-  ]);
+    const { raw } = await converse(fixture, [
+      call(1, "migration_scan", { module: "auth" }),
+      call(2, "migration_pending_decisions", { module: "auth" }),
+    ]);
 
-  for (const response of raw) {
-    assert.ok(response.error, JSON.stringify(response));
-    assert.match(response.error.message, /format-10 operation/);
-    assert.match(response.error.message, /Nothing was read or written/);
+    assert.equal(raw.length, 2);
+    for (const response of raw) {
+      assert.ok(response.error, JSON.stringify(response));
+      assert.match(response.error.message, /format-10 operation/);
+      assert.match(response.error.message, /Nothing was read or written/);
+    }
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+  } finally {
+    await fixture.cleanup();
   }
-  assert.deepEqual(await snapshot(record), before);
 });
 
 // --- 08 §11 the MCP front end owns a host-native human loop ------------------

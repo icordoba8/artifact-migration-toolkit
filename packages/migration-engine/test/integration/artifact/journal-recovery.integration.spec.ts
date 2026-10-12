@@ -16,9 +16,9 @@ import { historicalBootstrap } from "../../support/historical-bootstrap.mjs";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-expect-error -- untyped production JS module, consumed directly for real behavior.
-import { artifactOperatorDecisions, getArtifactStatus, previewArtifact, previewArtifactFormatUpgrade, runArtifact, upgradeArtifactFormat } from "../../../src/artifact/artifact-migration.mjs";
+import { artifactOperatorDecisions, getArtifactStatus, previewArtifact, previewArtifactFormatUpgrade, runArtifact, upgradeArtifactFormat } from "../../../src/lifecycle/index.mjs";
 // @ts-expect-error -- untyped production JS modules.
-import { candidateDigestOf, decisionAppliesToCandidate, decisionLineDigest, DEFAULT_DECISION_POLICY_DIGEST, resolveHistoricalRequiredPrincipal, validateProtectedDecisionPolicy } from "../../../src/resumable-migration.mjs";
+import { candidateDigestOf, decisionAppliesToCandidate, decisionLineDigest, DEFAULT_DECISION_POLICY_DIGEST, resolveHistoricalRequiredPrincipal, validateProtectedDecisionPolicy } from "../../../src/decisions/index.mjs";
 // @ts-expect-error -- untyped production JS module.
 import { buildDecision } from "../../../src/record-decision.mjs";
 

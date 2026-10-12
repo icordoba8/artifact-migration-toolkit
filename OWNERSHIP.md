@@ -1,0 +1,60 @@
+# Ownership register
+
+The current owner of each critical guarantee of the migration engine (`packages/migration-engine/src/`), as implemented after Track A (A1–A9) and checked by A10. Background: `docs/architecture/a10-tests.md`; per-track records: `docs/architecture/a1-ownership.md` … `docs/architecture/a8-ownership.md`.
+
+`pnpm architecture:check` (`scripts/check-architecture.mjs`, rule A10-OWN-1) checks this file in CI:
+- every guarantee and id appears once;
+- every owner names one module directory or engine file that exists;
+- every adversarial test reference names a registered suite whose source contains that exact test title.
+
+## Dependency order
+
+Modules, top to bottom. An edge may only point down, and it may skip layers (A10-ARCH-3). Files outside the modules have a fixed tier in `TIERS` in `scripts/check-architecture.mjs`:
+
+| Tier | Contents |
+|---|---|
+| entry | installed bins (`cli/*`, `mcp-server.mjs`, `record-decision.mjs`, `artifact/run-artifact.mjs`, `upgrades/upgrade-migration.mjs`), `operator-signer-service.mjs`, `migration-policy.mjs`, `core.mjs` (package `.` export) |
+| `transport/` | argv, MCP, the one process-entry check |
+| compat | the historical facades (`resumable-migration.mjs`, `artifact/artifact-migration.mjs`, `decision-recorder.mjs`, `operator-approval.mjs`, `lifecycle-policy.mjs`, `module-lock.mjs`, `migration-utils.mjs`, `upgrades/upgrade-coordinator.mjs`, `discovery-scan.mjs`, `visual-evidence.mjs`, `format-upgrade.mjs`) and the live `operation-sequence.mjs`, `operator-signer-host.mjs` |
+| `lifecycle/` | |
+| `slices/` | |
+| `visual/` | |
+| `census/` | |
+| signer | `operator-signer.mjs` |
+| `decisions/` | |
+| `store/` | |
+| identity | `toolkit-identity.mjs`, the frozen `upgrades/upgrade-v4-to-v5.mjs` |
+| `formats/` | |
+| `shared/` | |
+| leaf | `engine-paths.mjs`, `operator-webauthn.mjs` |
+
+## Guarantees
+
+**Owner** = the module that holds the rule. **Callers** only invoke it; they own nothing in this row. Test references use the form `` `file` › "test title" ``.
+
+| Id | Guarantee | Owner | Public interface | Adversarial test | Callers; permitted exceptions |
+|---|---|---|---|---|---|
+| G1 | Safe path containment | `shared/` | `assertSecurePath`, `assertProjectRootContainment`, `isResolvedWithin`, `isLexicallyWithin` (`shared/index.mjs`) | `packages/migration-engine/test/unit/store-shared.test.mjs` › "store: atomicWrite refuses a symlinked path with zero mutation and leaves no temp file behind"; `packages/migration-engine/test/unit/migration-contract.test.mjs` › "an owner that escapes the target repository is refused" | Callers: store, decisions, census, lifecycle. Exception: the two containment checks stay two exports (DR1, Track B). |
+| G2 | Durable writes | `store/` | `atomicWrite`, `appendDurably`, `writeTree` (`store/index.mjs`) | `packages/migration-engine/test/unit/store-shared.test.mjs` › "store: appendDurably appends exact bytes through its crash boundaries and refuses a symlinked ledger" | Exceptions: exactly the `FS_WRITERS` rows of the checker (A10-SRC-1): the decision ledger append (DR7/DR8), the lock, the journals, the signer files and two fd-1 writes. |
+| G3 | Integrity and history | `store/` | `appendHistory`, `readHistoryEvents`, `sealHistoryTail`, `historyAnchorNow` (`store/index.mjs`) | `packages/migration-engine/test/unit/store-shared.test.mjs` › "store: the history chain verifies, and a one-byte edit, a reorder or a forged head is refused" | Also `pnpm rehearse:negative` (four corruptions of the installed replay, CI shard 2). Callers: lifecycle (`appendHistoryOnce`, `readState` in `lifecycle/record.mjs`, an A8 store seam). |
+| G4 | Format eligibility | `formats/` | `formatIsSupported`, `uses*` predicates, `upgradeIsActive` (`formats/index.mjs`) | `packages/migration-engine/test/unit/format-upgrades.test.mjs` › "upgradeIsActive is fail-closed, and pure over persisted state"; `packages/migration-engine/test/unit/migration-contract.test.mjs` › "FU-10: every lifecycle mutation refuses while the increment is owed" | Exception: the remaining raw format comparisons outside `formats/` are pinned by A2-ARCH-3. |
+| G5 | Historical format compatibility | `formats/` | `EARLIEST_SUPPORTED_FORMAT`, `formatIsSupported` (`formats/index.mjs`) | `packages/migration-engine/test/unit/migration-contract.test.mjs` › "FU-11: the historical adoption spelling stays valid forever"; `packages/migration-engine/test/unit/mcp-server.test.mjs` › "the format-9 auth record is refused by scan and pending_decisions, unchanged" | Callers: lifecycle (`commitFormatUpgrade`). The frozen v4 upgrader keeps private copies of the v4 vocabulary (`SAME_NAME_OTHER_RULE`). |
+| G6 | Discovery completeness | `census/` | `validateDiscoveryCompleteness`, `validateLegacyInventory` (`census/index.mjs`) | `packages/migration-engine/test/unit/artifact-migration.test.mjs` › "completeness with an undeclared structural unit is refused"; `packages/migration-engine/test/unit/migration-contract.test.mjs` › "DISCOVERY_COMPLETENESS revalidates legacy evidence against the final editable boundary" | Callers: lifecycle validators (module and artifact wrappers, A5/A8 seams). |
+| G7 | Slice ownership | `slices/` | `unclaimedTargetDrift`, `assertNoUnclaimedTargetDrift` (`slices/index.mjs`) | `packages/migration-engine/test/unit/migration-contract.test.mjs` › "R-W4-a: an unclaimed modified target file blocks FINALIZE by name"; `packages/migration-engine/test/unit/migration-contract.test.mjs` › "a changed file outside the owner is still refused in either spelling" | Callers: lifecycle (`sliceDriftFacts`, rework/amend under the lock). Exception: two claim spellings (DR4, Track B). |
+| G8 | Visual evidence authority | `visual/` | `compareVisualEvidence`, `validateVisualAcceptance`, `assertDesignSourceUnchanged` (`visual/index.mjs`) | `packages/migration-engine/test/unit/migration-contract.test.mjs` › "UI-9: changing an owning slice file narrowly stales its UI evidence"; `packages/migration-engine/test/unit/migration-contract.test.mjs` › "figma-mcp: the design source and its links are fixed for the migration's lifetime" | Callers: lifecycle adoption and validation. Exception: the artifact engine's inline design-source comparison (DR18, Track B). |
+| G9 | Decision authorization | `decisions/` | `resolveRequiredPrincipal`, `principalSatisfiesRequirement`, ledger validation (`decisions/index.mjs`) | `packages/migration-engine/test/integration/operator-approval-authority.integration.spec.mjs` › "no fabricated, unbound, stale or mismatched ledger line authorizes a checkpoint"; `packages/migration-engine/test/unit/record-decision.test.mjs` › "new-format judgment uses only the engine policy; weak principals never satisfy it" | Callers: lifecycle (checkpoint gates), the signer. |
+| G10 | Candidate-bound approvals | `decisions/` | `assertReviewedCandidateCurrent`, candidate digests (`decisions/index.mjs`) | `packages/migration-engine/test/unit/decisions.test.mjs` › "A3: under the lock only the deep-equal reviewed candidate is writable, at the same principal"; `packages/migration-engine/test/integration/operator-signer.integration.spec.mjs` › "module 19: signed REJECTED blocks only that candidate digest and a stale review writes nothing" | Callers: the lifecycle recorder, under the module lock. |
+| G11 | One decision recording path | `lifecycle/` | `runRecordDecisionCli`, `relayOperatorDecision` (`lifecycle/recorder.mjs`, via `lifecycle/index.mjs`) | `packages/migration-engine/test/unit/record-decision.test.mjs` › "the v2 writer produces AGENT_RELAYED only, never HUMAN_ATTESTED or a v2 AUTO line"; `packages/migration-engine/test/unit/lifecycle.test.mjs` › "A8-ARCH-7: lifecycle reaches the decision ledgers only through the recorder, under the module lock" | Calls the G9/G10 rules and the G2 ledger append. Exception: the argv-shaped recorder API stays in lifecycle (A7/A8 seam). |
+| G12 | Module locking | `lifecycle/` | `withModuleLock`, `lockPathFor` (`lifecycle/index.mjs`) | `packages/migration-engine/test/unit/migration-contract.test.mjs` › "P1-11: a kill at every journal/rename boundary leaves a lock a fresh process reclaims"; `packages/migration-engine/test/unit/toolkit-identity.test.mjs` › "concurrent adoptions serialize through the existing record lock" | Pinned by A8-ARCH-6. Only `core.mjs` and the `module-lock.mjs` facade re-export the primitives. |
+| G13 | Journal recovery | `lifecycle/` | `recoverMigrationRecord`, `recoverTransaction` (`lifecycle/index.mjs`) | `packages/migration-engine/test/unit/migration-contract.test.mjs` › "R-W6-e: a crash between the state write and the history append recovers idempotently"; `packages/migration-engine/test/integration/artifact/journal-recovery.integration.spec.ts` › "refuses missing, forged and mismatched journal identities before publication" | Exception: several journal formats remain (DR13, Track B). |
+| G14 | Lifecycle transitions | `lifecycle/` | `advanceMigration`, `previewAdvance`, `readState` (`lifecycle/index.mjs`) | `packages/migration-engine/test/unit/migration-contract.test.mjs` › "P1-1: a hand-edited currentStep contradicts the append-only history"; `packages/migration-engine/test/integration/artifact/journal-recovery.integration.spec.ts` › "a forged event.to that disagrees with the proposed state's currentStep is refused" | Calls G3 and G4. Module and artifact checkpoint rules stay separate (A8-ARCH-8). |
+| G15 | MCP refusal behavior | `transport/` | `approvalShapedArgument`, `handleMessage` (`transport/index.mjs`) | `packages/migration-engine/test/integration/operator-approval-authority.integration.spec.mjs` › "R-W2-e: no argv option, environment variable, or tool argument can produce an approval"; `packages/migration-engine/test/unit/mcp-server.test.mjs` › "no sequence of tool calls appends to the operator decisions ledger" | Exception: `migration_relay_decision.decision` is the one answer-carrying argument (A7-ARCH-7). |
+| G16 | Installed runtime identity | `toolkit-identity.mjs` | `activeToolkitIdentity` (the build identity beside the installed `src/`) | `packages/migration-engine/test/unit/toolkit-identity.test.mjs` › "a different build is refused by every mutating entry point, before any write"; `packages/migration-engine/test/unit/toolkit-identity.test.mjs` › "a forged identity in state.json is refused by the integrity anchor and the history" | Callers: the lifecycle gate (`assertRecordToolkitIdentity`), transport, the signer host. The identity shape and transition rules are `formats/` (`validateToolkitIdentity`, `autoAdoptableToolkitTransition`). |
+| G17 | Provider installation integrity | `providers/install-support.mjs` (installer boundary, outside the engine) | the four `providers/*/install.mjs` adapters | `test/provider-installation.test.mjs` › "ownership, checksums, symlinks and config conflicts fail closed"; `test/provider-installation.test.mjs` › "SHA256SUMS disagreeing with the release manifest fails closed" | No engine code in a provider tree (A10-ARCH-6). |
+
+## Remaining architectural debt
+
+These are recorded, not removed. A10 changed no production behavior.
+- The A8 owners-b seams: the 119 lifecycle rows still homed in `lifecycle/` (store 31, slices 26, decisions 31, transport 11, formats 8, census 7, visual 5), listed in `docs/architecture/a8-ownership.md`.
+- Seven source files above the 1,000-line ceiling, pinned at their current size (A10-SIZE-1, `docs/architecture/a10-tests.md`).
+- Track B items DR1, DR4, DR7/DR8, DR13, DR18, I3/DR28, I4, I7, I8 and P4, and A9 debts D1–D10 (`docs/architecture/a9-instructions.md`).

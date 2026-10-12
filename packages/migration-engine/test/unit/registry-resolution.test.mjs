@@ -17,16 +17,18 @@ import { promisify } from "node:util";
 
 import {
   assertFigmaSource,
-  previewRegistryUpdate,
   resolveDesignSource,
-  resolveRegistryPath,
-  updateRegistry,
-} from "../../src/migration-utils.mjs";
+} from "../../src/formats/index.mjs";
 import {
+  previewRegistryUpdate,
+  resolveRegistryPath,
+} from "../../src/store/index.mjs";
+import {
+  updateRegistry,
   assertExecutionConfirmation,
   bootstrapMigration,
   previewMigrationExecution,
-} from "../../src/resumable-migration.mjs";
+} from "../../src/lifecycle/index.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsRoot = path.resolve(

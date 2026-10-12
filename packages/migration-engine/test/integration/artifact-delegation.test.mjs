@@ -20,15 +20,19 @@ import {
   artifactBindingFor,
   artifactPrerequisiteWork,
   assertArtifactPrerequisites,
-  delegatedChangedFilesSatisfiedByChild,
   validateArtifactDelegationRow,
-} from "../../src/resumable-migration.mjs";
-import {
-  artifactIdFor,
-  artifactRoot,
   getArtifactStatus,
   runArtifact,
-} from "../../src/artifact/artifact-migration.mjs";
+} from "../../src/lifecycle/index.mjs";
+import {
+  delegatedChangedFilesSatisfiedByChild,
+} from "../../src/slices/index.mjs";
+import {
+  artifactIdFor,
+} from "../../src/census/index.mjs";
+import {
+  artifactRoot,
+} from "../../src/store/index.mjs";
 import { runArtifactCli } from "../../src/artifact/run-artifact.mjs";
 import { runRecordDecisionCli } from "../../src/record-decision.mjs";
 

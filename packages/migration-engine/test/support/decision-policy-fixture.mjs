@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { DEFAULT_DECISION_POLICY_DIGEST } from "../../src/resumable-migration.mjs";
+import { DEFAULT_DECISION_POLICY_DIGEST } from "../../src/decisions/index.mjs";
 
 export const protectedPolicyDocument = (projectRoot, rules = {}, previous) => {
   const policy = { policyId: "admin/high-assurance", projectRoot,

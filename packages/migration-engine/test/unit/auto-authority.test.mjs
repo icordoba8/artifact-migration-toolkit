@@ -13,10 +13,12 @@ import { fileURLToPath } from "node:url";
 import {
   AUTO_DECISIONS_FILE,
   DECISIONS_FILE,
+} from "../../src/formats/index.mjs";
+import {
   isAutoAuthority,
-} from "../../src/resumable-migration.mjs";
+  maySelfConfirm,
+} from "../../src/lifecycle/index.mjs";
 import { autoAdoptableToolkitTransition } from "../../src/toolkit-identity.mjs";
-import { maySelfConfirm } from "../../src/migration-policy.mjs";
 import { parseDiscoverArguments } from "../../src/cli/discover-module.mjs";
 
 const sourceRoot = fileURLToPath(new URL("../../src/", import.meta.url));

@@ -10,8 +10,16 @@ import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 import { runRecordDecisionCli } from "../../src/record-decision.mjs";
 import { runMigration } from "../../src/cli/run-migration.mjs";
 import { advanceMigration, previewAdvance } from "../../src/core.mjs";
-import { candidateDigestOf, DEFAULT_DECISION_POLICY_ID, DEFAULT_DECISION_POLICY_DIGEST,
-  resolveHistoricalRequiredPrincipal, resolveRequiredPrincipal, recoverMigrationRecord } from "../../src/resumable-migration.mjs";
+import {
+  candidateDigestOf,
+  DEFAULT_DECISION_POLICY_ID,
+  DEFAULT_DECISION_POLICY_DIGEST,
+  resolveHistoricalRequiredPrincipal,
+  resolveRequiredPrincipal,
+} from "../../src/decisions/index.mjs";
+import {
+  recoverMigrationRecord,
+} from "../../src/lifecycle/index.mjs";
 import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 import { createFixture, atDirectLedgerCompleteness, EXCLUDED_CLASSIFICATION, decisionLedger,
   state, addLegacyFiles, extraFileNames, manyExcluded, behaviorBacked, resolutionFor } from "./approval.fixture.mjs";

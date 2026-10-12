@@ -44,7 +44,7 @@ import {
 } from "../../src/record-decision.mjs";
 import {
   candidateDigestOf,
-} from "../../src/resumable-migration.mjs";
+} from "../../src/decisions/index.mjs";
 import {
   addLegacyFiles,
   atDiscoveryCompleteness,

@@ -46,11 +46,14 @@ import {
 } from "../../src/toolkit-identity.mjs";
 import {
   assertRecordToolkitIdentity,
+} from "../../src/lifecycle/index.mjs";
+import {
   MIGRATION_FORMAT_VERSION,
   RESUMABLE_CONTRACT_VERSION,
   WORKFLOW_VERSION,
-} from "../../src/resumable-migration.mjs";
-import { ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, ARTIFACT_FORMAT_VERSION } from "../../src/artifact/artifact-migration.mjs";
+  ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
+  ARTIFACT_FORMAT_VERSION,
+} from "../../src/formats/index.mjs";
 import { buildRelease, releaseCheck, verifyRelease } from "../../../../scripts/release.mjs";
 import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
 import { renderedCommandPattern } from "../support/portability.mjs";

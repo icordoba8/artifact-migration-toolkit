@@ -3,8 +3,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PNG } from "pngjs";
 
-import { captureStructuredNode, deriveStructuredAuthority, structuredAssetIdentity,
-  structuredDigest } from "../../src/visual-evidence.mjs";
+import {
+  captureStructuredNode,
+  deriveStructuredAuthority,
+  structuredAssetIdentity,
+  structuredDigest,
+} from "../../src/visual/index.mjs";
 import { structuredNodes } from "./structured-figma-fixture.mjs";
 
 const digest = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;

@@ -18,7 +18,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { readState } from "../../src/resumable-migration.mjs";
+import { readState } from "../../src/lifecycle/index.mjs";
 
 const FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
