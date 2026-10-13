@@ -207,7 +207,6 @@ export const acquireModuleLock = async (
   };
   const entry = `${identity.uuid}.json`;
   const staging = `${lock}.${identity.uuid}.tmp`;
-  const deadline = Date.now() + timeoutMs;
   let owner = null;
   let held = false;
   try {
@@ -219,11 +218,14 @@ export const acquireModuleLock = async (
     } finally {
       await handle.close();
     }
-    // The deadline is checked once per attempt, before it, so every retry path
-    // is bounded -- including a reclaim that keeps "succeeding" because a racer
-    // keeps re-creating the lock.
-    while (!held) {
-      if (Date.now() >= deadline) throw lockedError(name, lock, owner);
+    // `timeoutMs` bounds the wait for a holder, not staging: a slow fsync above
+    // must not spend it. The deadline is checked before every retry, so every
+    // retry path is bounded -- including a reclaim that keeps "succeeding"
+    // because a racer keeps re-creating the lock. The first attempt always
+    // runs, so even a spent budget tries the lock and names its holder.
+    const deadline = Date.now() + timeoutMs;
+    for (let attempt = 0; !held; attempt += 1) {
+      if (attempt > 0 && Date.now() >= deadline) throw lockedError(name, lock, owner);
       try {
         await rename(staging, lock);
         held = true;

@@ -2961,6 +2961,65 @@ test("an owner that cannot be proven gone is never reclaimed, whatever its age",
   }
 });
 
+// Regression (v1.4.0 CI 38438679284): the deadline started before staging, so a
+// zero budget, or a staging fsync slower than the budget, gave up without one
+// `rename` and named no holder ("pid unknown"). The hook stands in for slow
+// staging: once the owner entry is staged, it moves this process's clock past
+// any budget. The zero-budget dead owner is left out on purpose: it may give
+// up after reclaiming, which is safe.
+test("a spent budget still tries the lock once and names its holder", async () => {
+  const live = new RegExp(`holds the lock .*\\(pid ${process.pid}\\)`);
+  const legacy = /holds the lock .*protocol-1 release, which is never reclaimed automatically/;
+  const free = async () => undefined;
+  const legacyFile = (lock) =>
+    writeFile(lock, `${JSON.stringify({ pid: DEAD_PID, uuid: randomUUID(), acquiredAt: new Date().toISOString() })}\n`);
+  const slow = 16 * 60_000;
+  const cases = [
+    ["a free lock, no budget", 0, 0, free, null],
+    ["a protocol-1 lock, no budget", 0, 0, legacyFile, legacy],
+    ["a live owner, no budget", 0, 0, (lock) => seedOwner(lock, { pid: process.pid }), live],
+    ["a free lock, staging outlasting the budget", 150, slow, free, null],
+    ["a protocol-1 lock, staging outlasting the budget", 150, slow, legacyFile, legacy],
+  ];
+  const now = Date.now;
+  for (const [label, timeoutMs, staging, seed, message] of cases) {
+    const { root, lock, cleanup } = await lockRoot();
+    let renames = 0;
+    const restore = hookFs({
+      open: (real) => async (file, ...rest) => {
+        const handle = await real(file, ...rest);
+        if (String(file).startsWith(`${lock}.`)) Date.now = () => now() + staging;
+        return handle;
+      },
+      rename: (real) => async (from, to) => {
+        if (String(to) === lock) renames += 1;
+        return real(from, to);
+      },
+    });
+    try {
+      await seed(lock);
+      const before = await treeOf(root);
+      const options = { timeoutMs, pollMs: 10 };
+      if (message) {
+        await assert.rejects(acquireModuleLock(root, "auth", options), message, label);
+        assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
+      } else {
+        const release = await acquireModuleLock(root, "auth", options);
+        assert.equal((await readdir(lock)).length, 1, `${label}: the lock holds exactly its new owner`);
+        await assert.rejects(acquireModuleLock(root, "auth", { timeoutMs: 0 }), live, `${label}: two writers held the lock`);
+        await release();
+        assert.deepEqual(await readdir(path.dirname(lock)), [], `${label}: the lock or a staging directory was left behind`);
+      }
+      assert.ok(renames >= 1, `${label}: the lock was never tried`);
+      if (timeoutMs === 0 && message) assert.equal(renames, 1, `${label}: a spent budget retried`);
+    } finally {
+      Date.now = now;
+      restore();
+      await cleanup();
+    }
+  }
+});
+
 test("a provably dead or vanished owner is reclaimed automatically", async () => {
   const cases = [
     ["a dead owner", (lock) => seedOwner(lock)],
