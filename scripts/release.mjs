@@ -425,6 +425,10 @@ export const buildRelease = async ({ root = repositoryRoot, force = false } = {}
   const manifest = {
     version: 1,
     toolkit: identity,
+    // Writers of this release take directory locks with owner entries
+    // (lifecycle/lock.mjs, providers/install-support.mjs). Protocol-2 launchers
+    // and installers refuse any manifest without it as protocol 1.
+    writerLockProtocol: 2,
     // Toolkit SemVer is an independent axis. These are stated, not derived from
     // the version above, and the version above is not derived from them.
     supports: await supportedMigrationVersions(root),

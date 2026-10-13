@@ -75,6 +75,23 @@ export class RuntimeSelectionError extends Error {
   }
 }
 
+// A release manifest's `writerLockProtocol`; one without it is protocol 1.
+// Protocol-1 writers take regular-file locks and do not honour this protocol's
+// directory locks, so no selection made here -- skill identity, receipt reuse,
+// history, siblings, the store, `--version`, the environment override, a
+// rollback pin or a download -- may select, execute or roll back to one. This
+// governs only launches through this file; a protocol-1 runtime started by
+// its own path is outside it (docs/lock-protocol-cutover.md).
+const WRITER_LOCK_PROTOCOL = 2;
+const requireLockProtocol = (manifest, require) => {
+  const found = manifest?.writerLockProtocol ?? 1;
+  if (found === WRITER_LOCK_PROTOCOL) return;
+  throw new RuntimeSelectionError('RELEASE_LOCK_PROTOCOL_UNSUPPORTED',
+    `Release ${manifest?.toolkit?.version} uses writer lock protocol ${found}, which this launcher (protocol ${WRITER_LOCK_PROTOCOL}) never selects, runs or rolls back to: `
+    + `its writers do not honour protocol-${WRITER_LOCK_PROTOCOL} locks. Select a protocol-${WRITER_LOCK_PROTOCOL} release (1.4.0 or later) with \`--version X.Y.Z\`, or run \`skills add\` from a current release; see docs/lock-protocol-cutover.md.`,
+    { required: manifest?.toolkit?.version ?? null, writerLockProtocol: found, supported: WRITER_LOCK_PROTOCOL, reason: require.reason });
+};
+
 const REMEDY = 'Reinstall the skill with `skills add` from a published release, or select a release explicitly with `--version X.Y.Z`.';
 
 const run = async (command, args, options = {}) => {
@@ -269,7 +286,9 @@ const satisfies = (manifest, require) =>
 async function accept(store, release, pin, require, origin) {
   let manifest;
   try { manifest = await pinnedManifest(store, release, pin); } catch { return null; }
-  return satisfies(manifest, require) ? { release, pin, manifest, origin } : null;
+  if (!satisfies(manifest, require)) return null;
+  requireLockProtocol(manifest, require);
+  return { release, pin, manifest, origin };
 }
 
 /** Releases this receipt still retains for rollback. Never a downgrade: the
@@ -648,6 +667,7 @@ async function selectRuntime(
   // ---- local sources, strongest first. No network anywhere in this block. ----
   const installed = previous ? await receiptManifest(previous) : null;
   if (installed && satisfies(installed, require)) {
+    requireLockProtocol(installed, require);
     return result(previous, { bootstrapped: false, network: false }, await localPreflight(previous));
   }
 
@@ -706,6 +726,7 @@ async function selectRuntime(
         + `the skill requires ${require.exact.computedHash} and that release proves ${manifest.skills?.skills?.[require.exact.skill]?.computedHash ?? 'nothing for this skill'}. ${REMEDY}`,
         { required: require.exact.computedHash, releaseProves: manifest.skills?.skills?.[require.exact.skill]?.computedHash ?? null, version: require.version, skill: require.exact.skill });
     }
+    requireLockProtocol(manifest, require);
     await mkdir(store, { recursive: true });
     return await converge(bundle, sha256(manifestBytes), { network: true });
   } finally {

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawn } from 'node:child_process';
-import { cp, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readlinkSync } from 'node:fs';
+import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
@@ -513,4 +517,369 @@ test('every provider projection of a released skill carries the identical identi
       assert.ok(projected.equals(canonical), `${provider}/${skill} identity drifted from canonical`);
     }
   }
+});
+
+// --- install.lock ownership under adversarial interleavings -----------------
+//
+// Each interleaving below once let two installers hold the lock, or let one
+// release another's (v1.4.0 audit L2). Barriers, not sleeps: node:fs/promises
+// is wrapped in this process -- the adapter's named imports are live bindings,
+// refreshed by syncBuiltinESMExports -- and each installer runs under an
+// AsyncLocalStorage name. An installer is "inside" from its first read of
+// anything but the lock: every such read comes after it holds the lock.
+const fsp = createRequire(import.meta.url)('node:fs/promises');
+const actor = new AsyncLocalStorage();
+function hookFs(wrappers) {
+  const originals = Object.fromEntries(Object.keys(wrappers).map(name => [name, fsp[name]]));
+  for (const [name, wrap] of Object.entries(wrappers)) fsp[name] = wrap(originals[name]);
+  syncBuiltinESMExports();
+  return () => { Object.assign(fsp, originals); syncBuiltinESMExports(); };
+}
+const barrier = () => { let open; const opened = new Promise(resolve => { open = resolve; }); return { open, opened }; };
+const DEAD = 2 ** 22 - 1; // Above every pid_max this test could collide with.
+// This process's PID realm, as install-support.mjs records it.
+const REALM = process.platform === 'linux' ? `linux:${readlinkSync('/proc/self/ns/pid')}` : process.platform;
+const LOCK_TIMEOUT = { timeout: 180_000 };
+const underLock = (lock, file) => String(file) === lock || String(file).startsWith(`${lock}${path.sep}`);
+/** Calls `onOwner` once a named installer has a lock owner record open, `onInside` at its first other read; either may park it. */
+const watchInstallers = (lock, { onOwner = () => {}, onInside = () => {} }, extra = {}) => {
+  const inside = new Set();
+  return hookFs({
+    open: real => async (file, ...rest) => {
+      const handle = await real(file, ...rest);
+      const name = actor.getStore();
+      if (name && underLock(lock, file)) await onOwner(name);
+      return handle;
+    },
+    readFile: real => async (file, ...rest) => {
+      const bytes = await real(file, ...rest);
+      const name = actor.getStore();
+      if (name && !underLock(lock, file) && !inside.has(name)) { inside.add(name); await onInside(name); }
+      return bytes;
+    },
+    ...extra,
+  });
+};
+const as = (name, run) => actor.run(name, run).then(result => ({ result }), error => ({ error }));
+async function lockRoot(label) {
+  const b = await bundles();
+  const root = path.join(scratch, label);
+  await mkdir(path.join(root, '.artifact-migration-tools'), { recursive: true });
+  const lock = path.join(root, '.artifact-migration-tools/install.lock');
+  return { root, lock, options: { scope: 'project', root, store: path.join(scratch, `${label} store`), bundle: b.first, pin: b.pin } };
+}
+/** The owner entry this lock format publishes, for a chosen owner. */
+async function seedOwner(lock, owner = {}) {
+  const uuid = randomUUID();
+  await mkdir(lock, { recursive: true });
+  await writeFile(path.join(lock, `${uuid}.json`), `${JSON.stringify({ uuid, pid: DEAD, hostname: os.hostname(), realm: REALM, startedAt: new Date().toISOString(), action: 'install', provider: 'codex', ...owner }, null, 2)}\n`);
+  return uuid;
+}
+/** Every name and byte below `dir`: what "left untouched" means. */
+async function treeOf(dir, tree = {}) {
+  for (const name of (await readdir(dir)).sort()) {
+    const file = path.join(dir, name);
+    const info = await lstat(file);
+    if (info.isSymbolicLink()) tree[file] = `-> ${await readlink(file)}`;
+    else if (info.isDirectory()) await treeOf(file, Object.assign(tree, { [file]: 'dir' }));
+    else tree[file] = await readFile(file, 'utf8');
+  }
+  return tree;
+}
+const lockLeftovers = async root => (await readdir(path.join(root, '.artifact-migration-tools'))).filter(name => name.startsWith('install.lock'));
+const doctorOk = async options => assert.equal((await adapter('codex', { ...options, action: 'doctor' })).outcome, 'OK');
+
+for (const [label, seed] of [
+  ['a dead owner entry', lock => seedOwner(lock)],
+]) {
+  test(`two installers reclaiming ${label} never both work under the lock`, LOCK_TIMEOUT, async () => {
+    const { root, lock, options } = await lockRoot(`two reclaimers of ${label}`);
+    await seed(lock);
+    const bParked = barrier();
+    const bResume = barrier();
+    let bSettled;
+    const bDone = new Promise(resolve => { bSettled = resolve; });
+    const inside = new Set();
+    let overlap = false;
+    let paused = false;
+    const restore = watchInstallers(lock, {
+      onOwner: async name => {
+        if (name !== 'B' || paused) return;
+        paused = true; bParked.open(); await bResume.opened;
+      },
+      onInside: async name => {
+        if (inside.size) overlap = true;
+        inside.add(name);
+        // A works on under the lock while B finishes reclaiming the owner it saw die.
+        if (name === 'A') { bResume.open(); await bDone; }
+      },
+    });
+    try {
+      const b = as('B', () => adapter('codex', options)).then(outcome => { bSettled(); return outcome; });
+      await bParked.opened; // B has read the dead owner
+      const a = await as('A', () => adapter('codex', options)).finally(() => bResume.open());
+      const outcome = await b;
+      assert.equal(overlap, false, 'two installers worked under the lock at once');
+      assert.match(outcome.error?.message ?? 'B installed', /Installation locked/);
+      assert.equal(a.result?.recoveredLock, true, a.error?.message);
+      assert.deepEqual(await lockLeftovers(root), []);
+      await doctorOk(options);
+    } finally { restore(); }
+  });
+}
+
+test("an installer whose lock was lost releases only its own, never its replacement's", LOCK_TIMEOUT, async () => {
+  const { root, lock, options } = await lockRoot('replacement owner');
+  await adapter('codex', options);
+  const aInside = barrier(); const aResume = barrier();
+  const cInside = barrier(); const cResume = barrier();
+  const restore = watchInstallers(lock, {
+    onInside: async name => {
+      if (name === 'A') { aInside.open(); await aResume.opened; }
+      if (name === 'C') { cInside.open(); await cResume.opened; }
+    },
+  });
+  try {
+    const a = as('A', () => adapter('codex', { ...options, action: 'doctor' }));
+    await aInside.opened;
+    // A's lock is lost while it works -- deleted by hand -- and C takes the lock.
+    await rm(lock, { recursive: true, force: true });
+    const c = as('C', () => adapter('codex', { ...options, action: 'doctor' }));
+    await cInside.opened;
+    aResume.open();
+    assert.equal((await a).result?.outcome, 'OK');
+    assert.equal(await lstat(lock).then(() => true, () => false), true, "A's cleanup removed C's lock");
+    await assert.rejects(adapter('codex', { ...options, action: 'doctor' }), /Installation locked/);
+    cResume.open();
+    assert.equal((await c).result?.outcome, 'OK');
+    assert.deepEqual(await lockLeftovers(root), []);
+    await doctorOk(options);
+  } finally { restore(); }
+});
+
+test('a doctor that meets a working install fails closed and leaves its lock alone', LOCK_TIMEOUT, async () => {
+  const { root, lock, options } = await lockRoot('concurrent doctor');
+  const aInside = barrier(); const aResume = barrier();
+  const restore = watchInstallers(lock, { onInside: async name => { if (name === 'A') { aInside.open(); await aResume.opened; } } });
+  try {
+    const a = as('A', () => adapter('codex', options));
+    await aInside.opened;
+    const held = await treeOf(lock);
+    await assert.rejects(adapter('codex', { ...options, action: 'doctor' }), /Installation locked/);
+    await assert.rejects(adapter('codex', options), /Installation locked/);
+    assert.deepEqual(await treeOf(lock), held, "a refused installer touched the owner's lock");
+    aResume.open();
+    assert.equal((await a).error, undefined);
+    assert.deepEqual(await lockLeftovers(root), []);
+    await doctorOk(options);
+  } finally { restore(); }
+});
+
+test('a failed install rolls back under contention, releasing only its own lock', LOCK_TIMEOUT, async () => {
+  const { root, lock, options } = await lockRoot('contended rollback');
+  const config = path.join(root, '.codex/config.toml');
+  const aInside = barrier(); const aResume = barrier();
+  const restore = watchInstallers(lock, { onInside: async name => { if (name === 'A') { aInside.open(); await aResume.opened; } } }, {
+    rename: real => async (from, to, ...rest) => {
+      if (actor.getStore() === 'A' && String(to) === config) throw Object.assign(new Error('injected config failure'), { code: 'EIO' });
+      return real(from, to, ...rest);
+    },
+  });
+  try {
+    const a = as('A', () => adapter('codex', options));
+    await aInside.opened;
+    await assert.rejects(adapter('codex', options), /Installation locked/);
+    aResume.open();
+    assert.match((await a).error?.message ?? 'A installed', /injected config failure/);
+    assert.deepEqual(await consumerTree(root), {}, 'the failed install was not rolled back');
+    assert.deepEqual(await readdir(path.join(root, '.artifact-migration-tools')), [], 'a receipt or lock survived the rollback');
+  } finally { restore(); }
+  await adapter('codex', options);
+  await doctorOk(options);
+});
+
+test('a half-built install lock is only staging: it neither blocks nor shares the published lock', LOCK_TIMEOUT, async () => {
+  const { root, lock, options } = await lockRoot('half-built lock');
+  const aParked = barrier(); const aResume = barrier();
+  const bInside = barrier(); const bResume = barrier();
+  const restore = watchInstallers(lock, { onInside: async name => { if (name === 'B') { bInside.open(); await bResume.opened; } } }, {
+    // A has created its staging directory; its owner record is not written yet.
+    writeFile: real => async (file, ...rest) => {
+      if (actor.getStore() === 'A' && String(file).startsWith(`${lock}.`)) { aParked.open(); await aResume.opened; }
+      return real(file, ...rest);
+    },
+  });
+  try {
+    const a = as('A', () => adapter('codex', options));
+    await aParked.opened;
+    const b = as('B', () => adapter('codex', options));
+    await bInside.opened; // B holds the lock while A's staging exists
+    aResume.open();
+    assert.match((await a).error?.message ?? 'A installed', /Installation locked/);
+    bResume.open();
+    assert.equal((await b).error, undefined);
+    assert.deepEqual(await lockLeftovers(root), []);
+    await doctorOk(options);
+  } finally { restore(); }
+});
+
+test('an install lock whose owner cannot be proven dead fails closed and is left untouched', LOCK_TIMEOUT, async () => {
+  const cases = [
+    ['a live owner', lock => seedOwner(lock, { pid: process.pid })],
+    ['a dead owner on another host', lock => seedOwner(lock, { hostname: `${os.hostname()}-elsewhere` })],
+    ['an owner without a hostname', lock => seedOwner(lock, { hostname: undefined })],
+    ['a torn owner entry', async lock => { await mkdir(lock); await writeFile(path.join(lock, `${randomUUID()}.json`), '{"pid":'); }],
+    ['an entry naming another owner', async lock => { const uuid = await seedOwner(lock); await rename(path.join(lock, `${uuid}.json`), path.join(lock, `${randomUUID()}.json`)); }],
+    ['two owner entries', async lock => { await seedOwner(lock); await seedOwner(lock); }],
+    ['an unexpected entry', async lock => { await mkdir(lock); await writeFile(path.join(lock, 'owner.json'), JSON.stringify({ pid: DEAD, hostname: os.hostname() })); }],
+    ['a symlink to a dead owner', async (lock, root) => { await seedOwner(path.join(root, 'elsewhere')); await symlink(path.join(root, 'elsewhere'), lock); }],
+    ['a dead owner in the Windows realm on this host', lock => seedOwner(lock, { realm: 'win32' })],
+    ['a dead owner in another Linux pid namespace', lock => seedOwner(lock, { realm: 'linux:pid:[1]' })],
+    ['an owner without a realm', lock => seedOwner(lock, { realm: undefined })],
+    ['an entry symlinked to a dead owner', async (lock, root) => { const uuid = await seedOwner(path.join(root, 'elsewhere')); await mkdir(lock); await symlink(path.join(root, 'elsewhere', `${uuid}.json`), path.join(lock, `${uuid}.json`)); }],
+    ['an entry that is a directory', lock => mkdir(path.join(lock, `${randomUUID()}.json`), { recursive: true })],
+    ['an oversized owner entry', lock => seedOwner(lock, { padding: 'x'.repeat(2048) })],
+    ['a dead legacy lock file', lock => writeFile(lock, `${JSON.stringify({ pid: DEAD, hostname: os.hostname(), startedAt: new Date().toISOString(), action: 'install', provider: 'codex' }, null, 2)}\n`)],
+  ];
+  for (const [label, seed] of cases) {
+    const { root, lock, options } = await lockRoot(`unproven ${label}`);
+    await seed(lock, root);
+    const before = await treeOf(root);
+    await assert.rejects(adapter('codex', options), /Installation locked|Symlink refused/, label);
+    assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched or something was installed`);
+  }
+});
+
+test('an interrupted install or reclaim leaves a lock the next installer recovers', LOCK_TIMEOUT, async () => {
+  const cases = [
+    // A release, or a reclaimer killed after removing the dead entry, leaves the directory empty.
+    ['an empty lock directory', lock => mkdir(lock), undefined],
+    // A killed installer, or a reclaimer killed before removing it, leaves the dead entry.
+    ['a dead owner entry', lock => seedOwner(lock), true],
+  ];
+  for (const [label, seed, recovered] of cases) {
+    const { root, lock, options } = await lockRoot(`interrupted ${label}`);
+    await seed(lock);
+    assert.equal((await adapter('codex', options)).recoveredLock, recovered, label);
+    assert.deepEqual(await lockLeftovers(root), [], label);
+    await doctorOk(options);
+  }
+  // An installer killed before publishing leaves only its staging: never read, never removed.
+  const { root, lock, options } = await lockRoot('interrupted staging');
+  const stray = `${lock}.${randomUUID()}.tmp`;
+  await seedOwner(stray, { pid: process.pid });
+  const before = await treeOf(stray);
+  assert.equal((await adapter('codex', options)).recoveredLock, undefined);
+  assert.deepEqual(await treeOf(stray), before);
+  assert.deepEqual(await lockLeftovers(root), [path.basename(stray)]);
+});
+
+test('a protocol-1 install.lock file is never reclaimed; once an operator removes it, installs work', LOCK_TIMEOUT, async () => {
+  const { root, lock, options } = await lockRoot('legacy lock file');
+  for (const legacy of [
+    `${JSON.stringify({ pid: DEAD, hostname: os.hostname(), startedAt: new Date().toISOString(), action: 'install', provider: 'codex' }, null, 2)}\n`,
+    `${JSON.stringify({ pid: process.pid, hostname: os.hostname() })}\n`,
+    '',
+  ]) {
+    await writeFile(lock, legacy);
+    const before = await treeOf(root);
+    await assert.rejects(adapter('codex', options), { code: 'INSTALL_LEGACY_LOCK', message: /^Installation locked; .* protocol-1 release/ });
+    await assert.rejects(adapter('codex', { ...options, action: 'doctor' }), /Installation locked/);
+    assert.deepEqual(await treeOf(root), before, 'the legacy lock was touched or something was installed');
+  }
+  await rm(lock); // the documented manual recovery, once every writer is stopped
+  assert.equal((await adapter('codex', options)).recoveredLock, undefined);
+  assert.deepEqual(await lockLeftovers(root), []);
+  await doctorOk(options);
+});
+
+test('only ESRCH proves an installer gone: every other probe answer keeps its lock', LOCK_TIMEOUT, async () => {
+  const kill = process.kill;
+  try {
+    for (const code of ['EPERM', 'EINVAL', 'EACCES', 'ENOSYS', undefined]) {
+      let probed = false;
+      process.kill = (pid, signal) => {
+        if (pid !== DEAD) return kill.call(process, pid, signal);
+        probed = true;
+        throw Object.assign(new Error(`injected ${code}`), { code });
+      };
+      const { root, lock, options } = await lockRoot(`probe ${code}`);
+      await seedOwner(lock);
+      const before = await treeOf(root);
+      await assert.rejects(adapter('codex', options), /Installation locked/, String(code));
+      assert.equal(probed, true, `${code}: the probe was never reached`);
+      assert.deepEqual(await treeOf(root), before, `${code}: the lock was touched`);
+    }
+  } finally { process.kill = kill; }
+});
+
+test('an install owner entry swapped for a symlink after it was vetted is never followed', LOCK_TIMEOUT, async () => {
+  const { root, lock, options } = await lockRoot('swapped owner entry');
+  const uuid = await seedOwner(lock, { pid: process.pid });
+  const decoy = path.join(root, 'decoy');
+  await mkdir(decoy);
+  await writeFile(path.join(decoy, `${uuid}.json`), JSON.stringify({ uuid, pid: DEAD, hostname: os.hostname(), realm: REALM }));
+  const entry = path.join(lock, `${uuid}.json`);
+  let swapped = false;
+  const restore = hookFs({
+    open: real => async (file, ...rest) => {
+      if (String(file) === entry && !swapped) {
+        swapped = true; // after the reader's lstat, before its open
+        await rm(entry);
+        await symlink(path.join(decoy, `${uuid}.json`), entry);
+      }
+      return real(file, ...rest);
+    },
+  });
+  try {
+    await assert.rejects(adapter('codex', options), /Installation locked/);
+    assert.equal(swapped, true);
+    assert.equal((await lstat(entry)).isSymbolicLink(), true, 'the swapped entry was removed');
+    assert.deepEqual(await readdir(lock), [`${uuid}.json`]);
+  } finally { restore(); }
+});
+
+test('a protocol-1 release is never installed, run, repaired, updated to or rolled back to; a protocol-1 receipt still updates', LOCK_TIMEOUT, async () => {
+  const b = await bundles();
+  // A protocol-1 release: no manifest field, and the installer it shipped (here
+  // the current one with its protocol check removed, which is what it lacked).
+  const old = path.join(scratch, 'release protocol one');
+  await cp(b.first, old, { recursive: true });
+  const manifest = JSON.parse(await readFile(path.join(old, 'release-manifest.json')));
+  delete manifest.writerLockProtocol;
+  const installer = (await readFile(path.join(old, 'providers/install-support.mjs'), 'utf8')).replaceAll('.writerLockProtocol !== WRITER_LOCK_PROTOCOL)', '.writerLockProtocol === "never")');
+  await writeFile(path.join(old, 'providers/install-support.mjs'), installer);
+  manifest.files['providers/install-support.mjs'] = digest(installer);
+  await writeFile(path.join(old, 'SHA256SUMS'), `${Object.entries(manifest.files).map(([relative, hash]) => `${hash.slice(7)}  ${relative}`).join('\n')}\n`);
+  await writeFile(path.join(old, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  const oldPin = digest(await readFile(path.join(old, 'release-manifest.json')));
+  const refused = { code: 'INSTALL_LOCK_PROTOCOL_UNSUPPORTED', message: /writer lock protocol 1/ };
+  const unchanged = async (label, run, { root, store }) => {
+    const before = [await treeOf(root), await treeOf(store).catch(() => null)];
+    await assert.rejects(run(), refused, label);
+    assert.deepEqual([await treeOf(root), await treeOf(store).catch(() => null)], before, `${label}: something was written`);
+  };
+
+  // Fresh root: not installed, and nothing staged in the store.
+  const fresh = await lockRoot('protocol one fresh');
+  await unchanged('install', () => adapter('codex', { ...fresh.options, bundle: old, pin: oldPin }), fresh.options);
+
+  // Installed on protocol 2: neither updated nor rolled back to protocol 1.
+  const current = await lockRoot('protocol one current');
+  await adapter('codex', current.options);
+  await unchanged('update', () => adapter('codex', { ...current.options, action: 'update', bundle: old, pin: oldPin }), current.options);
+  await unchanged('rollback', () => adapter('codex', { ...current.options, action: 'rollback', bundle: old, pin: oldPin }), current.options);
+  await doctorOk(current.options);
+
+  // Left on protocol 1 by its own installer: never run or repaired from here...
+  const legacy = await lockRoot('protocol one receipt');
+  const installed = await capture(process.execPath, [path.join(old, 'providers/codex/install.mjs'), 'install', '--scope', 'project', '--root', legacy.root, '--store', legacy.options.store, '--bundle', old, '--pin', oldPin], legacy.root);
+  assert.equal(installed.code, 0, installed.stderr);
+  await unchanged('doctor', () => adapter('codex', { ...legacy.options, action: 'doctor' }), legacy.options);
+  // ...but it updates to protocol 2, and cannot then roll back.
+  const updated = await adapter('codex', { ...legacy.options, action: 'update' });
+  assert.equal(updated.pin, b.pin);
+  assert.ok(updated.releases.some(item => item.pin === oldPin));
+  await unchanged('rollback after update', () => adapter('codex', { ...legacy.options, action: 'rollback', bundle: old, pin: oldPin }), legacy.options);
+  await doctorOk(legacy.options);
 });
