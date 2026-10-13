@@ -289,3 +289,33 @@ test("A5: an external requirement's census rules decide the package the target m
   assert.throws(() => census.externalRequirementPackage({ element: "src/a.ts", disposition: "EXTERNAL_DEPENDENCY", ref: "a" }, label), /is not an external package requirement/);
   assert.throws(() => census.externalRequirementPackage({ element: "EXTERNAL lodash/fp", disposition: "EXTERNAL_DEPENDENCY", ref: "lodash/fp" }, label), /must name the required package 'lodash', not 'lodash\/fp'/);
 });
+
+test("I3/DR28: implicitModuleRoots prefers the one feature root, fails closed on competing ones, and respects attribution", () => {
+  const single = { formatVersion: 18, legacyModule: "auth" };
+  const implicit = (state, roots) =>
+    [...census.implicitModuleRoots(state, roots.map((path) => (typeof path === "string" ? { path } : path)), roots.map((root) => root.path ?? root))].sort();
+  // The feature root beats a same-named route that sorts first, with or
+  // without a package/app prefix.
+  assert.deepEqual(implicit(single, ["src/app/auth", "src/features/auth"]), ["src/features/auth"]);
+  assert.deepEqual(implicit(single, ["apps/web/src/app/auth", "apps/web/src/features/auth"]), ["apps/web/src/features/auth"]);
+  // Exact components only: neither `xsrc` nor `myfeatures` is the convention,
+  // so the historical first match stands.
+  assert.deepEqual(implicit(single, ["src/app/auth", "src/myfeatures/auth"]), ["src/app/auth"]);
+  assert.deepEqual(implicit(single, ["src/app/auth", "xsrc/features/auth"]), ["src/app/auth"]);
+  // Historical: no feature root, first basename match; a single root as before.
+  assert.deepEqual(implicit(single, ["src/pages/auth", "src/app/auth"]), ["src/app/auth"]);
+  assert.deepEqual(implicit(single, ["auth", "auth-extra"]), ["auth"]);
+  assert.deepEqual(implicit(single, ["src/auth-ui"]), []);
+  // Competing feature roots: neither is the owner, so neither is implicit.
+  assert.deepEqual(implicit(single, ["apps/a/src/features/auth", "apps/b/src/features/auth", "src/app/auth"]), []);
+  // Multi-source: per source, and only among roots declared as that source's.
+  const multi = { formatVersion: 19, legacyModule: "auth", legacySources: ["auth", "billing"] };
+  assert.deepEqual(
+    implicit(multi, [
+      { path: "packages/billing/src/features/auth", source: "billing" },
+      { path: "src/app/auth", source: "auth" },
+      { path: "src/features/billing", source: "billing" },
+    ]),
+    ["src/app/auth", "src/features/billing"],
+  );
+});

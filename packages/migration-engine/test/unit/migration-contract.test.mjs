@@ -14812,6 +14812,188 @@ test("the recorder demands no ROOT_DECLARATION for any source's own implicit roo
   }
 });
 
+// I3: the implicit root was the alphabetically first basename match, so an
+// application route (`src/app/auth`) beat the canonical feature root
+// (`src/features/auth`) and the feature root needed a ROOT_DECLARATION it
+// should never have. Offer and validation now share one census resolver.
+const featureRootLegacy = (rootPath = "src/features/auth") =>
+  JSON.parse(
+    JSON.stringify(LEGACY_INVENTORY).replaceAll(
+      "legacy/auth/marker.txt",
+      `legacy/${rootPath}/marker.txt`,
+    ),
+  );
+
+const rootClassification = (moduleRoots, base = MODULE_CLASSIFICATION) => ({
+  ...base,
+  moduleRoots,
+  files: moduleRoots.map((entry) => multiSourceFileRow(entry.path)),
+});
+
+const pendingRootPaths = async (fixture) =>
+  (
+    await pendingDecisionCandidates({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+    })
+  ).candidates.filter((candidate) => candidate.kind === "ROOT_DECLARATION");
+
+/** Drives to DISCOVERY_COMPLETENESS with `classification` written, not advanced. */
+const atRootCompleteness = async (fixture, classification, overrides = {}) => {
+  await withLegacySources(
+    fixture,
+    classification.moduleRoots.map((entry) => entry.path),
+  );
+  await driveTo(fixture, "DISCOVER_LEGACY", advance, {
+    legacy: featureRootLegacy(),
+    classification,
+    ...overrides,
+  });
+  await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+  await writeClassification(fixture, classification);
+};
+
+/** Records each candidate at the terminal and cites it on its root. */
+const approveRoots = async (fixture, classification, candidates) => {
+  const linked = structuredClone(classification);
+  for (const candidate of candidates) {
+    const { decision } = await recordAtTerminal(
+      fixture,
+      candidate,
+      challengeFor(candidate),
+    );
+    const entry = linked.moduleRoots.find(
+      (root) => root.path === candidate.subject.path,
+    );
+    entry.decisionId = decision.id;
+    entry.decisionDigest = lineDigestOf(decision);
+  }
+  return linked;
+};
+
+test("I3: the feature root is implicit and a same-named app route needs a valid ROOT_DECLARATION", async () => {
+  const fixture = await createFixture();
+  try {
+    const classification = rootClassification([
+      { path: "src/app/auth", reason: "The auth route, widened by the operator.", decisionId: null },
+      { path: "src/features/auth", reason: "The canonical auth feature.", decisionId: null },
+    ]);
+    await atRootCompleteness(fixture, classification);
+    const offered = await pendingRootPaths(fixture);
+    assert.deepEqual(offered.map((candidate) => candidate.subject.path), ["src/app/auth"]);
+
+    // Missing: the app route is not exempt, so the gate asks for it -- and
+    // only it -- exactly as the recorder offered.
+    await assert.rejects(advance(fixture), /moduleRoots\[0\]\.decisionId must be a non-empty string/);
+    // Forged: an id no ledger holds.
+    const forged = structuredClone(classification);
+    Object.assign(forged.moduleRoots[0], { decisionId: "DEC-999", decisionDigest: "sha256:x" });
+    await writeClassification(fixture, forged);
+    await assert.rejects(advance(fixture), /recorded in neither .*can never author its own approval/s);
+
+    const approved = await approveRoots(fixture, classification, offered);
+    // Stale: the reason the operator approved was edited afterwards.
+    const stale = structuredClone(approved);
+    stale.moduleRoots[0].reason = "A reason the operator never saw.";
+    await writeClassification(fixture, stale);
+    await assert.rejects(advance(fixture), /does not approve current stable candidate|rationale changed after decision/);
+
+    await writeClassification(fixture, approved);
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("I3: a REJECTED ROOT_DECLARATION never authorizes the app route (format 19)", async () => {
+  const fixture = await createFixture();
+  try {
+    const classification = rootClassification(
+      [
+        { path: "src/app/auth", reason: "The auth route, widened by the operator." },
+        { path: "src/features/auth", reason: "The canonical auth feature." },
+      ],
+      DIRECT_LEDGER.classification,
+    );
+    await atRootCompleteness(fixture, classification, { bootstrap: { currentFormat: true } });
+    assert.equal((await state(fixture)).formatVersion, 19);
+    const [candidate, ...rest] = await pendingRootPaths(fixture);
+    assert.equal(candidate.subject.path, "src/app/auth");
+    assert.deepEqual(rest, []);
+    const cwd = process.cwd();
+    process.chdir(fixture.root);
+    try {
+      const { decision } = await runRecordDecisionCli(["auth", "--approve", candidate.id], {
+        stdout: { write() {} },
+        ask: () => "REJECT",
+      });
+      assert.equal(decision.result, "REJECTED");
+    } finally {
+      process.chdir(cwd);
+    }
+    const projected = (
+      await pendingDecisionCandidates({ ...(await resolutionFor(fixture)), moduleName: "auth" })
+    ).decisions.candidates.filter((row) => row.kind === "ROOT_DECLARATION");
+    assert.deepEqual(projected.map((row) => [row.subject.path, row.state]), [["src/app/auth", "REJECTED"]]);
+    await assert.rejects(advance(fixture), /moduleRoots\[0\]/);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("I3: each source resolves its own feature root, and attribution beats a matching basename", async () => {
+  const fixture = await createFixture();
+  try {
+    const classification = rootClassification([
+      // Named `auth` and a feature root, but declared billing's: it is never
+      // auth's implicit root, and billing's implicit root is named billing.
+      { path: "packages/billing/src/features/auth", reason: "Billing's auth adapter.", decisionId: null, source: "billing" },
+      { path: "src/app/auth", reason: "The auth route.", decisionId: null, source: "auth" },
+      { path: "src/features/auth", reason: "The canonical auth feature.", decisionId: null, source: "auth" },
+      { path: "src/features/billing", reason: "The canonical billing feature.", decisionId: null, source: "billing" },
+    ]);
+    await atRootCompleteness(fixture, classification, { bootstrap: { legacy: ["auth", "billing"] } });
+    const offered = await pendingRootPaths(fixture);
+    assert.deepEqual(
+      offered.map((candidate) => candidate.subject.path),
+      ["packages/billing/src/features/auth", "src/app/auth"],
+    );
+    await assert.rejects(advance(fixture), /moduleRoots\[0\]\.decisionId must be a non-empty string/);
+    // Offer == accept: approving exactly what was offered closes the gate.
+    await writeClassification(fixture, await approveRoots(fixture, classification, offered));
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("I3: competing feature roots for one source are not implicitly authorized", async () => {
+  const fixture = await createFixture();
+  try {
+    const classification = rootClassification([
+      { path: "apps/admin/src/features/auth", reason: "The admin app's auth feature.", decisionId: null },
+      { path: "apps/web/src/features/auth", reason: "The web app's auth feature.", decisionId: null },
+    ]);
+    await atRootCompleteness(fixture, classification, {
+      legacy: featureRootLegacy("apps/web/src/features/auth"),
+    });
+    const offered = await pendingRootPaths(fixture);
+    assert.deepEqual(
+      offered.map((candidate) => candidate.subject.path),
+      ["apps/admin/src/features/auth", "apps/web/src/features/auth"],
+    );
+    await assert.rejects(advance(fixture), /moduleRoots\[0\]\.decisionId must be a non-empty string/);
+    await writeClassification(fixture, await approveRoots(fixture, classification, offered));
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("--adopt-target pins an immutable target baseline and requires the feature", async () => {
   const missing = await createFixture();
   try {

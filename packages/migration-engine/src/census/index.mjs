@@ -47,6 +47,7 @@ export {
   assertDiscoveryUnchanged,
   assertLegacyEvidenceAttributes,
   assertLegacyEvidenceWithinBoundary,
+  implicitModuleRoots,
   readCanonicalModuleBoundary,
   sourceOfEvidence,
 } from "./boundary.mjs";

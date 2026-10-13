@@ -125,6 +125,39 @@ export const moduleRootSource = (entry, sources) =>
   (sources.length === 1 ? sources[0] : null);
 
 /**
+ * DR28: the one rule for which roots are implicit -- exempt from
+ * ROOT_DECLARATION -- read by DISCOVERY_COMPLETENESS and, through the
+ * lifecycle, by the decision recorder, so the gate and the offer cannot drift.
+ *
+ * At most one per declared source, chosen among the canonical scanner roots
+ * named after it (and, where attribution applies, declared as its own): the
+ * single `.../src/features/<source>` root when exactly one exists (I3: an
+ * `src/app/<source>` route no longer wins by sorting first); none when several
+ * feature roots compete, so each needs an operator decision; otherwise the
+ * alphabetically first match, as before.
+ */
+export const implicitModuleRoots = (state, declaredRoots, scanRoots) => {
+  const sources = legacySourcesOf(state);
+  const ownerOf = usesSourceAttribution(state)
+    ? new Map(declaredRoots.map((entry) => [moduleRootPath(entry), moduleRootSource(entry, sources)]))
+    : null;
+  const implicit = new Set();
+  for (const name of sources) {
+    const named = [...scanRoots]
+      .filter((root) => path.posix.basename(root) === name && (!ownerOf || ownerOf.get(root) === name))
+      .sort();
+    // Scanner roots are normalized, so a suffix after "/" matches exact path
+    // components, never a substring.
+    const features = named.filter(
+      (root) => root === `src/features/${name}` || root.endsWith(`/src/features/${name}`),
+    );
+    const chosen = features.length === 0 ? named[0] : features.length === 1 ? features[0] : null;
+    if (chosen) implicit.add(chosen);
+  }
+  return implicit;
+};
+
+/**
  * The three rules that make `sourceOfEvidence` total and deterministic, applied
  * at DISCOVERY_COMPLETENESS -- the earliest boundary at which roots truthfully
  * exist, and the checkpoint that already pins them immutable. Nothing reads a
