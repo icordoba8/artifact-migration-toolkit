@@ -179,7 +179,7 @@ export const createUnstampedRecord = async ({
   await execFileAsync("git", ["add", "-A"], { cwd: root });
   await execFileAsync(
     "git",
-    ["-c", "user.name=Identity Test", "-c", "user.email=identity@example.test", "commit", "-q", "-m", "fixture"],
+    ["-c", "user.name=Identity Test", "-c", "user.email=identity@example.test", "-c", "maintenance.auto=false", "commit", "-q", "-m", "fixture"],
     { cwd: root },
   );
 

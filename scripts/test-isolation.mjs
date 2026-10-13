@@ -22,7 +22,7 @@ export const withTestRoot = async (run) => {
     await linkPackageDependencies(root, "");
     await linkPackageDependencies(root, "packages/migration-engine");
     for (const args of [["init", "-q"], ["add", "-A"],
-      ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "test snapshot"]]) {
+      ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "maintenance.auto=false", "commit", "-qm", "test snapshot"]]) {
       const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
       if (result.status !== 0) throw new Error(`scratch git ${args[0]}: ${result.stderr}`);
     }
