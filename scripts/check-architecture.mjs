@@ -135,7 +135,7 @@ export const FS_WRITERS = {
   "decisions/record.mjs": ["appendFile", "mkdir"],
   "decisions/policy.mjs": ["open"],
   // lifecycle/: the module lock, and journal removal after commit or recovery (A8, "Transaction and journal protocols").
-  "lifecycle/lock.mjs": ["mkdir", "open", "rename", "rm", "unlink"],
+  "lifecycle/lock.mjs": ["mkdir", "open", "rename", "rm", "rmdir", "unlink"],
   "lifecycle/bootstrap.mjs": ["link", "mkdir", "open", "rename", "rm"],
   "lifecycle/contract-upgrade.mjs": ["cp", "mkdir", "rename", "rm", "writeFile"],
   "lifecycle/artifact-transaction.mjs": ["mkdir", "rm"],

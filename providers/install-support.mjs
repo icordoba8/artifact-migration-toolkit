@@ -1,6 +1,7 @@
 // Shared adapter file/config operations only. Migration rules live in the engine.
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, readlinkSync } from 'node:fs';
+import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -11,6 +12,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const optional = file => readFile(file).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
 // A typed refusal: the message is unchanged, `code` and `state` are for a
 // machine reader (the bootstrap prints `state` to stderr as JSON).
+// The release manifest's `writerLockProtocol`; a manifest without it is protocol 1.
+const WRITER_LOCK_PROTOCOL = 2;
 const refuse = (code, message, state = {}) => Object.assign(new Error(message), { code, state: { code, ...state } });
 const conflict = (file, message = 'Conflicting or modified MCP configuration') => refuse('INSTALL_REGISTRATION_CONFLICT', message, { file });
 const layouts = {
@@ -284,6 +287,7 @@ async function validateSelection(receipt, provider, layout) {
   });
   if (provider === 'claude' && receipt.mode !== 'runtime') expectedFiles.push('.claude-plugin/plugin.json');
   if (!same(Object.keys(receipt.files).sort(), expectedFiles.sort())) throw new Error('Invalid ownership manifest');
+  return manifest;
 }
 
 /** The consumer files a verified release's adapter writes, rendered for `release` in the store. */
@@ -362,7 +366,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     });
   }
   if (!['install', 'update', 'rollback', 'remove', 'doctor'].includes(action)) throw new Error(`Unknown action: ${action}`);
-  if (previous) await validateSelection(previous, provider, layout);
+  const installed = previous ? await validateSelection(previous, provider, layout) : null;
   const history = previous ? await historicalOwned(previous, provider, layout) : [];
   const historical = history.map(item => item.native);
   if (action !== 'install' && !previous) throw new Error('No installation selected');
@@ -377,6 +381,11 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     if (digest(await readFile(await safePath(root, relative))) !== hash) throw new Error(`Owned file modified: ${relative}`);
   }
   if (action === 'doctor') {
+    // `exec` and repair would run or re-register a protocol-1 engine whose
+    // writers ignore this installer's locks: refused, as selection refuses it.
+    if (installed && installed.writerLockProtocol !== WRITER_LOCK_PROTOCOL) {
+      throw refuse('INSTALL_LOCK_PROTOCOL_UNSUPPORTED', `The installed release ${installed.toolkit.version} uses writer lock protocol ${installed.writerLockProtocol ?? 1}, which this installer (protocol ${WRITER_LOCK_PROTOCOL}) never runs or repairs. Update this root to a protocol-${WRITER_LOCK_PROTOCOL} release (1.4.0 or later); see docs/lock-protocol-cutover.md.`, { version: installed.toolkit.version, writerLockProtocol: installed.writerLockProtocol ?? 1, action });
+    }
     // Restore missing or verified historical registrations after both surfaces
     // have rejected conflicts; leave unrelated configuration untouched.
     const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp, historical);
@@ -403,6 +412,11 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   let adopted = null;
   if (action !== 'remove') {
     const manifest = await verifyBundle(bundle, pin);
+    // Before any write: a protocol-1 release's writers ignore this installer's
+    // locks, so it is never installed, updated to or rolled back to from here.
+    if (manifest.writerLockProtocol !== WRITER_LOCK_PROTOCOL) {
+      throw refuse('INSTALL_LOCK_PROTOCOL_UNSUPPORTED', `Release ${manifest.toolkit.version} uses writer lock protocol ${manifest.writerLockProtocol ?? 1}, which this installer (protocol ${WRITER_LOCK_PROTOCOL}) never installs, updates to or rolls back to: its writers do not honour protocol-${WRITER_LOCK_PROTOCOL} locks. Select a protocol-${WRITER_LOCK_PROTOCOL} release (1.4.0 or later); see docs/lock-protocol-cutover.md.`, { version: manifest.toolkit.version, writerLockProtocol: manifest.writerLockProtocol ?? 1, action });
+    }
     const release = path.join(store, `${manifest.toolkit.version}-${pin.slice(7)}`);
     if (action === 'rollback' && !(previous.releases ?? []).some(item => item.release === release && item.pin === pin)) throw new Error('Rollback requires a previously installed exact release');
     const rendered = await renderFiles(bundle, manifest, provider, layout, mode, release);
@@ -489,22 +503,73 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
 }
 
 const LOCKED = 'Installation locked; inspect interrupted installation before retrying';
+// What `rename` of a directory reports while something occupies the lock path
+// (EPERM: Windows will not replace an existing directory).
+const OCCUPIED = new Set(['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM']);
+const OWNER_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const MAX_OWNER_BYTES = 1024;
+const ignore = (...codes) => error => { if (!codes.includes(error.code)) throw error; };
+const rmdirIfEmpty = dir => rmdir(dir).catch(ignore('ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'));
+// The space a recorded pid means anything in, as in the engine's lifecycle/lock.mjs:
+// Windows and WSL share a hostname but not pids, and each Linux pid namespace
+// is its own. Null (no /proc) never proves an owner gone.
+const PID_REALM = (() => {
+  if (process.platform !== 'linux') return process.platform;
+  try { return `linux:${readlinkSync('/proc/self/ns/pid')}`; } catch { return null; }
+})();
 
 /**
- * Is the recorded lock owner provably dead on this host?
+ * Is the lock owner recorded in `file` provably dead?
  *
- * Only `ESRCH` -- no such process -- proves it. `EPERM` means the pid exists
- * and belongs to someone else, an unparseable file means nothing is known, and
- * a different hostname means the pid number says nothing about that machine's
- * process table. Every one of those is ambiguous, and ambiguity fails closed:
+ * Only when the entry is a regular file of bounded size, read without following
+ * a symlink (O_NOFOLLOW where the OS has it, and the opened file must be the
+ * lstat-vetted one everywhere), naming this `uuid`, this host and this PID
+ * realm, and `kill(pid, 0)` answers ESRCH. EPERM is a live process another user
+ * owns, and every other answer -- a torn or foreign entry, another host or
+ * realm, an unexpected probe error -- is ambiguous, and ambiguity fails closed:
  * reclaiming a live installer's lock would run two config writers at once.
  */
-const lockOwnerDead = async (lock) => {
+const lockOwnerDead = async (file, uuid) => {
+  let handle;
   let owner;
-  try { owner = JSON.parse(await readFile(lock, 'utf8')); } catch { return false; }
-  if (!owner || typeof owner !== 'object' || owner.hostname !== os.hostname() || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  try {
+    const vetted = await lstat(file);
+    if (!vetted.isFile() || vetted.size > MAX_OWNER_BYTES) return false;
+    handle = await open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== vetted.dev || opened.ino !== vetted.ino) return false;
+    const buffer = Buffer.alloc(MAX_OWNER_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_OWNER_BYTES) return false;
+    owner = JSON.parse(buffer.toString('utf8', 0, bytesRead));
+  } catch { return false; } finally { await handle?.close().catch(() => undefined); }
+  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || owner.hostname !== os.hostname() || PID_REALM === null || owner.realm !== PID_REALM || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
   try { process.kill(owner.pid, 0); return false; }
   catch (error) { return error.code === 'ESRCH'; }
+};
+
+/**
+ * Frees a lock nothing provably holds: 'dead' when a dead owner was removed,
+ * 'empty' when there was no owner left (a release or reclaim cut short),
+ * 'legacy' for a protocol-1 `install.lock` file, null to fail closed. Each
+ * removal is keyed by identity -- the dead owner's own entry name, `rmdir` of
+ * an empty directory -- so a reclaimer that lost the race removes nothing of
+ * the winner's.
+ */
+const reclaim = async (lock) => {
+  const info = await lstat(lock).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (!info) return 'empty';
+  // Written by a protocol-1 installer, which does not honour this format: never
+  // ours to remove, whoever wrote it and whether or not they are alive.
+  if (info.isFile()) return 'legacy';
+  if (!info.isDirectory()) return null;
+  const entries = await readdir(lock).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; });
+  if (entries.length === 0) { await rmdirIfEmpty(lock); return 'empty'; }
+  const [entry] = entries;
+  if (entries.length !== 1 || !OWNER_ENTRY.test(entry) || !await lockOwnerDead(path.join(lock, entry), entry.slice(0, -5))) return null;
+  await unlink(path.join(lock, entry)).catch(ignore('ENOENT', 'ENOTDIR'));
+  await rmdirIfEmpty(lock);
+  return 'dead';
 };
 
 // Doctor repairs a missing registration, so it is a config writer too and takes
@@ -513,33 +578,42 @@ export async function adapter(provider, options = {}) {
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
   const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
   await mkdir(path.dirname(lock), { recursive: true });
-  // One config writer per host root, still the same `wx` open, so mutual
-  // exclusion is unchanged. The file now says who holds it, which is what turns
-  // a killed installer from "delete this by hand, forever" into one reclaim --
-  // and reclaiming assumes nothing about consistency: `applyAdapter`'s first act
-  // on an existing receipt is `validateSelection` + `verifyBundle` + per-file
-  // digest checks, so a half-applied install is re-proven, not trusted.
-  const claim = () => open(lock, 'wx').then(
-    handle => handle.writeFile(json({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString(), action: options.action ?? 'install', provider })).then(() => handle),
-    error => { if (error.code === 'EEXIST') return null; throw error; },
-  );
-  let handle = await claim();
+  // One config writer per host root. The lock is a directory holding exactly
+  // its owner's `<uuid>.json`, staged complete and published by one `rename`,
+  // which cannot land on a held lock -- so it never exists without saying who
+  // holds it. That is what turns a killed installer from "delete this by hand,
+  // forever" into one reclaim, and reclaiming assumes nothing about consistency:
+  // `applyAdapter`'s first act on an existing receipt is `validateSelection` +
+  // `verifyBundle` + per-file digest checks, so a half-applied install is
+  // re-proven, not trusted.
+  const id = randomUUID();
+  const staging = `${lock}.${id}.tmp`;
+  const claim = () => rename(staging, lock).then(() => true, error => { if (OCCUPIED.has(error.code)) return false; throw error; });
+  let held = false;
   let recoveredLock = false;
-  if (!handle && await lockOwnerDead(lock)) {
-    // One `rm` then one `wx` open: a second installer that also saw the dead pid
-    // loses the race with EEXIST and fails closed with the existing message.
-    await rm(lock, { force: true });
-    handle = await claim();
-    recoveredLock = handle !== null;
-  }
-  if (!handle) throw new Error(LOCKED);
+  try {
+    await mkdir(staging);
+    await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), realm: PID_REALM, startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
+    held = await claim();
+    // One reclaim, then one claim: a second installer that also saw the dead
+    // owner loses that claim and fails closed with the existing message.
+    const freed = held ? null : await reclaim(lock);
+    if (freed === 'legacy') throw refuse('INSTALL_LEGACY_LOCK', `${LOCKED}: ${lock} is a lock file from a protocol-1 release, which is never reclaimed automatically. Stop every installer and migration command on this root, old releases included, then remove it by hand (docs/lock-protocol-cutover.md).`, { lock });
+    if (freed) { held = await claim(); recoveredLock = held && freed === 'dead'; }
+  } finally { if (!held) await rm(staging, { recursive: true, force: true }); }
+  if (!held) throw new Error(LOCKED);
   try {
     const result = await applyAdapter(provider, options);
     // Reported, not persisted: the receipt records what is installed, and a
     // reclaimed lock is a fact about this invocation.
     return recoveredLock ? { ...result, recoveredLock } : result;
   }
-  finally { await handle.close(); await rm(lock, { force: true }); }
+  finally {
+    // Our entry, then the directory only if that emptied it: never another
+    // installer's lock, whatever happened to ours meanwhile.
+    await unlink(path.join(lock, `${id}.json`)).catch(ignore('ENOENT', 'ENOTDIR'));
+    await rmdirIfEmpty(lock);
+  }
 }
 
 export async function main(provider) {

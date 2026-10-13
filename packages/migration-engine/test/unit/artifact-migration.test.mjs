@@ -7,6 +7,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   writeFile,
@@ -4435,8 +4436,8 @@ test("an actual SIGINT mid-checkpoint leaves a resumable record", async () => {
     );
 
     // Deterministic checkpoint evidence, not a sleep: the run holds the
-    // record's module lock for the whole mutating checkpoint, and the lock
-    // file names its holder's pid. The record is parked at FINALIZE with every
+    // record's module lock for the whole mutating checkpoint, and the lock's
+    // owner entry names its holder's pid. The record is parked at FINALIZE with every
     // prior checkpoint complete, so "this child owns the lock" means "this
     // child is inside the FINALIZE checkpoint" -- validating gates, running the
     // TypeScript validator and walking the target tree -- not idle.
@@ -4448,9 +4449,10 @@ test("an actual SIGINT mid-checkpoint leaves a resumable record", async () => {
     const checkpointDeadline = Date.now() + 60_000;
     let holder = null;
     while (Date.now() < checkpointDeadline) {
-      // The lock is created empty and written a moment later, so a probe that
-      // lands in between reads "" -- not an owner, just not one yet.
-      holder = await readFile(lockFile, "utf8")
+      // The lock is a directory published with its one owner entry already
+      // written; a probe before it exists finds nothing -- not an owner yet.
+      holder = await readdir(lockFile)
+        .then(([entry]) => readFile(path.join(lockFile, entry), "utf8"))
         .then((bytes) => JSON.parse(bytes))
         .catch(() => null);
       if (holder?.pid === child.pid) break;

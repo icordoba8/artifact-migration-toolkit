@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { readlinkSync } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -98,8 +99,8 @@ export const runDoctor = async ({ cwd }) => {
  * is satisfied by exactly one of them.
  */
 const variants = new Map();
-async function variantRelease(version, engine = null) {
-  const key = `${version} ${engine ? 'legacy' : 'current'}`;
+async function variantRelease(version, engine = null, { lockProtocol = 2 } = {}) {
+  const key = `${version} ${engine ? 'legacy' : 'current'} protocol ${lockProtocol}`;
   if (variants.has(key)) return variants.get(key);
   const { built } = await releaseFixture();
   const home = path.join(scratch, `${key} bundle`);
@@ -113,6 +114,20 @@ async function variantRelease(version, engine = null) {
     manifest.files[relative] = digest(Buffer.from(contents));
   };
   if (engine) await restamp('packages/migration-engine/src/migration-utils.mjs', engine);
+  if (lockProtocol === 1) {
+    // What a protocol-1 release is to a protocol-2 launcher: no manifest field,
+    // and an installer that installs itself and counts every call.
+    delete manifest.writerLockProtocol;
+    let installer = await readFile(path.join(bundle, 'providers/install-support.mjs'), 'utf8');
+    for (const [from, to] of [
+      ['if (manifest.writerLockProtocol !== WRITER_LOCK_PROTOCOL) {', 'if (false) {'],
+      ['export async function adapter(provider, options = {}) {', 'export async function adapter(provider, options = {}) {\n  globalThis.protocol1AdapterRuns = (globalThis.protocol1AdapterRuns ?? 0) + 1;'],
+    ]) {
+      assert.ok(installer.includes(from), from);
+      installer = installer.replace(from, to);
+    }
+    await restamp('providers/install-support.mjs', installer);
+  }
   await restamp('packages/migration-engine/build-identity.json', `${JSON.stringify(manifest.toolkit, null, 2)}\n`);
   for (const relative of Object.keys(manifest.files).filter(name => /^providers\/[^/]+\/adapter\.json$/.test(name))) {
     const adapter = JSON.parse(await readFile(path.join(bundle, relative), 'utf8'));
@@ -677,13 +692,99 @@ test('T12: a provably dead lock owner is reclaimed once; anything ambiguous stay
   await writeFile(lock, `${JSON.stringify({ pid: dead, hostname: `${os.hostname()}-elsewhere` })}\n`);
   await assert.rejects(ensureRuntime({ provider: 'codex', root, store }, offline), /Installation locked/);
 
-  // Provably dead on this host: reclaimed once, and the repair completes with
-  // full re-verification of the receipt, the bundle and every owned file.
+  // A protocol-1 lock file is never reclaimed, even with its owner provably
+  // dead: its writers do not honour this protocol. An operator removes it.
   await writeFile(lock, `${JSON.stringify({ pid: dead, hostname: os.hostname(), startedAt: new Date().toISOString(), action: 'install', provider: 'codex' })}\n`);
+  await assert.rejects(ensureRuntime({ provider: 'codex', root, store }, offline), /Installation locked; .* protocol-1 release/);
+  await rm(lock);
+
+  // Provably dead in this host's PID realm: reclaimed once, and the repair
+  // completes with full re-verification of the receipt, the bundle and every
+  // owned file.
+  const uuid = '00000000-0000-4000-8000-000000000000';
+  const realm = process.platform === 'linux' ? `linux:${readlinkSync('/proc/self/ns/pid')}` : process.platform;
+  await mkdir(lock);
+  await writeFile(path.join(lock, `${uuid}.json`), `${JSON.stringify({ uuid, pid: dead, hostname: os.hostname(), realm, startedAt: new Date().toISOString(), action: 'install', provider: 'codex' })}\n`);
   const repaired = await ensureRuntime({ provider: 'codex', root, store }, offline);
   assert.equal(repaired.mcpRepair.repaired, true);
   await assert.rejects(stat(lock), { code: 'ENOENT' }, 'the reclaimed lock was not released');
   assert.deepEqual(await snapshot(root), settled, 'recovery did not restore the exact installed state');
+});
+
+// Protocol-1 releases (no `writerLockProtocol` in their manifest) take regular-
+// file locks that protocol-2 writers do not honour, so no source may select,
+// run or roll back to one. Each refusal comes before the release's adapter runs
+// in this process (its patched installer counts every call) and before anything
+// is written.
+test('a protocol-1 release is never selected, run or rolled back to, from any source', async () => {
+  const old = await variantRelease('1.3.98', null, { lockProtocol: 1 });
+  const current = await variantRelease('1.4.98');
+  // As a protocol-1 installer left them: its own CLI, in its own process.
+  const installOld = (provider, root, store) => execFileAsync(process.execPath,
+    [path.join(old.bundle, `providers/${provider}/install.mjs`), 'install', '--runtime-only', '--scope', 'project', '--root', root, '--store', store, '--bundle', old.bundle, '--pin', old.pin]);
+  const refusal = async (label, run, { root, store }) => {
+    const consumerBefore = await snapshot(root);
+    const storeBefore = await snapshot(store);
+    const error = await run().then(() => null, e => e);
+    assert.equal(error?.code, 'RELEASE_LOCK_PROTOCOL_UNSUPPORTED', `${label}: ${error?.stack ?? 'selected'}`);
+    assert.match(error.message, /Release 1\.3\.98 uses writer lock protocol 1/);
+    assert.equal(error.state.writerLockProtocol, 1);
+    assert.equal(error.state.receipt, 'unchanged');
+    assert.equal(globalThis.protocol1AdapterRuns, undefined, `${label}: the protocol-1 adapter ran`);
+    assert.deepEqual(await snapshot(root), consumerBefore, `${label}: the consumer changed`);
+    assert.deepEqual(await snapshot(store), storeBefore, `${label}: the store changed`);
+  };
+
+  // A consumer a protocol-1 installer left on 1.3.98.
+  const root = path.join(scratch, 'protocol one consumer');
+  const store = path.join(scratch, 'protocol one store');
+  await mkdir(root, { recursive: true });
+  await installOld('codex', root, store);
+  assert.equal(globalThis.protocol1AdapterRuns, undefined, 'the protocol-1 adapter ran in this process');
+  const at = { root, store };
+
+  await requiring('1.3.98');
+  await refusal('installed receipt', () => ensureRuntime({ provider: 'codex', root, store }, offline), at);
+  await refusal('exact-version override', () => ensureRuntime({ provider: 'codex', root, store, version: '1.3.98' }, offline), at);
+  process.env.ARTIFACT_MIGRATION_TOOLS_VERSION = '1.3.98';
+  try {
+    await refusal('environment override', () => ensureRuntime({ provider: 'codex', root, store }, offline), at);
+  } finally { delete process.env.ARTIFACT_MIGRATION_TOOLS_VERSION; }
+
+  // The cutover itself: a protocol-1 receipt updates to a protocol-2 release
+  // through the new release's adapter, and keeps 1.3.98 in its history.
+  await requiring('1.4.98');
+  const updated = await ensureRuntime({ provider: 'codex', root, store }, { ...current, skillRelease });
+  assert.equal(updated.toolkit.version, '1.4.98');
+  const receipt = JSON.parse(await readFile(receiptPath(root), 'utf8'));
+  assert.ok(receipt.releases.some(item => item.pin === old.pin), 'the protocol-1 release left the history');
+
+  await requiring('1.3.98');
+  await refusal('retained history', () => ensureRuntime({ provider: 'codex', root, store }, offline), at);
+
+  // A rollback pin a protocol-1 installer wrote stands for 1.3.98: refused too.
+  await writeFile(receiptPath(root), `${JSON.stringify({ ...receipt, pinned: { version: '1.3.98', by: 'rollback', at: new Date().toISOString(), againstSkill: null } }, null, 2)}\n`);
+  await requiring('1.4.98');
+  await refusal('rollback pin', () => ensureRuntime({ provider: 'codex', root, store }, offline), at);
+
+  // Another provider's protocol-1 receipt in a fresh consumer on the same store.
+  const sibling = path.join(scratch, 'protocol one sibling consumer');
+  await mkdir(sibling, { recursive: true });
+  await installOld('claude', sibling, store);
+  await requiring('1.3.98');
+  await refusal('sibling receipt', () => ensureRuntime({ provider: 'codex', root: sibling, store }, offline), { root: sibling, store });
+
+  // Nothing in the consumer, the protocol-1 release only in the shared store.
+  const bare = path.join(scratch, 'protocol one bare consumer');
+  await mkdir(bare, { recursive: true });
+  await refusal('shared store', () => ensureRuntime({ provider: 'codex', root: bare, store }, offline), { root: bare, store });
+
+  // Nothing local at all: downloaded and verified, then refused before the store exists.
+  const fresh = path.join(scratch, 'protocol one fresh store');
+  const requests = old.requests();
+  await refusal('downloaded release', () => ensureRuntime({ provider: 'codex', root: bare, store: fresh }, { ...old, skillRelease }), { root: bare, store: fresh });
+  assert.equal(old.requests(), requests + 1);
+  await assert.rejects(stat(fresh), { code: 'ENOENT' });
 });
 
 // T14. Fail-closed was always right here; an error naming neither cause nor
