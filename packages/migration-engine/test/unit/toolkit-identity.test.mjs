@@ -447,7 +447,7 @@ test("A-02 artifact mismatch remains BLOCKED with progress and exact identity re
   await writeFile(path.join(root, source), "export const widget = true;\n");
   await execFileAsync("git", ["init", "-q"], { cwd: root });
   await execFileAsync("git", ["add", "."], { cwd: root });
-  await execFileAsync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"], { cwd: root });
+  await execFileAsync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "-c", "maintenance.auto=false", "commit", "-qm", "fixture"], { cwd: root });
   const args = [source, "--source-root", root, "--target-root", root, "--json"];
   const bootstrap = await runEngine(sourceEngine, "artifact/run-artifact.mjs", args, root);
   assert.equal(bootstrap.code, 0, bootstrap.output);
