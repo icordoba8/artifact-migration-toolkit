@@ -12,22 +12,26 @@
 
 import assert from "node:assert/strict";
 import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
-import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import {
   access,
   appendFile,
   cp,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
+  readlink,
   rename,
   rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -2636,6 +2640,415 @@ test("a live lock holder is never stolen", async () => {
     await (
       await acquireModuleLock(fixture.targetRoot, "auth")
     )();
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- Lock ownership: identity-keyed removal, no age eviction ----------------
+//
+// Each interleaving below once granted the lock twice or evicted a live owner
+// (v1.4.0 audit L1a/L1b). The barriers are deterministic, not sleeps: `hookFs`
+// wraps node:fs/promises in this process -- the lock module's named imports are
+// live bindings, refreshed by syncBuiltinESMExports -- and `actor` names each
+// contender, so a hook parks exactly one of them at an exact step.
+const fsp = createRequire(import.meta.url)("node:fs/promises");
+const actor = new AsyncLocalStorage();
+const hookFs = (wrappers) => {
+  const originals = Object.fromEntries(
+    Object.keys(wrappers).map((name) => [name, fsp[name]]),
+  );
+  for (const [name, wrap] of Object.entries(wrappers)) {
+    fsp[name] = wrap(originals[name]);
+  }
+  syncBuiltinESMExports();
+  return () => {
+    Object.assign(fsp, originals);
+    syncBuiltinESMExports();
+  };
+};
+const barrier = () => {
+  let open;
+  const opened = new Promise((resolve) => (open = resolve));
+  return { open, opened };
+};
+/** Parks `name`'s first call whose path argument lies inside `lock`. */
+const parkFirst = (name, lock, parked, resume) => {
+  let paused = false;
+  return (real) =>
+    async (...args) => {
+      if (actor.getStore() === name && !paused && underLock(lock, args[0])) {
+        paused = true;
+        parked.open();
+        await resume.opened;
+      }
+      return real(...args);
+    };
+};
+const DEAD_PID = 2147483646;
+const lockModuleUrl = pathToFileURL(path.join(scriptsRoot, "module-lock.mjs")).href;
+const underLock = (lock, file) =>
+  String(file) === lock || String(file).startsWith(`${lock}${path.sep}`);
+const lockRoot = async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sm-lock-"));
+  const lock = lockPathFor(root, "auth");
+  await mkdir(path.dirname(lock), { recursive: true });
+  return { root, lock, cleanup: () => rm(root, { recursive: true, force: true }) };
+};
+const contend = (root, options) =>
+  acquireModuleLock(root, "auth", { timeoutMs: 150, pollMs: 10, ...options });
+/** The owner entry this lock format publishes, for a chosen owner. */
+const seedOwner = async (lock, owner = {}) => {
+  const uuid = randomUUID();
+  await mkdir(lock, { recursive: true });
+  await writeFile(
+    path.join(lock, `${uuid}.json`),
+    `${JSON.stringify({ pid: DEAD_PID, hostname: os.hostname(), uuid, acquiredAt: new Date().toISOString(), ...owner })}\n`,
+  );
+  return uuid;
+};
+/** Every name and byte below `dir`: what "left untouched" means. */
+const treeOf = async (dir, tree = {}) => {
+  for (const name of (await readdir(dir)).sort()) {
+    const file = path.join(dir, name);
+    const info = await lstat(file);
+    if (info.isSymbolicLink()) tree[file] = `-> ${await readlink(file)}`;
+    else if (info.isDirectory()) await treeOf(file, Object.assign(tree, { [file]: "dir" }));
+    else tree[file] = await readFile(file, "utf8");
+  }
+  return tree;
+};
+/** A real process that takes the lock and is killed holding it. */
+const deadHolder = (root) =>
+  execFileAsync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    `const { acquireModuleLock } = await import(${JSON.stringify(lockModuleUrl)});\n` +
+      `await acquireModuleLock(process.argv[1], "auth");\n` +
+      `process.kill(process.pid, "SIGKILL");\n`,
+    root,
+  ]).then(
+    () => assert.fail("the lock holder was not killed"),
+    (error) => assert.equal(error.signal, "SIGKILL", error.stderr),
+  );
+
+test("two reclaimers of one dead owner never both hold the lock", async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  const parked = barrier();
+  const resume = barrier();
+  let paused = false;
+  const restore = hookFs({
+    readFile: (real) => async (file, ...rest) => {
+      const bytes = await real(file, ...rest);
+      if (actor.getStore() === "B" && !paused && underLock(lock, file)) {
+        paused = true;
+        parked.open();
+        await resume.opened;
+      }
+      return bytes;
+    },
+  });
+  try {
+    await deadHolder(root);
+    const holders = [];
+    const b = actor
+      .run("B", () => acquireModuleLock(root, "auth", { timeoutMs: 1000, pollMs: 10 }))
+      .then((release) => holders.push("B") && release, (error) => error);
+    await parked.opened; // B has read the dead owner's record
+    const releaseA = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
+    holders.push("A");
+    resume.open(); // B goes on to reclaim the owner it saw die
+    const outcome = await b;
+    assert.deepEqual(holders, ["A"], "two processes held the lock at once");
+    assert.match(outcome.message, /holds the lock/);
+    // A's lock survived B's reclaim intact: a third contender is still refused.
+    await assert.rejects(contend(root), /holds the lock/);
+    await releaseA();
+    assert.equal(await exists(lock), false);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a reclaimer paused before its removal leaves the replacement owner's lock alone", async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  const parked = barrier();
+  const resume = barrier();
+  const park = parkFirst("B", lock, parked, resume);
+  const restore = hookFs({ rename: park, unlink: park, rmdir: park, rm: park });
+  try {
+    await deadHolder(root);
+    const holders = [];
+    const b = actor
+      .run("B", () => acquireModuleLock(root, "auth", { timeoutMs: 1000, pollMs: 10 }))
+      .then((release) => holders.push("B") && release, (error) => error);
+    await parked.opened; // B proved the owner dead; its removal has not run
+    const releaseA = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
+    holders.push("A");
+    resume.open();
+    const outcome = await b;
+    assert.deepEqual(holders, ["A"], "two processes held the lock at once");
+    assert.match(outcome.message, /holds the lock/);
+    await assert.rejects(contend(root), /holds the lock/);
+    await releaseA();
+    assert.equal(await exists(lock), false);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a live owner keeps its lock however long it holds it", async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  // A real holder in another process, alive until told to release.
+  const holder = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `const { acquireModuleLock } = await import(${JSON.stringify(lockModuleUrl)});\n` +
+        `const release = await acquireModuleLock(process.argv[1], "auth");\n` +
+        `process.stdout.write("held\\n");\n` +
+        `process.stdin.once("data", async () => { await release(); process.exit(0); });\n`,
+      root,
+    ],
+    { stdio: ["pipe", "pipe", "inherit"] },
+  );
+  const exited = new Promise((resolve) => holder.once("exit", resolve));
+  const now = Date.now;
+  try {
+    await new Promise((resolve, reject) => {
+      holder.stdout.once("data", resolve);
+      holder.once("exit", (code) => reject(new Error(`the holder exited with ${code}`)));
+    });
+    // Sixteen minutes on by this waiter's clock -- past the old staleAfterMs.
+    Date.now = () => now() + 16 * 60_000;
+    await assert.rejects(contend(root), new RegExp(`holds the lock .*\\(pid ${holder.pid}\\)`));
+    Date.now = now;
+    assert.equal(await exists(lock), true, "the live owner's lock was removed");
+    holder.stdin.write("release\n");
+    assert.equal(await exited, 0);
+    await (await acquireModuleLock(root, "auth", { timeoutMs: 1000 }))();
+  } finally {
+    Date.now = now;
+    holder.kill("SIGKILL");
+    await cleanup();
+  }
+});
+
+test("a release removes its own lock and never a replacement owner's", async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  const parked = barrier();
+  const resume = barrier();
+  const park = parkFirst("A", lock, parked, resume);
+  const restore = hookFs({ rename: park, unlink: park, rmdir: park, rm: park });
+  try {
+    const releaseA = await acquireModuleLock(root, "auth");
+    const releasing = actor.run("A", () => releaseA());
+    await parked.opened; // A's release is under way; its removal has not run
+    // Meanwhile A's lock is lost -- deleted by hand -- and C takes the lock.
+    await rm(lock, { recursive: true, force: true });
+    const releaseC = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
+    resume.open();
+    await releasing;
+    await assert.rejects(contend(root), /holds the lock/, "A's release removed C's lock");
+    await releaseA(); // a second release is a no-op
+    await assert.rejects(contend(root), /holds the lock/);
+    await releaseC();
+    assert.equal(await exists(lock), false);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a half-built lock is only staging: it neither blocks nor shares the published lock", async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  const parked = barrier();
+  const resume = barrier();
+  let paused = false;
+  const restore = hookFs({
+    open: (real) => async (...args) => {
+      const handle = await real(...args);
+      // A's owner entry now exists in its staging directory, still empty.
+      if (actor.getStore() === "A" && !paused) {
+        paused = true;
+        parked.open();
+        await resume.opened;
+      }
+      return handle;
+    },
+  });
+  try {
+    const a = actor
+      .run("A", () => acquireModuleLock(root, "auth", { timeoutMs: 300, pollMs: 10 }))
+      .then((release) => release, (error) => error);
+    await parked.opened;
+    const releaseB = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
+    resume.open();
+    assert.match((await a).message, /holds the lock/, "A shared B's lock");
+    await releaseB();
+    // A removed its own staging on the way out; nothing is left behind.
+    assert.deepEqual(await readdir(path.dirname(lock)), []);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("an owner that cannot be proven gone is never reclaimed, whatever its age", async () => {
+  const unproven = /holds the lock .*cannot be proven gone/;
+  const cases = [
+    ["a live pid with an ancient lock", (lock) => seedOwner(lock, { pid: process.pid, acquiredAt: "2000-01-01T00:00:00.000Z" }), new RegExp(`\\(pid ${process.pid}\\)`)],
+    ["a dead pid on another host", (lock) => seedOwner(lock, { hostname: `${os.hostname()}-elsewhere` }), unproven],
+    ["an entry without a hostname", (lock) => seedOwner(lock, { hostname: undefined }), unproven],
+    ["an invalid pid", (lock) => seedOwner(lock, { pid: 0 }), unproven],
+    ["a pid that is not a number", (lock) => seedOwner(lock, { pid: String(DEAD_PID) }), unproven],
+    ["a torn entry", async (lock) => {
+      await mkdir(lock);
+      await writeFile(path.join(lock, `${randomUUID()}.json`), '{"pid":');
+    }, unproven],
+    ["an entry naming another owner", async (lock) => {
+      const uuid = await seedOwner(lock);
+      await rename(path.join(lock, `${uuid}.json`), path.join(lock, `${randomUUID()}.json`));
+    }, unproven],
+    ["two entries", async (lock) => {
+      await seedOwner(lock);
+      await seedOwner(lock);
+    }, unproven],
+    ["an unexpected entry", async (lock) => {
+      await mkdir(lock);
+      await writeFile(path.join(lock, "owner.json"), JSON.stringify({ pid: DEAD_PID, hostname: os.hostname() }));
+    }, unproven],
+    ["a symlink to a dead owner's lock", async (lock, root) => {
+      await seedOwner(path.join(root, "elsewhere"));
+      await symlink(path.join(root, "elsewhere"), lock);
+    }, unproven],
+    ["a legacy lock file of a live pid", (lock) => writeFile(lock, JSON.stringify({ pid: process.pid, uuid: "legacy", acquiredAt: "2000-01-01T00:00:00.000Z" })), new RegExp(`\\(pid ${process.pid}\\)`)],
+    ["a torn legacy lock file", (lock) => writeFile(lock, ""), unproven],
+    ["a legacy lock file of a dead pid on another host", (lock) => writeFile(lock, JSON.stringify({ pid: DEAD_PID, hostname: `${os.hostname()}-elsewhere` })), unproven],
+  ];
+  for (const [label, seed, message] of cases) {
+    const { root, lock, cleanup } = await lockRoot();
+    try {
+      await seed(lock, root);
+      const before = await treeOf(root);
+      await assert.rejects(contend(root), message, label);
+      assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
+    } finally {
+      await cleanup();
+    }
+  }
+});
+
+test("a provably dead or vanished owner is reclaimed automatically", async () => {
+  const cases = [
+    ["a dead owner", (lock) => seedOwner(lock)],
+    ["an empty lock directory: a release or reclaim cut short", (lock) => mkdir(lock)],
+    ["a dead legacy lock file, written before hostnames", (lock) => writeFile(lock, `${JSON.stringify({ pid: DEAD_PID, uuid: randomUUID(), acquiredAt: new Date().toISOString() })}\n`)],
+    ["a dead legacy lock file on this host", (lock) => writeFile(lock, JSON.stringify({ pid: DEAD_PID, hostname: os.hostname() }))],
+  ];
+  for (const [label, seed] of cases) {
+    const { root, lock, cleanup } = await lockRoot();
+    try {
+      await seed(lock);
+      const release = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
+      assert.equal((await readdir(lock)).length, 1, `${label}: the lock holds exactly its new owner`);
+      await release();
+      assert.equal(await exists(lock), false, label);
+    } finally {
+      await cleanup();
+    }
+  }
+  // A killed acquirer's staging is not the lock: never read, never removed.
+  const { root, lock, cleanup } = await lockRoot();
+  try {
+    const stray = `${lock}.${randomUUID()}.tmp`;
+    await seedOwner(stray, { pid: process.pid });
+    const before = await treeOf(root);
+    await (await acquireModuleLock(root, "auth", { timeoutMs: 1000 }))();
+    assert.deepEqual(await treeOf(root), before);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a kill after any lock filesystem step leaves a lock the next process takes", async () => {
+  // A child reclaims a dead owner's lock, holds it and releases it, and is
+  // SIGKILLed right after its Nth mutating filesystem call. N walks every one.
+  const child =
+    `import { createRequire, syncBuiltinESMExports } from "node:module";\n` +
+    `const fsp = createRequire(import.meta.url)("node:fs/promises");\n` +
+    `const [lockModule, root, killAt] = process.argv.slice(1);\n` +
+    `let step = 0;\n` +
+    `for (const name of ["mkdir", "open", "rename", "unlink", "rmdir", "rm", "writeFile"]) {\n` +
+    `  const real = fsp[name];\n` +
+    `  fsp[name] = async (...args) => {\n` +
+    `    try { return await real(...args); }\n` +
+    `    finally { if (++step === Number(killAt)) process.kill(process.pid, "SIGKILL"); }\n` +
+    `  };\n` +
+    `}\n` +
+    `syncBuiltinESMExports();\n` +
+    `const { acquireModuleLock } = await import(lockModule);\n` +
+    `await (await acquireModuleLock(root, "auth", { timeoutMs: 5000 }))();\n` +
+    `process.stdout.write(String(step));\n`;
+  for (let killAt = 1; ; killAt += 1) {
+    const { root, lock, cleanup } = await lockRoot();
+    try {
+      await seedOwner(lock);
+      const completed = await execFileAsync(process.execPath, [
+        "--input-type=module", "-e", child, lockModuleUrl, root, String(killAt),
+      ]).then(
+        ({ stdout }) => Number(stdout),
+        (error) => assert.equal(error.signal, "SIGKILL", error.stderr) ?? null,
+      );
+      // Wherever the kill landed, a fresh process takes and releases the lock,
+      // and nothing is left but, at most, the killed acquirer's staging.
+      await (await acquireModuleLock(root, "auth", { timeoutMs: 2000 }))();
+      const left = await readdir(path.dirname(lock));
+      assert.ok(left.every((name) => /^auth\.lock\.[0-9a-f-]{36}\.tmp$/.test(name)), `kill at ${killAt}: ${left}`);
+      if (completed !== null) {
+        // The child outlived every step: each one was a kill point.
+        assert.equal(completed, killAt - 1);
+        assert.ok(completed >= 9, `only ${completed} filesystem steps`);
+        break;
+      }
+    } finally {
+      await cleanup();
+    }
+  }
+});
+
+test("a protected state write waits for the live owner and runs once it releases", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "DISCOVERY_COMPLETENESS");
+    await completeStepDoc(fixture, "ASSESS_TARGET");
+    await writeJson(path.join(fixture.migrationRoot, "inventories/target.json"), TARGET_INVENTORY);
+    const lock = lockPathFor(fixture.targetRoot, "auth");
+    const stateFile = path.join(fixture.migrationRoot, "state.json");
+    const before = await readFile(stateFile, "utf8");
+    const blocked = barrier();
+    const restore = hookFs({
+      rename: (real) => (from, to, ...rest) =>
+        real(from, to, ...rest).catch((error) => {
+          if (String(to) === lock) blocked.open();
+          throw error;
+        }),
+    });
+    try {
+      const release = await acquireModuleLock(fixture.targetRoot, "auth");
+      const advancing = advance(fixture);
+      await blocked.opened; // the advance reached the lock and was refused
+      assert.equal(await readFile(stateFile, "utf8"), before, "state was written under another owner's lock");
+      await release();
+      await advancing;
+    } finally {
+      restore();
+    }
+    assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+    assert.equal(await exists(lock), false);
   } finally {
     await fixture.cleanup();
   }

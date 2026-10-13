@@ -4,29 +4,42 @@
 // per-command journal dialect -- everything that mutates a module's persisted
 // artifacts takes this lock, keyed by target root plus lock name.
 //
-// The lock is an existence lock whose holder is identified by PID and process
-// start marker. Abrupt process death leaves the file behind, so a waiter that
-// proves the holder is gone reclaims it through an atomic rename: only one
-// racer can win a rename of the same path, so reclamation cannot double-grant.
+// The lock is a directory holding exactly one owner entry, `<uuid>.json`. It is
+// built complete in a private staging directory and published by one `rename`,
+// which cannot land on a published lock (never empty), so the lock never exists
+// without its owner. Every removal is keyed by identity, never by the shared
+// path: `unlink(<lock>/<uuid>.json)` removes that one owner's entry or nothing,
+// and `rmdir` removes only an empty directory, so no waiter, reclaimer or
+// release can delete a lock someone else holds. A waiter reclaims a lock only
+// when its owner is provably gone: recorded on this host, and no such pid. Age
+// is never evidence -- a slow live owner keeps its lock -- and anything that
+// proves no owner (a torn entry, a foreign host, extra entries, a symlink)
+// fails closed.
 //
 // ponytail: PID identity, not an OS-held handle. Node cannot portably hold an
 // advisory lock that the kernel releases on death (Windows has no flock, and
-// an open handle does not block a second `open` here), so identity plus atomic
-// reclaim is the portable equivalent. Ceiling: a recycled PID belonging to a
-// live unrelated process makes a stale lock look held until `staleAfterMs`
-// elapses. Upgrade path: an OS-held lock via a native addon, if that ever
-// becomes worth a dependency.
+// an open handle does not block a second `open` here), so identity plus
+// identity-keyed removal is the portable equivalent. Ceilings: a recycled PID
+// now owned by a live unrelated process keeps a stale lock held until that
+// process exits; hosts (or PID namespaces) sharing one hostname and one
+// filesystem look like one host; a waiter killed mid-acquire leaves its
+// `<name>.lock.<uuid>.tmp` staging directory, which nothing reads. Upgrade
+// path: record a process start marker (Linux /proc starttime) to prove PID
+// reuse, or an OS-held lock via a native addon.
 
 import { randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   rm,
-  stat,
+  rmdir,
   unlink,
 } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 const LOCK_ROOT = ".agents/knowledge/migrations/locks";
@@ -53,36 +66,82 @@ export const processAlive = (pid) => {
   }
 };
 
+// What `rename` of a directory reports while something occupies the lock path
+// (EPERM: Windows will not replace an existing directory).
+const OCCUPIED = new Set(["EEXIST", "ENOTEMPTY", "ENOTDIR", "EPERM"]);
+const OWNER_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const UNPROVEN = Object.freeze({ pid: null });
+
+const ignore = (...codes) => (error) => {
+  if (!codes.includes(error.code)) throw error;
+};
+const unlinkEntry = (file) => unlink(file).catch(ignore("ENOENT", "ENOTDIR"));
+const rmdirIfEmpty = (dir) =>
+  rmdir(dir).catch(ignore("ENOENT", "ENOTEMPTY", "EEXIST", "ENOTDIR"));
+
 const readOwner = async (file) => {
   try {
-    return JSON.parse(await readFile(file, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") return null;
-    // A torn or hand-edited lock file has no provable owner.
-    return { pid: null, corrupt: true };
+    const owner = JSON.parse(await readFile(file, "utf8"));
+    return Number.isInteger(owner?.pid) && owner.pid > 0 ? owner : UNPROVEN;
+  } catch {
+    // Missing, torn or hand-edited: no provable owner.
+    return UNPROVEN;
   }
 };
 
+// Regular-file locks from older releases carry no hostname; they are judged on
+// this host, as they always were.
+const onThisHost = (owner) => (owner.hostname ?? os.hostname()) === os.hostname();
+const provablyGone = (owner) =>
+  owner.pid !== null && onThisHost(owner) && !processAlive(owner.pid);
+
 /**
- * Atomically drops a lock proven stale. The rename is the arbiter: a second
- * process that already reclaimed and re-created the lock makes this rename
- * fail (or move a file whose owner no longer matches), so it never removes a
- * lock another process legitimately holds.
+ * Frees `lock` when, and only when, its owner is provably gone (or it has none
+ * left) and returns null; otherwise returns the owner, UNPROVEN if unknowable.
  */
-const reclaimStale = async (file, owner) => {
-  const parked = `${file}.${randomUUID()}.stale`;
-  try {
-    await rename(file, parked);
-  } catch (error) {
-    if (error.code === "ENOENT") return true;
+const reclaimIfGone = async (lock) => {
+  const info = await lstat(lock).catch((error) => {
+    if (error.code === "ENOENT") return null;
     throw error;
+  });
+  if (!info) return null;
+  if (info.isFile()) {
+    // A lock file from an older release. This format never writes a file
+    // here and `unlink` cannot remove a directory, so this drops only that
+    // legacy owner; two current reclaimers of it cannot hurt each other.
+    const owner = await readOwner(lock);
+    if (!provablyGone(owner)) return owner;
+    await unlink(lock).catch(ignore("ENOENT", "EISDIR", "EPERM"));
+    return null;
   }
-  const parkedOwner = await readOwner(parked);
-  await rm(parked, { force: true });
-  // If the parked bytes are not the ones we proved stale, another process
-  // re-created the lock between our read and our rename; treat it as held.
-  return JSON.stringify(parkedOwner) === JSON.stringify(owner);
+  if (!info.isDirectory()) return UNPROVEN;
+  const entries = await readdir(lock).catch((error) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  });
+  if (entries === null) return null;
+  // Released or reclaimed but not yet removed: free, whoever removes it.
+  if (entries.length === 0) return rmdirIfEmpty(lock).then(() => null);
+  const [entry] = entries;
+  if (entries.length !== 1 || !OWNER_ENTRY.test(entry)) return UNPROVEN;
+  const owner = await readOwner(path.join(lock, entry));
+  if (owner.uuid !== entry.slice(0, -5) || typeof owner.hostname !== "string") {
+    return UNPROVEN;
+  }
+  if (!provablyGone(owner)) return owner;
+  // That name is this dead owner's alone: it removes its entry or nothing,
+  // even if a replacement owner has taken the lock since we read it.
+  await unlinkEntry(path.join(lock, entry));
+  await rmdirIfEmpty(lock);
+  return null;
 };
+
+const lockedError = (name, lock, owner) =>
+  new Error(
+    !owner || (owner.pid !== null && onThisHost(owner))
+      ? `Another migration command holds the lock for '${name}' at ${lock} (pid ${owner?.pid ?? "unknown"}). Wait for it to finish; the lock is reclaimed automatically once that process is gone.`
+      : `Another migration command holds the lock for '${name}' at ${lock}, but its owner (${owner.pid === null ? "unreadable" : `pid ${owner.pid} on ${owner.hostname}`}) cannot be proven gone, so it is never reclaimed automatically. Remove it by hand only once no migration command is running.`,
+  );
 
 /**
  * @param {string} targetRoot repository that owns the lock directory
@@ -92,68 +151,60 @@ const reclaimStale = async (file, owner) => {
 export const acquireModuleLock = async (
   targetRoot,
   name,
-  { timeoutMs = 30_000, pollMs = 25, staleAfterMs = 15 * 60_000 } = {},
+  { timeoutMs = 30_000, pollMs = 25 } = {},
 ) => {
-  const file = lockPathFor(targetRoot, name);
-  await mkdir(path.dirname(file), { recursive: true });
+  const lock = lockPathFor(targetRoot, name);
+  await mkdir(path.dirname(lock), { recursive: true });
   const identity = {
     pid: process.pid,
+    hostname: os.hostname(),
     uuid: randomUUID(),
     acquiredAt: new Date().toISOString(),
   };
+  const entry = `${identity.uuid}.json`;
+  const staging = `${lock}.${identity.uuid}.tmp`;
   const deadline = Date.now() + timeoutMs;
-  let contender = null;
-
-  // The deadline is checked once per attempt, before it, so every retry path
-  // is bounded. A reclaim that "succeeds" while the lock keeps reappearing --
-  // a live racer re-creating it, or a reclaim that cannot actually remove the
-  // file -- used to `continue` past the deadline check and spin forever.
-  while (true) {
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `Another migration command holds the lock for '${name}' at ${file} (pid ${contender?.pid ?? "unknown"}). Wait for it to finish; the lock is reclaimed automatically once that process is gone.`,
-      );
-    }
-    let handle;
+  let owner = null;
+  let held = false;
+  try {
+    await mkdir(staging);
+    const handle = await open(path.join(staging, entry), "wx", 0o600);
     try {
-      handle = await open(file, "wx", 0o600);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      const owner = await readOwner(file);
-      contender = owner;
-      const age = owner?.acquiredAt
-        ? Date.now() - Date.parse(owner.acquiredAt)
-        : await stat(file)
-            .then((entry) => Date.now() - entry.mtimeMs)
-            .catch(() => 0);
-      const stale =
-        owner === null ||
-        (owner.corrupt === true && age > staleAfterMs) ||
-        (owner.corrupt !== true && !processAlive(owner.pid)) ||
-        age > staleAfterMs;
-      // ponytail: a successful reclaim retries immediately -- the normal case
-      // wins the very next `open`. A pathological reclaim loop therefore spins
-      // hot, but only until the deadline above. Add a sleep here if that ever
-      // shows up in a profile.
-      if (stale && (await reclaimStale(file, owner))) continue;
-      await sleep(pollMs);
-      continue;
+      await handle.writeFile(`${JSON.stringify(identity)}\n`, "utf8");
+      await handle.sync().catch(() => undefined);
+    } finally {
+      await handle.close();
     }
-    await handle.writeFile(`${JSON.stringify(identity)}\n`, "utf8");
-    await handle.sync().catch(() => undefined);
-    await handle.close();
-    let released = false;
-    return async () => {
-      if (released) return;
-      released = true;
-      const owner = await readOwner(file);
-      // Never remove a lock another process reclaimed from us.
-      if (owner?.uuid !== identity.uuid) return;
-      await unlink(file).catch((error) => {
-        if (error.code !== "ENOENT") throw error;
-      });
-    };
+    // The deadline is checked once per attempt, before it, so every retry path
+    // is bounded -- including a reclaim that keeps "succeeding" because a racer
+    // keeps re-creating the lock.
+    while (!held) {
+      if (Date.now() >= deadline) throw lockedError(name, lock, owner);
+      try {
+        await rename(staging, lock);
+        held = true;
+      } catch (error) {
+        if (!OCCUPIED.has(error.code)) throw error;
+        owner = await reclaimIfGone(lock);
+        // ponytail: a freed lock retries immediately -- the normal case wins
+        // the very next `rename`. A pathological reclaim loop therefore spins
+        // hot, but only until the deadline above. Add a sleep here if that
+        // ever shows up in a profile.
+        if (owner) await sleep(pollMs);
+      }
+    }
+  } finally {
+    if (!held) await rm(staging, { recursive: true, force: true });
   }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    // Our entry, then the directory only if that emptied it: a lock anyone
+    // else holds by now is untouched either way.
+    await unlinkEntry(path.join(lock, entry));
+    await rmdirIfEmpty(lock);
+  };
 };
 
 export const withModuleLock = async (targetRoot, name, run, options) => {

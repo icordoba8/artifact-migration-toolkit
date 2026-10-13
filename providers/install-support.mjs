@@ -1,6 +1,6 @@
 // Shared adapter file/config operations only. Migration rules live in the engine.
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -489,6 +489,12 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
 }
 
 const LOCKED = 'Installation locked; inspect interrupted installation before retrying';
+// What `rename` of a directory reports while something occupies the lock path
+// (EPERM: Windows will not replace an existing directory).
+const OCCUPIED = new Set(['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM']);
+const OWNER_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const ignore = (...codes) => error => { if (!codes.includes(error.code)) throw error; };
+const rmdirIfEmpty = dir => rmdir(dir).catch(ignore('ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'));
 
 /**
  * Is the recorded lock owner provably dead on this host?
@@ -499,12 +505,38 @@ const LOCKED = 'Installation locked; inspect interrupted installation before ret
  * process table. Every one of those is ambiguous, and ambiguity fails closed:
  * reclaiming a live installer's lock would run two config writers at once.
  */
-const lockOwnerDead = async (lock) => {
+const lockOwnerDead = async (file, uuid) => {
   let owner;
-  try { owner = JSON.parse(await readFile(lock, 'utf8')); } catch { return false; }
-  if (!owner || typeof owner !== 'object' || owner.hostname !== os.hostname() || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  try { owner = JSON.parse(await readFile(file, 'utf8')); } catch { return false; }
+  if (!owner || typeof owner !== 'object' || (uuid && owner.uuid !== uuid) || owner.hostname !== os.hostname() || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
   try { process.kill(owner.pid, 0); return false; }
   catch (error) { return error.code === 'ESRCH'; }
+};
+
+/**
+ * Frees a lock nothing provably holds: 'dead' when a dead owner was removed,
+ * 'empty' when there was no owner left (a release or reclaim cut short), null
+ * to fail closed. Each removal is keyed by identity -- the dead owner's own
+ * entry name, `rmdir` of an empty directory, `unlink` that cannot remove a
+ * directory -- so a reclaimer that lost the race removes nothing of the winner's.
+ */
+const reclaim = async (lock) => {
+  const info = await lstat(lock).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  if (!info) return 'empty';
+  if (info.isFile()) {
+    // An install.lock file from an older release; this format never writes one.
+    if (!await lockOwnerDead(lock)) return null;
+    await unlink(lock).catch(ignore('ENOENT', 'EISDIR', 'EPERM'));
+    return 'dead';
+  }
+  if (!info.isDirectory()) return null;
+  const entries = await readdir(lock).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; });
+  if (entries.length === 0) { await rmdirIfEmpty(lock); return 'empty'; }
+  const [entry] = entries;
+  if (entries.length !== 1 || !OWNER_ENTRY.test(entry) || !await lockOwnerDead(path.join(lock, entry), entry.slice(0, -5))) return null;
+  await unlink(path.join(lock, entry)).catch(ignore('ENOENT', 'ENOTDIR'));
+  await rmdirIfEmpty(lock);
+  return 'dead';
 };
 
 // Doctor repairs a missing registration, so it is a config writer too and takes
@@ -513,33 +545,41 @@ export async function adapter(provider, options = {}) {
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
   const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
   await mkdir(path.dirname(lock), { recursive: true });
-  // One config writer per host root, still the same `wx` open, so mutual
-  // exclusion is unchanged. The file now says who holds it, which is what turns
-  // a killed installer from "delete this by hand, forever" into one reclaim --
-  // and reclaiming assumes nothing about consistency: `applyAdapter`'s first act
-  // on an existing receipt is `validateSelection` + `verifyBundle` + per-file
-  // digest checks, so a half-applied install is re-proven, not trusted.
-  const claim = () => open(lock, 'wx').then(
-    handle => handle.writeFile(json({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString(), action: options.action ?? 'install', provider })).then(() => handle),
-    error => { if (error.code === 'EEXIST') return null; throw error; },
-  );
-  let handle = await claim();
+  // One config writer per host root. The lock is a directory holding exactly
+  // its owner's `<uuid>.json`, staged complete and published by one `rename`,
+  // which cannot land on a held lock -- so it never exists without saying who
+  // holds it. That is what turns a killed installer from "delete this by hand,
+  // forever" into one reclaim, and reclaiming assumes nothing about consistency:
+  // `applyAdapter`'s first act on an existing receipt is `validateSelection` +
+  // `verifyBundle` + per-file digest checks, so a half-applied install is
+  // re-proven, not trusted.
+  const id = randomUUID();
+  const staging = `${lock}.${id}.tmp`;
+  const claim = () => rename(staging, lock).then(() => true, error => { if (OCCUPIED.has(error.code)) return false; throw error; });
+  let held = false;
   let recoveredLock = false;
-  if (!handle && await lockOwnerDead(lock)) {
-    // One `rm` then one `wx` open: a second installer that also saw the dead pid
-    // loses the race with EEXIST and fails closed with the existing message.
-    await rm(lock, { force: true });
-    handle = await claim();
-    recoveredLock = handle !== null;
-  }
-  if (!handle) throw new Error(LOCKED);
+  try {
+    await mkdir(staging);
+    await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
+    held = await claim();
+    // One reclaim, then one claim: a second installer that also saw the dead
+    // owner loses that claim and fails closed with the existing message.
+    const freed = held ? null : await reclaim(lock);
+    if (freed) { held = await claim(); recoveredLock = held && freed === 'dead'; }
+  } finally { if (!held) await rm(staging, { recursive: true, force: true }); }
+  if (!held) throw new Error(LOCKED);
   try {
     const result = await applyAdapter(provider, options);
     // Reported, not persisted: the receipt records what is installed, and a
     // reclaimed lock is a fact about this invocation.
     return recoveredLock ? { ...result, recoveredLock } : result;
   }
-  finally { await handle.close(); await rm(lock, { force: true }); }
+  finally {
+    // Our entry, then the directory only if that emptied it: never another
+    // installer's lock, whatever happened to ours meanwhile.
+    await unlink(path.join(lock, `${id}.json`)).catch(ignore('ENOENT', 'ENOTDIR'));
+    await rmdirIfEmpty(lock);
+  }
 }
 
 export async function main(provider) {
