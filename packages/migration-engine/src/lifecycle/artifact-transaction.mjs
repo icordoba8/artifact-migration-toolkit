@@ -5,7 +5,7 @@
  * `artifact/artifact-migration.mjs` (Track A8).
  */
 import { constants } from "node:fs";
-import { access, lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { access, lstat, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { verifyConsumedHistory } from "../decisions/index.mjs";
 import {
@@ -41,6 +41,7 @@ import {
   fileExists as exists,
   historyPrefixContent,
   integrityFor,
+  mkdirDurably,
   revalidatePins,
 } from "../store/index.mjs";
 import { nextState, previewAdvance } from "./artifact-checkpoints.mjs";
@@ -601,7 +602,7 @@ export const recoverTransaction = async (targetRoot, root) => {
 // previousState/input the running command already validated via
 // `previewAdvance` -- nothing here is re-derived from disk by a later caller.
 export const buildAdvanceTransaction = async (root, previousState, preview, selectedSlice) => {
-  await mkdir(root, { recursive: true });
+  await mkdirDurably(root);
   const history = await readHistory(root);
   const previousIntegrity = integrityFor(previousState, history.content);
   const proposed = await nextState(root, previousState, preview.validation, preview.fresh, selectedSlice);

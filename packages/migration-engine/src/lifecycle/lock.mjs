@@ -45,6 +45,8 @@ import {
 import os from "node:os";
 import path from "node:path";
 
+import { atomicWrite, mkdirDurably } from "../store/index.mjs";
+
 const LOCK_ROOT = ".agents/knowledge/migrations/locks";
 
 export const lockPathFor = (targetRoot, name) =>
@@ -197,7 +199,7 @@ export const acquireModuleLock = async (
   { timeoutMs = 30_000, pollMs = 25 } = {},
 ) => {
   const lock = lockPathFor(targetRoot, name);
-  await mkdir(path.dirname(lock), { recursive: true });
+  await mkdirDurably(path.dirname(lock));
   const identity = {
     pid: process.pid,
     hostname: os.hostname(),
@@ -262,19 +264,24 @@ export const withModuleLock = async (targetRoot, name, run, options) => {
   }
 };
 
+// Every lifecycle journal lives under <target>/.agents/knowledge/migrations/,
+// so the target root -- the last such prefix -- is the trusted root a journal
+// path is checked from. A journal anywhere else is refused.
+const MIGRATIONS_SEGMENT = `${path.sep}${path.join(".agents", "knowledge", "migrations")}${path.sep}`;
+const journalTargetRoot = (file) => {
+  const absolute = path.resolve(file);
+  const at = absolute.lastIndexOf(MIGRATIONS_SEGMENT);
+  if (at < 0) throw new Error(`Refusing a journal outside .agents/knowledge/migrations: ${absolute}`);
+  return absolute.slice(0, at) || path.parse(absolute).root;
+};
+
 /**
- * Crash-safe journal write: temp file plus rename, so a reader never observes a
- * half-written journal. Shared by the upgrade coordinator and initialization.
+ * Crash-safe journal write, so a reader never observes a half-written journal.
+ * DR7: the store replace-write, checked from the target root -- no write
+ * through a symlink anywhere below it, the temp file removed on failure, new
+ * directories and the rename fsynced. Byte format and operator-only mode are
+ * unchanged. Shared by every lifecycle journal.
  */
 export const writeJournalAtomic = async (file, journal) => {
-  await mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  const handle = await open(temporary, "wx", 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await rename(temporary, file);
+  await atomicWrite(journalTargetRoot(file), file, `${JSON.stringify(journal, null, 2)}\n`);
 };

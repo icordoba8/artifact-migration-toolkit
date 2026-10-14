@@ -126,20 +126,18 @@ export const SAME_NAME_OTHER_RULE = {
  * journal, recovery, signer and stdout sites each track documented.
  */
 export const FS_WRITERS = {
-  // store/: atomic writes, durable appends, tree writes, registry binding.
+  // store/: the one replace-write and the one durable append (DR7, DR8), staged trees, registry binding.
   "store/files.mjs": ["mkdir", "open", "rename", "rmdir", "unlink"],
-  "store/record.mjs": ["appendFile", "mkdir", "open"],
+  "store/record.mjs": ["open"],
   "store/registry.mjs": ["unlink"],
-  "store/tree.mjs": ["mkdir", "writeFile"],
-  // decisions/: the ledger append (A3) and the O_RDONLY|O_NOFOLLOW protected-policy read.
-  "decisions/record.mjs": ["appendFile", "mkdir"],
+  "store/tree.mjs": ["cp", "open"],
+  // decisions/: the O_RDONLY|O_NOFOLLOW protected-policy read (the ledger append is store's since DR8).
   "decisions/policy.mjs": ["open"],
   // lifecycle/: the module lock, and journal removal after commit or recovery (A8, "Transaction and journal protocols").
   "lifecycle/lock.mjs": ["mkdir", "open", "rename", "rm", "rmdir", "unlink"],
-  "lifecycle/bootstrap.mjs": ["link", "mkdir", "open", "rename", "rm"],
-  "lifecycle/contract-upgrade.mjs": ["cp", "mkdir", "rename", "rm", "writeFile"],
-  "lifecycle/artifact-transaction.mjs": ["mkdir", "rm"],
-  "lifecycle/artifact-run.mjs": ["mkdir"],
+  "lifecycle/bootstrap.mjs": ["link", "mkdir", "open", "rm"],
+  "lifecycle/contract-upgrade.mjs": ["rm"],
+  "lifecycle/artifact-transaction.mjs": ["rm"],
   "lifecycle/adoption.mjs": ["rm"],
   "lifecycle/advance.mjs": ["rm"],
   "lifecycle/format-upgrade.mjs": ["rm"],

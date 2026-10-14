@@ -12,10 +12,15 @@
  * import `formats/`, `shared/` and the leaf `engine-paths.mjs`, nothing above
  * it. Importers outside `store/` use this file only.
  *
- * The write variants are kept as they were, deliberately not merged (DR7, DR8
- * are Track B): `atomicWrite` (secure path, fsync, rename), `writeTree` (plain
- * writeFile), `appendDurably` (O_APPEND, file and directory fsync) and
- * `appendHistory` (O_APPEND, no fsync).
+ * One replace-write and one durable append (Track B DR7, DR8). `atomicWrite`
+ * (secure path, exclusive temp file, fsync, rename, directory fsync, temp
+ * cleanup) is every whole-file replacement: the lifecycle journals, the upgrade
+ * manifests and each file `writeTree` stages. `appendDurably` (secure path,
+ * O_APPEND | O_NOFOLLOW, file and directory fsync) is every append-only record:
+ * the module history (`appendHistory`) and both decision ledgers. Staged trees
+ * (`writeTree`, `copyTree`) are flushed before their caller's journalled rename
+ * commits them; the commit and its recovery stay the caller's, made durable
+ * with `mkdirDurably`, `renameDurably` and `syncDirectory`.
  */
 export {
   artifactEvidenceDigest,
@@ -40,9 +45,12 @@ export {
   fileIdentity,
   fileIdentityMatches,
   hashFile,
+  mkdirDurably,
   readJson,
   readOptionalJson,
   removeEmptyParents,
+  renameDurably,
+  syncDirectory,
 } from "./files.mjs";
 export {
   assertCommandResults,
@@ -86,6 +94,7 @@ export {
 } from "./registry.mjs";
 export {
   assertNoSymlink,
+  copyTree,
   entryExists,
   manifestOf,
   readTree,

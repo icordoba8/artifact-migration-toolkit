@@ -1,12 +1,12 @@
 /** Store: the module record's layout, history hash chain and integrity anchor. */
 
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, open, readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { assertSecurePath, isPlainObject, now } from "../shared/index.mjs";
 import { digestToolkitIdentity, HISTORY_FILE, INTEGRITY_FILE } from "../formats/index.mjs";
-import { fileExists } from "./files.mjs";
+import { appendDurably, fileExists, mkdirDurably } from "./files.mjs";
 // Compatibility re-export (Track A2): these names are formats-owned now.
 export { HISTORY_FILE, INTEGRITY_FILE } from "../formats/index.mjs";
 
@@ -140,7 +140,7 @@ export const renderState = (state) => `${JSON.stringify(state, null, 2)}\n`;
 // This appends with a true OS-level append (`O_APPEND`, via the `a` flag),
 // never reading or rewriting existing content, so two concurrent writers
 // cannot silently clobber each other's line. The NDJSON file remains the one
-// module-history record.
+// module-history record. DR8 (Track B) made it the store durable append.
 const HISTORY_HASH_DOMAIN = "artifact-migration-tools/module-history/v1\n";
 
 const historyDigest = (bytes) =>
@@ -189,15 +189,13 @@ export const prepareHistoryEvent = async (root, event) => {
   };
 };
 
-// DR8 variant: O_APPEND without fsync.
+// DR8: the store durable append, so a recorded transition survives a power
+// loss as well as a killed process. A torn line is still sealHistoryTail's.
 export const appendHistory = async (targetRoot, root, event) => {
-  const historyPath = path.join(root, HISTORY_FILE);
-  const secureHistoryPath = await assertSecurePath(targetRoot, historyPath);
-  await mkdir(path.dirname(secureHistoryPath), { recursive: true });
-  await appendFile(
-    secureHistoryPath,
+  await appendDurably(
+    targetRoot,
+    path.join(root, HISTORY_FILE),
     `${JSON.stringify(event.hash ? event : { at: now(), ...event })}\n`,
-    { flag: "a", mode: 0o600 },
   );
 };
 
@@ -210,7 +208,7 @@ export const appendHistory = async (targetRoot, root, event) => {
 export const assertHistoryAppendable = async (targetRoot, root) => {
   const historyPath = path.join(root, HISTORY_FILE);
   const securePath = await assertSecurePath(targetRoot, historyPath);
-  await mkdir(path.dirname(securePath), { recursive: true });
+  await mkdirDurably(path.dirname(securePath));
   const handle = await open(securePath, "a", 0o600);
   await handle.close();
 };

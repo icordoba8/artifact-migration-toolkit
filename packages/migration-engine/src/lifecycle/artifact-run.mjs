@@ -3,7 +3,7 @@
  * toolkit-identity change. Moved verbatim from `artifact/artifact-migration.mjs`
  * (Track A8).
  */
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   ARTIFACT_FORMAT_INCREMENTS,
@@ -18,7 +18,7 @@ import { withModuleLock } from "./lock.mjs";
 import { resolveArtifact } from "../census/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { jsonBytes } from "../shared/index.mjs";
-import { fileExists as exists, integrityFor } from "../store/index.mjs";
+import { fileExists as exists, integrityFor, mkdirDurably } from "../store/index.mjs";
 import { approveWithOperator, artifactApprover, recorderFor } from "./approval.mjs";
 import { previewAdvance, requestFor } from "./artifact-checkpoints.mjs";
 import {
@@ -72,7 +72,7 @@ const createArtifactRecord = async (resolved, options, confirmExecution) => {
   }
   const timestamp = new Date().toISOString();
   const state = initialArtifactState(resolved, preview.sourceBinding, preview.targetBinding, timestamp);
-  await mkdir(resolved.root, { recursive: true });
+  await mkdirDurably(resolved.root);
   const history = await readHistory(resolved.root);
   const event = eventFor(history, state, bootstrapEventInput());
   const transaction = {

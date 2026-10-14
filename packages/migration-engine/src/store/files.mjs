@@ -1,4 +1,4 @@
-/** Store: durable file primitives -- reads, pins, the replace-write and the attested append. */
+/** Store: durable file primitives -- reads, pins, the one replace-write (DR7) and the one durable append (DR8). */
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -12,11 +12,58 @@ import {
   isLexicallyWithin,
 } from "../shared/index.mjs";
 
-// DR7 variant: secure path, temp file cleaned up on error, fsync, rename.
-export const atomicWrite = async (targetRoot, destination, content) => {
+/**
+ * Makes a directory's entries durable: on POSIX a create or rename is only
+ * crash-safe once its directory is fsynced, and any failure to do so throws --
+ * a write is never reported durable when it is not. Windows cannot open a
+ * directory for it, so there it is skipped.
+ */
+export const syncDirectory = async (directory) => {
+  if (process.platform === "win32") return;
+  const handle = await open(directory, fsConstants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+};
+
+/**
+ * `mkdir -p` whose new entries are durable: the parent of every directory it
+ * created is fsynced, deepest first, so a journal or record written into a new
+ * directory cannot lose its path to a power loss. An existing path is a no-op.
+ */
+export const mkdirDurably = async (directory) => {
+  const first = await mkdir(directory, { recursive: true });
+  if (first === undefined) return;
+  for (let created = path.resolve(directory); ; created = path.dirname(created)) {
+    await syncDirectory(path.dirname(created));
+    if (created === path.resolve(first)) return;
+  }
+};
+
+/** A rename made durable in both directories it changes. */
+export const renameDurably = async (from, to) => {
+  await rename(from, to);
+  await syncDirectory(path.dirname(path.resolve(to)));
+  if (path.dirname(path.resolve(from)) !== path.dirname(path.resolve(to))) {
+    await syncDirectory(path.dirname(path.resolve(from)));
+  }
+};
+
+/**
+ * DR7: the one replace-write. Every whole-file replacement goes through here:
+ * the path is checked before and after its parent is (durably) created, the bytes go to
+ * an exclusive temp file beside the destination that is fsynced and renamed
+ * over it, and the directory is fsynced after the rename. A reader or a crash
+ * sees the old bytes or the new ones, never a mix, and a failure removes the
+ * temp file. A replaced file takes `mode` (operator-only unless the caller
+ * keeps a plain file's default).
+ */
+export const atomicWrite = async (targetRoot, destination, content, { mode = 0o600 } = {}) => {
   const absoluteDestination = await assertSecurePath(targetRoot, destination);
   const parent = path.dirname(absoluteDestination);
-  await mkdir(parent, { recursive: true });
+  await mkdirDurably(parent);
   await assertSecurePath(targetRoot, absoluteDestination);
 
   const temporary = path.join(
@@ -25,7 +72,7 @@ export const atomicWrite = async (targetRoot, destination, content) => {
   );
   let handle;
   try {
-    handle = await open(temporary, "wx", 0o600);
+    handle = await open(temporary, "wx", mode);
     await handle.writeFile(content, "utf8");
     await handle.sync();
     await handle.close();
@@ -38,6 +85,7 @@ export const atomicWrite = async (targetRoot, destination, content) => {
     });
     throw error;
   }
+  await syncDirectory(parent);
 };
 
 /** `contentIdentity` for a file on disk, read through the safe-path reader. */
@@ -138,11 +186,19 @@ export const removeEmptyParents = async (start, boundary) => {
   }
 };
 
-// DR8 variant: O_APPEND, then fsync of the file and (off Windows) its directory.
-export const appendDurably = async (targetRoot, file, text, onBoundary) => {
-  await assertSecurePath(targetRoot, file);
-  await mkdir(path.dirname(file), { recursive: true });
-  const handle = await open(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600);
+/**
+ * DR8: the one durable append. Every append-only record goes through here: the
+ * path is checked before and after its parent is (durably) created, the file is opened
+ * O_APPEND | O_NOFOLLOW (operator-only when it is created), the bytes are
+ * written in order without reading or rewriting anything before them, and the
+ * file then its directory are fsynced. `onBoundary` is the crash-injection
+ * seam of the attested decision append; it can only throw.
+ */
+export const appendDurably = async (targetRoot, file, text, onBoundary = async () => {}) => {
+  const absolute = await assertSecurePath(targetRoot, file);
+  await mkdirDurably(path.dirname(absolute));
+  await assertSecurePath(targetRoot, absolute);
+  const handle = await open(absolute, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600);
   try {
     const bytes = Buffer.from(text, "utf8");
     await onBoundary("during-append", { writePrefix: (length) => handle.write(bytes, 0, length) });
@@ -155,8 +211,5 @@ export const appendDurably = async (targetRoot, file, text, onBoundary) => {
   } finally {
     await handle.close();
   }
-  if (process.platform !== "win32") {
-    const directory = await open(path.dirname(file), fsConstants.O_RDONLY);
-    try { await directory.sync(); } finally { await directory.close(); }
-  }
+  await syncDirectory(path.dirname(absolute));
 };
