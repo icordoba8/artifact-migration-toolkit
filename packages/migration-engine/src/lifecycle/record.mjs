@@ -63,7 +63,7 @@ import {
 import { pinsAuthorityContext, usesVisualContract } from "../visual/index.mjs";
 import { assertLateDecisionsAreAppendable } from "../decisions/index.mjs";
 import { reworkPathParts } from "../slices/index.mjs";
-import { ADOPTION_ROOT, validateStateShape } from "./checkpoints.mjs";
+import { ADOPTION_ROOT, slicePhaseOpen, validateStateShape } from "./checkpoints.mjs";
 import { assertNoPendingTransaction } from "./registry.mjs";
 
 /**
@@ -1047,10 +1047,10 @@ export const validateCompletedHashes = async (root, state) => {
   }
 };
 
-export const assertStepDocumentComplete = async (root, step) => {
+export const assertStepDocumentComplete = async (root, step, state, sliceId) => {
   const relativePath = STEP_FILES[step];
   const content = await readFile(path.join(root, relativePath), "utf8");
-  if (!content.includes("- Status: `COMPLETE`")) {
+  if (!slicePhaseOpen(state, step, sliceId) && !content.includes("- Status: `COMPLETE`")) {
     throw new Error(`${relativePath} must record Status COMPLETE.`);
   }
   if (/\[TODO\]/i.test(content)) {

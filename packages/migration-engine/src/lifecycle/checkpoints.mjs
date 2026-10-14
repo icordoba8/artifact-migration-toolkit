@@ -158,6 +158,16 @@ export const expectedNextCheckpoint = (state) => {
   return steps[index + 1] ?? "COMPLETE";
 };
 
+// I7: steps/06 and steps/07 describe the whole multi-slice phase, so while a
+// slice other than the one validated is pending they cannot honestly read
+// COMPLETE. They stay TODO-free on every slice; only the advance that closes
+// the phase (the last pending slice) requires Status COMPLETE.
+export const slicePhaseOpen = (state, step, sliceId) =>
+  ["IMPLEMENT_SLICES", "VERIFY_SLICES"].includes(step) &&
+  (state?.pendingSlices ?? []).some(
+    (pending) => pending !== (sliceId ?? state.activeSlice),
+  );
+
 export const checkpointArtifacts = (state) => {
   if (state.currentStep === "COMPLETE") {
     return [
