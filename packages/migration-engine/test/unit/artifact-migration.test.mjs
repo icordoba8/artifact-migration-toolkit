@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
 import { comparisonPath } from "../support/portability.mjs";
 import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
+import { nonFigmaCases, OTHER_FIGMA_AUTHORITY, RECORDED_FIGMA, SAME_FIGMA_AUTHORITY } from "../support/design-source-cases.mjs";
 import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 
 import {
@@ -5378,6 +5379,90 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
     assert.equal(comparison?.threshold, 0.05);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+const artifactBytes = async (fixture) => Object.fromEntries(await Promise.all(
+  (await readdir(fixture.artifactRoot, { recursive: true, withFileTypes: true }))
+    .filter((entry) => entry.isFile())
+    .map(async (entry) => {
+      const file = path.join(entry.parentPath, entry.name);
+      return [path.relative(fixture.artifactRoot, file), await readFile(file, "utf8")];
+    })));
+
+const ARTIFACT_DESIGN_REFUSAL = /^(Invocation design source conflicts with persisted state\.|--figma links require --design-source figma-mcp|--design-source figma-mcp requires at least one --figma link|Figma source must be a non-empty URL string|Invalid Figma|Figma board links are not a UI design contract)/;
+
+// DR18: an invocation naming the pinned authority resumes exactly like a plain
+// resume, through the read and the mutation path alike; any other is refused
+// without a byte written.
+const assertArtifactDesignInvocations = async (fixture, { same, other }) => {
+  const plainStatus = await getArtifactStatus(fixture.options);
+  const plainRun = await runArtifact(fixture.options);
+  const bytes = await artifactBytes(fixture);
+  for (const [label, design] of same) {
+    const options = { ...fixture.options, ...design };
+    const status = await getArtifactStatus(options);
+    assert.deepEqual([status.outcome, status.reason], [plainStatus.outcome, plainStatus.reason], `status: ${label}`);
+    const run = await runArtifact(options);
+    assert.deepEqual([run.outcome, run.reason], [plainRun.outcome, plainRun.reason], `run: ${label}`);
+    assert.deepEqual(await artifactBytes(fixture), bytes, `bytes: ${label}`);
+  }
+  for (const [label, design] of other) {
+    const options = { ...fixture.options, ...design };
+    const status = await getArtifactStatus(options);
+    assert.equal(status.outcome, "BLOCKED", `status: ${label}`);
+    assert.match(status.reason, ARTIFACT_DESIGN_REFUSAL, `status: ${label}`);
+    // runArtifact blocks on an invocation conflict and throws an input error;
+    // either way it refuses with the reason status reports.
+    if (status.reason.startsWith("Invocation ")) {
+      const run = await runArtifact(options);
+      assert.equal(run.outcome, "BLOCKED", `run: ${label}`);
+      assert.equal(run.reason.split(" Next action:")[0], status.reason, `run: ${label}`);
+    } else {
+      await assert.rejects(runArtifact(options), (error) => error.message === status.reason, `run: ${label}`);
+    }
+    assert.deepEqual(await artifactBytes(fixture), bytes, `bytes: ${label}`);
+  }
+};
+
+test("DR18: an artifact record applies the module's design-source immutability rule", async () => {
+  const fixture = await createFixture();
+  try {
+    await bootstrap(fixture, RECORDED_FIGMA);
+    await assertArtifactDesignInvocations(fixture, { same: SAME_FIGMA_AUTHORITY, other: OTHER_FIGMA_AUTHORITY });
+    // A pending journal: status checks the invocation against the journal's
+    // state, and run replays the journal, never adopting the invocation's sources.
+    const recorded = (await stateOf(fixture)).figmaSources;
+    const history = path.join(fixture.artifactRoot, "history/history.ndjson");
+    await authorSource(fixture);
+    await chmod(history, 0o444);
+    await assert.rejects(runArtifact(fixture.options));
+    await chmod(history, 0o644);
+    const changed = { ...fixture.options, ...OTHER_FIGMA_AUTHORITY[3][1] };
+    const pending = await getArtifactStatus(changed);
+    assert.equal(pending.outcome, "BLOCKED");
+    assert.equal(pending.reason, "Invocation design source conflicts with persisted state.");
+    assert.ok(await exists(path.join(fixture.artifactRoot, "transaction.json")));
+    const reordered = await getArtifactStatus({ ...fixture.options, ...SAME_FIGMA_AUTHORITY[1][1] });
+    assert.match(reordered.reason, /recovered automatically/);
+    const blocked = await runArtifact(changed);
+    assert.equal(blocked.outcome, "BLOCKED");
+    assert.match(blocked.reason, /^Invocation design source conflicts with persisted state\./);
+    const replayed = await stateOf(fixture);
+    assert.equal(replayed.currentStep, "DISCOVERY_COMPLETENESS");
+    assert.deepEqual(replayed.figmaSources, recorded);
+  } finally {
+    await chmod(path.join(fixture.artifactRoot, "history/history.ndjson"), 0o644).catch(() => undefined);
+    await fixture.cleanup();
+  }
+  for (const recorded of ["target-system", "legacy-runtime"]) {
+    const nonFigma = await createFixture();
+    try {
+      await bootstrap(nonFigma, recorded === "target-system" ? {} : { designSource: recorded });
+      await assertArtifactDesignInvocations(nonFigma, nonFigmaCases(recorded));
+    } finally {
+      await nonFigma.cleanup();
+    }
   }
 });
 

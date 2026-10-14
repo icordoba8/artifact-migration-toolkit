@@ -29,7 +29,7 @@ BASE `7b48165`. Plan: `docs/phase0-architecture-baseline.md` §2, §4 option (b)
 |---|---|
 | `visual/index.mjs` | The one public entry. It only re-exports: every name the `visual-evidence.mjs` facade re-exports, plus every visual name something outside `visual/` uses. |
 | `visual/evidence.mjs` | The hardened v2 primitives, unchanged (formerly `visual-evidence.mjs`): PNG decode (`decodePng`), box resampling (`resampleTo`), alpha matte and antialiasing-excluded pixel deltas (`perceptualDelta`), the control multiset (`structuralDelta`), `HARDENED_VISUAL_VERSION = 2`, `FIXED_VISUAL_TOLERANCE = {px: 1, ratio: 0}`, the `REQUIRED_FACTS` taxonomy, `normalizeVisualValue`, `strokeFromComputedStyle`, the Figma provenance resolvers, `assertProvenancePrecedence`, `variableValueSet`, structured node capture, digests, facts, assets, literals, authority derivation, contract validation, target comparison, the capability profile and `assertStructuredCaptureScale`. |
-| `visual/authority.mjs` | Authority selection and context validation: `VISUAL_AUTHORITIES` (`figma-mcp`, `legacy-runtime`), `visualAuthorityOf`, `usesVisualContract`, `AUTHORITY_CONTEXT_FILES`, `pinsAuthorityContext`, the evidence roots (`LEGACY_RUNTIME_EVIDENCE_ROOT`, `TARGET_EVIDENCE_ROOT`), the capture roles (`LEGACY_AUTHORITY_ROLE`, `TARGET_VERIFICATION_ROLE`, `assertCaptureRole`), `assertTargetEvidencePath`, `hardenedVisual`, `frameKeyOf`, the module design-source pin (`designSourceExplicit`, `figmaSourceKey`, `assertDesignSourceUnchanged`), the Figma node identity (`FIGMA_NODE_ID`, `FIGMA_SOURCE_KINDS`, `figmaNodeKey`, `figmaMetadataAncestry`), `validateFigmaContext` with `resolveStructuredFigmaFrame` and `resolveFigmaFacts`, `validateLegacyRuntimeContext`, and `assertVisualCaptureBlock`. |
+| `visual/authority.mjs` | Authority selection and context validation: `VISUAL_AUTHORITIES` (`figma-mcp`, `legacy-runtime`), `visualAuthorityOf`, `usesVisualContract`, `AUTHORITY_CONTEXT_FILES`, `pinsAuthorityContext`, the evidence roots (`LEGACY_RUNTIME_EVIDENCE_ROOT`, `TARGET_EVIDENCE_ROOT`), the capture roles (`LEGACY_AUTHORITY_ROLE`, `TARGET_VERIFICATION_ROLE`, `assertCaptureRole`), `assertTargetEvidencePath`, `hardenedVisual`, `frameKeyOf`, the design-source pin (`designSourceExplicit`, `figmaSourceKey`, `designSourceConflict`, `assertDesignSourceUnchanged`), the Figma node identity (`FIGMA_NODE_ID`, `FIGMA_SOURCE_KINDS`, `figmaNodeKey`, `figmaMetadataAncestry`), `validateFigmaContext` with `resolveStructuredFigmaFrame` and `resolveFigmaFacts`, `validateLegacyRuntimeContext`, and `assertVisualCaptureBlock`. |
 | `visual/observations.mjs` | The format-18 UI observation contract: `OBSERVATION_EXPECTED`, `OBSERVATION_FIELDS`, `assertRequiredObservations`, and the requiredness predicate `uiBehaviorIsRequired` with `UI_UNREQUIRED_DISPOSITIONS`. |
 | `visual/acceptance.mjs` | Format-17 acceptance and comparison: `validateVisualAcceptance`, `compareVisualFact`, `assertVisualAcceptance`, `compareVisualEvidence`, the bounds `MAX_TOLERANCE_PX`/`MAX_TOLERANCE_RATIO` and `PROVISIONAL_VISUAL_DIFF_THRESHOLDS`, and the VISUAL_UNBACKED facts: `VISUAL_UNBACKED_KIND`, `visualContractDigest`, `visualUnbackedCandidate`, `backedRowFor`, `pendingVisualUnbackedCandidates`. |
 | `visual/proof.mjs` | Playwright runtime evidence and UI proof eligibility: `validateUiRuntimeEvidence`, the viewport and credential rules (`UI_VIEWPORT_STATES`, `UI_SECRET_*`, `assertNoUiSecret`), the `playwright-ui-proof/v1` classifiers `sliceLacksUiProofV1` and `completedSlicesLackingUiProofV1`, and `--reopen-ui` eligibility (`reopenUiEligible`, `reopenUiIneligible`). |
@@ -39,8 +39,8 @@ Inside `visual/`, the files import each other acyclically: `evidence` ← `autho
 
 ## Public API
 
-`visual/index.mjs` exports 67 names: the 36 primitives listed for the facade below, plus these 31:
-- **Authority:** `VISUAL_AUTHORITIES`, `visualAuthorityOf`, `usesVisualContract`, `pinsAuthorityContext`, `LEGACY_AUTHORITY_ROLE`, `TARGET_VERIFICATION_ROLE`, `LEGACY_RUNTIME_EVIDENCE_ROOT`, `designSourceExplicit`, `assertDesignSourceUnchanged`, `FIGMA_SOURCE_KINDS`, `figmaMetadataAncestry`, `validateFigmaContext`, `validateLegacyRuntimeContext`.
+`visual/index.mjs` exports 68 names: the 36 primitives listed for the facade below, plus these 32:
+- **Authority:** `VISUAL_AUTHORITIES`, `visualAuthorityOf`, `usesVisualContract`, `pinsAuthorityContext`, `LEGACY_AUTHORITY_ROLE`, `TARGET_VERIFICATION_ROLE`, `LEGACY_RUNTIME_EVIDENCE_ROOT`, `designSourceExplicit`, `designSourceConflict`, `assertDesignSourceUnchanged`, `FIGMA_SOURCE_KINDS`, `figmaMetadataAncestry`, `validateFigmaContext`, `validateLegacyRuntimeContext`.
 - **Observations:** `assertRequiredObservations`, `uiBehaviorIsRequired`.
 - **Acceptance:** `validateVisualAcceptance`, `compareVisualFact`, `compareVisualEvidence`, `PROVISIONAL_VISUAL_DIFF_THRESHOLDS`, `VISUAL_UNBACKED_KIND`, `pendingVisualUnbackedCandidates`.
 - **Proof:** `validateUiRuntimeEvidence`, `sliceLacksUiProofV1`, `completedSlicesLackingUiProofV1`, `reopenUiEligible`, `reopenUiIneligible`.
@@ -144,13 +144,23 @@ Architecture checks:
 
 ## Deferred (Track B), behavior preserved as-is
 
-- **DR18 / Q6.** Design-source immutability is still two comparators, and they differ:
-  - the module comparator, visual `assertDesignSourceUnchanged`, refuses a changed source and changed Figma links with two distinct messages, comparing `kind#fileKey#nodeId` keys;
-  - the artifact comparator, inline in `assertInvocationMatches` in `artifact-migration.mjs`, refuses with one message and compares canonical JSON.
-  Both are kept as they are. There is no abandon/reinit.
+- **Q6.** There is no abandon/reinit.
 - **I5.** The VISUAL_UNBACKED rationale still says "Figma evidence" for legacy-runtime records (`visualUnbackedCandidate`).
 - **I4.** The BUILD_BASELINE step text still asks for an explicit `tolerance`, which the v2 validator refuses.
 - **F5 / P1.** `PROVISIONAL_VISUAL_DIFF_THRESHOLDS`, the fixed ±1px tolerance and the identical-multiset rule are unchanged. These decisions stay closed.
+
+## Design-source immutability (DR18)
+
+DR18 (Track B) gives design-source immutability one rule: visual `designSourceConflict`. It applies when a resume explicitly names a design source (`designSourceExplicit`), to the `resolveDesignSource` result of that invocation.
+
+- The design source must equal the recorded one. A record with no `designSource` is `target-system`.
+- The Figma sources must name the same identities. One identity is a link's `kind`, `fileKey` and `nodeId`. They are compared as a sorted list of JSON-encoded triples. Link order and the rendered `raw` link never matter, and no field value can forge a separator. Equivalent spellings of one link, and repeats of it, normalize to one identity before the comparison. A changed kind, file key (a branch link included), node id, a dropped or added source, or another design source is a conflict. A pinned list that is not canonical (a repeated identity) fails closed.
+- The module refuses through `assertDesignSourceUnchanged`, with its two messages. The artifact record's `assertInvocationMatches` refuses with its established `Invocation design source conflicts with persisted state.` Both paths run the rule in their read path (preview, status) and their mutation path (bootstrap, run). A plain resume never reaches it.
+- Nothing is rewritten. The recorded `figmaSources` keep their bytes and their order.
+
+**Behavior changes.** Each one is covered by a DR18 test.
+- An artifact resume that names the recorded links in another order is accepted, as the module's already was. Before DR18 the artifact compared the canonical JSON of the full lists, so it refused a reordered list.
+- The module no longer accepts a record whose one `fileKey` spells two identities in the old `kind#fileKey#nodeId,` key syntax.
 
 ## Remaining architectural violations
 

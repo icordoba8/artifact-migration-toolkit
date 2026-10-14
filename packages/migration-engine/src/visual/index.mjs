@@ -40,6 +40,7 @@ export {
 } from "./evidence.mjs";
 export {
   assertDesignSourceUnchanged,
+  designSourceConflict,
   designSourceExplicit,
   FIGMA_SOURCE_KINDS,
   figmaMetadataAncestry,
