@@ -237,6 +237,9 @@ export const commitsTouchingSince = async (root, revision, relativePath) => {
       [
         "-C",
         root,
+        // DR4: the path is a file name, never a pattern: `src/a[1].ts` names
+        // that file and nothing else.
+        "--literal-pathspecs",
         "log",
         "--format=%H",
         `${revision}..HEAD`,

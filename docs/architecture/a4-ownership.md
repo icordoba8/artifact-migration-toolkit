@@ -56,7 +56,7 @@ BASE `04e8136`. Plan: `docs/phase0-architecture-baseline.md` §2 (R6), §4 optio
 - **amendment:** `completeSliceAmendment`, `draftSliceAmendment`, `SLICE_AMENDMENT_ROOT`.
 - **state:** `assertSliceStateConsistent`, `inspectSliceArtifacts`, `reconcileSliceState`.
 
-`canonicalClaim`, `repoRelative` and `targetRelative` are exported only for the DR4 pin test.
+`canonicalClaim`, `repoRelative` and `targetRelative` are exported only for the DR4 claim tests.
 
 ## Dependency inversions
 
@@ -85,27 +85,42 @@ No seam hands slices a function that does I/O, takes a lock, writes or journals.
 
 **One ordering change, unobservable.** `sliceAmendmentFor` now validates the plan before its three state-only refusals. Before A4 those refusals ran first, but they only push blockers: they cannot throw and they read nothing. When the plan read throws, it throws in both versions.
 
-## Path spellings kept apart (DR4 deferred)
+## Path spellings (DR4)
 
-DR4, one canonical claim spelling, is a Track B change. Each variant moved byte-identical and keeps its own rule:
+DR4 (Track B) gives ownership one spelling: the **canonical target path**. It is relative to the target root, `/`-separated, with no `./` and no trailing `/`. The target root itself is `""`. Every ownership comparison reads both sides in this form.
 
-| Variant | Rule (unchanged) |
+| Spelling | Rule |
 |---|---|
-| `rootRelativePath` (via `targetRelativePath` / `legacyRelativePath`) | Converts `\` to `/`; strips one leading `./`, trailing `/`s and the sibling-root prefix from the common ancestor; resolves against the root and refuses `'<claim>' is outside the <label> repository.`; returns the root-relative path. With no root, it only normalizes the spelling. |
-| `targetRelative` | Raw `path.relative(targetRoot, absolute)` with `/` separators. |
-| `repoRelative` | Adds `./`, for `git show <rev>:./<path>`. |
-| `canonicalClaim` | The first whitespace token. It resolves the token as an existing file directly under the target, or through the evidence bases (legacy, target, common ancestor), and keeps it only inside the target. Otherwise it falls back to the raw token with `\` converted to `/`. |
-| `resolveChangedFile`, `plannedTargetOwners`, `preservedEvidencePath`, `resolveAnchoredOwnership` claim set | Each keeps its own normalization (as at BASE). |
-| `artifact-migration.mjs` `normalizeRelative` | Stays in `shared/` (A1). |
+| Owners: `targetRelativePath` (`rootRelativePath`), `lexicalTargetPath`, `targetOwnerPaths`, `plannedTargetOwners` | Path math only; no file is read. `\` becomes `/`. Then one leading `./`, any trailing `/`s and the target's own prefix from the common ancestor are stripped, but never the `/` of a bare root. The result must resolve inside the target, and a target spelling may not contain a `..` segment, even one that lands back inside. Otherwise `targetRelativePath` refuses with `'<claim>' is outside the target repository.` `lexicalTargetPath` returns null instead of throwing. A plan owner that names nothing (outside, `/`, `..`) stays `null`: it still counts as declared, and it owns nothing. `.` and the bare prefix name the target root. |
+| Claims: `canonicalClaim`, `resolveChangedFile`, `resolveClaimPath`, `isTargetFile`, `anchoredClaimPath` | The first whitespace token. An existing file resolves as the implementation digest resolves it: directly under the target first, then through the evidence bases (legacy, target, common ancestor). The token is tried as written first, and `\` is read as a separator only when the written token names nothing. A resolved file counts only inside the target, both as spelled and with every link followed. A missing file, or one reached through a link out of the target, is spelled by `lexicalTargetPath`, so a deleted file reads as the path Git reports. A claim that names nothing inside the target stays as written and equals no target path. One spelling names one file: the gate refuses a claim whose direct and prefix readings (`existingClaimReadings`) name two existing target files. A reopened slice's anchored provenance belongs only to a claim's **canonical** path, which is its path-math spelling (`pinnedClaimPath`, the owner rule). `anchoredClaimPath` reads the pinned claim in the anchor commit, in resolution order. The gate refuses a reopened claim when that file is not its canonical path, or is not the file the claim names now. It also refuses an anchored claim reached through a link (`isLinkFree`). These refusals run regardless of the UI-reuse exception. So no file created, removed or committed around the anchor can switch what a pinned spelling owns. A claim that names no file in the anchor commit keeps its canonical path, and the gate refuses it as absent at the anchor. |
+| Subtree test: `ownsPath` | A path is owned when it is the owner or lies under `owner/`. A string prefix never counts, so `src/rw` does not own `src/rw-copy/`. Planned scope, rework, delegation, the shared-prerequisite check and the amendment's ownership basis all use this test. |
+| Git syntax: `repoRelative`, `./<path>` pathspecs | These are command syntax, not identities. `git show <rev>:./<path>` and `git log -- ./<path>` are built from the canonical path and are never compared. The post-anchor history check (`commitsTouchingSince`) passes `--literal-pathspecs`, so `src/a[1].ts` is a file name, never a pattern. |
+| `legacyRelativePath` | Legacy-relative paths. Same path math, against the legacy root, without the `..` refusal. |
+| `preservedEvidencePath` | Defect evidence references, which are persisted evidence. Its own rule, unchanged. |
+| `artifact-migration.mjs` `normalizeRelative` | Artifact child records. Stays in `shared/` (A1). |
 
-DR1 containment is unchanged: every moved function keeps the `isWithin` binding its origin file imported (`isResolvedWithin`).
+**What DR4 does not reinterpret.**
+- A `TARGET_DRIFT_ACCEPTED` decision authorizes only the exact `subject.path` it names. Offer and acceptance both read the canonical dirty path (`finding.path`), so a decision recorded under another spelling never accepts a file.
+- Persisted bytes are never rewritten: `changedFiles`, pins, preserved records and evidence stay as they are. Digests compose the canonical relative path, as they did before, so existing digests do not move.
+
+**Behavior changes.** Each one is covered by a DR4 test.
+- Plan scope (`targetPaths`, `targetOwner`) is read in any accepted spelling. Before DR4, a scope spelled `./src` or `<target-dir>/src` matched no dirty path, so a stray file inside it was an unrelated change and COMPLETE was reached.
+- Rework and delegation owners are subtrees in any spelling. Before DR4 they were raw string prefixes: `src/shared` authorized `src/shared-copy/`, and `./src/shared` authorized nothing.
+- A reopened slice's anchored claims are canonical. Before DR4, a pinned claim spelled `./src/x` or `<target-dir>/src/x` was refused as ownership. Its post-anchor pathspec also named no file, so post-anchor commits went unseen.
+- `src\x` claims resolve on every platform, so a record made on Windows validates and digests the same on POSIX. A spelling that resolved before DR4 resolves to the same file, so its digest does not move; this includes a POSIX file whose name contains a literal `\`.
+- A claim that resolves through a link to a file outside the target is refused as `outside the target repository`, and is never digested. This tightens BASE, which followed the link.
+- `/` is no longer read as the target root by `targetRelativePath`, and no `..` spelling is read as a target path. A capability `targetOwner` or `artifactMigration.target` of `/` or `../<target-dir>/…` is refused as outside the target, where BASE accepted it.
+- A claim spelled `<target-dir>/src/x` is refused when the target also holds `<target-dir>/src/x` under a directory of its own name. BASE silently chose the direct reading. A reopened claim carries anchored provenance only for its canonical path, unchanged since the anchor. So a reopened claim spelled through `..`, or one that resolves to a shadow or to a literal-`\` file, is refused, where BASE accepted it.
+- `--add-file` accepts any accepted spelling. The symlink and containment checks run on the file that spelling names.
+
+DR1 containment is unchanged: every function above keeps the `isWithin` binding (`isLexicallyWithin`).
 
 ## Guarantees and their one owner
 
 | Guarantee | Public function(s) | Tests |
 |---|---|---|
 | Every required baseline row and capability belongs to exactly one slice. Dependencies are declared earlier. A SHARED_PREREQUISITE is planned before its consumers. | `validateSlicePlan`, `assertCapabilityPlan` | migration-contract: "one capability may not be claimed by two slices", "a claimed feature with no import of the shared component is refused" |
-| A changed-file claim is a real file inside the target, in the live diff or anchored at the reopen. It is not pre-existing baseline work, in any accepted spelling. | `validateSliceImplementation`, `canonicalClaim`, `targetRelativePath` | migration-contract: P1-7 "changed files must exist and stay inside the target repository", "…not actually touched is refused", "pre-existing target work may not be claimed as slice work", "a shared prerequisite is accepted in either accepted path spelling", "a changed file outside the owner is still refused in either spelling", "IMPLEMENT gate: a file a verified slice claims under another spelling is not requested again"; slices.test: both DR4 pin tests |
+| A changed-file claim is a real file inside the target, in the live diff or anchored at the reopen. It is not pre-existing baseline work, in any accepted spelling. | `validateSliceImplementation`, `canonicalClaim`, `targetRelativePath` | migration-contract: P1-7 "changed files must exist and stay inside the target repository", "…not actually touched is refused", "pre-existing target work may not be claimed as slice work", "a shared prerequisite is accepted in either accepted path spelling", "a changed file outside the owner is still refused in either spelling", "IMPLEMENT gate: a file a verified slice claims under another spelling is not requested again"; slices.test: the DR4 claim and digest tests; migration-contract: the DR4 tests |
 | A shared prerequisite is built in its declared owner. | `assertSharedPrerequisitesBuilt` | migration-contract: "a FEATURE_LOCAL owner is recognised in either accepted path spelling"; artifact-delegation.test |
 | Implementation digests bind UI evidence to the claimed bytes. A claimed file edited after its evidence fails. | `implementationDigests` | visual-evidence and migration-contract UI-binding suites; R2-4 "a claimed file committed after the anchor needs evidence bound to current HEAD" |
 | A FAIL never advances. Rework preserves the failed attempt byte-for-byte and pins it before anything is released. Attempts are append-only and limited. | `assertSlicePassed`, `planSliceRework`, `validateFailedSliceResult`, `reworkLimitBlocker` | R-W3-a, R-W3-b, R-W3-e (fourth rework refused), R-W3-g, R-W3-h (mutating or deleting preserved bytes refused) |
@@ -120,8 +135,8 @@ DR1 containment is unchanged: every moved function keeps the `isWithin` binding 
 
 | # | Case | Tests |
 |---|---|---|
-| 1 | Claim-path spellings | "…either accepted path spelling" (×2), "…outside the owner is still refused in either spelling", IMPLEMENT-gate spelling tests; **new:** slices.test "the root-relative claim spelling keeps its rules…", "the changed-file claim spelling resolves real files only…" |
-| 2 | Relative paths and root containment | P1-7 "changed files must exist and stay inside the target repository"; **new:** the two pin tests (`../`, absolute and sibling inputs) |
+| 1 | Claim-path spellings | "…either accepted path spelling" (×2), "…outside the owner is still refused in either spelling", IMPLEMENT-gate spelling tests; slices.test "the root-relative claim spelling keeps its rules…"; DR4: slices.test "every accepted spelling of a changed-file claim is one target path…", "the implementation digest binds the same bytes…", and the migration-contract "DR4: …" tests |
+| 2 | Relative paths and root containment | P1-7 "changed files must exist and stay inside the target repository"; the root-relative and DR4 claim tests (`../`, absolute, sibling-prefix and symlinked inputs); DR4 amendment test (sibling prefix, traversal, link out of the target) |
 | 3 | Shared, config and test files outside `targetPaths` (P3 as designed) | "a shared prerequisite is accepted…"; amend tests (`OUTSIDE_PLANNED_SCOPE`, `TEST_OF_OWNED_SOURCE` ownership basis) |
 | 4 | A claimed file modified after its evidence | R2-4; R-W4-e (accepted path edited after acceptance re-blocks) |
 | 5 | Rework of a claimed file | R-W4-b; "v1.3.17 … reworking that file is not drift" |
@@ -173,7 +188,7 @@ Not taken from the owners-b map: `cli/run-migration.mjs` `UNCLAIMED_TARGET_DRIFT
   - visual→slices: `validateUiRuntimeEvidence` → `implementationDigests`, and `assertNoNavigationRepairNeeded` → `inspectSliceArtifacts`. A6 must receive both as facts.
   - store→slices: `isBytePinned` and `validateCompletedHashes` → `reworkPathParts`. These are store-owned and A1-blocked. When the pins cluster moves to store, the rework path layout must be supplied, or moved to formats as record-layout vocabulary.
 - **Deferred behavior changes, untouched:**
-  - DR4: one claim spelling.
+  - DR4: one claim spelling. Done in Track B (see "Path spellings (DR4)").
   - I8: `traceLists` `capabilityIds`.
   - P4: a PLAN check for UI interactions that cross slices.
   - I7: the shared step-document timing, still `assertStepDocumentComplete` in lifecycle.

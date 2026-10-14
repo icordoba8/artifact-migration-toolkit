@@ -4,7 +4,8 @@
 // are A1-ARCH-1/2 in `store-shared.test.mjs`.
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { CAPABILITY_OWNERSHIP_FORMAT } from "../../src/formats/index.mjs";
+import { commitsTouchingSince } from "../../src/shared/index.mjs";
 import * as slices from "../../src/slices/index.mjs";
 import * as store from "../../src/store/index.mjs";
 
@@ -147,7 +149,7 @@ test("A4-ARCH-5: historical compatibility exports remain, as the slices binding 
   assert.equal(slices.pendingTargetDriftCandidates.length, 4);
 });
 
-// -- claim spellings (DR4 is Track B: every variant keeps its own rule) --------
+// -- claim spellings (DR4: one canonical target-relative spelling) ------------
 
 const {
   canonicalClaim,
@@ -171,35 +173,129 @@ test("A4: the root-relative claim spelling keeps its rules for ./, trailing and 
     ["legacy/x.ts", "legacy/x.ts"],
   ]) assert.equal(targetRelativePath(claim, roots, "Claim"), expected, claim);
   assert.equal(legacyRelativePath("legacy/src/x.ts", roots, "Claim"), "src/x.ts");
-  for (const outside of ["../legacy/x.ts", path.join(workspace, "elsewhere.ts")]) {
+  // Legacy-relative paths keep their own rule.
+  assert.equal(legacyRelativePath("../legacy/src/x.ts", roots, "Claim"), "src/x.ts");
+  // DR4: a traversal is never a target spelling, even one that lands back inside.
+  for (const outside of ["../legacy/x.ts", path.join(workspace, "elsewhere.ts"), "/", "//", "../target/src", "src/../src/a.ts", "src\\..\\a.ts"]) {
     assert.throws(() => targetRelativePath(outside, roots, "Claim"), new RegExp(`Claim '.*' is outside the target repository\\.`));
   }
   // No root to resolve against: only the spelling is normalized.
   assert.equal(targetRelativePath("./src/a.ts/", {}, "Claim"), "src/a.ts");
 });
 
-test("A4: the changed-file claim spelling resolves real files only, and otherwise keeps the raw first token", async (t) => {
-  const workspace = await mkdtemp(path.join(os.tmpdir(), "a4-claim-"));
+test("DR4: every accepted spelling of a changed-file claim is one target path, existing or missing, and never a path outside the target", async (t) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "dr4-claim-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const roots = { legacyRoot: path.join(workspace, "legacy"), targetRoot: path.join(workspace, "target") };
+  await mkdir(path.join(roots.targetRoot, "src"), { recursive: true });
+  await mkdir(path.join(roots.legacyRoot, "src"), { recursive: true });
+  await mkdir(path.join(workspace, "elsewhere"), { recursive: true });
+  await writeFile(path.join(roots.targetRoot, "src/a.ts"), "a\n");
+  await writeFile(path.join(roots.legacyRoot, "src/b.ts"), "b\n");
+  await writeFile(path.join(workspace, "outside.ts"), "o\n");
+  await writeFile(path.join(workspace, "elsewhere/x.ts"), "x\n");
+  await symlink(path.join(workspace, "elsewhere"), path.join(roots.targetRoot, "src/linked"));
+  const identity = `sha256:${"0".repeat(64)}`;
+  for (const [changed, expected] of [
+    // An existing file, in every spelling the contract accepts.
+    ["src/a.ts", "src/a.ts"],
+    ["./src/a.ts", "src/a.ts"],
+    ["target/src/a.ts", "src/a.ts"],
+    ["src\\a.ts", "src/a.ts"],
+    [".\\src\\a.ts", "src/a.ts"],
+    ["src//a.ts", "src/a.ts"],
+    [path.join(roots.targetRoot, "src/a.ts"), "src/a.ts"],
+    // A v1.3.17 `<path> <identity>` entry reads as its path.
+    [`src/a.ts ${identity}`, "src/a.ts"],
+    [`target/src/a.ts ${identity}`, "src/a.ts"],
+    // A file that does not exist (yet, or any more) is spelled the same way.
+    ["src/missing.ts", "src/missing.ts"],
+    ["./src/missing.ts", "src/missing.ts"],
+    ["target/src/missing.ts", "src/missing.ts"],
+    ["src\\missing.ts", "src/missing.ts"],
+    ["src/missing.ts/", "src/missing.ts"],
+    // A legacy-only file is not a target file: it stays a target-relative
+    // spelling that names nothing in the target.
+    ["src/b.ts", "src/b.ts"],
+    ["legacy/src/b.ts", "legacy/src/b.ts"],
+    // Only the target's own prefix is stripped, never a sibling sharing it.
+    ["target-copy/src/a.ts", "target-copy/src/a.ts"],
+    // Lexical, never through a link: the claim names the target entry.
+    ["src/linked/x.ts", "src/linked/x.ts"],
+    // Outside the target: kept as written, so it equals no target path. A
+    // `..` segment is never read back into the target unless the file exists
+    // there as written, exactly as before DR4.
+    ["../outside.ts", "../outside.ts"],
+    ["../target/src/a.ts", "src/a.ts"],
+    ["../target/src/missing.ts", "../target/src/missing.ts"],
+    ["/", "/"],
+    [path.join(workspace, "outside.ts"), path.join(workspace, "outside.ts").replaceAll("\\", "/")],
+  ]) assert.equal(await canonicalClaim(changed, roots), expected, changed);
+  // No root to resolve against: only the spelling is normalized.
+  assert.equal(await canonicalClaim("./src/a.ts", {}), "src/a.ts");
+  const absolute = path.join(roots.targetRoot, "src/a.ts");
+  // Git's own syntax stays apart: `git show <rev>:./<path>` needs the `./`.
+  assert.equal(repoRelative(roots.targetRoot, absolute), "./src/a.ts");
+  assert.equal(targetRelative(roots, absolute), "src/a.ts");
+});
+
+test("DR4: the implementation digest binds the same bytes whichever accepted spelling the record uses", async (t) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "dr4-digest-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const roots = { legacyRoot: path.join(workspace, "legacy"), targetRoot: path.join(workspace, "target") };
   await mkdir(path.join(roots.targetRoot, "src"), { recursive: true });
   await mkdir(roots.legacyRoot, { recursive: true });
   await writeFile(path.join(roots.targetRoot, "src/a.ts"), "a\n");
+  const canonical = await slices.implementationDigests({ changedFiles: ["src/a.ts"] }, roots);
+  for (const changed of ["./src/a.ts", "target/src/a.ts", "src\\a.ts", `src/a.ts sha256:${"0".repeat(64)}`]) {
+    assert.deepEqual(await slices.implementationDigests({ changedFiles: [changed] }, roots), canonical, changed);
+  }
+  // Never bound to bytes outside the target: not by traversal, not through a link.
   await writeFile(path.join(workspace, "outside.ts"), "o\n");
-  for (const [changed, expected] of [
-    ["src/a.ts", "src/a.ts"],
-    ["./src/a.ts", "src/a.ts"],
-    ["target/src/a.ts", "src/a.ts"],
-    [`src/a.ts sha256:${"0".repeat(64)}`, "src/a.ts"],
-    ["src\\a.ts", "src/a.ts"],
-    ["src\\missing.ts", "src/missing.ts"],
-    // Never resolved outside the target root, so it stays the raw spelling.
-    ["../outside.ts", "../outside.ts"],
-  ]) assert.equal(await canonicalClaim(changed, roots), expected, changed);
-  assert.equal(await canonicalClaim("./src/a.ts", {}), "./src/a.ts");
-  const absolute = path.join(roots.targetRoot, "src/a.ts");
-  assert.equal(repoRelative(roots.targetRoot, absolute), "./src/a.ts");
-  assert.equal(targetRelative(roots, absolute), "src/a.ts");
+  await symlink(path.join(workspace, "outside.ts"), path.join(roots.targetRoot, "src/link.ts"));
+  for (const changed of ["../legacy/a.ts", "src/link.ts"]) {
+    await assert.rejects(
+      slices.implementationDigests({ changedFiles: [changed] }, roots),
+      new RegExp(`Cannot bind UI evidence to changed file '${changed.replaceAll(".", "\\.")}'`),
+    );
+  }
+});
+
+test("DR4: the post-anchor history of a claimed path reads it as a file name, never a pattern", async (t) => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "dr4-pathspec-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "maintenance.auto=false", ...args], { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  await mkdir(path.join(repo, "src"));
+  await writeFile(path.join(repo, "src/a[1].ts"), "a\n");
+  await writeFile(path.join(repo, "src/a1.ts"), "b\n");
+  git("add", "-A");
+  git("commit", "-qm", "anchor");
+  const anchor = git("rev-parse", "HEAD");
+  await writeFile(path.join(repo, "src/a1.ts"), "c\n");
+  git("commit", "-qam", "only the other file");
+  assert.deepEqual(await commitsTouchingSince(repo, anchor, "./src/a[1].ts"), []);
+  await writeFile(path.join(repo, "src/a[1].ts"), "d\n");
+  git("commit", "-qam", "the claimed file");
+  assert.deepEqual(await commitsTouchingSince(repo, anchor, "./src/a[1].ts"), [git("rev-parse", "HEAD")]);
+});
+
+test("DR4: a POSIX file named with a literal backslash keeps resolving, and its digest, as before DR4", { skip: process.platform === "win32" }, async (t) => {
+  const workspace = await mkdtemp(path.join(os.tmpdir(), "dr4-backslash-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const roots = { legacyRoot: path.join(workspace, "legacy"), targetRoot: path.join(workspace, "target") };
+  await mkdir(path.join(roots.targetRoot, "src"), { recursive: true });
+  await mkdir(roots.legacyRoot, { recursive: true });
+  const literal = "src/back\\slash.ts";
+  await writeFile(path.join(roots.targetRoot, literal), "b\n");
+  assert.equal(await canonicalClaim(literal, roots), literal);
+  const identity = await store.fileIdentity(path.join(roots.targetRoot, literal));
+  const { createHash } = await import("node:crypto");
+  assert.equal(
+    (await slices.implementationDigests({ changedFiles: [literal] }, roots)).current,
+    `sha256:${createHash("sha256").update(JSON.stringify([[literal, identity]])).digest("hex")}`,
+  );
 });
 
 // -- census facts handed in as data ---------------------------------------------

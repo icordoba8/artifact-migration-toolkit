@@ -1126,7 +1126,7 @@ const driveTo = async (fixture, stopAfter, step = advance, overrides = {}) => {
     await completeStepDoc(fixture, "PLAN");
     await writeJson(path.join(fixture.migrationRoot, "slices/index.json"), {
       version: 1,
-      slices: SLICES,
+      slices: overrides.slices ?? SLICES,
     });
     await step(fixture);
     await completeStepDoc(fixture, "IMPLEMENT_SLICES");
@@ -10489,6 +10489,19 @@ test("a changed file outside the owner is still refused in either spelling", asy
     } finally {
       await fixture.cleanup();
     }
+  }
+});
+
+test("DR4: a shared owner spelled through a traversal is refused, even one that lands back inside the target", async () => {
+  const fixture = await createFixture();
+  try {
+    const owner = `../${ancestorPrefix(fixture)}/src/shared/table`;
+    await assert.rejects(
+      implementShared(fixture, { targetOwner: owner, changedFiles: ["src/shared/table/index.ts"] }),
+      new RegExp(`CAP-S\\.targetOwner '${owner.replaceAll(".", "\\.")}' is outside the target repository`),
+    );
+  } finally {
+    await fixture.cleanup();
   }
 });
 
@@ -21649,6 +21662,299 @@ test("IMPLEMENT gate: a path no changedFiles entry can spell (a space) is not re
       targetRoot: fixture.targetRoot,
     });
     assert.deepEqual(drift.map((candidate) => candidate.subjectPath), [spaced]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/* --------------------------------------------------------------------------
+ * DR4: one canonical target-relative spelling for ownership. Every accepted
+ * spelling of a claim or an owner -- `src/x`, `./src/x`, `<target-dir>/src/x`,
+ * `src\\x`, a trailing separator -- names one target path to every ownership
+ * comparison, and no owner reaches past a `/` boundary into a sibling.
+ * ------------------------------------------------------------------------ */
+
+const DR4_SPELLINGS = {
+  "dot-slash": (relative) => `./${relative}`,
+  prefixed: (relative, fixture) => `${ancestorPrefix(fixture)}/${relative}`,
+  windows: (relative) => relative.replaceAll("/", "\\"),
+};
+
+/** Drive to COMPLETE with slice-a's one claim authored as `claim`. */
+const completeWithClaim = async (fixture, claim) => {
+  await driveTo(fixture, "PLAN");
+  for (const slice of SLICES) {
+    await authorSlice(fixture, slice.id);
+    if (slice.id === "slice-a") {
+      const recordPath = path.join(fixture.migrationRoot, "slices/slice-a.json");
+      await writeJson(recordPath, { ...(await readJson(recordPath)), changedFiles: [claim] });
+    }
+    await implementAndVerify(fixture, slice.id);
+  }
+  await authorFinalize(fixture);
+  await advance(fixture);
+  assert.equal((await state(fixture)).status, "COMPLETE", claim);
+};
+
+const ANCHORED_ONLY_CANONICAL = /carries anchored provenance only for its canonical target path/;
+
+test("DR4: a reopened claim reached through a link carries no anchored provenance", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await writeFile(path.join(fixture.targetRoot, "src/real.ts"), "export {};\n");
+    await commitTargetSliceWork(fixture, "an existing target file", "target/src/real.ts");
+    for (const slice of SLICES) {
+      await authorSlice(fixture, slice.id);
+      if (slice.id === "slice-a") {
+        // Same bytes, but the claimed path is a link to another target file,
+        // whose history the post-anchor check would never read.
+        await rm(path.join(fixture.targetRoot, "src/slice-a.ts"));
+        await symlink("real.ts", path.join(fixture.targetRoot, "src/slice-a.ts"));
+      }
+      await implementAndVerify(fixture, slice.id);
+    }
+    await authorFinalize(fixture);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+    await commitTargetSliceWork(fixture, "slice-a work", "target/src");
+    await (await reopenComplete(fixture, ["slice-a"])).run();
+    await authorEvidence(fixture, "slice-a");
+    await assert.rejects(advance(fixture, { slice: "slice-a" }), /is reached through a link/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR4: a reopened slice owns its anchored claim in every accepted spelling, and post-anchor commits still need current evidence", async () => {
+  for (const [name, spell] of Object.entries({
+    ...DR4_SPELLINGS,
+    // An existing file has always been claimable through a traversal, but a
+    // traversal has no canonical path, so it carries no anchored provenance.
+    traversal: (relative, fixture) => `../${ancestorPrefix(fixture)}/${relative}`,
+  })) {
+    const fixture = await createFixture();
+    try {
+      await completeWithClaim(fixture, spell("src/slice-a.ts", fixture));
+      await commitTargetSliceWork(fixture, "slice-a work", "target/src/slice-a.ts");
+      await (await reopenComplete(fixture, ["slice-a"])).run();
+      await writeFile(path.join(fixture.targetRoot, "src/slice-a.ts"), "export const changed = true;\n");
+      const head = await commitTargetSliceWork(fixture, "post-anchor change", "target/src/slice-a.ts");
+
+      await authorEvidence(fixture, "slice-a");
+      if (name === "traversal") {
+        await assert.rejects(advance(fixture, { slice: "slice-a" }), ANCHORED_ONLY_CANONICAL, name);
+        continue;
+      }
+      if (name === "prefixed") {
+        // A target holding its own `<target-dir>/` shadows the prefixed
+        // spelling: naming two files is refused, and so is naming another file
+        // than the canonical one anchored.
+        const original = path.join(fixture.targetRoot, "src/slice-a.ts");
+        const shadow = path.join(fixture.targetRoot, spell("src/slice-a.ts", fixture));
+        await mkdir(path.dirname(shadow), { recursive: true });
+        await writeFile(shadow, "export const shadow = true;\n");
+        await assert.rejects(advance(fixture, { slice: "slice-a" }), /names more than one target file/);
+        const bytes = await readFile(original);
+        await rm(original);
+        await assert.rejects(advance(fixture, { slice: "slice-a" }), ANCHORED_ONLY_CANONICAL);
+        await writeFile(original, bytes);
+        await rm(path.join(fixture.targetRoot, ancestorPrefix(fixture)), { recursive: true });
+      }
+      // The anchored claim is the committed file, so the post-anchor commit is
+      // found whichever way the pinned record spelled it.
+      await assert.rejects(advance(fixture, { slice: "slice-a" }), /verifiedAtRevision/, name);
+      const evidencePath = path.join(fixture.migrationRoot, "evidence/slice-a/result.json");
+      await writeJson(evidencePath, { ...(await readJson(evidencePath)), verifiedAtRevision: head });
+      await advance(fixture, { slice: "slice-a" });
+      assert.equal((await state(fixture)).currentStep, "FINALIZE", name);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("DR4: a prefixed claim switched to a shadow file before the reopen carries no anchored provenance", async () => {
+  const fixture = await createFixture();
+  try {
+    const claim = `${ancestorPrefix(fixture)}/src/slice-a.ts`;
+    await completeWithClaim(fixture, claim);
+    // After COMPLETE the canonical file goes and a shadow the same spelling
+    // reads directly arrives, both committed, so the anchor holds only the shadow.
+    await rm(path.join(fixture.targetRoot, "src/slice-a.ts"));
+    await mkdir(path.join(fixture.targetRoot, ancestorPrefix(fixture), "src"), { recursive: true });
+    await writeFile(path.join(fixture.targetRoot, claim), "export const shadow = true;\n");
+    await commitTargetSliceWork(fixture, "switch to a shadow", "target");
+    await (await reopenComplete(fixture, ["slice-a"])).run();
+    // `authorEvidence` reads the canonical file, so it is back only while it writes.
+    const original = path.join(fixture.targetRoot, "src/slice-a.ts");
+    await writeFile(original, "export {};\n");
+    await authorEvidence(fixture, "slice-a");
+    await rm(original);
+    await assert.rejects(advance(fixture, { slice: "slice-a" }), ANCHORED_ONLY_CANONICAL);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR4: a planned scope in any accepted spelling keeps a stray file in it as FINALIZE drift", async () => {
+  const fixture = await createFixture();
+  try {
+    const stray = "src/dr4-stray.ts";
+    const prefix = ancestorPrefix(fixture);
+    const scoped = (targetPaths) => SLICES.map((slice) => ({ ...slice, targetPaths }));
+    // Before DR4 a scope spelled through the repository prefix matched no
+    // dirty path, so the stray file read as an unrelated user change and
+    // COMPLETE was reached with it unaccounted for.
+    const failure = await driveTo(fixture, "FINALIZE", advance, {
+      slices: scoped([`${prefix}/src`]),
+      beforeFinalize: () => extraTargetFile(fixture, stray),
+    }).catch((error) => error);
+    assert.match(String(failure?.message), /UNCLAIMED_TARGET_DRIFT/);
+    assert.ok(failure.message.includes(stray), "the refusal names the path");
+    const persisted = await state(fixture);
+    assert.notEqual(persisted.status, "COMPLETE");
+
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const indexPath = path.join(fixture.migrationRoot, "slices/index.json");
+    const index = await readJson(indexPath);
+    const offered = async (targetPaths) => {
+      await writeJson(indexPath, { ...index, slices: scoped(targetPaths) });
+      return (await pendingTargetDriftCandidates(fixture.migrationRoot, persisted, roots)).map(
+        (candidate) => candidate.subjectPath,
+      );
+    };
+    for (const targetPaths of [["src"], ["./src/"], ["src\\"], [`${prefix}/src/`], ["."], [prefix]]) {
+      assert.deepEqual(await offered(targetPaths), [stray], JSON.stringify(targetPaths));
+    }
+    // A scope is a subtree, never a string prefix: `src/dr4` does not own
+    // `src/dr4-stray.ts`, so the file stays an unrelated change.
+    // Nor does a spelling that names nothing inside the target: an outside
+    // root, an absolute root, or a traversal back in.
+    for (const targetPaths of [["src/dr4"], [`${prefix}/src/dr4/`], ["../legacy"], ["/"], [`../${prefix}/src`]]) {
+      assert.deepEqual(await offered(targetPaths), [], JSON.stringify(targetPaths));
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR4: rework and delegation own their declared subtree in any spelling, never a sibling sharing its prefix", async () => {
+  const fixture = await createFixture();
+  try {
+    const files = ["src/shared/theme.ts", "src/shared-copy/theme.ts", "src/rw/a.ts", "src/rw-copy/a.ts"];
+    await finalizeWith(fixture, async () => {
+      for (const file of files) {
+        await mkdir(path.dirname(path.join(fixture.targetRoot, file)), { recursive: true });
+        await extraTargetFile(fixture, file);
+      }
+    }).catch(() => {});
+    const persisted = await state(fixture);
+    const reworking = { ...persisted, sliceReworks: { ...(persisted.sliceReworks ?? {}), "slice-a": 1 } };
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const indexPath = path.join(fixture.migrationRoot, "slices/index.json");
+    const index = await readJson(indexPath);
+    for (const [name, spell] of Object.entries({
+      plain: (owner) => owner,
+      trailing: (owner) => `${owner}/`,
+      ...DR4_SPELLINGS,
+    })) {
+      await writeJson(indexPath, {
+        ...index,
+        slices: index.slices.map((slice) =>
+          slice.id === "slice-a"
+            ? { ...slice, targetOwner: spell("src/rw", fixture) }
+            : { ...slice, artifact: "theme", targetOwner: spell("src/shared", fixture) },
+        ),
+      });
+      const offered = await pendingTargetDriftCandidates(fixture.migrationRoot, reworking, roots);
+      assert.deepEqual(
+        offered.map((candidate) => candidate.subjectPath).sort(),
+        ["src/rw-copy/a.ts", "src/shared-copy/theme.ts"],
+        name,
+      );
+    }
+    // An owner that names nothing inside the target authorizes nothing.
+    for (const owner of ["/", `../${ancestorPrefix(fixture)}`, "../legacy"]) {
+      await writeJson(indexPath, {
+        ...index,
+        slices: index.slices.map((slice) =>
+          slice.id === "slice-a" ? { ...slice, targetOwner: owner } : { ...slice, artifact: "theme", targetOwner: owner },
+        ),
+      });
+      const offered = await pendingTargetDriftCandidates(fixture.migrationRoot, reworking, roots);
+      assert.deepEqual(offered.map((candidate) => candidate.subjectPath).sort(), [...files].sort(), owner);
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR4: a claimed link out of the target is refused, in any spelling", async () => {
+  for (const [name, spell] of Object.entries({ plain: (relative) => relative, ...DR4_SPELLINGS })) {
+    const fixture = await createFixture();
+    try {
+      await driveTo(fixture, "PLAN");
+      await authorSlice(fixture, "slice-a");
+      await symlink(path.join(fixture.legacyRoot, "marker.txt"), path.join(fixture.targetRoot, "src/escape.ts"));
+      const recordPath = path.join(fixture.migrationRoot, "slices/slice-a.json");
+      const record = await readJson(recordPath);
+      await writeJson(recordPath, { ...record, changedFiles: [...record.changedFiles, spell("src/escape.ts", fixture)] });
+      await assert.rejects(advance(fixture, { slice: "slice-a" }), /which is outside the target repository/, name);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("DR4: an operator acceptance authorizes only the path it names, never a respelling of it", async () => {
+  const fixture = await createFixture();
+  try {
+    const stray = "src/dr4-accepted.ts";
+    await finalizeWith(fixture, () => extraTargetFile(fixture, stray)).catch(() => {});
+    const persisted = await state(fixture);
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const offered = async () =>
+      (await pendingTargetDriftCandidates(fixture.migrationRoot, persisted, roots)).map(
+        (candidate) => candidate.subjectPath,
+      );
+    // The offer names the canonical path, and only a decision over exactly
+    // that path accepts it: a recorded approval is never reinterpreted.
+    await acceptTargetDrift(fixture, `./${stray}`);
+    assert.deepEqual(await offered(), [stray]);
+    await acceptTargetDrift(fixture, stray);
+    assert.deepEqual(await offered(), []);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR4: an amendment reads --add-file in every accepted spelling as the one target path", async () => {
+  const fixture = await createFixture();
+  try {
+    await reopenedForAmendment(fixture, ["slice-a"]);
+    const added = await extraTargetFile(fixture, "src/slice-a-helper.ts");
+    for (const [name, spell] of Object.entries(DR4_SPELLINGS)) {
+      const preview = await amendPreview(fixture, "slice-a", [spell(added, fixture)]);
+      assert.deepEqual(preview.blockers, [], name);
+      assert.deepEqual(preview.sliceAmendment.add.map((file) => file.path), [added], name);
+      const duplicate = await amendPreview(fixture, "slice-a", [spell("src/slice-a.ts", fixture)]);
+      assert.match(duplicate.blockers.join(" "), /already in slice-a\.changedFiles/, name);
+    }
+    // A sibling of the target's prefix and a link out of the target stay refused.
+    await symlink(path.join(fixture.legacyRoot, "marker.txt"), path.join(fixture.targetRoot, "src/escape.ts"));
+    for (const refused of [
+      `${ancestorPrefix(fixture)}-copy/${added}`,
+      "../legacy/marker.txt",
+      `${ancestorPrefix(fixture)}/src/escape.ts`,
+    ]) {
+      const preview = await amendPreview(fixture, "slice-a", [refused]);
+      assert.match(
+        preview.blockers.join(" "),
+        /outside the target repository|not an existing regular file/,
+        refused,
+      );
+    }
   } finally {
     await fixture.cleanup();
   }

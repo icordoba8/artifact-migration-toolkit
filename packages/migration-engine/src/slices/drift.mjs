@@ -14,10 +14,12 @@ import { dirtyManifest } from "../shared/index.mjs";
 import { hashFile, readJson, readOptionalJson } from "../store/index.mjs";
 import {
   claimedTargetPaths,
+  ownsPath,
   plannedTargetOwners,
   readTargetBaseline,
   TARGET_DIRTY_SCOPE,
   targetBaselineDrift,
+  targetOwnerPaths,
   withinPlannedScope,
 } from "./claims.mjs";
 import { reworkAttemptsOf } from "./rework.mjs";
@@ -132,21 +134,22 @@ export const classifyTargetDrift = async (
       (sliceId) => reworkAttemptsOf(state, sliceId) > 0,
     ),
   );
-  const reworkOwned = new Set();
-  for (const sliceId of reworked) {
-    const planned = slices.find((slice) => slice.id === sliceId);
-    for (const owner of planned?.targetOwner
-      ? [planned.targetOwner]
-      : []) {
-      reworkOwned.add(owner.replaceAll("\\", "/"));
-    }
-  }
+  // DR4: both owner lists are canonical and own subtrees, so `src/rw` never
+  // authorizes `src/rw-copy/` and every spelling of an owner is one owner.
+  const reworkOwned = targetOwnerPaths(
+    slices
+      .filter((slice) => reworked.has(slice.id))
+      .map((slice) => slice.targetOwner),
+    roots,
+  );
   // A SHARED_PREREQUISITE with a live artifact delegation: the child record
   // owns those bytes and validates them under its own lifecycle.
-  const delegatedOwners = slices
-    .filter((slice) => slice.artifact || slice.delegatedTo)
-    .map((slice) => String(slice.targetOwner ?? "").replaceAll("\\", "/"))
-    .filter(Boolean);
+  const delegatedOwners = targetOwnerPaths(
+    slices
+      .filter((slice) => slice.artifact || slice.delegatedTo)
+      .map((slice) => slice.targetOwner),
+    roots,
+  );
 
   // W4-4/W4-5. The acceptance lives in the append-only operator ledger, never
   // in a CLI flag and never in a state field an agent could author. `boundTo`
@@ -238,7 +241,7 @@ export const classifyTargetDrift = async (
       .map((value) => value.replaceAll("\\", "/")),
   );
 
-  const owners = plannedTargetOwners(slices);
+  const owners = plannedTargetOwners(slices, roots);
   // Whether ownership is a question this record can answer at all. With owners,
   // "inside the migration's scope" and "outside it" are both decidable, and a
   // finding that lands inside is deterministic drift the AUTO principal may
@@ -252,6 +255,7 @@ export const classifyTargetDrift = async (
         slice.id !== state.activeSlice &&
         (state.pendingSlices ?? []).includes(slice.id),
     ),
+    roots,
   );
   const withinLaterSlice = (relative) =>
     laterOwners.length > 0 && withinPlannedScope(relative, laterOwners);
@@ -281,11 +285,11 @@ export const classifyTargetDrift = async (
     // Brownfield: already dirty before the migration started and unchanged
     // since is not this migration's doing.
     if (changedSinceBaseline && !changedSinceBaseline(relative)) continue;
-    if ([...reworkOwned].some((owner) => relative.startsWith(owner))) {
+    if (reworkOwned.some((owner) => ownsPath(owner, relative))) {
       findings.push({ path: relative, class: DRIFT_CLASSES.AUTHORIZED_REWORK });
       continue;
     }
-    if (delegatedOwners.some((owner) => relative.startsWith(owner))) {
+    if (delegatedOwners.some((owner) => ownsPath(owner, relative))) {
       findings.push({
         path: relative,
         class: DRIFT_CLASSES.AUTHORIZED_DELEGATION,
@@ -330,7 +334,7 @@ export const unlistedSliceCandidates = async (root, state, roots, sliceId, facts
   if (!usesSliceRework(state) || !roots?.targetRoot) return null;
   const plan = await readOptionalJson(path.join(root, initialArtifacts.slices), "Slice index");
   const slices = Array.isArray(plan?.slices) ? plan.slices : [];
-  const scope = plannedTargetOwners(slices.filter((slice) => slice.id === sliceId));
+  const scope = plannedTargetOwners(slices.filter((slice) => slice.id === sliceId), roots);
   if (scope.length === 0) return null;
   const record = await readJson(path.join(root, `slices/${sliceId}.json`), `Slice ${sliceId}`);
   // Classified as the VERIFY_SLICES this advance enters will classify it.
