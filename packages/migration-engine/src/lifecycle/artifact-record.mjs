@@ -28,6 +28,7 @@ import {
 import { artifactIdFor, sourcePathAtRoot, sourcePathForId } from "../census/index.mjs";
 import { engineCommand, quoteCommandToken } from "../engine-paths.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
+import { designSourceConflict, designSourceExplicit } from "../visual/index.mjs";
 import {
   assertArray as arrayOf,
   canonicalJson as canonical,
@@ -287,17 +288,9 @@ export const assertInvocationMatches = (state, options) => {
     assertPonytailTarget(options.ponytail);
     if (options.ponytail !== state.ponytail) throw new Error("Invocation Ponytail target conflicts with persisted state.");
   }
-  const designExplicit =
-    options.designSource !== undefined ||
-    (Array.isArray(options.figma) ? options.figma.length > 0 : options.figma !== undefined);
-  if (designExplicit) {
-    const requested = resolveDesignSource(options);
-    if (
-      requested.designSource !== (state.designSource ?? "target-system") ||
-      canonical(requested.figmaSources) !== canonical(state.figmaSources ?? [])
-    ) {
-      throw new Error("Invocation design source conflicts with persisted state.");
-    }
+  // The module's rule (visual/), under the artifact record's established refusal.
+  if (designSourceExplicit(options) && designSourceConflict(state, resolveDesignSource(options))) {
+    throw new Error("Invocation design source conflicts with persisted state.");
   }
 };
 

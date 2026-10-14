@@ -191,30 +191,30 @@ export const designSourceExplicit = ({ designSource, figma } = {}) =>
   designSource !== undefined ||
   (Array.isArray(figma) ? figma.length > 0 : figma !== undefined);
 
+// Each link's identity (kind, fileKey, nodeId), JSON-encoded and sorted: unforgeable, order-free.
 const figmaSourceKey = (sources) =>
-  (sources ?? [])
-    .map((source) => `${source.kind}#${source.fileKey}#${source.nodeId ?? ""}`)
-    .sort()
-    .join(",");
+  JSON.stringify((sources ?? []).map((source) =>
+    JSON.stringify([source.kind, source.fileKey, source.nodeId ?? null])).sort());
 
 /**
- * The design source is bootstrap-fixed. A resume that explicitly names a
- * different one is refused, mirroring the `--mock` and `--ponytail` conflicts.
+ * The design source is bootstrap-fixed: the one rule the module and the artifact
+ * record apply to a resume that explicitly names one (`design`, resolved). Figma
+ * links pin only a figma-mcp record, as formats/ validates them. Conflict or null.
  */
-export const assertDesignSourceUnchanged = (state, design) => {
+export const designSourceConflict = (state, design) => {
   const recorded = state.designSource ?? "target-system";
   if (design.designSource !== recorded) {
-    throw new Error(
-      `Design source '${design.designSource}' conflicts with the recorded design source '${recorded}'. The design source is fixed for the migration's lifetime; start a new migration to change it.`,
-    );
+    return `Design source '${design.designSource}' conflicts with the recorded design source '${recorded}'. The design source is fixed for the migration's lifetime; start a new migration to change it.`;
   }
-  if (
-    figmaSourceKey(design.figmaSources) !== figmaSourceKey(state.figmaSources)
-  ) {
-    throw new Error(
-      "Figma sources conflict with the recorded Figma sources. The design source and its links are fixed for the migration's lifetime.",
-    );
-  }
+  const pinned = recorded === "figma-mcp" ? state.figmaSources : [];
+  return figmaSourceKey(design.figmaSources) === figmaSourceKey(pinned) ? null
+    : "Figma sources conflict with the recorded Figma sources. The design source and its links are fixed for the migration's lifetime.";
+};
+
+/** The module's refusal. A record older than its design-source format is target-system. */
+export const assertDesignSourceUnchanged = (state, design) => {
+  const conflict = designSourceConflict(usesDesignSource(state) ? state : {}, design);
+  if (conflict) throw new Error(conflict);
 };
 
 /**

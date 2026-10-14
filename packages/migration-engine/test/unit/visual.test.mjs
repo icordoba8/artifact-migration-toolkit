@@ -328,3 +328,32 @@ test("A6: --reopen-ui is eligible only for COMPLETE, or ACTIVE at VERIFY_SLICES 
     "--reopen-ui is legal only for a COMPLETE migration, or an ACTIVE one at VERIFY_SLICES or FINALIZE; the current status is 'ACTIVE' at 'PLAN'.",
   );
 });
+
+test("DR18: designSourceConflict compares canonical Figma identities, never order, raw links or forgeable separators", () => {
+  const a = { kind: "design", fileKey: "ABC123def", nodeId: "12:34", raw: "https://www.figma.com/design/ABC123def?node-id=12-34" };
+  const b = { kind: "make", fileKey: "OTHERkey2", nodeId: null, raw: "https://www.figma.com/make/OTHERkey2" };
+  const figma = (...figmaSources) => ({ designSource: "figma-mcp", figmaSources });
+  const conflict = (state, design) => visual.designSourceConflict(state, design)?.split(".")[0] ?? null;
+  const FIGMA = "Figma sources conflict with the recorded Figma sources";
+  assert.equal(conflict(figma(a, b), figma({ ...b, nodeId: undefined, raw: "other" }, a)), null);
+  // A fileKey spelling two identities in a joined key is still one source.
+  const forged = figma({ kind: "design", fileKey: "ABC123def#12:34,make#OTHERkey2", nodeId: "", raw: "forged" });
+  assert.equal(conflict(forged, figma(a, { ...b, nodeId: "" })), FIGMA);
+  assert.equal(conflict(figma(a, a), figma(a)), FIGMA, "a non-canonical pinned duplicate fails closed");
+  assert.equal(conflict(figma(a), figma({ ...a, kind: "make" })), FIGMA);
+  assert.equal(conflict(figma(a), figma({ ...a, nodeId: null })), FIGMA);
+  assert.equal(conflict({}, { designSource: "target-system", figmaSources: [] }), null, "a pre-design-source record is target-system");
+  assert.equal(conflict({}, figma(a)), "Design source 'figma-mcp' conflicts with the recorded design source 'target-system'");
+  // Links pin only a figma-mcp record; on any other they are inert.
+  assert.equal(conflict({ designSource: "legacy-runtime", figmaSources: [a] }, { designSource: "legacy-runtime", figmaSources: [] }), null);
+  // A module record older than its design-source format is target-system,
+  // whatever inert design fields it carries.
+  const module = (formatVersion, fields) => ({ formatVersion, ...fields });
+  const target = { designSource: "target-system", figmaSources: [] };
+  assert.doesNotThrow(() => visual.assertDesignSourceUnchanged(module(13, { figmaSources: [a] }), target));
+  assert.doesNotThrow(() => visual.assertDesignSourceUnchanged(module(13, figma(a)), target));
+  assert.throws(() => visual.assertDesignSourceUnchanged(module(13, figma(a)), figma(a)), /^Error: Design source 'figma-mcp' conflicts with the recorded design source 'target-system'\./);
+  assert.throws(() => visual.assertDesignSourceUnchanged(module(14, figma(a)), target), /^Error: Design source 'target-system' conflicts/);
+  assert.doesNotThrow(() => visual.assertDesignSourceUnchanged(module(14, figma(a)), figma({ ...a, raw: "x" })));
+  assert.throws(() => visual.assertDesignSourceUnchanged(module(14, figma(a)), figma(b)), new RegExp(`^Error: ${FIGMA}\\.`));
+});

@@ -91,7 +91,9 @@ export const resolveDesignSource = ({ designSource, figma } = {}) => {
       `Invalid design source '${String(mode)}'. Use ${DESIGN_SOURCES.join(" or ")}.`,
     );
   }
-  const links = Array.isArray(figma) ? figma : figma ? [figma] : [];
+  // Any supplied value is a link, exactly as designSourceExplicit reads it, so an
+  // empty or non-string one is refused below instead of meaning "no links".
+  const links = Array.isArray(figma) ? figma : figma === undefined ? [] : [figma];
   // Every non-Figma source takes the same branch: the links belong to exactly
   // one origin, so `legacy-runtime` refuses them exactly as `target-system` does.
   if (mode !== "figma-mcp") {

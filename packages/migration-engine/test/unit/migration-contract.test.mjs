@@ -12,6 +12,7 @@
 
 import assert from "node:assert/strict";
 import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
+import { nonFigmaCases, OTHER_FIGMA_AUTHORITY, RECORDED_FIGMA, SAME_FIGMA_AUTHORITY } from "../support/design-source-cases.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
@@ -11675,6 +11676,72 @@ test("figma-mcp: the design source and its links are fixed for the migration's l
     assert.equal(preview.migration, "auth");
   } finally {
     await fixture.cleanup();
+  }
+});
+
+// DR18: the module half of the shared matrix. An invocation naming the pinned
+// authority previews and resumes like a plain resume and leaves the recorded
+// sources byte-identical; any other is refused by both without a byte written.
+const DESIGN_REFUSAL = /^(Design source '[^']+' conflicts with the recorded design source|Figma sources conflict with the recorded Figma sources|--figma links require --design-source figma-mcp|--design-source figma-mcp requires at least one --figma link|Figma source must be a non-empty URL string|Invalid Figma|Figma board links are not a UI design contract)/;
+const assertModuleDesignInvocations = async (fixture, { same, other }) => {
+  const resolution = await resolutionFor(fixture);
+  const preview = (design) =>
+    previewMigrationExecution({ ...resolution, moduleName: "auth", ...design });
+  const resume = async (design) => {
+    const confirmed = await preview(design);
+    return bootstrapMigration({
+      ...resolution,
+      moduleName: "auth",
+      registryBinding: confirmed.registryBinding,
+      boundInputs: confirmed.boundInputs,
+      ...design,
+    });
+  };
+  const recorded = await readFile(path.join(fixture.migrationRoot, "state.json"), "utf8");
+  const pinned = ({ designSource, figmaSources }) => ({ designSource, figmaSources });
+  for (const [label, design] of same) {
+    assert.equal((await preview(design)).migration, "auth", `preview: ${label}`);
+    await resume(design);
+    assert.deepEqual(pinned(await state(fixture)), pinned(JSON.parse(recorded)), `resume: ${label}`);
+  }
+  // The mutation attempt carries a fresh plain-resume confirmation, so only the
+  // design-source rule can refuse it.
+  const plain = await preview({});
+  const before = await snapshot(fixture.root);
+  for (const [label, design] of other) {
+    const refusal = await preview(design).then(() => null, (error) => error.message);
+    assert.match(String(refusal), DESIGN_REFUSAL, `preview: ${label}`);
+    await assert.rejects(
+      bootstrapMigration({
+        ...resolution,
+        moduleName: "auth",
+        registryBinding: plain.registryBinding,
+        boundInputs: plain.boundInputs,
+        ...design,
+      }),
+      (error) => error.message === refusal,
+      `resume: ${label}`,
+    );
+    assert.deepEqual(await snapshot(fixture.root), before, `bytes: ${label}`);
+  }
+};
+
+test("DR18: a module record applies the shared design-source immutability matrix", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture, RECORDED_FIGMA);
+    await assertModuleDesignInvocations(fixture, { same: SAME_FIGMA_AUTHORITY, other: OTHER_FIGMA_AUTHORITY });
+  } finally {
+    await fixture.cleanup();
+  }
+  for (const recorded of ["target-system", "legacy-runtime"]) {
+    const nonFigma = await createFixture();
+    try {
+      await initialize(nonFigma, recorded === "target-system" ? {} : { designSource: recorded });
+      await assertModuleDesignInvocations(nonFigma, nonFigmaCases(recorded));
+    } finally {
+      await nonFigma.cleanup();
+    }
   }
 });
 
