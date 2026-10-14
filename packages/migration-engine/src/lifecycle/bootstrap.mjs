@@ -4,7 +4,7 @@
  * `bootstrapUnderLock`. Moved verbatim from `resumable-migration.mjs` (Track A8).
  */
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { link, mkdir, open, readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import {
   assertLegacySourcesUnchanged,
@@ -47,9 +47,11 @@ import {
   previewProjectRegistryBinding,
   registryIdentity,
   removeEmptyParents,
+  renameDurably,
   renderIntegrity,
   renderState,
   statePathFor,
+  syncDirectory,
 } from "../store/index.mjs";
 import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
 import { assertDesignSourceUnchanged, designSourceExplicit } from "../visual/index.mjs";
@@ -191,6 +193,9 @@ const rollbackInitialization = async (targetRoot, journal) => {
   if (await ownerMatches(journal.rootOwner, journal.transactionId)) {
     await rm(journal.root, { recursive: true, force: true });
   }
+  // Stopped between creating the root and owning it: an empty root holds
+  // nothing, so it goes before the journal does (anything else stays).
+  await removeEmptyParents(journal.root, path.dirname(journal.root));
   if (
     journal.openSpecPath &&
     journal.stagedOpenSpec &&
@@ -198,10 +203,17 @@ const rollbackInitialization = async (targetRoot, journal) => {
   ) {
     await rm(journal.openSpecPath, { force: true });
     await removeEmptyParents(path.dirname(journal.openSpecPath), targetRoot);
+    await syncNearest(path.dirname(journal.openSpecPath));
   }
+  // The undo is durable before the journal that could finish it is removed.
+  await syncDirectory(path.dirname(journal.root));
   await cleanupInitialization(journal);
   await removeEmptyParents(path.dirname(journal.root), targetRoot);
 };
+
+/** Fsyncs `directory`, or its nearest ancestor still present after a removal. */
+const syncNearest = (directory) => syncDirectory(directory).catch((error) =>
+  error.code === "ENOENT" && path.dirname(directory) !== directory ? syncNearest(path.dirname(directory)) : Promise.reject(error));
 
 /**
  * Undoes or completes an initialization that died between its three commits
@@ -339,6 +351,7 @@ const commitInitialization = async ({
     if (stagedOpenSpec) {
       await assertSecurePath(targetRoot, openSpecPath);
       await link(stagedOpenSpec, openSpecPath);
+      await syncDirectory(path.dirname(openSpecPath));
       await hooks.afterCommit?.("openspec");
     }
     if (stagedProjectConfig) {
@@ -346,18 +359,23 @@ const commitInitialization = async ({
         registryBinding.projectRoot,
         registryBinding.configPath,
       );
-      await rename(stagedProjectConfig, registryBinding.configPath);
+      await renameDurably(stagedProjectConfig, registryBinding.configPath);
       await hooks.afterCommit?.("project-config");
     }
     await assertSecurePath(targetRoot, root);
+    // The owner marker is staged complete and renamed in, so the root is only
+    // ever empty (rollback removes it) or provably this transaction's.
+    const stagedOwner = path.join(stagedRoot, path.basename(rootOwner));
+    await writeOwner(stagedOwner, transactionId);
     await mkdir(root);
-    await writeOwner(rootOwner, transactionId);
+    await syncDirectory(path.dirname(root));
+    await renameDurably(stagedOwner, rootOwner);
     const entries = await readdir(stagedRoot);
     entries.sort((left, right) =>
       left === "state.json" ? 1 : right === "state.json" ? -1 : 0,
     );
     for (const entry of entries) {
-      await rename(path.join(stagedRoot, entry), path.join(root, entry));
+      await renameDurably(path.join(stagedRoot, entry), path.join(root, entry));
     }
     await rm(stagedRoot, { recursive: true, force: true });
     await hooks.afterCommit?.("migration");

@@ -7,15 +7,7 @@
 // every platform, so this is locked, staged, and recoverable, not atomic.
 
 import { createHash } from "node:crypto";
-import {
-  cp,
-  mkdir,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,10 +21,14 @@ import {
 } from "../shared/index.mjs";
 import {
   assertNoSymlink,
+  atomicWrite,
+  copyTree,
   entryExists as exists,
   manifestOf,
+  mkdirDurably,
   readRegistry,
   readTree,
+  renameDurably,
   resolveModule,
   sameManifest,
   migrationRoot,
@@ -74,6 +70,11 @@ const readJournal = async (file) => JSON.parse(await readFile(file, "utf8"));
 // Journal writes are temp-file + rename: a process killed mid-write must never
 // leave a torn journal, because the journal is what recovery reads.
 const writeJournal = writeJournalAtomic;
+
+// DR7: the manifests are what recovery compares a tree against, so they are
+// the store replace-write too, with a plain file's default mode as before.
+const writeManifest = (directory, name, content) =>
+  atomicWrite(directory, path.join(directory, name), content, { mode: 0o666 });
 
 /**
  * Deterministic recovery. Restores the original tree or finishes a target that
@@ -126,8 +127,8 @@ export const recoverTransaction = async (journal) => {
         `Cannot recover upgrade ${journal.confirmationId}: the preserved rollback tree does not match the recorded source manifest. Restore ${snapshotPath} manually.`,
       );
     }
-    await mkdir(path.dirname(livePath), { recursive: true });
-    await rename(rollbackPath, livePath);
+    await mkdirDurably(path.dirname(livePath));
+    await renameDurably(rollbackPath, livePath);
     await rm(stagingPath, { recursive: true, force: true });
     return finish("ROLLED_BACK");
   }
@@ -136,8 +137,8 @@ export const recoverTransaction = async (journal) => {
   // still the deterministic answer, so recovery restores it instead of raising
   // a raw ENOENT and wedging the module with no documented escape.
   if (!liveManifest && (await exists(snapshotPath))) {
-    await mkdir(path.dirname(livePath), { recursive: true });
-    await cp(snapshotPath, livePath, { recursive: true });
+    await mkdirDurably(path.dirname(livePath));
+    await copyTree(snapshotPath, livePath);
     await rm(stagingPath, { recursive: true, force: true });
     await rm(rollbackPath, { recursive: true, force: true });
     return finish("ROLLED_BACK");
@@ -371,10 +372,10 @@ const commitReplacement = async ({
   };
 
   await advance("PREPARED");
-  await rename(livePath, rollbackPath);
+  await renameDurably(livePath, rollbackPath);
   await hooks.afterRename?.("LIVE_MOVED");
   await advance("LIVE_MOVED");
-  await rename(stagingPath, livePath);
+  await renameDurably(stagingPath, livePath);
   await hooks.afterRename?.("TARGET_COMMITTED");
   await advance("TARGET_COMMITTED");
 
@@ -478,10 +479,8 @@ export const executeUpgrade = async ({
     const journalFile = path.join(directory, "transaction.json");
     const stagingPath = path.join(directory, "staging");
     const rollbackPath = path.join(directory, "rollback-live");
-    await mkdir(directory, { recursive: true });
-    await cp(livePath, path.join(directory, "source-snapshot"), {
-      recursive: true,
-    });
+    await mkdirDurably(directory);
+    await copyTree(livePath, path.join(directory, "source-snapshot"));
     const manifestHeader = {
       confirmationId: preview.confirmationId,
       sourceVersions: preview.sourceVersions,
@@ -489,21 +488,13 @@ export const executeUpgrade = async ({
       contractDigest: preview.contractDigest,
       openSpecDigest: preview.openSpecDigest,
     };
-    await writeFile(
-      path.join(directory, "source-manifest.json"),
-      `${JSON.stringify({ ...manifestHeader, files: sourceManifest }, null, 2)}\n`,
-      "utf8",
-    );
+    await writeManifest(directory, "source-manifest.json", `${JSON.stringify({ ...manifestHeader, files: sourceManifest }, null, 2)}\n`);
     await writeTree(stagingPath, transformation.target);
     const stagedManifest = manifestOf(await readTree(stagingPath));
     if (!sameManifest(stagedManifest, targetManifest)) {
       throw new Error("The staged tree does not match the validated target.");
     }
-    await writeFile(
-      path.join(directory, "target-manifest.json"),
-      `${JSON.stringify({ ...manifestHeader, files: targetManifest }, null, 2)}\n`,
-      "utf8",
-    );
+    await writeManifest(directory, "target-manifest.json", `${JSON.stringify({ ...manifestHeader, files: targetManifest }, null, 2)}\n`);
 
     await commitReplacement({
       journalFile,
@@ -687,11 +678,9 @@ export const executeRollback = async ({
       preview.confirmationId,
     );
     const stagingPath = path.join(directory, "staging");
-    await mkdir(directory, { recursive: true });
+    await mkdirDurably(directory);
     // The current contract-5 tree is snapshotted before anything moves.
-    await cp(livePath, path.join(directory, "source-snapshot"), {
-      recursive: true,
-    });
+    await copyTree(livePath, path.join(directory, "source-snapshot"));
     const liveTree = await readTree(livePath);
     // Same rule as the upgrade direction: only the pinned build may move a
     // stamped record's tree. Record rollback is not toolkit rollback, and this
@@ -709,18 +698,10 @@ export const executeRollback = async ({
       targetVersions: preview.targetVersions,
       contractDigest: preview.contractDigest,
     };
-    await writeFile(
-      path.join(directory, "source-manifest.json"),
-      `${JSON.stringify({ ...header, files: liveManifest }, null, 2)}\n`,
-      "utf8",
-    );
-    await cp(preview.snapshotPath, stagingPath, { recursive: true });
+    await writeManifest(directory, "source-manifest.json", `${JSON.stringify({ ...header, files: liveManifest }, null, 2)}\n`);
+    await copyTree(preview.snapshotPath, stagingPath);
     const stagedManifest = manifestOf(await readTree(stagingPath));
-    await writeFile(
-      path.join(directory, "target-manifest.json"),
-      `${JSON.stringify({ ...header, files: stagedManifest }, null, 2)}\n`,
-      "utf8",
-    );
+    await writeManifest(directory, "target-manifest.json", `${JSON.stringify({ ...header, files: stagedManifest }, null, 2)}\n`);
 
     await commitReplacement({
       journalFile: path.join(directory, "transaction.json"),

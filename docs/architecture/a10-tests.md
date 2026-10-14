@@ -266,6 +266,6 @@ No production file changed, so no behavior changed. The guards:
 - **The A8 owners-b seams:** 119 rows homed in `lifecycle/` that another module owns by rule (`docs/architecture/a8-ownership.md`). The gate pins the current direction; it does not claim these seams are gone.
 - **Seven oversized source files** (above).
 - **Same-name different-rule pairs** (`SAME_NAME_OTHER_RULE`): consolidating them is a behavior review.
-- **`FS_WRITERS` outside `store/`:** the decision ledger append (DR7/DR8) and the journals (DR13) are Track B.
+- **`FS_WRITERS` outside `store/`:** the journals (DR13) are Track B. The decision ledger append moved to the store durable append in DR7/DR8.
 - **Track B:** DR1, DR4, DR13, DR18, I3/DR28, I4, I7, I8, P4; A9 D1–D10.
 - **Windows CI:** disabled for Track A; re-enabling it is outside A10.

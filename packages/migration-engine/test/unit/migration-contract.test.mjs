@@ -51,6 +51,7 @@ import {
 import {
   previewRegistryUpdate,
   readRegistry,
+  readTree,
   resolveRegistryPath,
   artifactRoot,
 } from "../../src/store/index.mjs";
@@ -123,11 +124,14 @@ import {
   readCanonicalModuleBoundary,
 } from "../../src/census/index.mjs";
 import {
+  executeRollback,
   executeUpgrade,
   pendingTransactions,
+  previewRollback,
   previewUpgrade,
   recoverUpgrade,
 } from "../../src/upgrades/upgrade-migration.mjs";
+import { ioError, traceFs } from "../support/fs-trace.mjs";
 import {
   CAPABILITY_OWNERSHIP_FILE,
   MIGRATION_FORMAT_VERSION,
@@ -2579,6 +2583,125 @@ test("P1-11: a kill at every journal/rename boundary leaves a lock a fresh proce
     } finally {
       await fixture.cleanup();
     }
+  }
+});
+
+// DR7: everything recovery compares a tree against -- the source snapshot, both
+// manifests and the staged tree -- is fsynced before the journalled rename
+// moves the live tree. Traced in-process; a file is flushed when it was
+// fsynced itself or is the rename target of a fsynced temp file.
+test("DR7: upgrade and rollback flush the snapshot, manifests and staged tree before the live tree moves", async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.cleanup());
+  await driveTo(fixture, "PLAN");
+  await downgradeToV4(fixture.migrationRoot);
+  const resolution = await resolutionFor(fixture);
+  const request = { registryPath: resolution.registryPath, moduleName: "auth" };
+  for (const direction of ["upgrade", "rollback"]) {
+    const preview = direction === "upgrade" ? await previewUpgrade(request) : await previewRollback(request);
+    assert.equal(preview.requiresConfirmation, true, `${direction}: ${(preview.blockers ?? []).join("; ")}`);
+    const before = Object.keys(await readTree(fixture.migrationRoot));
+    const log = await traceFs(t);
+    let prepared = -1;
+    const hooks = { afterJournal: (journalState) => { if (journalState === "PREPARED") prepared = log.length; } };
+    await (direction === "upgrade"
+      ? executeUpgrade({ ...request, confirmUpgrade: preview.confirmationId, hooks })
+      : executeRollback({ ...request, confirmRollback: preview.confirmationId, hooks }));
+    const moved = log.findIndex(([op, file], index) => index >= prepared && op === "rename" && path.basename(file) === "rollback-live");
+    assert.ok(prepared >= 0 && moved >= prepared, `${direction}: the live tree never moved after PREPARED`);
+    const directory = path.dirname(log[moved][1]);
+    const synced = (file) => log.some(([op, f], index) => index < moved && op === "sync" && f === file);
+    const flushed = (file) => synced(file) ||
+      log.some(([op, f, from], index) => index < moved && op === "rename" && f === file && synced(from));
+    const after = Object.keys(await readTree(fixture.migrationRoot));
+    const expected = [
+      ...["source-manifest.json", "target-manifest.json"].map((name) => path.join(directory, name)),
+      ...before.map((relative) => path.join(directory, "source-snapshot", ...relative.split("/"))),
+      ...after.map((relative) => path.join(directory, "staging", ...relative.split("/"))),
+    ];
+    for (const file of expected) assert.ok(flushed(file), `${direction}: ${path.relative(directory, file)} not fsynced before the live tree moved`);
+    if (process.platform !== "win32") {
+      for (const tree of ["staging", "source-snapshot"]) assert.ok(synced(path.join(directory, tree)), `${direction}: ${tree}/ not fsynced`);
+      // Both directory renames are durable in both directories before the
+      // journal records them.
+      for (const [index, [op, file, from]] of log.entries()) {
+        if (op !== "rename" || !(path.basename(file) === "rollback-live" || path.basename(from) === "staging")) continue;
+        const journaled = log.findIndex(([o, f], at) => at > index && o === "rename" && path.basename(f) === "transaction.json");
+        for (const parent of new Set([path.dirname(file), path.dirname(from)])) {
+          assert.ok(log.some(([o, f], at) => at > index && at < journaled && o === "sync" && f === parent),
+            `${direction}: rename ${path.basename(from)} -> ${path.basename(file)} not durable in ${parent}`);
+        }
+      }
+    }
+  }
+});
+
+// DR7: initialization's commit -- the OpenSpec link, the migration tree's
+// directory and every entry renamed into it -- is fsynced before the journal
+// that could undo it is removed; the journal's new directory is durable too.
+test("DR7: initialization commits durable entries before it removes its journal", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.cleanup());
+  const log = await traceFs(t);
+  await initialize(fixture, { currentFormat: true });
+  const journalWritten = log.findIndex(([op, file]) => op === "rename" && path.basename(file) === "auth.journal");
+  const journalRemoved = log.findIndex(([op, file]) => op === "rm" && path.basename(file) === "auth.journal");
+  assert.ok(journalWritten >= 0 && journalRemoved > journalWritten, "the initialization journal was written and removed");
+  const created = log.findIndex(([op, file]) => op === "mkdir" && path.basename(file) === "init");
+  assert.ok(log.some(([op, file], index) => index > created && index < journalWritten && op === "sync" &&
+    file === path.dirname(log[created][1])), "the new init/ directory entry is fsynced before the journal is written");
+  const synced = (directory, after) =>
+    log.some(([op, file], index) => index > after && index < journalRemoved && op === "sync" && file === directory);
+  const moves = log.map((row, index) => [row, index]).filter(([[op, , from]]) => op === "rename" && /\.init$/.test(path.dirname(from)));
+  assert.ok(moves.length > 0, "entries were renamed out of the staged tree");
+  const root = path.dirname(moves[0][0][1]);
+  assert.ok(synced(path.dirname(root), log.findIndex(([op, file]) => op === "mkdir" && file === root)), "the migration directory entry");
+  for (const [[, file], index] of moves) assert.ok(synced(root, index), `${path.basename(file)} is not durable in the migration tree`);
+  const linked = log.findIndex(([op]) => op === "link");
+  if (linked >= 0) assert.ok(synced(path.dirname(log[linked][1]), linked), "the OpenSpec link is not durable");
+});
+
+// An initialization that dies after creating the migration directory but
+// before owning it leaves an empty, ownerless directory. Rollback removes it
+// only while it is empty, before the journal goes, so the module is not wedged
+// behind "destination already exists without state".
+test("DR7: an initialization stopped between creating and owning its directory rolls back cleanly", async (t) => {
+  // Each fault stops the commit at a different point of taking ownership: the
+  // owner marker's create, its write, and its move into the new root.
+  for (const [label, matches] of [
+    ["open", (op, file) => op === "open" && path.basename(file) === ".init-owner"],
+    ["write", (op, file) => op === "writeFile" && path.basename(file) === ".init-owner"],
+    ["rename", (op, file) => op === "rename" && path.basename(file) === ".init-owner"],
+  ]) {
+    const fixture = await createFixture();
+    t.after(() => fixture.cleanup());
+    let failed = false;
+    const log = await traceFs(t, async (op, file) => {
+      if (!failed && matches(op, file)) {
+        failed = true;
+        throw ioError();
+      }
+    });
+    await assert.rejects(initialize(fixture, { currentFormat: true }), { code: "EIO" }, label);
+    assert.equal(failed, true, label);
+    assert.equal(await exists(fixture.migrationRoot), false, `${label}: an ownerless directory was left behind`);
+    if (process.platform !== "win32") {
+      // The undo is fsynced before the journal that could finish it is removed.
+      const journalRemoved = log.findIndex(([op, file]) => op === "rm" && path.basename(file) === "auth.journal");
+      const removed = (op) => log.findLastIndex(([o, file]) => o === op && file.endsWith(`${path.sep}modules${path.sep}auth`));
+      const synced = (directory, after) => log.some(([op, file], index) => index > after && index < journalRemoved && op === "sync" && file === directory);
+      const rootGone = Math.max(removed("rm"), removed("rmdir"));
+      if (label === "rename") assert.ok(rootGone >= 0, "the empty root was created, then removed");
+      if (rootGone >= 0) assert.ok(synced(path.dirname(log[rootGone][1]), rootGone), `${label}: the root removal is not durable`);
+      const linkGone = log.findLastIndex(([op, file]) => op === "rm" && file.endsWith(`${path.sep}spec.md`));
+      assert.ok(linkGone >= 0, `${label}: the committed OpenSpec link was rolled back`);
+      assert.ok(log.some(([op, file], index) => index > linkGone && index < journalRemoved && op === "sync" &&
+        log[linkGone][1].startsWith(`${file}${path.sep}`)), `${label}: the OpenSpec removal is not durable`);
+    }
+    await traceFs(t);
+    await initialize(fixture, { currentFormat: true });
+    assert.equal(await exists(path.join(fixture.migrationRoot, "state.json")), true, label);
+    assert.equal(await exists(path.join(fixture.migrationRoot, ".init-owner")), false, label);
   }
 });
 

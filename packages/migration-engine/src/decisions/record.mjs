@@ -9,7 +9,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
@@ -22,12 +22,12 @@ import {
 import {
   assertArray as arrayOf,
   assertNonEmpty as nonEmpty,
-  assertSecurePath,
   canonicalJson as canonical,
   exactObject,
   sha256Hex as sha256,
   unique,
 } from "../shared/index.mjs";
+import { appendDurably } from "../store/index.mjs";
 import {
   projectArtifactDecision,
   projectModuleDecision,
@@ -353,15 +353,12 @@ export const appendDecisions = async (locked, decisions, stdout) => {
       `One append may not mix decision principals (${[...channels].sort().join(", ")}); each ledger is one principal's append-only chain.`,
     );
   }
-  const file = await assertSecurePath(
+  // DR8: the store durable append. A group's lines are one append, and the
+  // module lock every caller holds keeps it whole even across short writes.
+  await appendDurably(
     locked.targetRoot,
     path.join(locked.root, ledgerFileForChannel([...channels][0])),
-  );
-  await mkdir(path.dirname(file), { recursive: true });
-  await appendFile(
-    file,
     decisions.map((decision) => `${JSON.stringify(decision)}\n`).join(""),
-    { flag: "a", mode: 0o600 },
   );
   for (const decision of decisions) {
     stdout.write(
