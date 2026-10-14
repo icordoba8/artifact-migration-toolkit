@@ -103,7 +103,7 @@ Each violation prints one line, and the process exits 1:
 | A10-ARCH-5 | Facades declare nothing (except EXC-DOCTOR). A module export has one live definition; a same-named declaration elsewhere must be a listed different rule |
 | A10-ARCH-6 | Provider trees carry only `install.mjs`, `install-support.mjs` and `runtime.mjs` byte copies of the bootstrap. Installers import only `node:` builtins and `install-support.mjs`. No provider file equals an engine file |
 | A10-ARCH-7 | Diagnostics name rule, file:line, edge and remedy (tested through the API and the CLI) |
-| A10-SRC-1 | Filesystem mutation primitives are imported only by the 24 pinned files, each with its exact primitives (`FS_WRITERS`) |
+| A10-SRC-1 | Filesystem mutation primitives are imported only by the 12 pinned files, each with its exact primitives (`FS_WRITERS`) |
 | A10-SRC-2 | Only `transport/entry.mjs` calls `isMainModule`. Exactly the 11 installed executables call `startCommand`, once each |
 | A10-SIZE-1 | No engine file over 1,000 lines unless pinned, and no pinned file grows |
 | A10-TEST-1 | Tests import no module internal and no historical facade (except `FACADE_TESTS`). Computed imports only in `COMPUTED_IMPORT_TESTS` |
@@ -137,7 +137,7 @@ Each exception is named in the checker, bounded to the files listed, and fails w
 | EXC-BIN (`BIN_FRONTS`) | The 9 bins that front a transport command may import `transport/entry.mjs` plus their one command file. `record-decision.mjs` and `operator-signer-service.mjs` may import `transport/entry.mjs` only. | A7: a bin never loads another command's transport file |
 | EXC-DOCTOR (`FACADE_DECLARES`) | `migration-utils.mjs` declares `runDoctor`, `doctorCheck`, `MINIMUM_NODE_MAJOR`, `existingKnowledgeRoot` | The installed runtime bootstrap imports `runDoctor` from this path (A7, A8) |
 | `SAME_NAME_OTHER_RULE` | 9 names: the frozen v4 upgrader's private v4 vocabulary (6), `confirmationIdFor` (module checkpoint vs format upgrade), `validateLegacyInventory` and `validateTargetInventory` (lifecycle wrappers over census) | A2, A5, A8 |
-| `FS_WRITERS` | 24 files: `store/` (4), the `decisions/` ledger append and protected-policy read, 14 `lifecycle/` lock and journal files, two fd-1 `writeSync` sites, the signer and its host | A1, A3, A7, A8 |
+| `FS_WRITERS` | 12 files: `store/` (3), the `decisions/` protected-policy read, 4 `lifecycle/` files (the lock, initialization's commit and rollback, the upgrade trees), two fd-1 `writeSync` sites, the signer and its host. Journals are retired through the store durable removal (DR13) | A1, A3, A7, A8, DR13 |
 | `OVERSIZED_SOURCES` | 7 files, pinned at their BASE length | No-growth policy below |
 | `FACADE_TESTS` | `formats.test.mjs` (A2-ARCH-4 bindings); `artifact-migration.test.mjs` and `operator-approval-authority.integration.spec.mjs` (the artifact engine path's own surface: no approve export, no removed constant) | The facade is the subject |
 | `COMPUTED_IMPORT_TESTS` | 7 architecture suites; `visual-authority-proof`, `history-crash.mjs`, `migration-contract` and `installed-full-lifecycle`, which load from a built release or a bin path | The loaded path is the subject |
@@ -216,7 +216,7 @@ Engine source files above 1,000 lines, pinned at BASE size (A10-SIZE-1, no growt
 | `lifecycle/validation.mjs` | 1,583 | Module checkpoint validators, incl. A4/A5 seams (A8) |
 | `lifecycle/artifact-checkpoints.mjs` | 1,358 | Artifact checkpoint validation and dispatch (A8) |
 | `visual/evidence.mjs` | 1,355 | Visual evidence normalization and comparison (A6) |
-| `lifecycle/record.mjs` | 1,059 | Pins, anchor, append-only checks, advance journal (A8 store seam) |
+| `lifecycle/record.mjs` | 1,058 | Pins, anchor, append-only checks, advance journal adapter (A8 store seam; lowered from 1,059 by DR13) |
 | `visual/authority.mjs` | 1,004 | Design-source authority and Figma context (A6) |
 
 Splitting them is a separately reviewed implementation task. The other 112 engine files are under 1,000 lines.
@@ -266,6 +266,6 @@ No production file changed, so no behavior changed. The guards:
 - **The A8 owners-b seams:** 119 rows homed in `lifecycle/` that another module owns by rule (`docs/architecture/a8-ownership.md`). The gate pins the current direction; it does not claim these seams are gone.
 - **Seven oversized source files** (above).
 - **Same-name different-rule pairs** (`SAME_NAME_OTHER_RULE`): consolidating them is a behavior review.
-- **`FS_WRITERS` outside `store/`:** the journals (DR13) are Track B. The decision ledger append moved to the store durable append in DR7/DR8.
+- **`FS_WRITERS` outside `store/`:** the decision ledger append moved to the store durable append in DR7/DR8, and journal removal to the store durable removal in DR13 (`docs/architecture/dr13-journal-protocol.md`).
 - **Track B:** DR1, DR4, DR13, DR18, I3/DR28, I4, I7, I8, P4; A9 D1–D10.
 - **Windows CI:** disabled for Track A; re-enabling it is outside A10.

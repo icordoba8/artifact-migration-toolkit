@@ -131,6 +131,8 @@ No callback that reads facts, takes a lock, or records was added.
 
 The four journals keep their formats, names, stages and recovery order. DR13 (one journal protocol) is Track B.
 
+> Track B DR13 has since given these journals one recovery protocol (`lifecycle/journal.mjs`), moved the initialization adapter to `lifecycle/initialization.mjs` and the registry recovery to `lifecycle/registry.mjs`; formats, names, stages and order are unchanged. See `docs/architecture/dr13-journal-protocol.md`. The table below is the A8 record.
+
 | Protocol | Where now | Journal | Recovery |
 |---|---|---|---|
 | Module advance, reopen, rework, adoption, identity change, format upgrade | `record.mjs` (`ADVANCE_JOURNAL = "advance.journal"`, `readAdvanceJournal`, `recoverPendingAdvance`), written by `advance`, `reopen`, `adoption`, `toolkit-identity`, `format-upgrade` | `<record>/advance.journal` | `recoverPendingAdvance` before every lock-held mutation; state/history/integrity order unchanged |
@@ -250,7 +252,7 @@ Test-site edits. The old-site source guards inspect the new implementation, not 
 
 ## Deferred (Track B, not implemented)
 
-- **DR13:** one journal protocol. The journals above keep their formats.
+- **DR13:** one journal protocol. The journals above keep their formats. Done in Track B (`docs/architecture/dr13-journal-protocol.md`).
 - **I7:** step-document timing.
 - **I4:** tolerance guidance.
 - **DR18/Q6:** design-source reinitialization.

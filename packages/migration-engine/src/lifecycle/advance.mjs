@@ -2,7 +2,7 @@
  * Lifecycle: advance -- `previewAdvance`, `advanceMigration` and
  * `advanceUnderLock`. Moved verbatim from `resumable-migration.mjs` (Track A8).
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { legacySourceBinding } from "../census/index.mjs";
 import {
@@ -28,7 +28,8 @@ import {
   renderState,
   statePathFor,
 } from "../store/index.mjs";
-import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
+import { removeJournal, writeJournalAtomic } from "./journal.mjs";
+import { withModuleLock } from "./lock.mjs";
 import {
   consumedDecisionStore,
   rawDecisionLedgerBytes,
@@ -571,7 +572,7 @@ const advanceUnderLock = async ({
   await hooks?.afterWrite?.("state");
   await appendHistoryOnce(registryData.targetRoot, context.root, event);
   await hooks?.afterWrite?.("history");
-  await rm(journalFile, { force: true });
+  await removeJournal(journalFile);
   return {
     changed: true,
     state: nextState,

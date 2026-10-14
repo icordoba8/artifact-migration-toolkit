@@ -3,7 +3,6 @@
  * completion readers the recorder and the module lifecycle call. Moved verbatim
  * from `artifact/artifact-migration.mjs` (Track A8).
  */
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   artifactFormatUpgrade,
@@ -34,6 +33,7 @@ import {
   readArtifactState,
 } from "./artifact-record.mjs";
 import { assertTransactionReplayable, proveFormatUpgradeTransaction } from "./artifact-transaction.mjs";
+import { readJournal } from "./journal.mjs";
 import { exitCodeFor, MIGRATION_OUTCOMES } from "./policy.mjs";
 import { migrationProgress, renderProgress } from "./progress.mjs";
 
@@ -170,13 +170,16 @@ export const getArtifactStatus = async (options = {}) => {
 const readArtifactStatus = async (options = {}) => {
   const location = locate(options);
   const transactionFile = path.join(location.root, TRANSACTION_FILE);
-  if (await exists(transactionFile)) {
+  const found = await readJournal(transactionFile);
+  if (found) {
     // A recoverable two-phase transaction reports honestly as ACTIVE and is
     // replayed by the next run; only a torn or invalid one blocks. No write.
     let transaction;
     let replayable = false;
     try {
-      transaction = JSON.parse(await readFile(transactionFile, "utf8"));
+      // The DR13 reader, so status never reports healthy a journal run refuses.
+      if (found.corrupt) throw new Error(`Artifact transaction journal is unreadable at ${transactionFile}.`);
+      transaction = found.journal;
       await assertTransactionReplayable(location.root, transaction);
       // Same read-only proof recovery runs, so status cannot promise a replay run refuses.
       if (transaction.input?.kind === "FORMAT_UPGRADE") await proveFormatUpgradeTransaction(location.root, transaction);

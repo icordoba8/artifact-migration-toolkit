@@ -5,11 +5,13 @@ import {
   access,
   appendFile,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createRequire as requireFrom } from "node:module";
@@ -22,6 +24,7 @@ import { promisify } from "node:util";
 import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
 import { comparisonPath } from "../support/portability.mjs";
 import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
+import { traceFs } from "../support/fs-trace.mjs";
 import { nonFigmaCases, OTHER_FIGMA_AUTHORITY, RECORDED_FIGMA, SAME_FIGMA_AUTHORITY } from "../support/design-source-cases.mjs";
 import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 
@@ -4394,6 +4397,66 @@ test("an unwritable record fails loudly and replays once the obstruction is gone
     await chmod(history, 0o644).catch(() => undefined);
     await fixture.cleanup();
   }
+});
+
+// DR13: the artifact transaction is recovered by the one journal protocol. A
+// torn, non-object or symlinked journal, or one of a kind its writer never
+// records, is refused before any proof or write, and `--status` never reports
+// it healthy; the real journal is then recovered and retired by a removal whose
+// directory is fsynced.
+test("DR13: an unreadable, symlinked or unknown-kind artifact transaction is refused and never reported healthy", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => fixture.cleanup());
+  const history = path.join(fixture.artifactRoot, "history/history.ndjson");
+  await bootstrap(fixture);
+  await authorSource(fixture);
+  await chmod(history, 0o444);
+  await assert.rejects(runArtifact(fixture.options));
+  await chmod(history, 0o644);
+  const journal = path.join(fixture.artifactRoot, "transaction.json");
+  const original = await readFile(journal, "utf8");
+  const record = async () => Object.fromEntries(await Promise.all(
+    ["state.json", "integrity.json", "history/history.ndjson", "transaction.json"].map(async (file) =>
+      [file, await readFile(path.join(fixture.artifactRoot, file), "utf8").catch(() => null)])));
+  const outside = path.join(fixture.root, "outside-transaction.json");
+  const unknownKind = JSON.parse(original);
+  unknownKind.input.kind = "REWRITE";
+  const cases = [
+    ["torn", /journal is unreadable/, () => writeFile(journal, original.slice(0, 40))],
+    ["not an object", /journal is unreadable/, () => writeFile(journal, "[]\n")],
+    ["a symlink", /journal is unreadable/, async () => {
+      await writeFile(outside, original);
+      await rm(journal);
+      await symlink(outside, journal);
+    }],
+    ["an unknown kind", /kind must be/, () => writeFile(journal, `${JSON.stringify(unknownKind, null, 2)}\n`)],
+  ];
+  for (const [label, refusal, arrange] of cases) {
+    await arrange();
+    const before = await record();
+    const status = await getArtifactStatus(fixture.options);
+    assert.equal(status.status, "BLOCKED", label);
+    const run = await runArtifact(fixture.options);
+    assert.equal(run.outcome, "BLOCKED", label);
+    assert.match(run.reason, refusal, label);
+    assert.deepEqual(await record(), before, label);
+    if (label === "a symlink") {
+      assert.equal((await lstat(journal)).isSymbolicLink(), true);
+      assert.equal(await readFile(outside, "utf8"), original);
+    }
+    await rm(journal);
+    await writeFile(journal, original);
+  }
+  const log = await traceFs(t);
+  const recovered = await runArtifact(fixture.options);
+  assert.equal(recovered.outcome, "CONTINUE", recovered.reason);
+  assert.equal(await exists(journal), false);
+  const removed = log.findIndex(([op, file]) => op === "unlink" && file === journal);
+  assert.ok(removed >= 0 && log.some(([op, file], index) => index > removed && op === "sync" && file === fixture.artifactRoot),
+    "the recovered journal's removal is fsynced");
+  assert.equal(log.some(([op, file]) => op === "rm" && file === journal), false);
 });
 
 // Audit F4: an actual SIGINT to a real CLI process mid-checkpoint. The record

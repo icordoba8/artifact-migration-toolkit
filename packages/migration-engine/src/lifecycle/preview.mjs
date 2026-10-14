@@ -70,6 +70,8 @@ import {
 } from "./checkpoints.mjs";
 import { readContext } from "./context.mjs";
 import { pendingFormatUpgrade } from "./format-upgrade.mjs";
+import { initJournalFor } from "./initialization.mjs";
+import { readJournal } from "./journal.mjs";
 import {
   assertCurrentOpenSpecAuthority,
   loadOpenSpecAuthority,
@@ -262,6 +264,17 @@ export const previewMigrationExecution = async ({
   };
 
   if (!existingState) {
+    // DR13: an interrupted initialization explains whatever it left (a root
+    // without state, a committed OpenSpec, a rewritten binding). A preview
+    // cannot recover it, so it says so; the resume recovers under the lock.
+    if (await readJournal(initJournalFor(registryData.targetRoot, resolved.canonical))) {
+      throw Object.assign(
+        new Error(
+          `Migration '${resolved.canonical}' has an interrupted initialization. Nothing is wrong with the record: resume it with '/start-migration <module>' (or 'discover-module.mjs <module>'), which recovers under the module lock before doing anything else.`,
+        ),
+        { pendingTransaction: true },
+      );
+    }
     const legacyBlocker = await legacyChecklistBlocker(
       registryData.targetRoot,
       resolved.canonical,

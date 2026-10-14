@@ -2,7 +2,7 @@
  * Lifecycle: visual-contract and required-observation adoption. Moved verbatim
  * from `resumable-migration.mjs` (Track A8).
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { validateTargetInventory } from "../census/index.mjs";
 import {
@@ -31,10 +31,12 @@ import {
   fileIdentity,
   hashFile,
   migrationRoot,
+  removeDurably,
   renderState,
   statePathFor,
 } from "../store/index.mjs";
-import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
+import { removeJournal, writeJournalAtomic } from "./journal.mjs";
+import { withModuleLock } from "./lock.mjs";
 import {
   assertRequiredObservations,
   FIGMA_SOURCE_KINDS,
@@ -298,11 +300,11 @@ export const adoptVisualContractUnderLock = async ({
   ]) {
     await atomicWrite(registryData.targetRoot, path.join(root, relative), bytes);
   }
-  await rm(path.join(root, FIGMA_CONTEXT_ADOPTION_FILE));
+  await removeDurably(registryData.targetRoot, path.join(root, FIGMA_CONTEXT_ADOPTION_FILE));
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(adopted));
   await appendHistoryOnce(registryData.targetRoot, root, event);
-  await rm(journalFile, { force: true });
+  await removeJournal(journalFile);
   return {
     changed: true,
     adopted: true,
@@ -742,12 +744,12 @@ export const adoptUiObservations = async ({
         rewrite.content,
       );
     }
-    await rm(path.join(root, UI_OBSERVATIONS_CANDIDATE_FILE));
-    if (plan.confirmationDigest) await rm(path.join(root, FIGMA_CONTEXT_ADOPTION_FILE));
+    await removeDurably(registryData.targetRoot, path.join(root, UI_OBSERVATIONS_CANDIDATE_FILE));
+    if (plan.confirmationDigest) await removeDurably(registryData.targetRoot, path.join(root, FIGMA_CONTEXT_ADOPTION_FILE));
     await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
     await atomicWrite(registryData.targetRoot, statePath, renderState(adopted));
     await appendHistoryOnce(registryData.targetRoot, root, event);
-    await rm(journalFile, { force: true });
+    await removeJournal(journalFile);
     return {
       changed: true,
       adopted: true,

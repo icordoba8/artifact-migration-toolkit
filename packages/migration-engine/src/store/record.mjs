@@ -199,6 +199,31 @@ export const appendHistory = async (targetRoot, root, event) => {
   );
 };
 
+/** DR13: the bytes after the last newline of `history.ndjson` (empty at a record boundary). */
+export const historyTailOf = async (targetRoot, root) => {
+  const historyPath = await assertSecurePath(targetRoot, path.join(root, HISTORY_FILE));
+  if (!(await fileExists(historyPath))) return Buffer.alloc(0);
+  const content = await readFile(historyPath);
+  return content.subarray(content.lastIndexOf(0x0a) + 1);
+};
+
+/**
+ * DR13: whether the `tail` bytes are a torn (or newline-less) `appendHistory`
+ * of exactly `event` -- the only tail a crash during that append leaves.
+ * Compared byte for byte: a tear may split a multi-byte character. An unchained
+ * event is written with its append time first, so that time is read from the tail.
+ */
+export const isTornAppendOf = (tail, event) => {
+  const prefixOf = (value) => {
+    const line = Buffer.from(JSON.stringify(value), "utf8");
+    return tail.length <= line.length && line.subarray(0, tail.length).equals(tail);
+  };
+  if (event.hash || event.at !== undefined) return prefixOf(event.hash ? event : { at: event.at, ...event });
+  const head = tail.toString("latin1");
+  const at = /^\{"at":"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)"/.exec(head)?.[1];
+  return at ? prefixOf({ at, ...event }) : /^\{"at":"[\dTZ:.-]*$/.test(head) || '{"at":"'.startsWith(head);
+};
+
 /**
  * Proves the audit record is appendable before any state is written. Without
  * it, a broken `history/` (replaced by a file, read-only, or on a full disk)

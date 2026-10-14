@@ -11,8 +11,15 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  assertJournalTargets,
+  assertUpgradeJournal,
+  recoverJournal,
+  refuseJournal,
+  UPGRADE_JOURNAL_STATES,
+  writeJournalAtomic,
+} from "./journal.mjs";
 import { acquireModuleLock } from "./lock.mjs";
-import { writeJournalAtomic } from "./lock.mjs";
 import { pendingTransactions } from "./registry.mjs";
 import {
   assertSafeName,
@@ -54,13 +61,7 @@ const contractPath = fileURLToPath(
   new URL("../../references/v5-contract.md", import.meta.url),
 );
 
-export const TRANSACTION_STATES = [
-  "PREPARED",
-  "LIVE_MOVED",
-  "TARGET_COMMITTED",
-  "DONE",
-  "ROLLED_BACK",
-];
+export const TRANSACTION_STATES = UPGRADE_JOURNAL_STATES;
 
 const lockPathFor = (targetRoot, moduleName) =>
   path.join(moduleUpgradeRoot(targetRoot, moduleName), "upgrade.lock");
@@ -82,6 +83,10 @@ const writeManifest = (directory, name, content) =>
  */
 export const recoverTransaction = async (journal) => {
   const { livePath, directory, state } = journal;
+  // DR13: a state or kind this coordinator never writes is never classified.
+  if (!TRANSACTION_STATES.includes(state) || !["UPGRADE", "ROLLBACK"].includes(journal.kind)) {
+    refuseJournal(journal.file, `records state '${state}' of kind '${journal.kind}', which no upgrade or rollback writes`);
+  }
   const rollbackPath = path.join(directory, "rollback-live");
   const stagingPath = path.join(directory, "staging");
   const snapshotPath = path.join(directory, "source-snapshot");
@@ -96,6 +101,14 @@ export const recoverTransaction = async (journal) => {
   };
   const targetManifest = await readManifest("target-manifest.json");
   const sourceManifest = await readManifest("source-manifest.json");
+  // DR13: every writer since v1.0.0 writes both manifests before its first
+  // journal write, so only a PREPARED journal (the P2-4 escape hatch, with the
+  // live tree or its snapshot as the record) is classified without them.
+  if ((!targetManifest || !sourceManifest) && state !== "PREPARED") {
+    throw new Error(
+      `Cannot recover upgrade ${journal.confirmationId}: its source or target manifest is missing, which no ${state} journal's writer leaves. The immutable snapshot is at ${snapshotPath}.`,
+    );
+  }
   const liveManifest = (await exists(livePath))
     ? manifestOf(await readTree(livePath))
     : null;
@@ -122,7 +135,8 @@ export const recoverTransaction = async (journal) => {
   }
   if (!liveManifest && (await exists(rollbackPath))) {
     const rollbackManifest = manifestOf(await readTree(rollbackPath));
-    if (sourceManifest && !sameManifest(rollbackManifest, sourceManifest)) {
+    // The live tree moves only after both manifests are durable (every writer since v1.0.0).
+    if (!sourceManifest || !sameManifest(rollbackManifest, sourceManifest)) {
       throw new Error(
         `Cannot recover upgrade ${journal.confirmationId}: the preserved rollback tree does not match the recorded source manifest. Restore ${snapshotPath} manually.`,
       );
@@ -137,8 +151,20 @@ export const recoverTransaction = async (journal) => {
   // still the deterministic answer, so recovery restores it instead of raising
   // a raw ENOENT and wedging the module with no documented escape.
   if (!liveManifest && (await exists(snapshotPath))) {
+    // DR13: the snapshot is proven before it is restored, and the restored
+    // tree before the journal can say ROLLED_BACK.
+    // Without a source manifest only a PREPARED journal is in a phase (P2-4); then the snapshot is the record.
+    const restored = async (tree) => sourceManifest ? sameManifest(manifestOf(await readTree(tree)), sourceManifest) : state === "PREPARED";
+    if (!(await restored(snapshotPath))) {
+      throw new Error(
+        `Cannot recover upgrade ${journal.confirmationId}: the preserved snapshot does not match the recorded source manifest. Restore ${snapshotPath} manually.`,
+      );
+    }
     await mkdirDurably(path.dirname(livePath));
     await copyTree(snapshotPath, livePath);
+    if (!(await restored(livePath))) {
+      throw new Error(`Cannot recover upgrade ${journal.confirmationId}: the restored tree does not match the recorded source manifest.`);
+    }
     await rm(stagingPath, { recursive: true, force: true });
     await rm(rollbackPath, { recursive: true, force: true });
     return finish("ROLLED_BACK");
@@ -752,8 +778,19 @@ export const recoverUpgrade = async ({
       return { recovered: [], clean: true, migration: resolved.canonical };
     }
     const recovered = [];
-    for (const journal of pending) {
-      recovered.push(await recoverTransaction(journal));
+    const livePath = migrationRoot(registryData.targetRoot, resolved.canonical);
+    for (const { file, directory } of pending) {
+      // The DR13 protocol; the terminal journal stays as the upgrade's record.
+      recovered.push(await recoverJournal(file, {
+        keep: true,
+        unreadable: () => `Upgrade transaction journal is unreadable at ${file}. Preserve it and inspect the transaction before continuing.`,
+        recover: async (journal) => {
+          assertUpgradeJournal(file, journal, { targetRoot: registryData.targetRoot, moduleName: resolved.canonical, directory });
+          await assertJournalTargets(file, [[registryData.targetRoot, livePath], [registryData.targetRoot, directory]]);
+          // Recovery acts on the paths it derived, never on the journal's strings.
+          return recoverTransaction({ ...journal, livePath, file, directory });
+        },
+      }));
     }
     return { recovered, clean: false, migration: resolved.canonical };
   } finally {

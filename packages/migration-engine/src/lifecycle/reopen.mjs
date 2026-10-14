@@ -3,7 +3,7 @@
  * amendment, UI-proof reopen, complete-migration reopen, and slice state
  * repair. Moved verbatim from `resumable-migration.mjs` (Track A8).
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertNoPendingFormatUpgrade,
@@ -34,7 +34,8 @@ import {
   REOPEN_ROOT,
   resolveEvidencePath,
 } from "../store/index.mjs";
-import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
+import { removeJournal, writeJournalAtomic } from "./journal.mjs";
+import { withModuleLock } from "./lock.mjs";
 import {
   completedSlicesLackingUiProofV1,
   reopenUiEligible,
@@ -124,7 +125,7 @@ export const repairSliceState = async (targetRoot, moduleName) =>
     await atomicWrite(targetRoot, integrityPath, nextIntegrity);
     await atomicWrite(targetRoot, statePath, renderState(repaired));
     await appendHistoryOnce(targetRoot, root, event);
-    await rm(journalFile, { force: true });
+    await removeJournal(journalFile);
     return { changed: true, repairs, state: repaired };
   });
 
@@ -201,7 +202,7 @@ export const reopenDiscoveryUnderLock = async ({
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(reopened));
   await appendHistoryOnce(registryData.targetRoot, root, event);
-  await rm(path.join(root, ADVANCE_JOURNAL), { force: true });
+  await removeJournal(path.join(root, ADVANCE_JOURNAL));
   return {
     changed: true,
     reopened: true,
@@ -267,7 +268,7 @@ export const reworkSliceUnderLock = async ({
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(reworked));
   await appendHistoryOnce(registryData.targetRoot, root, event);
-  await rm(journalFile, { force: true });
+  await removeJournal(journalFile);
   return {
     changed: true,
     reopened: true,
@@ -376,7 +377,7 @@ export const amendSliceUnderLock = async ({
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(amendedState));
   await appendHistoryOnce(registryData.targetRoot, root, event);
-  await rm(journalFile, { force: true });
+  await removeJournal(journalFile);
   return {
     changed: true,
     amended: true,
@@ -625,7 +626,7 @@ export const reopenUiUnderLock = async ({
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(reopened));
   await appendHistoryOnce(registryData.targetRoot, root, event);
-  await rm(journalFile, { force: true });
+  await removeJournal(journalFile);
   return {
     changed: true,
     reopened: true,
@@ -964,7 +965,7 @@ export const reopenCompleteUnderLock = async ({
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(reopened));
   await appendHistoryOnce(registryData.targetRoot, root, event);
-  await rm(journalFile, { force: true });
+  await removeJournal(journalFile);
   return {
     changed: true,
     reopened: true,

@@ -33,7 +33,6 @@ import {
   gitRevision,
   isLexicallyWithin as isWithin,
   now,
-  sameFile,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";
 import {
@@ -46,14 +45,20 @@ import {
   persistProjectRegistryBinding,
   previewProjectRegistryBinding,
   registryIdentity,
-  removeEmptyParents,
   renameDurably,
   renderIntegrity,
   renderState,
   statePathFor,
   syncDirectory,
 } from "../store/index.mjs";
-import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
+import {
+  cleanupInitialization,
+  initJournalFor,
+  recoverInitialization,
+  rollbackInitialization,
+} from "./initialization.mjs";
+import { removeJournal, writeJournalAtomic } from "./journal.mjs";
+import { withModuleLock } from "./lock.mjs";
 import { assertDesignSourceUnchanged, designSourceExplicit } from "../visual/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import {
@@ -141,18 +146,6 @@ const assertBoundInputsUnchanged = async (registryData, boundInputs, brief) => {
   }
 };
 
-const initJournalFor = (targetRoot, moduleName) =>
-  path.join(
-    targetRoot,
-    ".agents/knowledge/migrations/init",
-    `${moduleName}.journal`,
-  );
-
-const ownerMatches = async (file, transactionId) =>
-  file
-    ? (await readFile(file, "utf8").catch(() => null)) === transactionId
-    : false;
-
 const writeOwner = async (file, transactionId) => {
   const handle = await open(file, "wx", 0o600);
   try {
@@ -161,86 +154,6 @@ const writeOwner = async (file, transactionId) => {
   } finally {
     await handle.close();
   }
-};
-
-const cleanupInitialization = async (journal) => {
-  for (const staged of [
-    journal.stagedRoot,
-    journal.stagedOpenSpec,
-    journal.stagedProjectConfig,
-  ]) {
-    if (staged) await rm(staged, { recursive: true, force: true });
-  }
-  if (await ownerMatches(journal.rootOwner, journal.transactionId)) {
-    await rm(journal.rootOwner, { force: true });
-  }
-  await rm(journal.file, { force: true });
-};
-
-const rollbackInitialization = async (targetRoot, journal) => {
-  if (journal.configPath && journal.configAfter !== undefined) {
-    const current = await readFile(journal.configPath, "utf8").catch(
-      () => null,
-    );
-    if (current === journal.configAfter) {
-      await atomicWrite(
-        journal.projectRoot,
-        journal.configPath,
-        journal.configBefore,
-      );
-    }
-  }
-  if (await ownerMatches(journal.rootOwner, journal.transactionId)) {
-    await rm(journal.root, { recursive: true, force: true });
-  }
-  // Stopped between creating the root and owning it: an empty root holds
-  // nothing, so it goes before the journal does (anything else stays).
-  await removeEmptyParents(journal.root, path.dirname(journal.root));
-  if (
-    journal.openSpecPath &&
-    journal.stagedOpenSpec &&
-    (await sameFile(journal.openSpecPath, journal.stagedOpenSpec))
-  ) {
-    await rm(journal.openSpecPath, { force: true });
-    await removeEmptyParents(path.dirname(journal.openSpecPath), targetRoot);
-    await syncNearest(path.dirname(journal.openSpecPath));
-  }
-  // The undo is durable before the journal that could finish it is removed.
-  await syncDirectory(path.dirname(journal.root));
-  await cleanupInitialization(journal);
-  await removeEmptyParents(path.dirname(journal.root), targetRoot);
-};
-
-/** Fsyncs `directory`, or its nearest ancestor still present after a removal. */
-const syncNearest = (directory) => syncDirectory(directory).catch((error) =>
-  error.code === "ENOENT" && path.dirname(directory) !== directory ? syncNearest(path.dirname(directory)) : Promise.reject(error));
-
-/**
- * Undoes or completes an initialization that died between its three commits
- * (OpenSpec authority, migration tree, project binding). Runs under the module
- * lock before any new initialization work, so an abrupt death never leaves a
- * committed OpenSpec without its migration, a half-staged tree, or a project
- * binding pointing at a migration that does not exist.
- */
-const recoverInitialization = async (targetRoot, moduleName) => {
-  const journalFile = initJournalFor(targetRoot, moduleName);
-  if (!(await fileExists(journalFile))) return null;
-  let journal;
-  try {
-    journal = JSON.parse(await readFile(journalFile, "utf8"));
-  } catch {
-    throw new Error(
-      `Initialization journal is unreadable at ${journalFile}. Preserve it and inspect the transaction before continuing.`,
-    );
-  }
-  journal.file = journalFile;
-
-  if (await fileExists(path.join(journal.root, "state.json"))) {
-    await cleanupInitialization(journal);
-    return { outcome: "COMPLETED" };
-  }
-  await rollbackInitialization(targetRoot, journal);
-  return { outcome: "ROLLED_BACK" };
 };
 
 const commitInitialization = async ({
@@ -377,13 +290,19 @@ const commitInitialization = async ({
     for (const entry of entries) {
       await renameDurably(path.join(stagedRoot, entry), path.join(root, entry));
     }
-    await rm(stagedRoot, { recursive: true, force: true });
-    await hooks.afterCommit?.("migration");
-    await cleanupInitialization(journal);
   } catch (error) {
+    // Committed once state.json landed (even if its directory fsync then
+    // failed): never rolled back; the journal stays for recovery (DR13).
+    if (await fileExists(path.join(root, "state.json"))) throw error;
     await rollbackInitialization(targetRoot, journal);
+    await removeJournal(journalFile);
     throw error;
   }
+  // From the commit point on, a failure keeps the journal for recovery to
+  // finish as COMPLETED.
+  await hooks.afterCommit?.("migration");
+  await cleanupInitialization(targetRoot, journal);
+  await removeJournal(journalFile);
 };
 
 export const bootstrapMigration = async ({
@@ -798,7 +717,7 @@ const bootstrapUnderLock = async ({
       renderState(refreshed),
     );
     await appendHistoryOnce(registryData.targetRoot, root, refreshEvent);
-    await rm(path.join(root, ADVANCE_JOURNAL), { force: true });
+    await removeJournal(path.join(root, ADVANCE_JOURNAL));
     return {
       changed: true,
       reopened: true,

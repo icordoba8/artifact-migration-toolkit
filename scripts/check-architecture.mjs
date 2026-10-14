@@ -126,25 +126,18 @@ export const SAME_NAME_OTHER_RULE = {
  * journal, recovery, signer and stdout sites each track documented.
  */
 export const FS_WRITERS = {
-  // store/: the one replace-write and the one durable append (DR7, DR8), staged trees, registry binding.
+  // store/: the one replace-write, the one durable append and the one durable removal (DR7, DR8, DR13), staged trees.
   "store/files.mjs": ["mkdir", "open", "rename", "rmdir", "unlink"],
   "store/record.mjs": ["open"],
-  "store/registry.mjs": ["unlink"],
   "store/tree.mjs": ["cp", "open"],
   // decisions/: the O_RDONLY|O_NOFOLLOW protected-policy read (the ledger append is store's since DR8).
   "decisions/policy.mjs": ["open"],
-  // lifecycle/: the module lock, and journal removal after commit or recovery (A8, "Transaction and journal protocols").
+  // lifecycle/: the module lock; initialization's staged trees, root owner, OpenSpec link and their rollback;
+  // the upgrade's staged and rollback trees. Every journal is retired through the store durable removal (DR13).
   "lifecycle/lock.mjs": ["mkdir", "open", "rename", "rm", "rmdir", "unlink"],
   "lifecycle/bootstrap.mjs": ["link", "mkdir", "open", "rm"],
+  "lifecycle/initialization.mjs": ["rm"],
   "lifecycle/contract-upgrade.mjs": ["rm"],
-  "lifecycle/artifact-transaction.mjs": ["rm"],
-  "lifecycle/adoption.mjs": ["rm"],
-  "lifecycle/advance.mjs": ["rm"],
-  "lifecycle/format-upgrade.mjs": ["rm"],
-  "lifecycle/record.mjs": ["rm"],
-  "lifecycle/registry.mjs": ["unlink"],
-  "lifecycle/reopen.mjs": ["rm"],
-  "lifecycle/toolkit-identity.mjs": ["rm"],
   // Synchronous refusal/result bytes to fd 1 before exit, not a file write.
   "lifecycle/recorder.mjs": ["writeSync"],
   "transport/artifact.mjs": ["writeSync"],
@@ -195,7 +188,7 @@ export const OVERSIZED_SOURCES = {
   "lifecycle/validation.mjs": 1583,
   "lifecycle/artifact-checkpoints.mjs": 1358,
   "visual/evidence.mjs": 1355,
-  "lifecycle/record.mjs": 1059,
+  "lifecycle/record.mjs": 1058,
   "visual/authority.mjs": 1004,
 };
 

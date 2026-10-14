@@ -1,11 +1,12 @@
 /**
  * Lifecycle: the artifact transaction -- input validation, replay proofs,
  * recovery phases, finish and recovery. Its journal format is unchanged and
- * separate from the module's (DR13 is Track B). Moved verbatim from
- * `artifact/artifact-migration.mjs` (Track A8).
+ * separate from the module's; its recovery is the DR13 journal protocol with
+ * this file as the adapter. Moved from `artifact/artifact-migration.mjs`
+ * (Track A8).
  */
 import { constants } from "node:fs";
-import { access, lstat, readdir, readFile, rm } from "node:fs/promises";
+import { access, lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { verifyConsumedHistory } from "../decisions/index.mjs";
 import {
@@ -45,6 +46,7 @@ import {
   revalidatePins,
 } from "../store/index.mjs";
 import { nextState, previewAdvance } from "./artifact-checkpoints.mjs";
+import { recoverJournal, removeJournal } from "./journal.mjs";
 import {
   bootstrapEventInput,
   EMPTY_HISTORY,
@@ -539,7 +541,6 @@ const finishTransaction = async (targetRoot, root, transaction) => {
     path.join(root, INTEGRITY_FILE),
     jsonBytes(integrityFor(transaction.state, finalHistory.content)),
   );
-  await rm(path.join(root, TRANSACTION_FILE), { force: true });
   return transaction.state;
 };
 
@@ -551,7 +552,9 @@ const finishTransaction = async (targetRoot, root, transaction) => {
 // proveBootstrapTransaction/proveAdvanceTransaction before ever reaching here.
 export const writeTransaction = async (targetRoot, root, transaction) => {
   await atomicWrite(targetRoot, path.join(root, TRANSACTION_FILE), jsonBytes(transaction));
-  return finishTransaction(targetRoot, root, transaction);
+  const state = await finishTransaction(targetRoot, root, transaction);
+  await removeJournal(path.join(root, TRANSACTION_FILE));
+  return state;
 };
 
 // Binds the journal to the record it was found in before any evidence in it is
@@ -572,30 +575,35 @@ const assertTransactionBoundToRecord = (targetRoot, root, transaction) => {
   }
 };
 
-export const recoverTransaction = async (targetRoot, root) => {
+// The DR13 adapter: bound to this record, structurally replayable, then
+// independently reproved by its own kind before `finishTransaction` writes.
+// An unknown version or kind is refused before any proof runs.
+export const recoverTransaction = (targetRoot, root) => {
   const file = path.join(root, TRANSACTION_FILE);
-  if (!(await exists(file))) return;
-  const transaction = JSON.parse(await readFile(file, "utf8"));
-  assertTransactionBoundToRecord(targetRoot, root, transaction);
-  if (transaction.version === TRANSACTION_VERSION) {
-    if (transaction.input?.kind === "BOOTSTRAP") {
-      await proveBootstrapTransaction(root, transaction);
-    } else if (transaction.input?.kind === "FORMAT_UPGRADE") {
-      await proveFormatUpgradeTransaction(root, transaction);
-    } else if (transaction.input?.kind === "TOOLKIT_IDENTITY") {
-      await proveToolkitIdentityTransaction(root, transaction);
-    } else {
-      await proveAdvanceTransaction(root, transaction);
-    }
-  } else if (transaction.version === 1) {
-    if (usesArtifactDirectLedger(transaction.state.formatVersion)) {
-      throw new Error("Artifact 14 cannot be recovered from a legacy bootstrap transaction.");
-    }
-    await reconstructLegacyTransaction(root, transaction);
-  } else {
-    throw new Error(`Unsupported artifact transaction version ${transaction.version}.`);
-  }
-  await finishTransaction(targetRoot, root, transaction);
+  return recoverJournal(file, {
+    unreadable: () => `Artifact transaction journal is unreadable at ${file}. Preserve it and inspect the transaction before continuing.`,
+    recover: async (transaction) => {
+      assertTransactionBoundToRecord(targetRoot, root, transaction);
+      if (transaction.version === TRANSACTION_VERSION) {
+        const prove = {
+          BOOTSTRAP: proveBootstrapTransaction,
+          ADVANCE: proveAdvanceTransaction,
+          FORMAT_UPGRADE: proveFormatUpgradeTransaction,
+          TOOLKIT_IDENTITY: proveToolkitIdentityTransaction,
+        }[transaction.input?.kind];
+        if (!prove) validateTransactionInput(transaction.input, "artifact transaction.input");
+        await prove(root, transaction);
+      } else if (transaction.version === 1) {
+        if (usesArtifactDirectLedger(transaction.state.formatVersion)) {
+          throw new Error("Artifact 14 cannot be recovered from a legacy bootstrap transaction.");
+        }
+        await reconstructLegacyTransaction(root, transaction);
+      } else {
+        throw new Error(`Unsupported artifact transaction version ${transaction.version}.`);
+      }
+      return finishTransaction(targetRoot, root, transaction);
+    },
+  });
 };
 
 // Establishes the advance transition exactly once, in-memory, from the

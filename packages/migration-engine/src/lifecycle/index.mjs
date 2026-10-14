@@ -32,8 +32,8 @@ export {
   lockPathFor,
   processAlive,
   withModuleLock,
-  writeJournalAtomic,
 } from "./lock.mjs";
+export { writeJournalAtomic } from "./journal.mjs";
 export {
   assertNoPendingTransaction,
   pendingTransactions,

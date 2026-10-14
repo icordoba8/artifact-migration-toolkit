@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, readdir, readFile, realpath, unlink } from "node:fs/promises";
+import { access, readdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { engineScriptsRoot, engineSkillRoot } from "../engine-paths.mjs";
@@ -33,7 +33,7 @@ const resolveRegistryRoot = (value, registryPath, label) => {
   return path.resolve(path.dirname(registryPath), expanded);
 };
 
-const validateRegistry = (document, registryPath) => {
+export const validateRegistry = (document, registryPath) => {
   const registry = assertPlainObject(document, "Migration registry");
   if (registry.version !== 1) {
     throw new Error("Migration registry version must be 1.");
@@ -606,44 +606,3 @@ export const renderRegistryPreview = (preview) =>
 
 export const registryJournalPathFor = (targetRoot) =>
   path.join(targetRoot, ".agents/knowledge/migrations/registry.journal.json");
-
-/**
- * Finishes a registry+config write pair a previous invocation started but
- * never got to clean up (killed mid-write). Both halves are applied only if
- * their current bytes still match the journalled "before" snapshot, so a
- * legitimate later change is never clobbered; either way the journal is then
- * cleared. Runs under the registry lock, before any new update is computed.
- */
-export const recoverRegistryJournal = async (targetRoot) => {
-  const file = registryJournalPathFor(targetRoot);
-  let journal;
-  try {
-    journal = JSON.parse(await readFile(file, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") return;
-    throw new Error(
-      `Registry transaction journal is unreadable at ${file}. Preserve it and inspect the transaction before continuing.`,
-    );
-  }
-  const registryCurrent = await readFile(journal.registryPath, "utf8").catch(
-    () => null,
-  );
-  if (registryCurrent === journal.registryBefore) {
-    await atomicWrite(targetRoot, journal.registryPath, journal.registryAfter);
-  }
-  if (journal.configPath) {
-    const configCurrent = await readFile(journal.configPath, "utf8").catch(
-      () => null,
-    );
-    if (configCurrent === journal.configBefore) {
-      await atomicWrite(
-        journal.projectRoot,
-        journal.configPath,
-        journal.configAfter,
-      );
-    }
-  }
-  await unlink(file).catch((error) => {
-    if (error.code !== "ENOENT") throw error;
-  });
-};

@@ -5,7 +5,7 @@
  * verbatim from `resumable-migration.mjs` (Track A8).
  */
 import { createHash } from "node:crypto";
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { isBrownfield } from "../census/index.mjs";
 import {
@@ -37,7 +37,9 @@ import {
   assertArray,
   assertNonEmpty,
   assertPlainObject,
+  contentIdentityMatches,
   isLexicallyWithin as isWithin,
+  isPlainObject,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";
 import {
@@ -50,16 +52,26 @@ import {
   fileIdentityMatches,
   historyAnchorNow,
   historyAnchorOf,
+  historyTailOf,
+  isTornAppendOf,
   migrationRoot,
   prepareHistoryEvent,
   readHistoryEvents,
   readIntegrity,
   readJson,
+  removeDurably,
   renderIntegrity,
   REOPEN_ROOT,
   sealHistoryTail,
   statePathFor,
 } from "../store/index.mjs";
+import {
+  assertAdvanceJournal,
+  assertJournalTargets,
+  readJournal,
+  recoverJournal,
+  refuseJournal,
+} from "./journal.mjs";
 import { pinsAuthorityContext, usesVisualContract } from "../visual/index.mjs";
 import { assertLateDecisionsAreAppendable } from "../decisions/index.mjs";
 import { reworkPathParts } from "../slices/index.mjs";
@@ -314,8 +326,8 @@ export const renderIntegrityNow = async (root, state, event) => {
  * agree, so pruning or rewriting a pin in `state.json` alone -- without also
  * forging the independently-written anchor -- is refused.
  */
-const assertIntegrityAnchor = async (root, state) => {
-  const integrity = await readIntegrity(root);
+const assertIntegrityAnchor = async (root, state, proposed) => {
+  const integrity = proposed ?? (await readIntegrity(root));
   if (!integrity) {
     if (usesIntegrityAnchor(state)) {
       throw new Error(
@@ -458,14 +470,10 @@ export const briefDigestFor = async (targetRoot, brief) => {
 // main workflow; initialization uses the same file name under its own root.
 export const ADVANCE_JOURNAL = "advance.journal";
 
+/** The DR13 journal reader: `null`, `{ corrupt, file }` or the journal with its `file`. */
 export const readAdvanceJournal = async (root) => {
-  const file = path.join(root, ADVANCE_JOURNAL);
-  if (!(await fileExists(file))) return null;
-  try {
-    return { ...JSON.parse(await readFile(file, "utf8")), file };
-  } catch {
-    return { corrupt: true, file };
-  }
+  const found = await readJournal(path.join(root, ADVANCE_JOURNAL));
+  return found && (found.corrupt ? found : { ...found.journal, file: found.file });
 };
 
 export const readState = async (targetRoot, moduleName) => {
@@ -493,12 +501,12 @@ export const readState = async (targetRoot, moduleName) => {
  * around a closed checkpoint. Replaying the history makes every one of those
  * edits contradict a file the engine only ever appends to.
  *
- * @param {null | object} [pendingJournal] the advance journal to tolerate an
- *   in-flight transition against; omitted, it is read from disk. Pass `null`
- *   for a strict replay with no tolerance -- what recovery uses to prove it
- *   actually completed before dropping the journal.
- * @returns {Promise<null | { toRevision: number }>} a tolerated in-flight
- *   transition when a recoverable advance journal is present.
+ * @param {null | object} [pendingJournal] the advance journal whose event an
+ *   in-flight transition is replayed with; omitted, it is read from disk. Pass
+ *   `null` for a strict replay of history alone -- what recovery uses to prove
+ *   it actually completed before dropping the journal.
+ * @returns {Promise<null | { toRevision: number }>} the in-flight transition
+ *   when the state is one journalled event ahead of history.
  */
 const assertStateGraph = async (root, state, pendingJournal) => {
   const journal =
@@ -540,7 +548,19 @@ const assertStateGraph = async (root, state, pendingJournal) => {
   let uiRemediationReopened = false;
   if (state.brief) requiredHashes.add(state.brief.path);
 
-  for (const event of events.slice(1)) {
+  // A crash between the state write and the history append leaves state one
+  // revision ahead of the record, with the journal naming the missing event.
+  // That event is replayed too (DR13), so the in-flight state is proven, not
+  // merely tolerated.
+  let inFlight = false;
+  const replayed = function* () {
+    yield* events.slice(1);
+    if (journal && !journal.corrupt && journal.toRevision === state.revision && revision === state.revision - 1 && isPlainObject(journal.event)) {
+      inFlight = true;
+      yield journal.event;
+    }
+  };
+  for (const event of replayed()) {
     // A contract upgrade is a persisted transition like any other: it bumps the
     // revision and appends exactly one event, but it moves no step and
     // invalidates no artifact. Without this the replay lags one revision behind
@@ -815,19 +835,6 @@ const assertStateGraph = async (root, state, pendingJournal) => {
     }
   }
 
-  // A crash between the state write and the history append leaves state one
-  // revision ahead of the record, with the journal naming the missing event.
-  const inFlight =
-    journal &&
-    !journal.corrupt &&
-    journal.toRevision === state.revision &&
-    revision === state.revision - 1;
-  if (inFlight) return { toRevision: journal.toRevision };
-  if (journal && !journal.corrupt && journal.toRevision === state.revision) {
-    // Journal left behind after a fully applied transition; nothing is missing.
-    return null;
-  }
-
   const mismatch = (field, expected, actual) => {
     throw new Error(
       `Migration state ${field} is '${actual}', but the append-only history proves '${expected}'. state.json was edited outside the workflow; reopen the responsible checkpoint instead.`,
@@ -877,7 +884,7 @@ const assertStateGraph = async (root, state, pendingJournal) => {
       `Migration artifactHashes must pin exactly [${expectedHashes.join(", ")}] for the transitions recorded in history, but pins [${actualHashes.join(", ")}]. Pruning or adding an entry cannot remove an artifact from the immutable set.`,
     );
   }
-  return null;
+  return inFlight ? { toRevision: state.revision } : null;
 };
 
 /** Appends `event` unless the recorded revision is already present. */
@@ -911,74 +918,66 @@ const assertRecovered = async (root, state) => {
 /**
  * Completes or discards an interrupted checkpoint transition. Runs under the
  * module lock at the start of every mutating command, so a new process always
- * finds a consistent state without an operator touching any file.
+ * finds a consistent state without an operator touching any file. The DR13
+ * advance adapter classifies before it writes: the persisted revision is the
+ * journal's from- or to-revision, the anchor one of its two recorded bytes,
+ * a history tail only a torn append of this event, and the state replays from
+ * history plus, at most, this one event. It retires only after the strict proof.
  */
-export const recoverPendingAdvance = async (targetRoot, root, statePath) => {
-  const journal = await readAdvanceJournal(root);
-  if (!journal) return null;
-  // An unreadable journal is the one case where nothing can be proven: the
-  // transition's from/to revisions are exactly what was lost, so neither branch
-  // below can run and `assertRecovered` has nothing to assert against. Deleting
-  // it here destroyed the only artifact that could still reconstruct a missing
-  // history event -- the durability guarantee is that a *failed* recovery keeps
-  // its journal, so this fails and keeps it, byte for byte.
-  if (journal.corrupt) {
-    throw new Error(
-      `An interrupted checkpoint transition left an unreadable journal at ${journal.file}. It records a transition that cannot be proven completed or discarded, so it was preserved exactly as found; investigate it before continuing. Nothing was changed.`,
-    );
-  }
-  const state = await readJson(statePath, "Migration state");
-  const integrityPath = path.join(root, INTEGRITY_FILE);
-  if (state.revision === journal.toRevision) {
-    // State committed; the integrity anchor and the audit event may still be
-    // missing (a death between the two writes is the same tolerated gap as
-    // between the state write and the history append).
-    if (journal.integrity) {
-      const current = (await fileExists(integrityPath))
-        ? await readFile(integrityPath, "utf8")
-        : null;
-      if (current !== journal.integrity.content) {
-        await atomicWrite(targetRoot, integrityPath, journal.integrity.content);
+export const recoverPendingAdvance = (targetRoot, root, statePath) => {
+  const file = path.join(root, ADVANCE_JOURNAL);
+  // An unreadable journal is the one case where nothing can be proven; a
+  // *failed* recovery keeps its journal, so this fails and keeps it.
+  const unreadable = () =>
+    `An interrupted checkpoint transition left an unreadable journal at ${file}. It records a transition that cannot be proven completed or discarded, so it was preserved exactly as found; investigate it before continuing. Nothing was changed.`;
+  return recoverJournal(file, { unreadable, recover: async (journal) => {
+    assertAdvanceJournal(file, journal);
+    const stateBytes = await readFile(statePath, "utf8");
+    const state = await readJson(statePath, "Migration state");
+    const committed = state.revision === journal.toRevision;
+    if (!committed && state.revision !== journal.fromRevision) refuseJournal(file, `is for revision ${journal.fromRevision} -> ${journal.toRevision}, which does not match the persisted revision ${state.revision}`);
+    const integrityPath = path.join(root, INTEGRITY_FILE);
+    const anchor = (await fileExists(integrityPath)) ? await readFile(integrityPath, "utf8") : null;
+    const { integrity, restore = [] } = journal;
+    if (integrity && anchor !== integrity.content && anchor !== integrity.before) refuseJournal(file, "cannot be classified: integrity.json is neither its before nor its after anchor");
+    // Only the append after the state write can tear history: a tail is this event's, of a committed transition.
+    const tail = await historyTailOf(targetRoot, root);
+    if (tail.length && !(committed && isTornAppendOf(tail, journal.event))) refuseJournal(file, "cannot be classified: history ends in bytes that are not a torn append of its event");
+    await assertStateGraph(root, state, journal);
+    if (committed) {
+      // The anchor in effect after recovery (the journal's, else the one on disk; absent only before anchors existed) agrees with this state and history before any write.
+      const prove = async (proposed) => { if (!isPlainObject(proposed)) return false; await readHistoryEvents(root, proposed, journal); await assertIntegrityAnchor(root, state, proposed); return true; };
+      const after = integrity ? integrity.content : anchor;
+      if (after === null ? usesIntegrityAnchor(state) : !(await Promise.resolve().then(() => prove(JSON.parse(after))).catch(() => false))) refuseJournal(file, "carries an after-anchor that does not agree with the persisted state and history");
+      if (integrity && anchor !== integrity.content) await atomicWrite(targetRoot, integrityPath, integrity.content);
+      const appended = await appendHistoryOnce(targetRoot, root, journal.event);
+      await assertRecovered(root, state); // History alone now produces exactly this state; the anchor agrees.
+      return { outcome: appended ? "COMPLETED_HISTORY" : "ALREADY_COMPLETE" };
+    }
+    // Nothing durable moved: restore what the transition rewrote ahead of the
+    // state write, then the anchor. A file the persisted state pins may only be
+    // left as it is or given back its pinned bytes, and state.json only the
+    // bytes already there.
+    for (const entry of restore) {
+      const pin = DERIVED_PINS[entry.path] ? undefined : state.artifactHashes[entry.path];
+      const target = path.join(root, entry.path);
+      if (entry.path === "state.json" ? entry.content !== stateBytes : pin !== undefined && (entry.remove ||
+          (entry.content !== (await readFile(target, "utf8").catch(() => null)) &&
+           !contentIdentityMatches(pin, target, Buffer.from(entry.content), { bytes: isBytePinned(entry.path) })))) {
+        refuseJournal(file, `would rewrite ${entry.path} to bytes the persisted state does not hold`);
       }
     }
-    const appended = await appendHistoryOnce(targetRoot, root, journal.event);
-    // The journal is the only thing that can retry this, so it is dropped only
-    // after the repaired record proves itself: `null` removes the in-flight
-    // tolerance, so history must now replay to exactly this state, revision and
-    // pin set, and the anchor must agree with both.
-    await assertRecovered(root, state);
-    await rm(journal.file, { force: true });
-    return { outcome: appended ? "COMPLETED_HISTORY" : "ALREADY_COMPLETE" };
-  }
-  if (state.revision === journal.fromRevision) {
-    // Nothing durable moved; restore any artifact the transition had rewritten
-    // ahead of the state write so the pinned hashes still match, including the
-    // integrity anchor if it was written before the crash.
-    for (const entry of journal.restore ?? []) {
-      if (entry.remove) {
-        await rm(path.join(root, entry.path), { force: true });
-      } else {
-        await atomicWrite(
-          targetRoot,
-          path.join(root, entry.path),
-          entry.content,
-        );
-      }
-    }
-    if (journal.integrity) {
-      if (journal.integrity.before === null) {
-        await rm(integrityPath, { force: true });
-      } else {
-        await atomicWrite(targetRoot, integrityPath, journal.integrity.before);
-      }
+    const undo = !integrity ? restore : [...restore, integrity.before === null
+      ? { path: INTEGRITY_FILE, remove: true }
+      : { path: INTEGRITY_FILE, content: integrity.before }];
+    await assertJournalTargets(file, undo.map((entry) => [targetRoot, path.join(root, entry.path)]));
+    for (const entry of undo) {
+      const target = path.join(root, entry.path);
+      await (entry.remove ? removeDurably(targetRoot, target) : atomicWrite(targetRoot, target, entry.content));
     }
     await assertRecovered(root, state);
-    await rm(journal.file, { force: true });
     return { outcome: "DISCARDED_UNCOMMITTED" };
-  }
-  throw new Error(
-    `An interrupted checkpoint transition for revision ${journal.fromRevision} -> ${journal.toRevision} does not match the persisted revision ${state.revision}. Investigate ${journal.file} before continuing; nothing was changed.`,
-  );
+  } });
 };
 
 export const completedArtifactHashes = async (root, state, step, sliceId) => {

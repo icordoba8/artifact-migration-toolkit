@@ -38,8 +38,6 @@ import {
   prepareHistoryEvent,
   readHistoryEvents,
   readTree,
-  recoverRegistryJournal,
-  registryJournalPathFor,
   renderIntegrity,
   sealHistoryTail,
 } from "../../src/store/index.mjs";
@@ -364,28 +362,7 @@ test("store: integrity.json bytes are stable, and the artifactHashes digest igno
   );
 });
 
-// -- store: registry journal, upgrade tree, artifact pins -----------------------
-
-test("store: registry journal recovery finishes only a write whose before-bytes still match", async (t) => {
-  const root = await scratch(t);
-  const registryPath = path.join(root, "registry.json");
-  const configPath = path.join(root, "package.json");
-  await writeFile(registryPath, "before");
-  await writeFile(configPath, "changed later");
-  await mkdir(path.dirname(registryJournalPathFor(root)), { recursive: true });
-  await writeFile(registryJournalPathFor(root), JSON.stringify({
-    registryPath, registryBefore: "before", registryAfter: "after",
-    configPath, configBefore: "config before", configAfter: "config after", projectRoot: root,
-  }));
-  await recoverRegistryJournal(root);
-  assert.equal(await readFile(registryPath, "utf8"), "after");
-  assert.equal(await readFile(configPath, "utf8"), "changed later");
-  await assert.rejects(readFile(registryJournalPathFor(root)), { code: "ENOENT" });
-
-  await writeFile(registryJournalPathFor(root), "{torn");
-  await assert.rejects(recoverRegistryJournal(root), /journal is unreadable/);
-  assert.equal(await readFile(registryJournalPathFor(root), "utf8"), "{torn");
-});
+// -- store: upgrade tree, artifact pins (the registry journal is lifecycle's, DR13) --
 
 test("store: readTree refuses a symlink anywhere in the tree", async (t) => {
   const root = await scratch(t);
