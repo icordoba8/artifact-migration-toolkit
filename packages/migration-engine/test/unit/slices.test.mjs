@@ -11,6 +11,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { CAPABILITY_OWNERSHIP_FORMAT } from "../../src/formats/index.mjs";
 import * as slices from "../../src/slices/index.mjs";
 import * as store from "../../src/store/index.mjs";
 
@@ -213,4 +214,47 @@ test("A4: a settled census fact keeps its value, and a failed read rejects nothi
     await slices.pendingTargetDriftCandidates(os.tmpdir(), { currentStep: "PLAN", formatVersion: 19 }, { targetRoot: os.tmpdir() }, { brownfield: false, legacySource: settled }),
     [],
   );
+});
+
+// -- the documented record contract ----------------------------------------------
+
+// I8: the canonical contract's slice-index, `slices/<slice-id>.json` and
+// `evidence/<slice-id>/result.json` examples, parsed from the first ```json
+// block after each section's marker sentence.
+const contractExamples = async () => {
+  const doc = await readFile(new URL("../../../../skills/start-migration/references/migration-contract.md", import.meta.url), "utf8");
+  const after = (marker) => {
+    const at = doc.indexOf(marker);
+    assert.notEqual(at, -1, `migration-contract.md lost '${marker}'`);
+    return JSON.parse(doc.slice(at).match(/```json\n([\s\S]*?)\n```/)[1]);
+  };
+  return {
+    index: after("## Slice index and records"),
+    implementation: after("`slices/<slice-id>.json` records implementation."),
+    evidence: after("`evidence/<slice-id>/result.json` records verification."),
+  };
+};
+
+test("I8: the documented slice and evidence records satisfy the list-coverage rule at format 11+, and pre-11 records need no capabilityIds", async () => {
+  const { index, implementation, evidence } = await contractExamples();
+  const sliceId = implementation.id;
+  assert.equal(evidence.sliceId, sliceId);
+  const planned = index.slices.find((slice) => slice.id === sliceId);
+  assert.ok(planned, `the slice index example plans '${sliceId}'`);
+  const command = () => "<engine command>";
+  // assertSlicePassed is the exported entry over traceLists/assertCoversPlanned:
+  // IMPLEMENT_SLICES holds the record to the plan, VERIFY_SLICES the evidence to the record.
+  const covers = (before, after, formatVersion) =>
+    slices.assertSlicePassed(before, { sliceId, result: "PASS", ...after }, sliceId, { formatVersion }, command);
+  const withoutCapabilities = ({ capabilityIds, ...record }) => record;
+
+  covers(planned, implementation, CAPABILITY_OWNERSHIP_FORMAT);
+  covers(implementation, evidence, CAPABILITY_OWNERSHIP_FORMAT);
+  // The rule the examples must honor is still enforced at format 11+.
+  assert.throws(() => covers(planned, withoutCapabilities(implementation), CAPABILITY_OWNERSHIP_FORMAT), /capabilityIds/);
+  assert.throws(() => covers(implementation, withoutCapabilities(evidence), CAPABILITY_OWNERSHIP_FORMAT), /capabilityIds/);
+  // A pre-11 record has no capability matrix: none of the three carries the list.
+  const legacy = CAPABILITY_OWNERSHIP_FORMAT - 1;
+  covers(withoutCapabilities(planned), withoutCapabilities(implementation), legacy);
+  covers(withoutCapabilities(implementation), withoutCapabilities(evidence), legacy);
 });

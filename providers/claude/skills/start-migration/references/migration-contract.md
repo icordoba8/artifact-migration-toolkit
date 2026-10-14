@@ -1954,6 +1954,15 @@ least one `changedFiles` entry under that row's `targetOwner`. `PLAN` proves the
 capability was scheduled; this proves it landed where the matrix said it would,
 rather than being rebuilt inside the feature after all.
 
+Both slice records repeat the slice's planned identifier lists, and each list
+must contain every id of the list it answers to — the implementation record its
+`slices/index.json` entry, the evidence record the implementation record — or
+the slice cannot advance. From format 11, `capabilityIds` is one of those lists
+and is required in both records, even when it is empty; before format 11 there
+is no capability matrix, so the list is not required and the engine ignores
+it. Advancing past `PLAN` scaffolds each record that does not exist yet with
+the planned lists already filled in.
+
 `slices/<slice-id>.json` records implementation. Each `changedFiles` entry
 must be a real path inside the target repository (P1-7): while the slice is
 not yet `IMPLEMENT_SLICES`-complete, it must also be part of the target
@@ -1967,6 +1976,7 @@ didn't actually touch:
   "requirementIds": ["CATALOG-REQ-001"],
   "scenarioIds": ["CATALOG-SCN-001"],
   "traceIds": ["PAR-001", "ROUTE-001", "DESIGN-001"],
+  "capabilityIds": ["CAP-004"],
   "changedFiles": ["src/features/catalog/..."],
   "decisions": ["Follow target routing conventions and use @target/ui."],
   "checks": ["pnpm test"]
@@ -1987,6 +1997,7 @@ legacy or target repository whose current SHA-256 must match `outputDigest`:
   "requirementIds": ["CATALOG-REQ-001"],
   "scenarioIds": ["CATALOG-SCN-001"],
   "traceIds": ["PAR-001", "ROUTE-001", "DESIGN-001"],
+  "capabilityIds": ["CAP-004"],
   "commands": [
     {
       "command": "pnpm test",

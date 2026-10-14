@@ -979,13 +979,14 @@ Full JSON schemas for every artifact below live in
    projection and loop directives with this engine. Neither
    side reimplements the other's rules — see
    `migrate-artifact/SKILL.md` *Responsibility boundary*. A non-delegated historical shared slice must still change at
-   least one file under `targetOwner`. Record `slices/<slice-id>.json` with changed files,
+   least one file under `targetOwner`. Record `slices/<slice-id>.json` with the slice's planned ID lists
+   (from format 11 including `capabilityIds`), changed files,
    decisions, checks, and `implementationStatus: COMPLETE`. Every file you changed must be in its
    `changedFiles`; the engine lists any you missed (`SLICE_FILES_UNLISTED`) — add them, or revert them.
 8. **`VERIFY_SLICES`** — verify only the active slice: execute its
    acceptance scenarios and affected tests, covering entry, transitions,
    URL/history semantics, and terminal outcomes. Record
-   `evidence/<slice-id>/result.json`. A slice that owns visible UI behavior
+   `evidence/<slice-id>/result.json`, repeating the same ID lists. A slice that owns visible UI behavior
    also records Playwright runtime evidence for every required state and
    interaction (see "Runtime UI evidence"). When all slices pass, advance to
    `FINALIZE`.
