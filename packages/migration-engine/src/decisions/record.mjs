@@ -859,7 +859,7 @@ export const deriveModuleDecisions = async ({
   classification,
   scan,
   legacySource,
-  legacySources,
+  implicitRoots = new Set(),
   ledger: { decisions, byId },
   targetDrift,
   visualUnbacked,
@@ -1002,20 +1002,9 @@ export const deriveModuleDecisions = async ({
   const roots = Array.isArray(classification.moduleRoots)
     ? classification.moduleRoots
     : [];
-  // One implicit root per declared source, exactly as `validateDiscovery-
-  // Completeness` computes it. Keying on `state.legacyModule` alone would flag
-  // every other source's basename-matching root as a pending ROOT_DECLARATION
-  // the validator never asks for. Identical to a single-source record.
-  const implicitRoots = new Set(
-    legacySources
-      .map(
-        (name) =>
-          [...scan.moduleRoots]
-            .filter((value) => path.posix.basename(value) === name)
-            .sort()[0],
-      )
-      .filter(Boolean),
-  );
+  // `implicitRoots` is census's answer (`implicitModuleRoots`), handed in by
+  // the lifecycle: the roots validateDiscoveryCompleteness exempts, so the offer
+  // is exactly what the gate asks for. Absent, every root is offered.
   for (const entry of roots) {
     const rootPath = typeof entry === "string" ? entry : entry?.path;
     if (!rootPath || implicitRoots.has(rootPath)) continue;

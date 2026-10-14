@@ -60,7 +60,7 @@ import { assertRecordToolkitIdentity } from "./toolkit-identity.mjs";
 import { sliceDriftFacts } from "./validation.mjs";
 import { artifactOperatorDecisions } from "./artifact-status.mjs";
 import { reconcileArtifactDecisions } from "./artifact-checkpoints.mjs";
-import { legacySourceBinding, legacySourcesOf } from "../census/index.mjs";
+import { implicitModuleRoots, legacySourceBinding } from "../census/index.mjs";
 import { pendingTargetDriftCandidates } from "../slices/index.mjs";
 import { pendingVisualUnbackedCandidates } from "../visual/index.mjs";
 import {
@@ -223,7 +223,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
       classification,
       scan,
       legacySource,
-      legacySources: legacySourcesOf(state),
+      implicitRoots: implicitModuleRoots(state, classification.moduleRoots, scan.moduleRoots),
       ledger,
       targetDrift,
       visualUnbacked,

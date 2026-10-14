@@ -9,9 +9,13 @@ import {
 import { initialArtifacts, usesDirectLedgerDecisions } from "../formats/index.mjs";
 import { assertArray, assertNonEmpty, assertPlainObject, isPlainObject } from "../shared/index.mjs";
 import { readJson } from "../store/index.mjs";
-import { assertLegacyEvidenceWithinBoundary, readCanonicalModuleBoundary } from "./boundary.mjs";
+import {
+  assertLegacyEvidenceWithinBoundary,
+  implicitModuleRoots,
+  readCanonicalModuleBoundary,
+} from "./boundary.mjs";
 import { assertEvidenceChecklist } from "./inventory.mjs";
-import { legacySourceBinding, legacySourcesOf } from "./sources.mjs";
+import { legacySourceBinding } from "./sources.mjs";
 
 /* ------------------------------------------------------------------ *
  * DISCOVERY_COMPLETENESS
@@ -100,25 +104,11 @@ export const validateDiscoveryCompleteness = async (
     algorithmVersion: scan.algorithmVersion,
   };
 
-  // C9: exactly one root per declared source may be implicit -- the slice that
-  // source is named after. Every additional root widens the module's boundary,
-  // and widening it is an operator decision, not an agent's.
-  //
-  // Per source and not per `state.legacyModule`: that field is
-  // `legacySources[0]`, alphabetically first and nothing more, so keying on it
-  // would demand a ROOT_DECLARATION for every root of every other source purely
-  // for being named after the wrong module. A single-source record resolves to
-  // exactly the one root it always did.
-  const implicitRoots = new Set(
-    legacySourcesOf(state)
-      .map(
-        (name) =>
-          [...scan.moduleRoots]
-            .filter((value) => path.posix.basename(value) === name)
-            .sort()[0],
-      )
-      .filter(Boolean),
-  );
+  // C9: at most one root per declared source may be implicit -- the slice that
+  // source is named after (`implicitModuleRoots`). Every additional root widens
+  // the module's boundary, and widening it is an operator decision, not an
+  // agent's.
+  const implicitRoots = implicitModuleRoots(state, declaredRoots, scan.moduleRoots);
   for (const [index, entry] of declaredRoots.entries()) {
     const label = `moduleRoots[${index}]`;
     const rootPath = assertNonEmpty(
