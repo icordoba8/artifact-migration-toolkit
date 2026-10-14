@@ -5,10 +5,6 @@
  * identity, canonical JSON, shape validators and read-only git queries. No
  * file in `shared/` writes to the filesystem or imports an engine module.
  * Importers outside `shared/` use this file only.
- *
- * The two containment checks stay two exports (DR1; merging them is Track B):
- * `isResolvedWithin` resolves both inputs before `path.relative`,
- * `isLexicallyWithin` relies on `path.relative`'s own resolution.
  */
 export {
   canonicalJson,
@@ -40,7 +36,6 @@ export {
   assertSecurePath,
   commonAncestor,
   isLexicallyWithin,
-  isResolvedWithin,
   normalizeRelative,
   portablePath,
   recordRelative,

@@ -37,7 +37,7 @@ import {
   assertArray,
   assertNonEmpty,
   assertPlainObject,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";
 import {

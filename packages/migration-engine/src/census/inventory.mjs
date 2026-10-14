@@ -11,7 +11,7 @@ import {
   assertNonEmpty,
   assertPlainObject,
   assertUniqueIds,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
 } from "../shared/index.mjs";
 import {
   assertEvidenceResolves,

@@ -10,8 +10,8 @@ import {
   assertArray,
   assertNonEmpty,
   assertPlainObject,
+  isLexicallyWithin as isWithin,
   isPlainObject,
-  isResolvedWithin as isWithin,
 } from "../shared/index.mjs";
 import { evidencePathClaim, readJson, resolveEvidencePath } from "../store/index.mjs";
 import { DiscoveryScannerVersionError, SUPPORTED_ALGORITHM_VERSIONS } from "./scan.mjs";

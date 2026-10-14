@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 
 import {
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
   normalizeRelative,
   portablePath as portable,
   samePath,

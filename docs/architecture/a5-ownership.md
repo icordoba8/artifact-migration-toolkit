@@ -125,7 +125,7 @@ These modules keep every export name, arity and value they had at BASE: `core.mj
 
 - **I3 / DR28.** Resolved in Track B: census `implicitModuleRoots` is the one implicit-root rule. `validateDiscoveryCompleteness` calls it, and the lifecycle recorder passes its result to `deriveModuleDecisions`. The single `src/features/<source>` root (also under a package or app prefix) now beats a same-named route, and competing feature roots get no implicit authorization.
 - **F8.** There is still no repair path for observations after the census.
-- **DR1.** `isWithin` keeps its two variants. The scanner keeps `isLexicallyWithin` and the rest of census keeps `isResolvedWithin`, as at BASE.
+- **DR1.** Resolved in Track B: `isLexicallyWithin` is the one containment rule and every census `isWithin` uses it. It keeps `isResolvedWithin`'s resolve-first body, which `path.relative` already does except for equal strings. Results are unchanged for every string input except one: an equal relative pair with no CWD now throws instead of passing.
 
 ## Remaining architectural violations
 

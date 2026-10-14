@@ -52,8 +52,8 @@ import {
   dirtyManifest,
   gitRevision,
   isContentIdentity,
+  isLexicallyWithin as isWithin,
   isPlainObject,
-  isResolvedWithin as isWithin,
 } from "../shared/index.mjs";
 import {
   assertCommandResults,
