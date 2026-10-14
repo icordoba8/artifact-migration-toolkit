@@ -13,10 +13,11 @@ import {
   canonicalClaim,
   claimedTargetPaths,
   implementationDigests,
+  lexicalTargetPath,
+  ownsPath,
   resolveChangedFile,
   TARGET_DIRTY_SCOPE,
   targetRelative,
-  targetRelativePath,
 } from "./claims.mjs";
 import { classifyTargetDrift } from "./drift.mjs";
 
@@ -172,7 +173,14 @@ export const draftSliceAmendment = async (
   );
   const added = [];
   for (const file of addFiles ?? []) {
-    const direct = path.resolve(roots.targetRoot, String(file));
+    // DR4: any accepted spelling names one target file -- as typed when that
+    // exists, otherwise through the canonical path math -- and the link and
+    // containment checks below run on the file it named.
+    let direct = path.resolve(roots.targetRoot, String(file));
+    const canonical = lexicalTargetPath(String(file), roots);
+    if (!(await fileExists(direct)) && canonical !== null) {
+      direct = path.resolve(roots.targetRoot, canonical);
+    }
     // Symlinks resolved first, so a link cannot smuggle an outside file in.
     const real = await realpath(direct).catch(() => null);
     if (real && isWithin(engineRoot, real)) {
@@ -275,14 +283,8 @@ export const completeSliceAmendment = async (root, state, roots, sliceId, draft,
         : null;
     if (resolved) amendedStems.add(withoutExtension(targetRelative(roots, resolved)));
   }
-  const under = (relative, owner) => {
-    try {
-      const base = targetRelativePath(String(owner), roots, "Owner");
-      return relative === base || relative.startsWith(`${base}/`);
-    } catch {
-      return false;
-    }
-  };
+  const under = (relative, owner) =>
+    ownsPath(lexicalTargetPath(String(owner), roots), relative);
   const add = [];
   for (const relative of added) {
     const testedSource =

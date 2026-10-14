@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import { TARGET_BASELINE_FILE } from "../formats/index.mjs";
 import {
@@ -9,6 +10,7 @@ import {
   committedChangesSince,
   commonAncestor,
   dirtyManifest,
+  fileAtRevision,
   gitRevision,
   isLexicallyWithin as isWithin,
   normalizeRelative,
@@ -153,8 +155,11 @@ export const readTargetBaseline = async (root, brownfield) =>
  */
 export const rootRelativePath = (claim, root, siblingRoot, label, repositoryLabel) => {
   const normalized = claim.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!root) return normalized.replace(/\/+$/, "");
-  let candidate = normalized.replace(/\/+$/, "");
+  // DR4: trailing separators go, but never the one that makes `/` absolute --
+  // stripping it turned the filesystem root into the target root.
+  const trimmed = normalized.replace(/(?<=.)\/+$/, "");
+  if (!root) return trimmed;
+  let candidate = trimmed;
   if (siblingRoot) {
     const prefix = path
       .relative(commonAncestor(siblingRoot, root), root)
@@ -175,14 +180,21 @@ export const rootRelativePath = (claim, root, siblingRoot, label, repositoryLabe
   return path.relative(root, absolute).replaceAll(path.sep, "/");
 };
 
-export const targetRelativePath = (claim, roots, label) =>
-  rootRelativePath(
+export const targetRelativePath = (claim, roots, label) => {
+  // DR4: a `..` segment never spells a target path, even one that lands back
+  // inside: a traversal is not an ownership spelling, and reading it as one let
+  // an owner reach a subtree its spelling never named.
+  if (claim.replaceAll("\\", "/").split("/").includes("..")) {
+    throw new Error(`${label} '${claim}' is outside the target repository.`);
+  }
+  return rootRelativePath(
     claim,
     roots?.targetRoot,
     roots?.legacyRoot,
     label,
     "target",
   );
+};
 
 export const legacyRelativePath = (claim, roots, label) =>
   rootRelativePath(
@@ -202,12 +214,135 @@ export const legacyRelativePath = (claim, roots, label) =>
 export const repoRelative = (targetRoot, absolute) =>
   `./${path.relative(targetRoot, absolute).replaceAll(path.sep, "/")}`;
 
+/** The first token of a `changedFiles` entry: a v1.3.17 `<path> <identity>` entry reads as its path. */
+const claimToken = (changed) => changed.trim().split(/\s+/)[0];
+
 /**
- * The two spellings of one composition. `current` composes file identities;
- * `legacy` composes the raw hashes evidence recorded before tagged identities
- * existed. Both are computed from the same files in the same order, so a
- * record bound to either is still bound to these bytes.
+ * DR4. The canonical target path a spelling names by path math alone
+ * (`targetRelativePath`), or null when it names nothing inside the target.
+ * Files are never consulted, so the answer cannot change with what exists.
  */
+export const lexicalTargetPath = (value, roots) => {
+  try {
+    return targetRelativePath(value, roots, "Path");
+  } catch {
+    return null;
+  }
+};
+
+/** A claim spelled by path math alone: the canonical path of its token, or null. */
+export const pinnedClaimPath = (changed, roots) =>
+  lexicalTargetPath(claimToken(changed), roots);
+
+const resolveToken = async (claim, roots) => {
+  const direct = path.resolve(roots.targetRoot, claim);
+  return isWithin(roots.targetRoot, direct) && (await fileExists(direct))
+    ? direct
+    : resolveEvidencePath(claim, roots);
+};
+
+/**
+ * The existing file one `changedFiles` claim names, inside the target or not,
+ * or null: directly under the target first, then through the evidence bases.
+ * The implementation gate reads "missing" and "outside" apart from this.
+ *
+ * DR4: `\` is read as a separator, as every ownership spelling reads it, but
+ * only when the token as written names nothing. A spelling that resolved before
+ * DR4 therefore still resolves to the same file, and its digest does not move.
+ */
+export const resolveClaimPath = async (changed, roots) => {
+  const claim = claimToken(changed);
+  const resolved = await resolveToken(claim, roots);
+  return resolved ?? (claim.includes("\\") ? resolveToken(claim.replaceAll("\\", "/"), roots) : null);
+};
+
+/**
+ * DR4. The target paths a claim's spelling can read as, in `resolveClaimPath`
+ * order: the token as written before `\` is read as a separator, and for each,
+ * directly under the target, then through the legacy and common-ancestor bases.
+ * A reading outside the target is null.
+ */
+const targetReadings = (changed, roots) => {
+  const claim = claimToken(changed);
+  const ancestor = roots.legacyRoot ? commonAncestor(roots.legacyRoot, roots.targetRoot) : null;
+  const at = (base, token) => {
+    if (!base) return null;
+    const absolute = path.resolve(base, token);
+    return isWithin(base, absolute) && isWithin(roots.targetRoot, absolute)
+      ? targetRelative(roots, absolute) || null
+      : null;
+  };
+  return (claim.includes("\\") ? [claim, claim.replaceAll("\\", "/")] : [claim]).map((token) => ({
+    direct: at(roots.targetRoot, token),
+    legacy: at(roots.legacyRoot, token),
+    ancestor: at(ancestor, token),
+  }));
+};
+
+/**
+ * DR4. The existing target files the spelling that resolves can name, read
+ * directly and through the target's own prefix. More than one means the
+ * spelling is ambiguous (`<target-dir>/src/x` when the target itself holds a
+ * `<target-dir>/` directory), and one spelling must name one file.
+ */
+export const existingClaimReadings = async (changed, roots) => {
+  const exists = (relative) =>
+    relative ? fileExists(path.join(roots.targetRoot, relative)) : false;
+  for (const { direct, legacy, ancestor } of targetReadings(changed, roots)) {
+    const named = [...new Set([direct, ancestor])].filter(Boolean);
+    const existing = [];
+    for (const relative of named) if (await exists(relative)) existing.push(relative);
+    if (existing.length > 0 || (await exists(legacy))) return existing;
+  }
+  return [];
+};
+
+/**
+ * DR4. The target file a pinned claim named in the commit `revision`, as a
+ * canonical path, or null: the first reading that exists in that commit. So a
+ * reopened slice's anchored claim is read from the anchored state, whichever
+ * accepted spelling the pinned record used, and never from what exists at HEAD.
+ */
+export const anchoredClaimPath = async (changed, roots, revision) => {
+  for (const reading of targetReadings(changed, roots)) {
+    for (const relative of [reading.direct, reading.legacy, reading.ancestor]) {
+      if (relative && (await fileAtRevision(roots.targetRoot, revision, `./${relative}`))) {
+        return relative;
+      }
+    }
+  }
+  return null;
+};
+
+/**
+ * Whether a resolved claim is a target file: inside the target as spelled and
+ * once every link is followed, so a link cannot bind a claim (or its digest) to
+ * bytes outside the target.
+ */
+export const isTargetFile = async (resolved, roots) => {
+  if (!isWithin(roots.targetRoot, resolved)) return false;
+  try {
+    return isWithin(await realpath(roots.targetRoot), await realpath(resolved));
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * DR4. Whether a resolved target file is reached through no link at all, so
+ * its own path is the path whose history and bytes it carries.
+ */
+export const isLinkFree = async (resolved, roots) => {
+  try {
+    return (
+      (await realpath(resolved)) ===
+      path.join(await realpath(roots.targetRoot), path.relative(roots.targetRoot, resolved))
+    );
+  } catch {
+    return false;
+  }
+};
+
 /**
  * The target file one `changedFiles` claim names, or null. Extracted so the
  * amendment resolves a claim exactly as the implementation digest does -- two
@@ -215,14 +350,16 @@ export const repoRelative = (targetRoot, absolute) =>
  * with the digest that binds it.
  */
 export const resolveChangedFile = async (changed, roots) => {
-  const claim = changed.trim().split(/\s+/)[0];
-  const direct = path.resolve(roots.targetRoot, claim);
-  const resolved =
-    isWithin(roots.targetRoot, direct) && (await fileExists(direct))
-      ? direct
-      : await resolveEvidencePath(claim, roots);
-  return resolved && isWithin(roots.targetRoot, resolved) ? resolved : null;
+  const resolved = await resolveClaimPath(changed, roots);
+  return resolved && (await isTargetFile(resolved, roots)) ? resolved : null;
 };
+
+/**
+ * The two spellings of one composition. `current` composes file identities;
+ * `legacy` composes the raw hashes evidence recorded before tagged identities
+ * existed. Both are computed from the same files in the same order, so a
+ * record bound to either is still bound to these bytes.
+ */
 
 export const implementationDigests = async (record, roots) => {
   const identities = [];
@@ -247,14 +384,30 @@ export const implementationDigests = async (record, roots) => {
  * The target subtrees the plan says this migration owns -- `targetOwner` and
  * `targetPaths`, read off the slice plan, never guessed.
  */
-export const plannedTargetOwners = (slices) =>
-  slices
-    .flatMap((slice) => [
+export const plannedTargetOwners = (slices, roots) =>
+  targetOwnerPaths(
+    slices.flatMap((slice) => [
       slice.targetOwner,
       ...(Array.isArray(slice.targetPaths) ? slice.targetPaths : []),
-    ])
+    ]),
+    roots,
+  );
+
+/**
+ * DR4. Declared owners in the canonical target-relative form (`lexicalTargetPath`):
+ * `src/x`, `./src/x/`, `<target-dir>/src/x` and `src\\x` are one owner, and `.`
+ * is the target root (`""`). An owner that names nothing inside the target is
+ * kept as `null`: it still counts as declared, as it always did, and owns nothing.
+ */
+export const targetOwnerPaths = (owners, roots) =>
+  owners
     .filter((owner) => typeof owner === "string" && owner)
-    .map((owner) => owner.replaceAll("\\", "/").replace(/\/+$/, ""));
+    .map((owner) => lexicalTargetPath(owner, roots));
+
+/** DR4. Whether a canonical path is the owner or inside it: a subtree, never a string prefix. */
+export const ownsPath = (owner, relative) =>
+  typeof owner === "string" &&
+  (owner === "" || relative === owner || relative.startsWith(`${owner}/`));
 
 /**
  * A plan that declares no owners at all cannot answer the ownership question,
@@ -262,20 +415,23 @@ export const plannedTargetOwners = (slices) =>
  * one of those may be waved through.
  */
 export const withinPlannedScope = (relative, owners) =>
-  owners.length === 0 ||
-  owners.some((owner) => relative === owner || relative.startsWith(`${owner}/`));
+  owners.length === 0 || owners.some((owner) => ownsPath(owner, relative));
 
 /**
- * One `changedFiles` claim in canonical target-relative form, resolved exactly
- * as the implementation digest resolves it -- so `target/src/x.ts` and
- * `src/x.ts` are one claim to every lookup, manual or engine. A v1.3.17
- * `<path> <identity>` entry reads as its path, like any other entry.
+ * DR4. One `changedFiles` claim in the canonical target-relative form every
+ * ownership comparison uses. An existing file resolves exactly as the
+ * implementation digest resolves it, so `target/src/x.ts`, `./src/x.ts` and
+ * `src/x.ts` are one claim to every lookup, manual or engine. A missing file
+ * (deleted since, or never there) is spelled by the same path math as an
+ * owner (`pinnedClaimPath`), so it still reads as the path Git reports. A
+ * claim that names nothing inside the target stays as written, which equals
+ * no target path. A v1.3.17 `<path> <identity>`
+ * entry reads as its path, like any other entry.
  */
 export const canonicalClaim = async (changed, roots) => {
   const resolved = roots?.targetRoot ? await resolveChangedFile(changed, roots) : null;
-  return resolved
-    ? targetRelative(roots, resolved)
-    : changed.trim().split(/\s+/)[0].replaceAll("\\", "/");
+  if (resolved) return targetRelative(roots, resolved);
+  return pinnedClaimPath(changed, roots) ?? claimToken(changed).replaceAll("\\", "/");
 };
 
 /** Every target path any planned slice claims, in canonical target-relative form. */

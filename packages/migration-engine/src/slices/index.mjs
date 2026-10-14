@@ -13,9 +13,10 @@
  * are handed in by the seams in `resumable-migration.mjs` and
  * `record-decision.mjs` (docs/architecture/a4-ownership.md).
  *
- * The divergent claim spellings are kept as they were (DR4 is Track B):
- * `rootRelativePath` and its `targetRelativePath`/`legacyRelativePath`
- * wrappers, `targetRelative`, `repoRelative` and `canonicalClaim`.
+ * Ownership compares one canonical target-relative spelling (DR4):
+ * `targetRelativePath` for owners and `canonicalClaim` for claims, with
+ * `ownsPath` as the one subtree test. `repoRelative` is Git syntax, never an
+ * identity.
  */
 export {
   anySliceVerified,
