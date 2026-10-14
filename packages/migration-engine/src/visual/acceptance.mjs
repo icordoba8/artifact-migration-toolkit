@@ -72,6 +72,22 @@ const visualContractDigest = (matrix) =>
     .digest("hex")}`;
 
 /**
+ * One persisted frame as the operator reads it, in its own authority's terms.
+ * The text is hashed into the candidate id: the figma-mcp wording is frozen
+ * (changing it re-asks every operator), and I5's legacy-runtime correction
+ * deliberately invalidated approvals of the old "Figma evidence" text.
+ */
+const describeFrame = (state, frame) => {
+  const legacy = visualAuthorityOf(state).contextFile === LEGACY_RUNTIME_CONTEXT_FILE;
+  const [source, id] = legacy
+    ? ["legacy runtime", `frame ${frame.key} at legacy revision ${frame.legacyRevision}`]
+    : ["Figma", `node ${frame.key} '${frame.name}'`];
+  return frame.extraction.fidelity === "COMPLETE"
+    ? `${legacy ? "Legacy runtime" : "Figma"} evidence: ${id} ${frame.viewport.width}x${frame.viewport.height}, COMPLETE, states: ${frame.states.join(" | ")}`
+    : `DEGRADED ${source} evidence, fidelity not established: ${id} (${frame.extraction.limitations.join("; ")})`;
+};
+
+/**
  * One `unbacked` entry as an operator decision candidate. Shared by validation
  * and `record-decision.mjs`, so the candidate the operator approves is exactly
  * the one FINALIZE re-derives. The engine never judges whether a frame designs
@@ -85,11 +101,7 @@ const visualUnbackedCandidate = ({ state, frames, matrix, contextDigest, item })
       subjectPath: `${item.uiBehaviorId}::${item.state}`,
       rationale: [
         String(item.reason ?? ""),
-        ...[...frames.values()].map((frame) =>
-          frame.extraction.fidelity === "COMPLETE"
-            ? `Figma evidence: node ${frame.key} '${frame.name}' ${frame.viewport.width}x${frame.viewport.height}, COMPLETE, states: ${frame.states.join(" | ")}`
-            : `DEGRADED Figma evidence, fidelity not established: node ${frame.key} '${frame.name}' (${frame.extraction.limitations.join("; ")})`,
-        ),
+        ...[...frames.values()].map((frame) => describeFrame(state, frame)),
       ].join("\n"),
       boundTo: {
         module: state.migrationId,

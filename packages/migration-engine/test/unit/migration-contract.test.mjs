@@ -13110,6 +13110,91 @@ test("unbacked-17: DEGRADED evidence is never absence of design; it needs an ope
   }
 });
 
+// I5: the VISUAL_UNBACKED rationale is what the operator decides against, so it
+// names the record's own authority. Figma wording -- and so Figma candidate
+// identity -- is byte-for-byte what it was before I5.
+test("I5: figma-mcp VISUAL_UNBACKED rationale is unchanged, COMPLETE and DEGRADED", async () => {
+  const cases = [
+    [UNRELATED_FRAME, "Figma evidence: node 12:34 'Account settings' 1280x720, COMPLETE, states: hover"],
+    [
+      { extraction: { retrievedAt: "2026-07-01T00:00:00.000Z", fidelity: "DEGRADED", limitations: ["too large", "no variables"] } },
+      "DEGRADED Figma evidence, fidelity not established: node 12:34 'Sign in' (too large; no variables)",
+    ],
+  ];
+  for (const [frame, line] of cases) {
+    const fixture = await createFixture();
+    try {
+      await figmaBaselineWith(fixture, frame);
+      await writeVisualAcceptance(fixture, unbackedContract());
+      const [candidate] = await visualCandidates(fixture);
+      assert.equal(candidate.rationale, `No frame designs the sign-in form.\n${line}`);
+      await rejectsAt(fixture, new RegExp(`VISUAL_UNBACKED_REQUIRES_OPERATOR: .*'${candidate.id}'`));
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+const legacyBaselineWith = async (fixture, frame) => {
+  await legacyAtAssessTarget(fixture);
+  await writeLegacyContext(fixture, { frame });
+  await advance(fixture);
+  await completeStepDoc(fixture, "BUILD_BASELINE");
+  await writeMatrices(fixture);
+  await registerAuth(fixture);
+};
+
+const legacyUnbacked = (entry = {}) => ({
+  ...legacyAcceptance(),
+  rows: [],
+  unbacked: [{ uiBehaviorId: "UIB-1", state: "DEFAULT", reason: "The rig cannot reach it.", ...entry }],
+});
+
+test("I5: legacy-runtime VISUAL_UNBACKED rationale names the pinned legacy frame, never Figma", async () => {
+  const cases = [
+    [{}, (rev) => `Legacy runtime evidence: frame UIB-1::DEFAULT at legacy revision ${rev} 1280x720, COMPLETE, states: DEFAULT`],
+    [
+      { extraction: { retrievedAt: "2026-09-29T00:00:00.000Z", fidelity: "DEGRADED", limitations: ["needs a backend fault", "no seed data"] } },
+      (rev) => `DEGRADED legacy runtime evidence, fidelity not established: frame UIB-1::DEFAULT at legacy revision ${rev} (needs a backend fault; no seed data)`,
+    ],
+  ];
+  for (const [frame, line] of cases) {
+    const fixture = await createFixture();
+    try {
+      await legacyBaselineWith(fixture, frame);
+      const rev = (await state(fixture)).legacyRevision.revision;
+      await writeVisualAcceptance(fixture, legacyUnbacked());
+      const [candidate] = await visualCandidates(fixture);
+      assert.equal(candidate.rationale, `The rig cannot reach it.\n${line(rev)}`);
+      assert.doesNotMatch(candidate.rationale, /Figma|node /);
+      assert.ok(candidate.boundTo.visualContextDigest);
+      assert.equal(candidate.boundTo.figmaContextDigest, undefined);
+      // Intentional identity change: the pre-I5 wording hashes differently, so
+      // an approval of the mislabelled candidate never applies -- fail closed.
+      const preI5 = `The rig cannot reach it.\n${frame.extraction
+        ? `DEGRADED Figma evidence, fidelity not established: node UIB-1::DEFAULT 'UIB-1::DEFAULT' (needs a backend fault; no seed data)`
+        : "Figma evidence: node UIB-1::DEFAULT 'UIB-1::DEFAULT' 1280x720, COMPLETE, states: DEFAULT"}`;
+      assert.notEqual(
+        candidate.rationaleDigest,
+        `sha256:${createHash("sha256").update(preI5).digest("hex")}`,
+      );
+      // Offering and validation derive the same candidate; missing is refused.
+      await rejectsAt(fixture, new RegExp(`VISUAL_UNBACKED_REQUIRES_OPERATOR: .*'${candidate.id}'`));
+      const approved = await approveVisualUnbacked(fixture);
+      assert.equal(approved.candidate.id, candidate.id);
+      const cited = legacyUnbacked({ decisionId: approved.decisionId, decisionDigest: approved.decisionDigest });
+      // A stale approval (contract changed after it) is refused.
+      await writeVisualAcceptance(fixture, { ...cited, notes: "edited after approval" });
+      await rejectsAt(fixture, /does not approve current stable candidate/);
+      await writeVisualAcceptance(fixture, cited);
+      await advance(fixture);
+      assert.ok((await state(fixture)).completedSteps.includes("BUILD_BASELINE"));
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
 // --- Slice B: structured Figma provenance, version 2 -------------------------
 //
 // Every fact is re-resolved by the engine out of bytes whose hash it has just
