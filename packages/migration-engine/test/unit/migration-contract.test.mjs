@@ -129,6 +129,7 @@ import {
   pendingTransactions,
   previewRollback,
   previewUpgrade,
+  recoverTransaction as recoverUpgradeTransaction,
   recoverUpgrade,
 } from "../../src/upgrades/upgrade-migration.mjs";
 import { ioError, traceFs } from "../support/fs-trace.mjs";
@@ -2645,8 +2646,11 @@ test("DR7: initialization commits durable entries before it removes its journal"
   const log = await traceFs(t);
   await initialize(fixture, { currentFormat: true });
   const journalWritten = log.findIndex(([op, file]) => op === "rename" && path.basename(file) === "auth.journal");
-  const journalRemoved = log.findIndex(([op, file]) => op === "rm" && path.basename(file) === "auth.journal");
+  // DR13: the journal is retired by the store durable removal -- unlinked, then its directory fsynced.
+  const journalRemoved = log.findIndex(([op, file]) => op === "unlink" && path.basename(file) === "auth.journal");
   assert.ok(journalWritten >= 0 && journalRemoved > journalWritten, "the initialization journal was written and removed");
+  assert.ok(log.some(([op, file], index) => index > journalRemoved && op === "sync" &&
+    file === path.dirname(log[journalRemoved][1])), "the journal removal is fsynced");
   const created = log.findIndex(([op, file]) => op === "mkdir" && path.basename(file) === "init");
   assert.ok(log.some(([op, file], index) => index > created && index < journalWritten && op === "sync" &&
     file === path.dirname(log[created][1])), "the new init/ directory entry is fsynced before the journal is written");
@@ -2687,7 +2691,9 @@ test("DR7: an initialization stopped between creating and owning its directory r
     assert.equal(await exists(fixture.migrationRoot), false, `${label}: an ownerless directory was left behind`);
     if (process.platform !== "win32") {
       // The undo is fsynced before the journal that could finish it is removed.
-      const journalRemoved = log.findIndex(([op, file]) => op === "rm" && path.basename(file) === "auth.journal");
+      const journalRemoved = log.findIndex(([op, file]) => op === "unlink" && path.basename(file) === "auth.journal");
+      assert.ok(journalRemoved >= 0 && log.some(([op, file], index) => index > journalRemoved && op === "sync" &&
+        file === path.dirname(log[journalRemoved][1])), `${label}: the journal removal is fsynced`);
       const removed = (op) => log.findLastIndex(([o, file]) => o === op && file.endsWith(`${path.sep}modules${path.sep}auth`));
       const synced = (directory, after) => log.some(([op, file], index) => index > after && index < journalRemoved && op === "sync" && file === directory);
       const rootGone = Math.max(removed("rm"), removed("rmdir"));
@@ -17969,6 +17975,788 @@ test("R-W6-f: a corrupt journal is preserved byte-for-byte and refuses", async (
       /journal/i,
     );
     assert.equal(await readFile(journal, "utf8"), corrupt);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- DR13: one journal protocol ------------------------------------------------
+//
+// Five journal formats, one recovery protocol (lifecycle/journal.mjs). An
+// unreadable journal is never recovered or removed. A format adapter refuses
+// every phase its writer cannot leave before it writes anything. A journal is
+// retired only after the strict proof, by a removal whose directory is fsynced.
+
+const PRESERVED = /preserved exactly as found/;
+
+/**
+ * Every file under `root` by its bytes, and every symlink by its target, never
+ * followed -- but `.git` and the lock directory: reclaiming a dead owner's
+ * lock is lock bookkeeping, not record data.
+ */
+const treeBytes = async (root, relative = "") => {
+  const found = {};
+  for (const entry of await readdir(path.join(root, relative), { withFileTypes: true })) {
+    const child = relative ? `${relative}/${entry.name}` : entry.name;
+    if (entry.name === ".git" || child.endsWith(".agents/knowledge/migrations/locks")) continue;
+    const absolute = path.join(root, child);
+    if (entry.isSymbolicLink()) found[child] = `-> ${await readlink(absolute)}`;
+    else if (entry.isDirectory()) Object.assign(found, await treeBytes(root, child));
+    else found[child] = createHash("sha256").update(await readFile(absolute)).digest("hex");
+  }
+  return found;
+};
+
+/** `attempt` must refuse and leave every entry under the fixture, the journal included, as it was. */
+const refusesUnchanged = async (fixture, attempt, pattern = PRESERVED, label) => {
+  const before = await treeBytes(fixture.root);
+  await assert.rejects(attempt(), pattern, label);
+  assert.deepEqual(await treeBytes(fixture.root), before, label);
+};
+
+/** A fixture one checkpoint short of DISCOVERY_COMPLETENESS, ready to advance. */
+const advanceableFixture = async () => {
+  const fixture = await createFixture();
+  await driveTo(fixture, "DISCOVER_LEGACY");
+  await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+  return fixture;
+};
+
+test("DR13: every advance crash boundary recovers once and idempotently, to exactly one event", async () => {
+  for (const [stage, outcome, moved] of [
+    ["journal", "DISCARDED_UNCOMMITTED", 0],
+    ["integrity", "DISCARDED_UNCOMMITTED", 0],
+    ["state", "COMPLETED_HISTORY", 1],
+    ["history", "ALREADY_COMPLETE", 1],
+  ]) {
+    const fixture = await advanceableFixture();
+    try {
+      const linesBefore = (await historyLines(fixture)).length;
+      const { revisionBefore, journal } = await interruptAdvanceAt(fixture, stage);
+      const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+      assert.deepEqual(await recoverMigrationRecord(request), { outcome }, stage);
+      assert.equal(await exists(journal), false, stage);
+      assert.equal((await state(fixture)).revision, revisionBefore + moved, stage);
+      assert.equal((await historyLines(fixture)).length, linesBefore + moved, stage);
+      // A restart finds nothing to recover and changes nothing.
+      const settled = await snapshot(fixture.root);
+      assert.equal(await recoverMigrationRecord(request), null, stage);
+      assert.deepEqual(await snapshot(fixture.root), settled, stage);
+      await previewMigrationExecution(request);
+      if (!moved) {
+        // A discarded transition is taken again, once.
+        assert.equal((await advance(fixture)).state.revision, revisionBefore + 1, stage);
+        assert.equal((await historyLines(fixture)).length, linesBefore + 1, stage);
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("DR13: a process killed at every advance boundary is recovered by the next process", async () => {
+  for (const [stage, moved] of [["journal", 0], ["integrity", 0], ["state", 1], ["history", 1]]) {
+    const fixture = await advanceableFixture();
+    try {
+      const resolution = await resolutionFor(fixture);
+      const linesBefore = (await historyLines(fixture)).length;
+      const revisionBefore = (await state(fixture)).revision;
+      // A real child process advances and hangs, alive, the instant the stage
+      // is durable; it is then SIGKILLed with the module lock still held.
+      const script = path.join(fixture.root, "kill-advance.mjs");
+      await writeFile(
+        script,
+        `import { advanceMigration, previewAdvance } from ${JSON.stringify(pathToFileURL(path.join(scriptsRoot, "lifecycle/index.mjs")).href)};\n` +
+          `const request = { ...JSON.parse(process.argv[2]), moduleName: "auth" };\n` +
+          `const preview = await previewAdvance(request);\n` +
+          `await advanceMigration({ ...request, confirmAdvance: preview.confirmationId, hooks: { afterWrite: (written) => {\n` +
+          `  if (written !== process.argv[3]) return undefined;\n` +
+          `  process.stdout.write("boundary-reached\\n");\n` +
+          `  return new Promise(() => setInterval(() => {}, 1000));\n` +
+          `} } });\n` +
+          `process.stdout.write("completed\\n");\n`,
+      );
+      const child = spawn(process.execPath, [script, JSON.stringify(resolution), stage], {
+        cwd: fixture.root,
+        stdio: ["ignore", "pipe", "inherit"],
+      });
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${stage}: the boundary was never reached`)), 60_000);
+        child.stdout.on("data", (chunk) => {
+          if (chunk.toString().includes("boundary-reached")) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.on("exit", (code) => {
+          clearTimeout(timer);
+          reject(new Error(`${stage}: exited ${code} before the boundary`));
+        });
+      });
+      child.kill("SIGKILL");
+      await new Promise((resolve) => child.on("exit", resolve));
+      const lock = lockPathFor(fixture.targetRoot, "auth");
+      const journal = path.join(fixture.migrationRoot, "advance.journal");
+      assert.equal(await exists(lock), true, `${stage}: the killed process held the lock`);
+      assert.equal(await exists(journal), true, `${stage}: the journal survived the kill`);
+
+      const request = { ...resolution, moduleName: "auth" };
+      await recoverMigrationRecord(request);
+      assert.equal(await exists(journal), false, stage);
+      assert.equal(await exists(lock), false, `${stage}: the dead owner's lock was reclaimed and released`);
+      assert.equal((await state(fixture)).revision, revisionBefore + moved, stage);
+      assert.equal((await historyLines(fixture)).length, linesBefore + moved, stage);
+      await previewMigrationExecution(request);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("DR13: an advance journal its writers never produce is refused before any write", async () => {
+  const fixture = await advanceableFixture();
+  try {
+    // The most dangerous phase: state moved, history one event short.
+    const { journal } = await interruptAdvanceAt(fixture, "state");
+    const original = await readFile(journal, "utf8");
+    const real = JSON.parse(original);
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    const forged = {
+      "an unknown field": { ...real, approvedBy: "nobody" },
+      "a revision gap": { ...real, toRevision: real.fromRevision + 2 },
+      "another revision": { ...real, fromRevision: real.fromRevision + 5, toRevision: real.toRevision + 5 },
+      "a foreign event revision": { ...real, event: { ...real.event, revision: real.toRevision + 1 } },
+      "an event without a kind": { ...real, event: { revision: real.toRevision } },
+      "a restore outside the record": { ...real, restore: [{ path: "../../../outside.txt", content: "x" }] },
+      "an absolute restore": { ...real, restore: [{ path: path.join(fixture.root, "package.json"), content: "x" }] },
+      "a restore of the history": { ...real, restore: [{ path: "history/history.ndjson", content: "" }] },
+      "a restore of the anchor": { ...real, restore: [{ path: "integrity.json", remove: true }] },
+      "a restore reaching the anchor through dot segments": { ...real, restore: [{ path: "steps/../integrity.json", remove: true }] },
+      "a restore of the journal": { ...real, restore: [{ path: "advance.journal", remove: true }] },
+      "a restore that does nothing": { ...real, restore: [{ path: "steps/01-resolve.md" }] },
+      "a restore that does both": { ...real, restore: [{ path: "steps/01-resolve.md", remove: true, content: "" }] },
+      "a malformed anchor": { ...real, integrity: { content: 1, before: null } },
+    };
+    for (const [label, journalValue] of Object.entries(forged)) {
+      await writeFile(journal, `${JSON.stringify(journalValue, null, 2)}\n`);
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), PRESERVED, label);
+    }
+    for (const bytes of ["[]\n", "null\n", "42\n"]) {
+      await writeFile(journal, bytes);
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /unreadable journal/, bytes);
+    }
+    // The real journal still recovers the record.
+    await writeFile(journal, original);
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "COMPLETED_HISTORY" });
+    await previewMigrationExecution(request);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR13: a state or anchor outside the journal's phases is refused with history and anchor untouched", async () => {
+  const fixture = await advanceableFixture();
+  try {
+    const { journal } = await interruptAdvanceAt(fixture, "state");
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    const statePath = path.join(fixture.migrationRoot, "state.json");
+    const integrityPath = path.join(fixture.migrationRoot, "integrity.json");
+    const [stateBytes, integrityBytes] = await Promise.all([readFile(statePath, "utf8"), readFile(integrityPath, "utf8")]);
+
+    // A state at the journal's revision that its event does not produce: the
+    // in-flight replay refuses it before an event is appended for it.
+    const forgedState = JSON.parse(stateBytes);
+    forgedState.completedSteps = forgedState.completedSteps.slice(0, -1);
+    await writeFile(statePath, `${JSON.stringify(forgedState, null, 2)}\n`);
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /append-only history proves/);
+    await writeFile(statePath, stateBytes);
+
+    // A history tail that is not a torn append of this event is never sealed away.
+    const historyPath = path.join(fixture.migrationRoot, "history/history.ndjson");
+    const historyBytes = await readFile(historyPath, "utf8");
+    await writeFile(historyPath, `${historyBytes}garbage`);
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /not a torn append of its event/);
+    await writeFile(historyPath, historyBytes);
+
+    // An anchor that is neither the journal's before nor its after bytes.
+    await writeFile(integrityPath, integrityBytes.replace(/"revision": \d+/, '"revision": 999'));
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /neither its before nor its after anchor/);
+    await writeFile(integrityPath, integrityBytes);
+
+    // An after-anchor is written only once it agrees with the state and
+    // history, whatever bytes the journal carries.
+    const real = await readFile(journal, "utf8");
+    const parsed = JSON.parse(real);
+    for (const content of ["{}\n", "null\n", "not json", integrityBytes.replace(/"revision": \d+/, '"revision": 999')]) {
+      await writeFile(journal, JSON.stringify({ ...parsed, integrity: { before: integrityBytes, content } }));
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /after-anchor that does not agree/, content);
+      // ...and the same forged anchor already on disk: still proven before the event is appended.
+      await writeFile(journal, JSON.stringify({ ...parsed, integrity: { before: parsed.integrity.before, content } }));
+      await writeFile(integrityPath, content);
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /after-anchor that does not agree|integrity\.json/, `on disk: ${content}`);
+      await writeFile(integrityPath, integrityBytes);
+    }
+    // An anchored record whose anchor is gone -- with a history that would
+    // still replay unchained -- is refused, never appended to.
+    const unchained = historyBytes.split("\n").filter(Boolean)
+      .map((line) => { const { hash: _h, previousHash: _p, seq: _s, ...event } = JSON.parse(line); return JSON.stringify(event); });
+    const { integrity: _anchor, ...withoutAnchor } = parsed;
+    await writeFile(historyPath, `${unchained.join("\n")}\n`);
+    await rm(integrityPath);
+    await writeFile(journal, JSON.stringify(withoutAnchor));
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /after-anchor that does not agree/);
+    await writeFile(historyPath, historyBytes);
+    await writeFile(integrityPath, integrityBytes);
+
+    // A writer that put state before the anchor (an older order) left the
+    // before-anchor on disk: the real after-anchor proves itself and is written.
+    await writeFile(journal, real);
+    await writeFile(integrityPath, parsed.integrity.before);
+
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "COMPLETED_HISTORY" });
+    assert.equal(await exists(journal), false);
+    assert.equal(await readFile(integrityPath, "utf8"), integrityBytes);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR13: a journal restores only bytes the persisted state holds, and an undo under a never-created directory recovers", async () => {
+  const fixture = await advanceableFixture();
+  try {
+    const { journal } = await interruptAdvanceAt(fixture, "journal");
+    const real = JSON.parse(await readFile(journal, "utf8"));
+    const statePath = path.join(fixture.migrationRoot, "state.json");
+    const stateBytes = await readFile(statePath, "utf8");
+    const pinned = "steps/01-resolve.md";
+    const pinnedBytes = await readFile(path.join(fixture.migrationRoot, pinned), "utf8");
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    for (const [label, restore] of [
+      ["another state", [{ path: "state.json", content: stateBytes.replace("ACTIVE", "COMPLETE") }]],
+      ["a pinned file rewritten", [{ path: pinned, content: `${pinnedBytes}forged\n` }]],
+      ["a pinned file removed", [{ path: pinned, remove: true }]],
+    ]) {
+      await writeFile(journal, JSON.stringify({ ...real, restore }));
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /to bytes the persisted state does not hold/, label);
+    }
+    // The format upgrade's idempotent restore (the bytes already on disk), a
+    // pinned file given back its own bytes, and the undo of a file whose new
+    // directory a crash came before are all the writers' phases.
+    await writeFile(journal, JSON.stringify({ ...real, restore: [
+      { path: "state.json", content: stateBytes },
+      { path: pinned, content: pinnedBytes },
+      { path: "rework/never-created/attempt-1/result.json", remove: true },
+    ] }));
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "DISCARDED_UNCOMMITTED" });
+    assert.equal(await readFile(statePath, "utf8"), stateBytes);
+    assert.equal(await exists(journal), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR13: a discarded transition's undo is durable before its journal is removed, and the removal is fsynced", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await advanceableFixture();
+  t.after(() => fixture.cleanup());
+  const { journal } = await interruptAdvanceAt(fixture, "integrity");
+  // A file the transition created ahead of its state write: the undo removes it.
+  const created = path.join(fixture.migrationRoot, "reopen/created.md");
+  await mkdir(path.dirname(created), { recursive: true });
+  await writeFile(created, "created ahead of the state write\n");
+  const real = JSON.parse(await readFile(journal, "utf8"));
+  await writeFile(journal, JSON.stringify({ ...real, restore: [{ path: "reopen/created.md", remove: true }] }));
+  const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+  const log = await traceFs(t);
+  assert.deepEqual(await recoverMigrationRecord(request), { outcome: "DISCARDED_UNCOMMITTED" });
+  const at = (op, file) => log.findIndex(([o, f]) => o === op && f === file);
+  const syncedBetween = (directory, from, to) => log.some(([op, file], index) => index > from && index < to && op === "sync" && file === directory);
+  const createdGone = at("unlink", created);
+  const anchorBack = at("rename", path.join(fixture.migrationRoot, "integrity.json"));
+  const journalGone = at("unlink", journal);
+  assert.ok(createdGone >= 0 && anchorBack >= 0 && journalGone > Math.max(createdGone, anchorBack), "the undo ran, then the removal");
+  assert.ok(syncedBetween(path.dirname(created), createdGone, journalGone), "the removed file's directory is fsynced before the journal goes");
+  assert.ok(syncedBetween(fixture.migrationRoot, anchorBack, journalGone), "the restored anchor is durable before the journal goes");
+  assert.ok(syncedBetween(fixture.migrationRoot, journalGone, log.length), "the journal removal itself is fsynced");
+  assert.equal(await exists(created), false);
+  // The forward path retires its journal the same way.
+  const advanced = await traceFs(t);
+  await advance(fixture);
+  const removed = advanced.findIndex(([op, file]) => op === "unlink" && file === journal);
+  assert.ok(removed >= 0 && advanced.some(([op, file], index) => index > removed && op === "sync" && file === fixture.migrationRoot),
+    "an advance's journal removal is fsynced");
+  assert.equal(advanced.some(([op, file]) => op === "rm" && file === journal), false);
+});
+
+test("DR13: a symlinked or non-file advance journal is refused; the link and its target are untouched", async () => {
+  const fixture = await advanceableFixture();
+  try {
+    const { journal } = await interruptAdvanceAt(fixture, "state");
+    const original = await readFile(journal, "utf8");
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    if (process.platform !== "win32") {
+      const outside = path.join(fixture.root, "outside.journal");
+      await writeFile(outside, original);
+      await rm(journal);
+      await symlink(outside, journal);
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /unreadable journal/);
+      assert.equal((await lstat(journal)).isSymbolicLink(), true);
+      assert.equal(await readFile(outside, "utf8"), original);
+      await rm(journal);
+    } else {
+      await rm(journal);
+    }
+    await mkdir(journal);
+    await writeFile(path.join(journal, "inside"), "x");
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /unreadable journal/);
+    await rm(journal, { recursive: true });
+    await writeFile(journal, original);
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "COMPLETED_HISTORY" });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR13: an undo that would reach through a symlink is refused before its first write", { skip: process.platform === "win32" }, async () => {
+  const fixture = await advanceableFixture();
+  try {
+    const { journal } = await interruptAdvanceAt(fixture, "integrity");
+    const real = JSON.parse(await readFile(journal, "utf8"));
+    const kept = path.join(fixture.migrationRoot, "kept.md");
+    const outside = path.join(fixture.root, "outside-dir");
+    await writeFile(kept, "removed only if the whole undo can run\n");
+    await mkdir(outside);
+    await writeFile(path.join(outside, "created.md"), "outside the record\n");
+    await symlink(outside, path.join(fixture.migrationRoot, "reopen"));
+    await writeFile(journal, JSON.stringify({ ...real, restore: [{ path: "kept.md", remove: true }, { path: "reopen/created.md", remove: true }] }));
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /through a symlink/);
+    assert.equal(await exists(kept), true);
+    assert.equal(await exists(path.join(outside, "created.md")), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/** The initialization journal exactly as `commitInitialization` writes it, before anything is staged. */
+const initJournalFor = async (fixture, overrides = {}) => {
+  const transactionId = randomUUID();
+  const root = fixture.migrationRoot;
+  const staged = (target) => path.join(path.dirname(target), `.${path.basename(target)}.${transactionId}.init`);
+  const configBefore = await readFile(fixture.packagePath, "utf8");
+  const file = path.join(fixture.targetRoot, ".agents/knowledge/migrations/init/auth.journal");
+  return {
+    file,
+    journal: {
+      file,
+      transactionId,
+      module: "auth",
+      pid: 1,
+      startedAt: new Date().toISOString(),
+      root,
+      rootOwner: path.join(root, ".init-owner"),
+      openSpecPath: fixture.specPath,
+      projectRoot: fixture.root,
+      configPath: fixture.packagePath,
+      configBefore,
+      configAfter: `${configBefore.trimEnd().slice(0, -1)},"config":{}}\n`,
+      stagedRoot: staged(root),
+      stagedOpenSpec: staged(fixture.specPath),
+      stagedProjectConfig: staged(fixture.packagePath),
+      ...overrides,
+    },
+  };
+};
+
+test("DR13: a failure after the initialization committed never rolls the record back", { skip: process.platform === "win32" }, async (t) => {
+  // The commit point is state.json's rename. Fail just after it (its directory
+  // fsync) and in the cleanup that follows: both keep the record and journal.
+  for (const [label, failsAt] of [
+    ["the state.json directory fsync", (op, file, seen) => op === "sync" && file === seen.root && seen.stateRenamed],
+    ["the staged-tree cleanup", (op, file) => op === "rm" && /\.auth\.[0-9a-f-]{36}\.init$/.test(path.basename(file))],
+  ]) {
+    const fixture = await createFixture();
+    t.after(() => fixture.cleanup());
+    const seen = { root: fixture.migrationRoot, stateRenamed: false };
+    let failed = false;
+    await traceFs(t, async (op, file) => {
+      if (op === "rename" && file === path.join(fixture.migrationRoot, "state.json")) seen.stateRenamed = true;
+      if (!failed && failsAt(op, file, seen)) {
+        failed = true;
+        throw ioError();
+      }
+    });
+    await assert.rejects(initialize(fixture, { currentFormat: true }), { code: "EIO" }, label);
+    await traceFs(t);
+    assert.equal(failed, true, label);
+    const journal = path.join(fixture.targetRoot, ".agents/knowledge/migrations/init/auth.journal");
+    assert.equal(await exists(path.join(fixture.migrationRoot, "state.json")), true, `${label}: the committed record stays`);
+    assert.equal(await exists(journal), true, `${label}: the journal stays for recovery to finish`);
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "COMPLETED" }, label);
+    assert.equal(await exists(journal), false, label);
+    assert.equal(await exists(path.join(fixture.migrationRoot, ".init-owner")), false, label);
+    await readState(fixture.targetRoot, "auth");
+  }
+});
+
+test("DR13: an initialization journal left right after it was written rolls back, even before modules/ exists", async () => {
+  const fixture = await createFixture();
+  try {
+    const { file, journal } = await initJournalFor(fixture);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(journal, null, 2));
+    assert.equal(await exists(path.dirname(fixture.migrationRoot)), false, "no module directory was ever created");
+    await assert.rejects(previewFresh(fixture), (error) => error.pendingTransaction === true);
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "ROLLED_BACK" });
+    await initialize(fixture, { currentFormat: true });
+    assert.equal(await exists(file), false);
+    assert.equal(await exists(path.join(fixture.migrationRoot, "state.json")), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR13: a process killed at every initialization commit is recovered by the next initialization", async () => {
+  for (const stage of ["openspec", "project-config", "migration"]) {
+    const fixture = await createFixture();
+    try {
+      const resolution = await resolutionFor(fixture);
+      const script = path.join(fixture.root, "kill-init.mjs");
+      await writeFile(
+        script,
+        `import { bootstrapMigration, previewMigrationExecution } from ${JSON.stringify(pathToFileURL(path.join(scriptsRoot, "lifecycle/index.mjs")).href)};\n` +
+          `const [request, stage] = [{ ...JSON.parse(process.argv[2]), moduleName: "auth" }, process.argv[3]];\n` +
+          `const preview = await previewMigrationExecution({ ...request, openSpecProposal: process.argv[4] });\n` +
+          `await bootstrapMigration({ ...request, openSpecProposal: preview.openSpecProposal, registryBinding: preview.registryBinding,\n` +
+          `  boundInputs: preview.boundInputs, hooks: { afterCommit: (committed) => {\n` +
+          `    if (committed !== stage) return undefined;\n` +
+          `    process.stdout.write("boundary-reached\\n");\n` +
+          `    return new Promise(() => setInterval(() => {}, 1000));\n` +
+          `  } } });\n` +
+          `process.stdout.write("completed\\n");\n`,
+      );
+      const child = spawn(process.execPath, [script, JSON.stringify(resolution), stage, SPEC], {
+        cwd: fixture.root,
+        stdio: ["ignore", "pipe", "inherit"],
+      });
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${stage}: the boundary was never reached`)), 60_000);
+        child.stdout.on("data", (chunk) => {
+          if (chunk.toString().includes("boundary-reached")) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.on("exit", (code) => {
+          clearTimeout(timer);
+          reject(new Error(`${stage}: exited ${code} before the boundary`));
+        });
+      });
+      child.kill("SIGKILL");
+      await new Promise((resolve) => child.on("exit", resolve));
+      const journal = path.join(fixture.targetRoot, ".agents/knowledge/migrations/init/auth.journal");
+      assert.equal(await exists(journal), true, `${stage}: the journal survived the kill`);
+      // What `discover-module` does: the preview reports the interrupted
+      // initialization, the resume recovers it under the reclaimed lock (undoing
+      // or finishing it), and a record without state is then initialized once.
+      const committed = stage === "migration";
+      if (!committed) await assert.rejects(previewFresh(fixture), (error) => error.pendingTransaction === true, stage);
+      const request = { ...resolution, moduleName: "auth" };
+      if (committed) {
+        // Committed, but no longer what it committed: the journal stays.
+        const packageBytes = await readFile(fixture.packagePath, "utf8");
+        const rebound = JSON.parse(packageBytes);
+        rebound.config.startMigration.registry = "elsewhere/registry.json";
+        await writeFile(fixture.packagePath, `${JSON.stringify(rebound, null, 2)}\n`);
+        await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /no longer the one it wrote/, stage);
+        await writeFile(fixture.packagePath, packageBytes);
+        const statePath = path.join(fixture.migrationRoot, "state.json");
+        const stateBytes = await readFile(statePath, "utf8");
+        await writeFile(statePath, stateBytes.replace('"revision": 1', '"revision": 2'));
+        await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /revision/, stage);
+        await writeFile(statePath, stateBytes);
+      }
+      assert.deepEqual(await recoverMigrationRecord(request), { outcome: committed ? "COMPLETED" : "ROLLED_BACK" }, stage);
+      assert.equal(await recoverMigrationRecord(request), null, `${stage}: a restart recovers nothing more`);
+      if (!committed) await initialize(fixture, { currentFormat: true });
+      assert.equal(await exists(journal), false, stage);
+      assert.equal(await exists(lockPathFor(fixture.targetRoot, "auth")), false, stage);
+      assert.equal(await exists(path.join(fixture.migrationRoot, ".init-owner")), false, stage);
+      assert.equal((await historyLines(fixture)).length, 1, `${stage}: one CREATED event`);
+      assert.deepEqual((await readdir(path.dirname(fixture.migrationRoot))).filter((entry) => entry.endsWith(".init")), [], `${stage}: no staged tree is left`);
+      await readState(fixture.targetRoot, "auth");
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("DR13: an initialization journal that names paths its writer never derives, or a root it does not own, is refused before anything is removed", async () => {
+  const fixture = await createFixture();
+  try {
+    const sentinel = path.join(fixture.targetRoot, "src");
+    const request = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    const forged = {
+      "a staged root elsewhere": { stagedRoot: sentinel },
+      "another module's root": { root: path.join(path.dirname(fixture.migrationRoot), "billing") },
+      "another module": { module: "billing" },
+      "an unrelated project": { projectRoot: path.join(fixture.root, "..", "unrelated-dr13"), configPath: path.join(fixture.root, "..", "unrelated-dr13/package.json") },
+      "a binding outside package.json": { configPath: path.join(fixture.root, "other.json") },
+      "an OpenSpec outside the target": { openSpecPath: path.join(fixture.root, "spec.md") },
+      "a transaction id that is not one": { transactionId: "../../src" },
+      "an unknown field": { approvedBy: "nobody" },
+    };
+    for (const [label, overrides] of Object.entries(forged)) {
+      const { file, journal } = await initJournalFor(fixture, overrides);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, JSON.stringify(journal, null, 2));
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), PRESERVED, label);
+    }
+    const { file, journal } = await initJournalFor(fixture);
+    await writeFile(file, JSON.stringify(journal, null, 2));
+    if (process.platform !== "win32") {
+      // The module directory reached through a symlink: its own owner marker
+      // behind it does not make the removal safe.
+      const elsewhere = path.join(fixture.root, "elsewhere");
+      await mkdir(path.join(elsewhere, "auth"), { recursive: true });
+      await writeFile(path.join(elsewhere, "auth/.init-owner"), journal.transactionId);
+      await writeFile(path.join(elsewhere, "auth/kept.md"), "kept\n");
+      await symlink(elsewhere, path.dirname(fixture.migrationRoot));
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /through a symlink/);
+      await rm(path.dirname(fixture.migrationRoot));
+    }
+    if (process.platform !== "win32") {
+      // A `..` after a symlink: lexically this module's root, physically
+      // somewhere else whose owner marker matches. Only canonical paths count.
+      const modules = path.dirname(fixture.migrationRoot);
+      const victim = path.join(fixture.root, "elsewhere-parent", "auth");
+      await mkdir(path.join(fixture.root, "elsewhere-parent", "sub"), { recursive: true });
+      await mkdir(victim, { recursive: true });
+      await writeFile(path.join(victim, ".init-owner"), journal.transactionId);
+      await writeFile(path.join(victim, "kept.md"), "kept\n");
+      await mkdir(modules, { recursive: true });
+      await symlink(path.join(fixture.root, "elsewhere-parent", "sub"), path.join(modules, "link"));
+      const sneaky = `${modules}${path.sep}link${path.sep}..${path.sep}auth`;
+      await writeFile(file, JSON.stringify({ ...journal, root: sneaky, rootOwner: `${sneaky}${path.sep}.init-owner` }, null, 2));
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /non-canonical path/);
+      assert.equal(await exists(path.join(victim, "kept.md")), true);
+      await rm(path.join(modules, "link"));
+      await writeFile(file, JSON.stringify(journal, null, 2));
+    }
+    // Owned by another transaction, or by none while holding files: someone else's evidence.
+    await mkdir(fixture.migrationRoot, { recursive: true });
+    await writeFile(path.join(fixture.migrationRoot, ".init-owner"), randomUUID());
+    await writeFile(path.join(fixture.migrationRoot, "kept.md"), "kept\n");
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /another initialization owns/);
+    await rm(path.join(fixture.migrationRoot, ".init-owner"));
+    if (process.platform !== "win32") {
+      // An owner marker read through a link authorizes nothing.
+      const borrowed = path.join(fixture.root, "borrowed-owner");
+      await writeFile(borrowed, journal.transactionId);
+      await symlink(borrowed, path.join(fixture.migrationRoot, ".init-owner"));
+      await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /through a symlink/);
+      await rm(path.join(fixture.migrationRoot, ".init-owner"));
+    }
+    await refusesUnchanged(fixture, () => recoverMigrationRecord(request), /files no initialization owns/);
+    await refusesUnchanged(fixture, () => bootstrapMigration({ ...request, boundInputs: {} }), /files no initialization owns/);
+    // Its own root (owner marker, partial tree) is the writer's phase: rolled back.
+    await writeFile(path.join(fixture.migrationRoot, ".init-owner"), journal.transactionId);
+    assert.deepEqual(await recoverMigrationRecord(request), { outcome: "ROLLED_BACK" });
+    await initialize(fixture, { currentFormat: true });
+    assert.equal(await exists(file), false);
+    assert.equal(await exists(path.join(fixture.migrationRoot, "kept.md")), false);
+    assert.equal(await exists(path.join(sentinel, "placeholder.ts")), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+/** The registry journal exactly as `updateRegistry` writes it for registering `auth`. */
+const registryJournalFor = async (fixture, overrides = {}) => {
+  const preview = await previewRegistryUpdate({
+    projectRoot: fixture.root,
+    registryPath: fixture.registryPath,
+    moduleName: "auth",
+    target: "auth",
+  });
+  return {
+    file: path.join(fixture.targetRoot, ".agents/knowledge/migrations/registry.journal.json"),
+    journal: {
+      registryPath: preview.registryPath,
+      registryBefore: preview.before,
+      registryAfter: preview.content,
+      configPath: preview.registryBinding.configPath,
+      configBefore: preview.registryBinding.before,
+      configAfter: preview.registryBinding.content,
+      projectRoot: preview.registryBinding.projectRoot,
+      ...overrides,
+    },
+  };
+};
+
+test("DR13: registry recovery finishes only its own before/after phases and refuses anything else with nothing written", async () => {
+  for (const phase of ["both before", "registry written", "both written"]) {
+    const fixture = await createFixture({ modules: {} });
+    try {
+      const { file, journal } = await registryJournalFor(fixture);
+      await writeFile(file, JSON.stringify(journal));
+      if (phase !== "both before") await writeFile(journal.registryPath, journal.registryAfter);
+      if (phase === "both written") await writeFile(journal.configPath, journal.configAfter);
+      await registerAuth(fixture);
+      assert.equal(await exists(file), false, phase);
+      assert.equal(await readFile(journal.registryPath, "utf8"), journal.registryAfter, phase);
+      assert.equal(await readFile(journal.configPath, "utf8"), journal.configAfter, phase);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+  const fixture = await createFixture({ modules: {} });
+  try {
+    const outside = path.join(fixture.root, "outside.json");
+    await writeFile(outside, "{}\n");
+    const { file, journal } = await registryJournalFor(fixture);
+    const forged = {
+      "a registry outside the target": { ...journal, registryPath: outside, registryBefore: "{}\n" },
+      "a binding outside package.json": { ...journal, configPath: outside, configBefore: "{}\n" },
+      "an unrelated project": { ...journal, projectRoot: path.join(fixture.root, "..", "unrelated-dr13") },
+      "an unknown field": { ...journal, approvedBy: "nobody" },
+      "a registry write without bytes": { ...journal, registryAfter: null },
+      "a registry document that does not validate": { ...journal, registryAfter: "{}\n" },
+      "a registry path with dot segments": { ...journal, registryPath: `${path.dirname(journal.registryPath)}${path.sep}..${path.sep}migrations${path.sep}registry.json` },
+      "a binding to another registry": { ...journal, configAfter: `${JSON.stringify({ name: "x", config: { startMigration: { registry: "outside.json" } } })}\n` },
+    };
+    for (const [label, value] of Object.entries(forged)) {
+      await writeFile(file, JSON.stringify(value));
+      await refusesUnchanged(fixture, () => registerAuth(fixture), PRESERVED, label);
+    }
+    if (process.platform !== "win32") {
+      // The binding reached through a symlink: refused before the registry half is written.
+      const realPackage = path.join(fixture.root, "real-package.json");
+      await writeFile(file, JSON.stringify(journal));
+      await rename(fixture.packagePath, realPackage);
+      await symlink(realPackage, fixture.packagePath);
+      await refusesUnchanged(fixture, () => registerAuth(fixture), /through a symlink/);
+      await rm(fixture.packagePath);
+      await rename(realPackage, fixture.packagePath);
+    }
+    // Changed outside the workflow after the crash: neither of its phases. It
+    // is never clobbered, and never mistaken for a finished registration.
+    await writeFile(file, JSON.stringify(journal));
+    await writeFile(journal.configPath, '{"name":"edited by hand","private":true}\n');
+    await refusesUnchanged(fixture, () => registerAuth(fixture), /holds neither its journalled before nor after bytes/);
+    assert.equal(await readFile(journal.registryPath, "utf8"), journal.registryBefore, "the registry half was not applied either");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("DR13: a registration that fails after its journal keeps it, and the next registration finishes the pair", async (t) => {
+  const fixture = await createFixture({ modules: {} });
+  t.after(() => fixture.cleanup());
+  const { file, journal } = await registryJournalFor(fixture);
+  let failed = false;
+  await traceFs(t, async (op, target) => {
+    if (!failed && op === "rename" && target === fixture.packagePath) {
+      failed = true;
+      throw ioError();
+    }
+  });
+  await assert.rejects(registerAuth(fixture), { code: "EIO" });
+  assert.equal(failed, true);
+  assert.equal(await readFile(file, "utf8").then(JSON.parse).then((kept) => kept.configAfter), journal.configAfter, "the journal survives the failure");
+  assert.equal(await readFile(fixture.registryPath, "utf8"), journal.registryAfter);
+  assert.equal(await readFile(fixture.packagePath, "utf8"), journal.configBefore);
+  await traceFs(t);
+  await registerAuth(fixture);
+  assert.equal(await exists(file), false);
+  assert.equal(await readFile(fixture.packagePath, "utf8"), journal.configAfter);
+});
+
+test("DR13: an upgrade journal outside its writer's states, module or directory is refused with nothing restored", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await downgradeToV4(fixture.migrationRoot);
+    const request = { registryPath: (await resolutionFor(fixture)).registryPath, moduleName: "auth" };
+    const preview = await previewUpgrade(request);
+    const stop = new Error("killed at LIVE_MOVED");
+    await assert.rejects(
+      executeUpgrade({ ...request, confirmUpgrade: preview.confirmationId, hooks: { afterJournal: (s) => { if (s === "LIVE_MOVED") throw stop; } } }),
+      (error) => error === stop,
+    );
+    const [pending] = await pendingTransactions(fixture.targetRoot, "auth");
+    const original = await readFile(pending.file, "utf8");
+    const real = JSON.parse(original);
+    assert.equal(await exists(fixture.migrationRoot), false, "the live tree is moved aside");
+    const forged = {
+      "an unknown state": { ...real, state: "HALF_DONE" },
+      "an unknown kind": { ...real, kind: "MERGE" },
+      "another module": { ...real, module: "billing" },
+      "another live tree": { ...real, livePath: path.join(fixture.targetRoot, "src") },
+      "another directory": { ...real, directory: fixture.upgradesRoot },
+      "an unknown field": { ...real, approvedBy: "nobody" },
+      // A terminal state hides nothing: the journal is still checked before it counts as settled.
+      "a terminal state of an unknown kind": { ...real, state: "DONE", kind: "MERGE" },
+      "a terminal state of another module": { ...real, state: "ROLLED_BACK", module: "billing" },
+      "a terminal journal without its paths": { confirmationId: real.confirmationId, module: "auth", kind: "UPGRADE", state: "DONE" },
+      "a terminal journal without its live path": { ...real, state: "DONE", livePath: undefined },
+      "a terminal journal of another module's live tree": { ...real, state: "DONE", livePath: path.join(fixture.root, "elsewhere/billing") },
+      // Same last segments elsewhere: a pending journal is bound by its whole path.
+      "a same-named live tree elsewhere": { ...real, livePath: path.join(fixture.root, "elsewhere/auth") },
+      "a same-named directory elsewhere": { ...real, directory: path.join(fixture.root, "elsewhere", real.confirmationId) },
+      "a non-canonical live path": { ...real, livePath: `${path.dirname(fixture.migrationRoot)}${path.sep}x${path.sep}..${path.sep}auth` },
+    };
+    for (const [label, value] of Object.entries(forged)) {
+      await writeFile(pending.file, JSON.stringify(value, null, 2));
+      await refusesUnchanged(fixture, () => recoverUpgrade(request), PRESERVED, label);
+      await refusesUnchanged(fixture, () => readState(fixture.targetRoot, "auth"), PRESERVED, label);
+    }
+    // The public per-journal entry classifies only states and kinds its coordinator writes.
+    await writeFile(pending.file, original);
+    for (const value of [{ ...real, state: "HALF_DONE" }, { ...real, kind: "MERGE" }]) {
+      await refusesUnchanged(fixture, () => recoverUpgradeTransaction({ ...value, file: pending.file, directory: pending.directory }), PRESERVED);
+    }
+    // The live tree moved, so both manifests were written first: without
+    // either one nothing is restored or settled.
+    await writeFile(pending.file, original);
+    for (const name of ["source-manifest.json", "target-manifest.json"]) {
+      const manifest = path.join(pending.directory, name);
+      const manifestBytes = await readFile(manifest, "utf8");
+      await rm(manifest);
+      await refusesUnchanged(fixture, () => recoverUpgrade(request), /source or target manifest is missing/, name);
+      await writeFile(manifest, manifestBytes);
+    }
+    if (process.platform !== "win32") {
+      // The live path reached through a symlink: nothing is renamed through it.
+      await writeFile(pending.file, original);
+      const modules = path.dirname(fixture.migrationRoot);
+      const elsewhere = path.join(fixture.root, "elsewhere-modules");
+      await rename(modules, elsewhere);
+      await symlink(elsewhere, modules);
+      await refusesUnchanged(fixture, () => recoverUpgrade(request), /through a symlink/);
+      await rm(modules);
+      await rename(elsewhere, modules);
+    }
+    await writeFile(pending.file, "{torn");
+    await refusesUnchanged(fixture, () => recoverUpgrade(request), /Upgrade transaction journal is unreadable/);
+    await refusesUnchanged(fixture, () => readState(fixture.targetRoot, "auth"), /Upgrade transaction journal is unreadable/);
+    // A snapshot that no longer matches its manifest is never restored.
+    await writeFile(pending.file, original);
+    const rollbackLive = path.join(pending.directory, "rollback-live");
+    const parked = path.join(fixture.root, "parked-rollback");
+    await rename(rollbackLive, parked);
+    const snapshotState = path.join(pending.directory, "source-snapshot/state.json");
+    const snapshotBytes = await readFile(snapshotState, "utf8");
+    await writeFile(snapshotState, snapshotBytes.replace("{", '{"tampered":true,'));
+    await refusesUnchanged(fixture, () => recoverUpgrade(request), /preserved snapshot does not match/);
+    assert.equal(await exists(fixture.migrationRoot), false, "nothing was copied into the live path");
+    await writeFile(snapshotState, snapshotBytes);
+    await rename(parked, rollbackLive);
+    const recovered = await recoverUpgrade(request);
+    assert.deepEqual(recovered.recovered.map((entry) => entry.outcome), ["ROLLED_BACK"]);
+    assert.deepEqual(await pendingTransactions(fixture.targetRoot, "auth"), []);
+    assert.equal(JSON.parse(await readFile(pending.file, "utf8")).state, "ROLLED_BACK", "the terminal journal stays as the record");
   } finally {
     await fixture.cleanup();
   }

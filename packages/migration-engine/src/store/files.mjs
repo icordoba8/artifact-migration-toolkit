@@ -1,4 +1,4 @@
-/** Store: durable file primitives -- reads, pins, the one replace-write (DR7) and the one durable append (DR8). */
+/** Store: durable file primitives -- reads, pins, the one replace-write (DR7), the one durable append (DR8) and the one durable removal (DR13). */
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
@@ -87,6 +87,31 @@ export const atomicWrite = async (targetRoot, destination, content, { mode = 0o6
   }
   await syncDirectory(parent);
 };
+
+/**
+ * DR13: the one durable removal. The path is checked from `root` (no symlink
+ * anywhere below it, the entry itself included), an absent entry is already
+ * removed, and the nearest existing directory is fsynced -- so a journal is
+ * never reported gone, and an undo never reported done, when a crash could
+ * still bring the entry back.
+ */
+export const removeDurably = async (root, file) => {
+  const absolute = await assertSecurePath(root, file);
+  await unlink(absolute).catch((error) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  await syncNearestDirectory(path.dirname(absolute));
+};
+
+/**
+ * Fsyncs `directory`, or its nearest ancestor that exists: a removal may have
+ * taken the directory with it, or a crash may have come before it was created.
+ */
+export const syncNearestDirectory = (directory) =>
+  syncDirectory(directory).catch((error) =>
+    error.code === "ENOENT" && path.dirname(directory) !== directory
+      ? syncNearestDirectory(path.dirname(directory))
+      : Promise.reject(error));
 
 /** `contentIdentity` for a file on disk, read through the safe-path reader. */
 export const fileContentIdentity = async (root, relativePath, options) => {

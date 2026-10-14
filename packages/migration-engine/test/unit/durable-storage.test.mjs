@@ -34,7 +34,9 @@ import {
   copyTree,
   hashHistoryEvent,
   HISTORY_FILE,
+  historyTailOf,
   INTEGRITY_FILE,
+  isTornAppendOf,
   prepareHistoryEvent,
   readHistoryEvents,
   readTree,
@@ -477,4 +479,29 @@ test("DR8: the decision ledger append is the store durable append; an interrupte
   await traceFs(t, async (op, file) => { if (op === "write" && file === ledger) throw ioError(); });
   await assert.rejects(appendApprovedCandidate({ candidate: candidate("b.md"), locked, result: "APPROVED", ask: undefined, stdout: quiet, statementFor }), { code: "EIO" });
   assert.deepEqual(await readFile(ledger), first);
+});
+
+test("DR13: a torn history append is recognized byte for byte, even split inside a character", async (t) => {
+  const root = await scratch(t);
+  const record = path.join(root, MIGRATIONS, "modules/auth");
+  await mkdir(path.join(record, "history"), { recursive: true });
+  const chained = { event: "REOPENED", reason: "café", revision: 3, seq: 3, hash: `sha256:${"a".repeat(64)}` };
+  const line = Buffer.from(JSON.stringify(chained));
+  const split = line.indexOf(Buffer.from("é")) + 1;
+  await writeFile(path.join(record, HISTORY_FILE), Buffer.concat([Buffer.from("{}\n"), line.subarray(0, split)]));
+  const tail = await historyTailOf(root, record);
+  assert.deepEqual(tail, line.subarray(0, split));
+  assert.equal(isTornAppendOf(tail, chained), true, "a tear inside é is still this event's prefix");
+  assert.equal(isTornAppendOf(line, chained), true, "the whole event without its newline");
+  assert.equal(isTornAppendOf(Buffer.concat([line, Buffer.from(" ")]), chained), false);
+  assert.equal(isTornAppendOf(Buffer.from("garbage"), chained), false);
+  assert.equal(isTornAppendOf(line.subarray(0, split), { ...chained, reason: "cafe" }), false);
+  // An unchained event carries its append time first; the tail supplies it.
+  const plain = { event: "REFRESHED", reason: "naïve", revision: 4 };
+  const plainLine = Buffer.from(JSON.stringify({ at: "2026-10-14T20:00:00.000Z", ...plain }));
+  assert.equal(isTornAppendOf(plainLine.subarray(0, plainLine.indexOf(Buffer.from("ï")) + 1), plain), true);
+  assert.equal(isTornAppendOf(plainLine.subarray(0, 10), plain), true);
+  assert.equal(isTornAppendOf(Buffer.from('{"at":"zz'), plain), false);
+  await writeFile(path.join(record, HISTORY_FILE), "{}\n");
+  assert.equal((await historyTailOf(root, record)).length, 0);
 });

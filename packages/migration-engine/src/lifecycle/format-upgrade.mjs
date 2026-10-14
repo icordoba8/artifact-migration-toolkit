@@ -4,7 +4,7 @@
  * increments stay in formats/. Moved verbatim from `resumable-migration.mjs`
  * (Track A8).
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertDirectLedgerEligible,
@@ -31,7 +31,8 @@ import {
   renderState,
   statePathFor,
 } from "../store/index.mjs";
-import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
+import { removeJournal, writeJournalAtomic } from "./journal.mjs";
+import { withModuleLock } from "./lock.mjs";
 import { adoptUiObservations, uiObservationsAdoptionPlan } from "./adoption.mjs";
 import { readContext } from "./context.mjs";
 import {
@@ -178,7 +179,7 @@ const adoptDirectLedgerDecisions = async ({
     await hooks?.afterWrite?.("state");
     await appendHistoryOnce(registryData.targetRoot, root, event);
     await hooks?.afterWrite?.("history");
-    await rm(journalFile, { force: true });
+    await removeJournal(journalFile);
     return {
       changed: true,
       upgraded: true,
@@ -436,7 +437,7 @@ export const commitNoOpFormatUpgrade = async ({
     await hooks?.afterWrite?.("state");
     await appendHistoryOnce(registryData.targetRoot, root, event);
     await hooks?.afterWrite?.("history");
-    await rm(journalFile, { force: true });
+    await removeJournal(journalFile);
     return {
       changed: true,
       upgraded: true,

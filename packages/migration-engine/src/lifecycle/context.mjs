@@ -15,6 +15,8 @@ import {
   resolveModule,
   statePathFor,
 } from "../store/index.mjs";
+import { initJournalFor, recoverInitialization } from "./initialization.mjs";
+import { readJournal } from "./journal.mjs";
 import { withModuleLock } from "./lock.mjs";
 import { validateStateShape } from "./checkpoints.mjs";
 import { readState, recoverPendingAdvance } from "./record.mjs";
@@ -23,19 +25,24 @@ import { readState, recoverPendingAdvance } from "./record.mjs";
  * The public recovery entry point. Every mutating command already recovers on
  * its own; this exists because a preview must not mutate, so a record whose
  * integrity anchor is one revision ahead of its state could be *diagnosed* by a
- * read but never repaired by one.
+ * read but never repaired by one. DR13: an interrupted initialization is the
+ * same case for a record without state -- the preview reports it as pending
+ * and this recovers it first, under the same lock.
  */
 export const recoverMigrationRecord = async ({ registryPath, moduleName }) => {
   const { registryData, resolved } = await readContext({
     registryPath,
     moduleName,
   });
-  const root = migrationRoot(registryData.targetRoot, resolved.canonical);
-  const statePath = statePathFor(registryData.targetRoot, resolved.canonical);
-  if (!(await fileExists(statePath))) return null;
-  return withModuleLock(registryData.targetRoot, resolved.canonical, () =>
-    recoverPendingAdvance(registryData.targetRoot, root, statePath),
-  );
+  const { targetRoot } = registryData;
+  const root = migrationRoot(targetRoot, resolved.canonical);
+  const statePath = statePathFor(targetRoot, resolved.canonical);
+  if (!(await fileExists(statePath)) && !(await readJournal(initJournalFor(targetRoot, resolved.canonical)))) return null;
+  return withModuleLock(targetRoot, resolved.canonical, async () => {
+    const initialized = await recoverInitialization(targetRoot, resolved.canonical);
+    if (!(await fileExists(statePath))) return initialized;
+    return (await recoverPendingAdvance(targetRoot, root, statePath)) ?? initialized;
+  });
 };
 
 export const readContext = async ({

@@ -48,9 +48,11 @@ export {
   mkdirDurably,
   readJson,
   readOptionalJson,
+  removeDurably,
   removeEmptyParents,
   renameDurably,
   syncDirectory,
+  syncNearestDirectory,
 } from "./files.mjs";
 export {
   assertCommandResults,
@@ -68,7 +70,9 @@ export {
   HISTORY_FILE,
   historyAnchorNow,
   historyAnchorOf,
+  historyTailOf,
   INTEGRITY_FILE,
+  isTornAppendOf,
   migrationRoot,
   prepareHistoryEvent,
   readHistoryEvents,
@@ -85,10 +89,10 @@ export {
   previewRegistryUpdate,
   projectRootFor,
   readRegistry,
-  recoverRegistryJournal,
   registryIdentity,
   registryJournalPathFor,
   renderRegistryPreview,
+  validateRegistry,
   resolveModule,
   resolveRegistryPath,
 } from "./registry.mjs";

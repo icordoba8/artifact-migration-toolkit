@@ -50,7 +50,7 @@ const load = (file) => import(pathToFileURL(path.join(src, file)).href);
 const LIFECYCLE_FILES = [
   "adoption.mjs", "advance.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-record.mjs",
   "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "checkpoints.mjs", "context.mjs",
-  "contract-upgrade.mjs", "format-upgrade.mjs", "index.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "preview.mjs",
+  "contract-upgrade.mjs", "format-upgrade.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "preview.mjs",
   "progress.mjs", "record.mjs", "recorder.mjs", "registry.mjs", "reopen.mjs", "status.mjs", "templates.mjs",
   "toolkit-identity.mjs", "validation.mjs",
 ];
@@ -351,10 +351,11 @@ test("A8-ARCH-6: the module lock and every journal stay lifecycle-controlled, wi
     visit(sf);
     if (named) assert.ok(["core.mjs", "module-lock.mjs"].includes(file), file);
   }
-  const text = Object.fromEntries(await Promise.all(["record.mjs", "bootstrap.mjs", "artifact-transaction.mjs", "registry.mjs", "contract-upgrade.mjs", "lock.mjs"]
+  // DR13: the initialization journal's path moved with its adapter, out of bootstrap.mjs.
+  const text = Object.fromEntries(await Promise.all(["record.mjs", "initialization.mjs", "artifact-transaction.mjs", "registry.mjs", "contract-upgrade.mjs", "lock.mjs"]
     .map(async (file) => [file, await readFile(path.join(src, "lifecycle", file), "utf8")])));
   assert.match(text["record.mjs"], /^export const ADVANCE_JOURNAL = "advance\.journal";$/m);
-  assert.match(text["bootstrap.mjs"], /"\.agents\/knowledge\/migrations\/init",/);
+  assert.match(text["initialization.mjs"], /"\.agents\/knowledge\/migrations\/init",/);
   assert.match(text["artifact-transaction.mjs"], /TRANSACTION_FILE/);
   assert.match(text["registry.mjs"], /registryJournalPathFor\(fresh\.targetRoot\)/);
   assert.match(text["contract-upgrade.mjs"], /"upgrade\.lock"/);
@@ -399,9 +400,10 @@ test("A8-ARCH-8: module and artifact checkpoint rules stay separate", async () =
   const edges = {};
   for (const file of LIFECYCLE_FILES) edges[file] = targets(`lifecycle/${file}`, await parse(`lifecycle/${file}`)).filter((t) => t.startsWith("lifecycle/")).map((t) => t.slice(10));
   // The artifact engine reads only the shared vocabulary of the module side:
-  // final gates, progress, policy, the one lock and the one offer loop.
+  // final gates, progress, policy, the one lock, the one journal protocol
+  // (DR13) and the one offer loop.
   for (const file of LIFECYCLE_FILES.filter((file) => file.startsWith("artifact-"))) {
-    assert.deepEqual(edges[file].filter((t) => !t.startsWith("artifact-") && !["checkpoints.mjs", "progress.mjs", "policy.mjs", "approval.mjs", "lock.mjs"].includes(t)), [], file);
+    assert.deepEqual(edges[file].filter((t) => !t.startsWith("artifact-") && !["checkpoints.mjs", "progress.mjs", "policy.mjs", "approval.mjs", "lock.mjs", "journal.mjs"].includes(t)), [], file);
   }
   // Only the delegation validators and the recorder reach into the artifact engine.
   const reachers = LIFECYCLE_FILES.filter((file) => !file.startsWith("artifact-") && file !== "index.mjs" && edges[file].some((t) => t.startsWith("artifact-")));

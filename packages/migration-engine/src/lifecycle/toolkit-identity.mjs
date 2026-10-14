@@ -3,7 +3,7 @@
  * adoption and the manual identity change. Moved verbatim from
  * `resumable-migration.mjs` (Track A8).
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { engineCommand } from "../engine-paths.mjs";
 import {
@@ -21,7 +21,8 @@ import {
   renderState,
   statePathFor,
 } from "../store/index.mjs";
-import { withModuleLock, writeJournalAtomic } from "./lock.mjs";
+import { removeJournal, writeJournalAtomic } from "./journal.mjs";
+import { withModuleLock } from "./lock.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { readContext } from "./context.mjs";
 import { isAutoAuthority } from "./policy.mjs";
@@ -229,7 +230,7 @@ export const changeModuleToolkitIdentity = async ({
     await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
     await atomicWrite(registryData.targetRoot, statePath, renderState(stamped));
     await appendHistoryOnce(registryData.targetRoot, root, event);
-    await rm(journalFile, { force: true });
+    await removeJournal(journalFile);
     return {
       changed: true,
       statePath,

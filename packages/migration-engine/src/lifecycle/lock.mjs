@@ -45,7 +45,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-import { atomicWrite, mkdirDurably } from "../store/index.mjs";
+import { mkdirDurably } from "../store/index.mjs";
 
 const LOCK_ROOT = ".agents/knowledge/migrations/locks";
 
@@ -262,26 +262,4 @@ export const withModuleLock = async (targetRoot, name, run, options) => {
   } finally {
     await release();
   }
-};
-
-// Every lifecycle journal lives under <target>/.agents/knowledge/migrations/,
-// so the target root -- the last such prefix -- is the trusted root a journal
-// path is checked from. A journal anywhere else is refused.
-const MIGRATIONS_SEGMENT = `${path.sep}${path.join(".agents", "knowledge", "migrations")}${path.sep}`;
-const journalTargetRoot = (file) => {
-  const absolute = path.resolve(file);
-  const at = absolute.lastIndexOf(MIGRATIONS_SEGMENT);
-  if (at < 0) throw new Error(`Refusing a journal outside .agents/knowledge/migrations: ${absolute}`);
-  return absolute.slice(0, at) || path.parse(absolute).root;
-};
-
-/**
- * Crash-safe journal write, so a reader never observes a half-written journal.
- * DR7: the store replace-write, checked from the target root -- no write
- * through a symlink anywhere below it, the temp file removed on failure, new
- * directories and the rename fsynced. Byte format and operator-only mode are
- * unchanged. Shared by every lifecycle journal.
- */
-export const writeJournalAtomic = async (file, journal) => {
-  await atomicWrite(journalTargetRoot(file), file, `${JSON.stringify(journal, null, 2)}\n`);
 };
