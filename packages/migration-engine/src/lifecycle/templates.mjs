@@ -16,11 +16,18 @@ import {
   WORKFLOW_VERSION,
 } from "../formats/index.mjs";
 import {
+  FIXED_VISUAL_TOLERANCE,
+  HARDENED_VISUAL_VERSION,
   LEGACY_AUTHORITY_ROLE,
   LEGACY_RUNTIME_EVIDENCE_ROOT,
   VISUAL_AUTHORITIES,
 } from "../visual/index.mjs";
 import { FINAL_GATES, renderStep } from "./checkpoints.mjs";
+
+// Rendered only at bootstrap, when no visual contract is pinned yet, so the
+// contract authored from it is always a new one: v2, never v1 history. The
+// values come from the visual contract itself so the brief cannot drift from it.
+const FIXED_TOLERANCE_RULE = `Author it at \`"version": ${HARDENED_VISUAL_VERSION}\` and never author a \`tolerance\` (\`VISUAL_TOLERANCE_FIXED\`): every row is compared at the engine's fixed \`${JSON.stringify(FIXED_VISUAL_TOLERANCE)}\`, not an agent-chosen value.`;
 
 export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
   "steps/02-discover-legacy.md": renderStep({
@@ -98,12 +105,12 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
       "A missing architecture authority is recorded in `authorityGaps`, never invented or cited as if present.",
       ...(designSource === "figma-mcp"
         ? [
-            `Derive \`${VISUAL_ACCEPTANCE_FILE}\` from \`${FIGMA_CONTEXT_FILE}\`: one row per required UI behavior state, binding \`figmaNodeId\`, \`figmaState\`, the frame \`viewport\`, expected visual facts (\`px\`, \`count\`, \`equals\`, \`present\`), and an explicit \`tolerance\`; the row is the only thing that binds a runtime state to Figma, and nothing is inferred from frame names or states. A state with no row goes under \`unbacked\` with its reason, and stays blocked until an operator approves its VISUAL_UNBACKED candidate (\`record-decision.mjs <module> --pending\`, approved at a terminal) and the entry cites that \`decisionId\` and \`decisionDigest\`. A state with a row can never be unbacked.`,
+            `Derive \`${VISUAL_ACCEPTANCE_FILE}\` from \`${FIGMA_CONTEXT_FILE}\`: one row per required UI behavior state, binding \`figmaNodeId\`, \`figmaState\`, the frame \`viewport\`, and expected visual facts (\`px\`, \`count\`, \`equals\`, \`present\`); the row is the only thing that binds a runtime state to Figma, and nothing is inferred from frame names or states. ${FIXED_TOLERANCE_RULE} A state with no row goes under \`unbacked\` with its reason, and stays blocked until an operator approves its VISUAL_UNBACKED candidate (\`record-decision.mjs <module> --pending\`, approved at a terminal) and the entry cites that \`decisionId\` and \`decisionDigest\`. A state with a row can never be unbacked.`,
           ]
         : []),
       ...(designSource === "legacy-runtime"
         ? [
-            `Derive \`${VISUAL_ACCEPTANCE_FILE}\` from \`${LEGACY_RUNTIME_CONTEXT_FILE}\`: one row per required UI behavior state, binding \`legacyFrameId\` (the pinned frame's \`id\`), the frame \`viewport\`, expected visual facts (\`px\`, \`count\`, \`equals\`, \`present\`) taken from that frame's pinned measurements, and an explicit \`tolerance\`; the row is the only thing that binds a runtime state to the legacy authority. A state with no row goes under \`unbacked\` with its reason and an approved VISUAL_UNBACKED decision. A state with a row can never be unbacked.`,
+            `Derive \`${VISUAL_ACCEPTANCE_FILE}\` from \`${LEGACY_RUNTIME_CONTEXT_FILE}\`: one row per required UI behavior state, binding \`legacyFrameId\` (the pinned frame's \`id\`), the frame \`viewport\`, and expected visual facts (\`px\`, \`count\`, \`equals\`, \`present\`) taken from that frame's pinned measurements; the row is the only thing that binds a runtime state to the legacy authority. ${FIXED_TOLERANCE_RULE} A state with no row goes under \`unbacked\` with its reason and an approved VISUAL_UNBACKED decision. A state with a row can never be unbacked.`,
           ]
         : []),
     ],

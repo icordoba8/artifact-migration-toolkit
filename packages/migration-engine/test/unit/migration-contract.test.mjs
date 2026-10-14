@@ -160,6 +160,8 @@ import {
   validateVisualAcceptance,
   validateFigmaContext,
   assertRequiredObservations,
+  FIXED_VISUAL_TOLERANCE,
+  HARDENED_VISUAL_VERSION,
 } from "../../src/visual/index.mjs";
 import {
   createDecisionCandidate,
@@ -12144,6 +12146,95 @@ test("legacy-17: bootstrap pins the source, renders the authority, and refuses -
       "utf8",
     );
     assert.match(baselineDoc, /legacyFrameId/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// I4: the BUILD_BASELINE step document is the agent's only per-record brief for
+// the visual contract, so it must ask for exactly what validation accepts.
+test("I4: hardened step 04 guidance matches the fixed-tolerance contract for both authorities", async () => {
+  const authorities = [
+    ["figma-mcp", initFigma, async (fixture) => {
+      await atAssessTarget(fixture, undefined, LEGACY_INVENTORY);
+      await writeFigmaContext(fixture);
+    }, (row) => visualAcceptance({ row })],
+    ["legacy-runtime", initLegacy, async (fixture) => {
+      await atAssessTarget(fixture, undefined, LEGACY_INVENTORY);
+      await writeLegacyContext(fixture);
+    }, (row) => legacyAcceptance({ row })],
+  ];
+  for (const [designSource, init, authorContext, contract] of authorities) {
+    const fixture = await createFixture();
+    try {
+      await init(fixture);
+      const doc = await readFile(path.join(fixture.migrationRoot, "steps/04-build-baseline.md"), "utf8");
+      const visualLine = doc.split("\n").find((line) => line.includes("matrices/visual-acceptance.json"));
+      assert.ok(visualLine, designSource);
+      // Never asks for the field validation refuses; names the engine's own value.
+      assert.doesNotMatch(visualLine, /explicit `tolerance`/, designSource);
+      assert.match(visualLine, /never author a `tolerance`/, designSource);
+      assert.ok(visualLine.includes(`\`"version": ${HARDENED_VISUAL_VERSION}\``), designSource);
+      assert.ok(visualLine.includes(`\`${JSON.stringify(FIXED_VISUAL_TOLERANCE)}\``), designSource);
+      assert.match(visualLine, /VISUAL_TOLERANCE_FIXED/, designSource);
+      // Unrelated requirements and the unbacked/operator rules are untouched.
+      assert.match(visualLine, /viewport/, designSource);
+      assert.match(visualLine, /`unbacked`/, designSource);
+      assert.match(visualLine, /VISUAL_UNBACKED/, designSource);
+      assert.match(visualLine, /A state with a row can never be unbacked\./, designSource);
+      assert.match(doc, /Every legacy behavior maps to one row in `matrices\/behavior-parity\.json`\./);
+      assert.match(doc, /`matrices\/capability-ownership\.json`/);
+      if (designSource === "figma-mcp") {
+        assert.match(visualLine, /`figmaNodeId`, `figmaState`/);
+        assert.match(visualLine, /record-decision\.mjs <module> --pending/);
+        assert.match(visualLine, /`decisionId` and `decisionDigest`/);
+      } else {
+        assert.match(visualLine, /`legacyFrameId` \(the pinned frame's `id`\)/);
+        assert.match(visualLine, /taken from that frame's pinned measurements/);
+      }
+      // Following the guidance passes; the field it forbids is what refuses.
+      await authorContext(fixture);
+      await advance(fixture);
+      await completeStepDoc(fixture, "BUILD_BASELINE");
+      await writeMatrices(fixture);
+      await registerAuth(fixture);
+      await writeVisualAcceptance(fixture, contract({ tolerance: FIXED_VISUAL_TOLERANCE }));
+      await rejectsAt(fixture, /VISUAL_TOLERANCE_FIXED/);
+      await writeVisualAcceptance(fixture, contract());
+      await advance(fixture);
+      assert.equal((await state(fixture)).currentStep, "PLAN", designSource);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+// I4: v1 stays readable only as already-pinned history, and there the explicit
+// tolerance it was authored under is still required.
+test("I4: an already pinned v1 contract still requires its explicit tolerance", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveFigmaToBaseline(fixture);
+    const historical = async (contract) => {
+      await writeVisualAcceptance(fixture, contract);
+      const persisted = await state(fixture);
+      const bytes = await readFile(path.join(fixture.migrationRoot, "matrices/visual-acceptance.json"));
+      return { ...persisted, artifactHashes: {
+        ...persisted.artifactHashes,
+        "matrices/visual-acceptance.json": `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+      } };
+    };
+    await assert.rejects(
+      validateVisualAcceptance(fixture.migrationRoot, await historical({ ...visualAcceptance(), version: 1 }), LEGACY_INVENTORY, TARGET_INVENTORY),
+      /VIS-1\.tolerance must be/,
+    );
+    const rows = await validateVisualAcceptance(
+      fixture.migrationRoot,
+      await historical({ ...visualAcceptance({ row: { tolerance: { px: 4, ratio: 0.05 } } }), version: 1 }),
+      LEGACY_INVENTORY,
+      TARGET_INVENTORY,
+    );
+    assert.deepEqual(rows[0].tolerance, { px: 4, ratio: 0.05 });
   } finally {
     await fixture.cleanup();
   }
