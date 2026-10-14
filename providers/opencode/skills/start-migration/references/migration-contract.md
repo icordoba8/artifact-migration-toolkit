@@ -967,6 +967,13 @@ Before validation, set the status to `COMPLETE` and replace every `[TODO]` with
 concrete evidence. Completing one step never authorizes the next step in the
 same session.
 
+`steps/06-implement-slices.md` and `steps/07-verify-slices.md` each span every
+slice of their phase. Each slice's advance still requires the document to hold
+no `[TODO]`, but Status `COMPLETE` is required only when the last pending slice
+advances; until then keep it at any other status and record each slice's
+evidence as it lands. Once the phase closes, both documents are held to
+`COMPLETE` like every other step document.
+
 ## Legacy inventory
 
 `inventories/legacy.json` requires at least one behavior. While

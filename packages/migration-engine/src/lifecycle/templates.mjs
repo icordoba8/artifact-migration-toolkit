@@ -29,6 +29,10 @@ import { FINAL_GATES, renderStep } from "./checkpoints.mjs";
 // values come from the visual contract itself so the brief cannot drift from it.
 const FIXED_TOLERANCE_RULE = `Author it at \`"version": ${HARDENED_VISUAL_VERSION}\` and never author a \`tolerance\` (\`VISUAL_TOLERANCE_FIXED\`): every row is compared at the engine's fixed \`${JSON.stringify(FIXED_VISUAL_TOLERANCE)}\`, not an agent-chosen value.`;
 
+// I7: steps/06 and steps/07 span every slice, so COMPLETE closes the phase.
+const SLICE_PHASE_STATUS_RULE =
+  "This document spans every slice: each slice advances only once it holds no TODO placeholder, and Status `COMPLETE` is required when the last pending slice advances.";
+
 export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
   "steps/02-discover-legacy.md": renderStep({
     number: "02",
@@ -133,7 +137,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
     number: "06",
     name: "Implement slices",
     purpose:
-      "Implement only one active slice per session and record its changed scope.",
+      `Implement only one active slice per session and record its changed scope. ${SLICE_PHASE_STATUS_RULE}`,
     dependencies: "`steps/05-plan.md`, `slices/index.json`",
     requirements: [
       "The active `slices/<slice-id>.json` marks every assigned requirement implemented.",
@@ -145,7 +149,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
     number: "07",
     name: "Verify slices",
     purpose:
-      "Verify one active slice against its behavior, route, navigation, design-system, and architecture requirements.",
+      `Verify one active slice against its behavior, route, navigation, design-system, and architecture requirements. ${SLICE_PHASE_STATUS_RULE}`,
     dependencies:
       "`steps/06-implement-slices.md`, active slice record, and changed target files",
     requirements: [

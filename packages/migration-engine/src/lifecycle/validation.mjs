@@ -1375,7 +1375,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
   if (!MIGRATION_STEPS.includes(step)) {
     throw new Error(`Unknown migration step '${step}'.`);
   }
-  await assertStepDocumentComplete(root, step);
+  await assertStepDocumentComplete(root, step, state, sliceId);
   if (step === "DISCOVER_LEGACY") {
     const inventory = await validateLegacyInventory(root, roots, state);
     await assertLegacyDiscoveryChecklist(

@@ -21677,3 +21677,134 @@ test("A4: the decisions seam and the three-argument reader offer the same drift 
     await fixture.cleanup();
   }
 });
+
+// I7: steps/06 and steps/07 each describe the whole multi-slice phase, so
+// they cannot honestly read COMPLETE while other slices are still pending.
+// Every slice still requires them TODO-free; only the advance that closes
+// the phase (the last pending slice) requires Status COMPLETE.
+const inProgressStepDoc = async (fixture, step, extra = "") => {
+  const [number, file, name] = STEP_NAMES[step];
+  await writeFile(
+    path.join(fixture.migrationRoot, `steps/${number}-${file}.md`),
+    `# ${number}. ${name}\n\n- Status: \`IN_PROGRESS\`\n\n## Result\n\nSlice progress recorded by the contract suite.${extra}\n`,
+  );
+};
+
+test("I7: a finished slice advances before the multi-slice phase document is COMPLETE; the last slice still needs it", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await inProgressStepDoc(fixture, "IMPLEMENT_SLICES");
+    await inProgressStepDoc(fixture, "VERIFY_SLICES");
+    const [first, last] = SLICES.map((slice) => slice.id);
+
+    // Every slice still needs a TODO-free phase document.
+    await inProgressStepDoc(fixture, "IMPLEMENT_SLICES", "\n- [TODO] later");
+    await authorSlice(fixture, first);
+    await assert.rejects(advance(fixture, { slice: first }), /06-implement-slices\.md still contains TODO evidence/);
+    await inProgressStepDoc(fixture, "IMPLEMENT_SLICES");
+
+    await advance(fixture, { slice: first });
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+    await authorEvidence(fixture, first);
+    // An interrupted session resumes and revalidates mid-phase.
+    const resolution = await resolutionFor(fixture);
+    assert.equal((await validateResumableMigration({ ...resolution, moduleName: "auth" })).valid, true);
+    assert.equal((await validateResumableMigration({ ...resolution, moduleName: "auth", step: "IMPLEMENT_SLICES", slice: first })).valid, true);
+    await advance(fixture, { slice: first });
+    let persisted = await state(fixture);
+    assert.equal(persisted.currentStep, "IMPLEMENT_SLICES");
+    assert.equal(persisted.activeSlice, last);
+    assert.deepEqual(persisted.completedSlices, [first]);
+    assert.ok(!persisted.completedSteps.includes("IMPLEMENT_SLICES"));
+
+    // The last pending slice closes the phase: COMPLETE is required, and a
+    // refusal writes nothing.
+    await authorSlice(fixture, last);
+    const before = await readFile(path.join(fixture.migrationRoot, "state.json"), "utf8");
+    await assert.rejects(advance(fixture, { slice: last }), /06-implement-slices\.md must record Status COMPLETE/);
+    assert.equal(await readFile(path.join(fixture.migrationRoot, "state.json"), "utf8"), before);
+    await completeStepDoc(fixture, "IMPLEMENT_SLICES");
+    await advance(fixture, { slice: last });
+
+    await authorEvidence(fixture, last);
+    await assert.rejects(advance(fixture, { slice: last }), /07-verify-slices\.md must record Status COMPLETE/);
+    await completeStepDoc(fixture, "VERIFY_SLICES");
+    await advance(fixture, { slice: last });
+    persisted = await state(fixture);
+    assert.equal(persisted.currentStep, "FINALIZE");
+    assert.ok(persisted.completedSteps.includes("IMPLEMENT_SLICES"));
+    assert.ok(persisted.completedSteps.includes("VERIFY_SLICES"));
+
+    // Once the phase is closed the documents are held to COMPLETE again.
+    await inProgressStepDoc(fixture, "VERIFY_SLICES");
+    await assert.rejects(
+      validateResumableMigration({ ...resolution, moduleName: "auth", step: "VERIFY_SLICES", slice: first }),
+      /07-verify-slices\.md must record Status COMPLETE/,
+    );
+    await completeStepDoc(fixture, "VERIFY_SLICES");
+    await authorFinalize(fixture);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("I7: the generated phase documents, once their placeholders are filled, let a non-final slice advance", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture);
+    const phaseDocs = ["steps/06-implement-slices.md", "steps/07-verify-slices.md"];
+    const generated = Object.fromEntries(await Promise.all(phaseDocs.map(async (relative) =>
+      [relative, await readFile(path.join(fixture.migrationRoot, relative), "utf8")])));
+    await fixture.cleanup();
+    Object.assign(fixture, await createFixture());
+    await driveTo(fixture, "PLAN");
+    for (const relative of phaseDocs) {
+      assert.match(generated[relative], /- Status: `PENDING`/);
+      await writeFile(path.join(fixture.migrationRoot, relative), generated[relative].replaceAll("- [TODO] ", "- Recorded: "));
+    }
+    const first = SLICES[0].id;
+    await authorSlice(fixture, first);
+    await advance(fixture, { slice: first });
+    await authorEvidence(fixture, first);
+    await advance(fixture, { slice: first });
+    assert.equal((await state(fixture)).activeSlice, SLICES[1].id);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("I7: a reworked slice retries implementation while the phase document is still in progress", async () => {
+  const fixture = await createFixture();
+  try {
+    const { sliceId } = await atFailedVerification(fixture);
+    await inProgressStepDoc(fixture, "IMPLEMENT_SLICES");
+    await inProgressStepDoc(fixture, "VERIFY_SLICES");
+    await rework(fixture, sliceId);
+    await authorSlice(fixture, sliceId);
+    await listDefectEvidence(fixture, sliceId);
+    await advance(fixture, { slice: sliceId });
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("I7: single-checkpoint step documents still require Status COMPLETE", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "BUILD_BASELINE");
+    await completeStepDoc(fixture, "PLAN");
+    await writeJson(path.join(fixture.migrationRoot, "slices/index.json"), { version: 1, slices: SLICES });
+    const [number, file, name] = STEP_NAMES.PLAN;
+    await writeFile(
+      path.join(fixture.migrationRoot, `steps/${number}-${file}.md`),
+      `# ${number}. ${name}\n\n- Status: \`IN_PROGRESS\`\n\n## Result\n\nPartial.\n`,
+    );
+    await assert.rejects(advance(fixture), /05-plan\.md must record Status COMPLETE/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
