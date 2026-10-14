@@ -5,7 +5,7 @@ import {
   assertNonEmpty,
   assertPlainObject,
   commonAncestor,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
 } from "../shared/index.mjs";
 import { fileExists, fileIdentity, fileIdentityMatches } from "./files.mjs";
 

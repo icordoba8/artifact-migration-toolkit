@@ -18,10 +18,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import * as shared from "../../src/shared/index.mjs";
 import {
+  assertSecurePath,
   canonicalJson,
   isLexicallyWithin,
-  isResolvedWithin,
   sha256Hex,
 } from "../../src/shared/index.mjs";
 import {
@@ -206,12 +207,45 @@ test("A1-ARCH-3: a moved declaration has no second live implementation at its ol
 
 // -- shared ------------------------------------------------------------------
 
-test("shared: the two containment checks stay two exports and agree on absolute inputs", () => {
-  assert.notEqual(isLexicallyWithin, isResolvedWithin);
-  for (const [root, candidate, expected] of [["/a", "/a", true], ["/a", "/a/b", true], ["/a", "/ab", false], ["/a", "/a/../b", false]]) {
-    assert.equal(isLexicallyWithin(root, candidate), expected);
-    assert.equal(isResolvedWithin(root, candidate), expected);
+test("shared: DR1 one containment rule; resolving first matches path.relative on posix and win32", (t) => {
+  assert.equal("isResolvedWithin" in shared, false);
+  // The removed `isResolvedWithin` pre-resolved both inputs; this is the
+  // premise that made the merge lossless, on both platforms' path semantics.
+  const posix = ["", ".", "..", "a", "a/b", "./a", "a/../b", "../a", "/", "/a", "/a/", "/a/b", "/ab", "/a/../b", "/a/..b", "a\\b"];
+  const win32 = [...posix, "C:\\a", "c:\\A\\b", "C:/a/b", "C:\\ab", "C:a", "D:\\a", "\\\\srv\\share\\a", "C:\\a\\..\\b"];
+  for (const [p, corpus] of [[path.posix, posix], [path.win32, win32]]) {
+    for (const root of corpus) for (const candidate of corpus) {
+      assert.equal(p.relative(root, candidate), p.relative(p.resolve(root), p.resolve(candidate)), `${root} -> ${candidate}`);
+    }
   }
+  const cwd = process.cwd();
+  for (const [root, candidate, expected] of [
+    ["/a", "/a", true], ["/a", "/a/", true], ["/a/", "/a/b", true], ["/a", "/a/./b", true],
+    ["/a", "/ab", false], ["/a", "/a/../b", false], ["/a/b", "/a", false], ["/a", "/", false],
+    // Relative inputs resolve against the CWD, exactly as the removed variant did.
+    ["a", "a/b", true], ["", ".", true], ["a", "..", false], ["a", "a/../b", false],
+    [cwd, "x", true], ["x", cwd, false],
+    // Historical fail-closed quirk, kept: a child named `..b` is refused.
+    ["/a", "/a/..b", false],
+  ]) {
+    assert.equal(isLexicallyWithin(root, candidate), expected, `${root} -> ${candidate}`);
+  }
+  assert.throws(() => isLexicallyWithin("/a", undefined), { code: "ERR_INVALID_ARG_TYPE" });
+  // `path.relative` returns "" for equal strings before resolving; the rule
+  // must still fail closed when a relative input cannot be resolved.
+  t.mock.method(process, "cwd", () => { throw Object.assign(new Error("cwd gone"), { code: "ENOENT" }); });
+  assert.throws(() => isLexicallyWithin("a", "a"), { code: "ENOENT" });
+  assert.equal(isLexicallyWithin("/a", "/a/b"), true);
+});
+
+test("shared: lexical containment is not physical containment; assertSecurePath still refuses the symlink", async (t) => {
+  const root = await scratch(t);
+  const outside = await scratch(t);
+  await symlink(outside, path.join(root, "link"));
+  const candidate = path.join(root, "link", "escape.txt");
+  assert.equal(isLexicallyWithin(root, candidate), true);
+  await assert.rejects(assertSecurePath(root, candidate), /Refusing symlink output path/);
+  await assert.rejects(assertSecurePath(root, path.join(root, "..", "x")), /escapes the target repository/);
 });
 
 test("shared: sha256Hex and canonicalJson are the primitives the pins digest", () => {

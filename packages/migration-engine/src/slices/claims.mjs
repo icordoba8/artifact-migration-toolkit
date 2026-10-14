@@ -10,7 +10,7 @@ import {
   commonAncestor,
   dirtyManifest,
   gitRevision,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
   normalizeRelative,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";

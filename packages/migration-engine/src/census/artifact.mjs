@@ -16,7 +16,7 @@ import {
   dirtyManifest,
   exactObject,
   gitRevision,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
   normalizeRelative,
   sameMembers,
   samePath,

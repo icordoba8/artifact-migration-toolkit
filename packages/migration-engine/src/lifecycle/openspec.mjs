@@ -6,7 +6,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { requirementsSourceFor, validateOpenSpecAuthorityShape } from "../formats/index.mjs";
-import { contentIdentity, isResolvedWithin as isWithin } from "../shared/index.mjs";
+import { contentIdentity, isLexicallyWithin as isWithin } from "../shared/index.mjs";
 import { contentIdentityMatchesSource } from "../store/index.mjs";
 
 const OPEN_SPEC_REQUIREMENT =

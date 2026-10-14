@@ -9,7 +9,7 @@ import {
   assertSecurePath,
   contentIdentity,
   contentIdentityMatches,
-  isResolvedWithin,
+  isLexicallyWithin,
 } from "../shared/index.mjs";
 
 // DR7 variant: secure path, temp file cleaned up on error, fsync, rename.
@@ -115,7 +115,7 @@ export const fileIdentityMatches = async (recorded, filePath, options) =>
 /** `fileIdentityMatches` against a target-relative source, or false if absent. */
 export const contentIdentityMatchesSource = async (recorded, targetRoot, source) => {
   const filePath = path.resolve(targetRoot, source);
-  if (!isResolvedWithin(targetRoot, filePath)) return false;
+  if (!isLexicallyWithin(targetRoot, filePath)) return false;
   return fileIdentityMatches(recorded, filePath).catch(() => false);
 };
 
@@ -127,7 +127,7 @@ export const readOptionalJson = async (filePath, label) => {
 export const removeEmptyParents = async (start, boundary) => {
   let current = path.resolve(start);
   const limit = path.resolve(boundary);
-  while (current !== limit && isResolvedWithin(limit, current)) {
+  while (current !== limit && isLexicallyWithin(limit, current)) {
     try {
       await rmdir(current);
     } catch (error) {

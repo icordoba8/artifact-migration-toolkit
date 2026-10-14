@@ -3,8 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SLICE_REWORK_FORMAT, usesSliceRework } from "../formats/index.mjs";
 import {
+  isLexicallyWithin as isWithin,
   isPlainObject,
-  isResolvedWithin as isWithin,
   sha256Hex as hashContent,
   withoutExtension,
 } from "../shared/index.mjs";

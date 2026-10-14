@@ -11,7 +11,7 @@ import {
 } from "../formats/index.mjs";
 import {
   isPlainObject,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
   recordRelative,
 } from "../shared/index.mjs";
 import { fileExists, fileIdentityMatches } from "../store/index.mjs";

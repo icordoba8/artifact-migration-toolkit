@@ -15,8 +15,14 @@ const comparablePath = (value) => {
 export const samePath = (left, right) =>
   comparablePath(left) === comparablePath(right);
 
+/**
+ * The one containment rule (DR1). Lexical only: no symlink is followed, so
+ * physical containment is `assertSecurePath`'s job. Resolving first only
+ * matters where `path.relative` skips it (equal strings): a relative input
+ * with no CWD then throws instead of passing.
+ */
 export const isLexicallyWithin = (root, candidate) => {
-  const relative = path.relative(root, candidate);
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return (
     relative === "" ||
     (!relative.startsWith("..") && !path.isAbsolute(relative))
@@ -90,17 +96,9 @@ export const assertProjectRootContainment = (projectRoot, registryData) => {
 export const recordRelative = (root, absolute) =>
   path.relative(root, absolute).split(path.sep).join("/");
 
-export const isResolvedWithin = (root, candidate) => {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-};
-
 export const commonAncestor = (left, right) => {
   let current = path.resolve(left);
-  while (!isResolvedWithin(current, path.resolve(right))) {
+  while (!isLexicallyWithin(current, path.resolve(right))) {
     const parent = path.dirname(current);
     if (parent === current) return current;
     current = parent;

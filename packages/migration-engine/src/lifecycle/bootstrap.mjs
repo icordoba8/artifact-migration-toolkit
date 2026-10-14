@@ -31,7 +31,7 @@ import {
   contentIdentity,
   dirtyManifest,
   gitRevision,
-  isResolvedWithin as isWithin,
+  isLexicallyWithin as isWithin,
   now,
   sameFile,
   sha256Hex as hashContent,
