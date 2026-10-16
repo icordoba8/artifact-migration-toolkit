@@ -38,6 +38,7 @@ import {
   usesCapabilityOwnership,
   usesDirectLedgerDecisions,
   usesDiscoveryCompleteness,
+  usesUiCoverage,
   usesSliceRework,
   usesSourceAttribution,
 } from "../formats/index.mjs";
@@ -68,6 +69,7 @@ import {
   resolveEvidencePath,
 } from "../store/index.mjs";
 import {
+  assertRequiredAppearance,
   assertRequiredObservations,
   completedSlicesLackingUiProofV1,
   sliceLacksUiProofV1,
@@ -113,12 +115,9 @@ import {
 import { artifactArgumentsFor, artifactCommandFor } from "./artifact-record.mjs";
 import { getArtifactStatus, validateArtifactComplete } from "./artifact-status.mjs";
 import { assertStepDocumentComplete } from "./record.mjs";
-
-// Seam (Track A5): the legacy inventory rules are census's; the format-18
-// observation rule they apply per UI behavior is visual's, passed in as data.
+import { validateExternalUiCapabilities } from "./ui-coverage.mjs";
 export const validateLegacyInventory = (root, roots, state) =>
-  validateLegacyInventoryRules(root, roots, state, { assertRequiredObservations });
-
+  validateLegacyInventoryRules(root, roots, state, { assertRequiredObservations, assertRequiredAppearance });
 /**
  * The one policy-aware module resolver for format 19, and the only thing that
  * turns a ledger line into authority there.
@@ -494,6 +493,7 @@ const validateCapabilityOwnership = async (root, state, roots, baselineIds) => {
       }
     }
   }
+  if (usesUiCoverage(state)) await validateExternalUiCapabilities(root, state, roots, rows);
   return rows;
 };
 

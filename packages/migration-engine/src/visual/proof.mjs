@@ -4,6 +4,7 @@ import { UI_RUNTIME_STATES } from "../census/index.mjs";
 import {
   REQUIRED_OBSERVATIONS_FORMAT,
   UI_PROOF_FORMAT,
+  usesUiCoverage,
   usesRequiredObservations,
   usesUiVerification,
 } from "../formats/index.mjs";
@@ -23,11 +24,14 @@ import {
   resolveEvidencePath,
 } from "../store/index.mjs";
 import {
+  compareAppearanceCoverage,
   assertVisualAcceptance,
   compareVisualEvidence,
 } from "./acceptance.mjs";
 import {
+  assertVisualCaptureBlock,
   assertCaptureRole,
+  LEGACY_AUTHORITY_ROLE,
   assertTargetEvidencePath,
   TARGET_VERIFICATION_ROLE,
   visualAuthorityOf,
@@ -146,6 +150,8 @@ export const validateUiRuntimeEvidence = async ({
   const screenshotSlots = new Set();
   const screenshotHashes = new Set();
   const visualComparison = [];
+  const appearanceEvidence = new Map();
+  const comparedVisualRows = new Set();
   let baselineViewport = null;
   const exercised = new Set();
   const satisfiedPostActions = new Set();
@@ -176,6 +182,12 @@ export const validateUiRuntimeEvidence = async ({
         `${label} does not name a required state for UI behavior '${record.uiBehaviorId}'.`,
       );
     }
+    const appearanceClaim = usesUiCoverage(state)
+      ? uiBehavior.requiredAppearance.find((claim) => claim.id === record.appearanceClaimId && claim.state === record.state)
+      : null;
+    if (usesUiCoverage(state) && !appearanceClaim) {
+      throw new Error(`${label}.appearanceClaimId must name a required appearance claim of '${uiBehavior.id}' state '${record.state}'.`);
+    }
     const viewport = assertPlainObject(record.viewport, `${label}.viewport`);
     for (const axis of ["width", "height"]) {
       if (!Number.isInteger(viewport[axis]) || viewport[axis] <= 0) {
@@ -186,15 +198,17 @@ export const validateUiRuntimeEvidence = async ({
     }
     // Format 17: a Figma-backed TARGET state is accepted by the engine's own
     // comparison, never by the row's authored `result`.
-    const visualRow =
-      origin === "TARGET"
-        ? baseline.visualRows?.find(
-            (row) =>
-              row.uiBehaviorId === record.uiBehaviorId &&
-              row.state === record.state,
-          )
-        : undefined;
+    const visualRow = origin === "TARGET"
+      ? baseline.visualRows?.find((row) => usesUiCoverage(state)
+        ? row.id === record.visualRowId
+        : row.uiBehaviorId === record.uiBehaviorId && row.state === record.state)
+      : undefined;
+    if (usesUiCoverage(state) && record.visualRowId &&
+      (!visualRow || visualRow.uiBehaviorId !== record.uiBehaviorId || visualRow.state !== record.state)) {
+      throw new Error(`${label}.visualRowId does not bind this behavior state to a visual acceptance row.`);
+    }
     if (visualRow) {
+      comparedVisualRows.add(visualRow.id);
       await assertVisualAcceptance({
         record,
         visualRow,
@@ -462,7 +476,7 @@ export const validateUiRuntimeEvidence = async ({
       if (!isContentIdentity(record.screenshot.hash)) {
         throw new Error(`${label}.screenshot.hash must be a SHA-256 digest.`);
       }
-      const slot = `${origin}::${record.uiBehaviorId}::${record.state}`;
+      const slot = `${origin}::${record.uiBehaviorId}::${record.state}${usesUiCoverage(state) ? `::${record.appearanceClaimId}` : ""}`;
       if (screenshotSlots.has(slot)) {
         throw new Error(
           `${label}.screenshot exceeds the budget: '${record.uiBehaviorId}' state '${record.state}' is already captured for ${origin}.`,
@@ -473,7 +487,7 @@ export const validateUiRuntimeEvidence = async ({
       // mean perfect visual parity, which is the best possible outcome of a
       // migration -- only a repeated capture inside one origin is a mistake.
       const digestSlot = `${origin}::${record.screenshot.hash}`;
-      if (screenshotHashes.has(digestSlot)) {
+      if (!usesUiCoverage(state) && screenshotHashes.has(digestSlot)) {
         throw new Error(
           `${label}.screenshot duplicates an existing ${origin} capture in this slice.`,
         );
@@ -494,6 +508,35 @@ export const validateUiRuntimeEvidence = async ({
         roots,
         { require: true },
       );
+    }
+    if (usesUiCoverage(state)) {
+      if (!screenshotPath) throw new Error(`${label} needs a screenshot for appearance claim '${appearanceClaim.id}'.`);
+      assertVisualCaptureBlock({ rootLocator: appearanceClaim.locator }, record.capture, label, true);
+      const requiredRole = origin === "TARGET" ? TARGET_VERIFICATION_ROLE : LEGACY_AUTHORITY_ROLE;
+      if (record.capture.role !== requiredRole) throw new Error(`VISUAL_CAPTURE_ROLE: ${label}.capture.role must be '${requiredRole}'.`);
+      if (origin === "LEGACY" && binding.legacyRevision !== state.legacyRevision?.revision) {
+        throw new Error(`${label}.boundTo.legacyRevision does not match the pinned legacy revision.`);
+      }
+      const snapshot = assertPlainObject(await readJson(proofPath, `${label}.reference`), `${label}.reference`);
+      if (snapshot.proofFormat !== UI_PROOF_FORMAT || snapshot.uiBehaviorId !== uiBehavior.id || snapshot.state !== record.state) {
+        throw new Error(`${label} is not a bound ${UI_PROOF_FORMAT} proof for this appearance claim.`);
+      }
+      if (appearanceClaim.afterInteractionId &&
+        !record.interactions?.some((item) => item.id === appearanceClaim.afterInteractionId)) {
+        throw new Error(`${label} does not exercise the interaction for appearance claim '${appearanceClaim.id}'.`);
+      }
+      const observation = appearanceClaim.afterInteractionId
+        ? snapshot.interactions?.find((item) => item.id === appearanceClaim.afterInteractionId)?.postAction
+        : snapshot.observation;
+      if (!Array.isArray(observation?.controls) || !observation.controls.some((control) =>
+        control.role === appearanceClaim.role && control.name === appearanceClaim.name &&
+        control.locator === appearanceClaim.locator && control.visible === true)) {
+        throw new Error(`${label} proof does not observe visible appearance claim '${appearanceClaim.id}'.`);
+      }
+      const key = `${uiBehavior.id}::${record.state}::${appearanceClaim.id}`;
+      const pair = appearanceEvidence.get(key) ?? {};
+      pair[origin] = { record, snapshot: { ...snapshot, observation }, screenshotPath };
+      appearanceEvidence.set(key, pair);
     }
     if (visualRow?.version === HARDENED_VISUAL_VERSION) {
       const frame = visualRow.authorityFrame;
@@ -552,6 +595,21 @@ export const validateUiRuntimeEvidence = async ({
         if (observation.afterInteractionId && !satisfiedPostActions.has(`${uiBehavior.id}::${observation.id}`)) {
           throw new Error(`Required UI behavior '${uiBehavior.id}' state '${observation.state}' misses required postAction observation '${observation.id}' after interaction '${observation.afterInteractionId}'.`);
         }
+      }
+    }
+  }
+  if (usesUiCoverage(state)) {
+    for (const row of baseline.visualRows ?? []) {
+      if (!comparedVisualRows.has(row.id)) throw new Error(`VISUAL_COVERAGE_MISSING: acceptance row '${row.id}' has no bound TARGET capture.`);
+    }
+    for (const uiBehavior of required) {
+      for (const claim of uiBehavior.requiredAppearance) {
+        const pair = appearanceEvidence.get(`${uiBehavior.id}::${claim.state}::${claim.id}`);
+        if (!pair?.LEGACY || !pair?.TARGET) {
+          throw new Error(`VISUAL_COVERAGE_MISSING: '${claim.id}' needs bound LEGACY and TARGET captures of '${claim.locator}'.`);
+        }
+        const scrollContract = uiBehavior.scrollContracts.find((row) => row.state === claim.state);
+        visualComparison.push(await compareAppearanceCoverage({ ...claim, scrollContract }, pair.LEGACY, pair.TARGET));
       }
     }
   }

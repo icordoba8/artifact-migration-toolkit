@@ -73,6 +73,22 @@ executed automated scenario. `N/A` needs a specific reason. `BLOCKED` identifies
 the missing evidence, why it matters, and the smallest decision or external
 condition required. Generic evidence is invalid.
 
+For each visible or interactive control, record the legacy component identity,
+behavior, visible affordances, adornments, icons and triggers, and materially
+different open/closed, disabled, loading and error states where applicable.
+Include caller-specific styling when a shared component is rendered in this
+consumer. A `TARGET_REUSE` capability row establishes implementation ownership;
+the rendered component still needs visual and interaction evidence. Trace
+externally rendered UI imports from the scan to a UI behavior and a source-backed
+capability disposition. A different target package or native control is valid
+when required behavior and appearance are verified, or an authorized
+disposition permits the difference.
+
+For a scrollable view, record the intended owner and scrolling element, parent
+height constraint, relevant ancestor overflow, whether the document may scroll,
+and nested scrolling where applicable. Measure the same viewport and fixture in
+legacy and target. Matching pixels inside a grid do not establish page scrolling.
+
 ## Evidence classification
 
 Classify each discovered behavior:
@@ -228,6 +244,12 @@ files stay outside this module's closure and digest. An explicit entry point is
 always retained in `entryPoints`, but declaration never overwrites its accurate
 `SUPPORTING`, `INBOUND_CONSUMER`, or `GOVERNING_FRAMEWORK` boundary relation.
 Run `--scan` to see all relations before authoring.
+
+Scanner algorithm 4 also follows Next.js `layout` and `template` ancestors of
+relevant pages, then their imports and styles. These files govern the route
+without importing the child. They remain outside `OWNED` unless a declared
+module root itself contains them; a migration pinned to algorithm 1–3 keeps
+its historical boundary. Format 20 requires algorithm 4.
 
 I18n namespace calls resolve through the tracked governing configuration to
 the exact JSON resource. CSS imports and URLs, assets, JSON, and

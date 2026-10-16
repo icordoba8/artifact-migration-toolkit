@@ -183,15 +183,16 @@ test("each format predicate turns on exactly at its format, and an unstamped rec
 });
 
 test("historical formats keep their lifecycle and are never promoted by an advance", () => {
-  assert.deepEqual(formats.SUPPORTED_FORMAT_VERSIONS, Array.from({ length: 16 }, (_, index) => 4 + index));
+  assert.deepEqual(formats.SUPPORTED_FORMAT_VERSIONS, Array.from({ length: 17 }, (_, index) => 4 + index));
   for (const format of formats.SUPPORTED_FORMAT_VERSIONS) assert.equal(formats.formatIsSupported(format), true, `${format}`);
-  for (const format of [1, 2, 3, 20, "19"]) assert.equal(formats.formatIsSupported(format), false, `${format}`);
+  for (const format of [1, 2, 3, 21, "19"]) assert.equal(formats.formatIsSupported(format), false, `${format}`);
   assert.equal(formats.stepsFor({ formatVersion: 9 }), formats.LEGACY_MIGRATION_STEPS);
   assert.equal(formats.stepsFor({ formatVersion: 10 }), formats.MIGRATION_STEPS);
   for (const format of formats.NON_PROMOTING_FORMAT_VERSIONS) assert.equal(formats.formatIsPromoting(format), false, `${format}`);
   // A format-18 record with every 18 feature is stamped 18, not promoted to 19.
   assert.equal(formats.stampedFormatVersion({ formatVersion: 18 }), 18);
   assert.equal(formats.stampedFormatVersion({ formatVersion: 19 }), 19);
+  assert.equal(formats.stampedFormatVersion({ formatVersion: 20 }), 20);
 });
 
 test("the compatibility classification is formats', and the engine binds the same refusal bytes", () => {

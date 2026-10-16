@@ -205,6 +205,26 @@ export const legacyRelativePath = (claim, roots, label) =>
     "legacy",
   );
 
+/** A rendered package import needs a source-backed capability disposition. */
+export const assertExternalUiCapabilityRows = (scan, rows, roots) => {
+  const discovered = new Map((scan.externalUi ?? []).map((use) =>
+    [JSON.stringify([use.from, use.spec, use.symbol]), use]));
+  const reconciled = new Set();
+  for (const row of rows) {
+    for (const token of assertArray(row.externalUiImports ?? [], `${row.id}.externalUiImports`)) {
+      const use = discovered.get(token);
+      if (!use) throw new Error(`${row.id}.externalUiImports cites unknown import '${token}'.`);
+      if (!assertArray(row.legacyEvidence, `${row.id}.legacyEvidence`).some((claim) =>
+        legacyRelativePath(claim, roots, `${row.id}.legacyEvidence`) === use.from)) {
+        throw new Error(`${row.id}.externalUiImports '${token}' must cite its legacy source file.`);
+      }
+      reconciled.add(token);
+    }
+  }
+  const missing = [...discovered.keys()].filter((token) => !reconciled.has(token));
+  if (missing.length) throw new Error(`EXTERNAL_UI_CAPABILITY_GAP: ${JSON.stringify(missing)} needs a capability disposition with source evidence.`);
+};
+
 /**
  * A path under the target root in the form Git resolves against it. The `./`
  * prefix is load-bearing: `git show <rev>:<path>` reads a bare path from the

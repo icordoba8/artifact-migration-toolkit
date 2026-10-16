@@ -52,7 +52,7 @@ const LIFECYCLE_FILES = [
   "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "checkpoints.mjs", "context.mjs",
   "contract-upgrade.mjs", "format-upgrade.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "preview.mjs",
   "progress.mjs", "record.mjs", "recorder.mjs", "registry.mjs", "reopen.mjs", "status.mjs", "templates.mjs",
-  "toolkit-identity.mjs", "validation.mjs",
+  "toolkit-identity.mjs", "ui-coverage.mjs", "validation.mjs",
 ];
 
 /**

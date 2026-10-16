@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { PNG } from "pngjs";
 import pixelmatch from "pixelmatch";
 
 import {
+  assertRequiredAppearance,
+  compareScrollContract,
+  compareAppearanceCoverage,
+  validateUiRuntimeEvidence,
   FIXED_VISUAL_TOLERANCE,
   HARDENED_VISUAL_VERSION,
   decodePng,
@@ -40,6 +48,50 @@ import {
   strokeFromComputedStyle,
   compareVisualFact,
 } from "../../src/visual/index.mjs";
+
+const scrollProof = ({ documentHeight = 1080, ancestorHeight = 972, overflowY = "hidden" } = {}) => ({
+  observation: { scroll: {
+    document: { clientHeight: 1080, scrollHeight: documentHeight },
+    owner: { kind: "ELEMENT", locator: "grid", clientHeight: 600, scrollHeight: 1200, overflowY: "auto" },
+    ancestors: [{ locator: "card", clientHeight: ancestorHeight, scrollHeight: 972, overflowY }],
+  } },
+});
+
+test("format 20 requires every control and post-action appearance claim, including reused triggers", () => {
+  const item = {
+    id: "UI-1", runtimeStates: ["DEFAULT", "DIALOG"],
+    interactions: [{ id: "OPEN" }],
+    requiredObservations: [
+      { id: "O1", state: "DEFAULT", role: "textbox", name: "Date", predicate: "visibility", expected: true },
+      { id: "O2", state: "DEFAULT", role: "button", name: "Choose date", predicate: "visibility", expected: true },
+      { id: "O3", state: "DIALOG", afterInteractionId: "OPEN", role: "dialog", name: "Calendar", predicate: "presence", expected: true },
+    ],
+    scrollContracts: [
+      { state: "DEFAULT", owner: "NONE", documentScrollable: false, ancestorClipped: false },
+      { state: "DIALOG", owner: "NONE", documentScrollable: false, ancestorClipped: false },
+    ], externalUiImports: [],
+    requiredAppearance: [
+      { id: "A1", state: "DEFAULT", role: "textbox", name: "Date", locator: "date-input" },
+    ],
+  };
+  assert.throws(() => assertRequiredAppearance(item), /no initial appearance claim for 'DIALOG'/);
+  item.requiredAppearance.push({ id: "A2", state: "DIALOG", role: "dialog", name: "Calendar", locator: "calendar" });
+  assert.throws(() => assertRequiredAppearance(item), /does not cover required control 'O2'/);
+  item.requiredAppearance.push({ id: "A3", state: "DEFAULT", role: "button", name: "Choose date", locator: "trigger" });
+  assert.throws(() => assertRequiredAppearance(item), /does not cover required control 'O3'/);
+  item.requiredAppearance.push({ id: "A4", state: "DIALOG", afterInteractionId: "OPEN", role: "dialog", name: "Calendar", locator: "calendar-open" });
+  assert.doesNotThrow(() => assertRequiredAppearance(item));
+});
+
+test("identical grid pixels do not mask document or ancestor scroll divergence", () => {
+  const contract = { owner: "ELEMENT", documentScrollable: false, ancestorClipped: true };
+  const legacy = scrollProof();
+  assert.equal(compareScrollContract(legacy, scrollProof(), contract).result, "PASS");
+  assert.throws(() => compareScrollContract(legacy, scrollProof({ documentHeight: 1262 }), contract), /SCROLL_DIVERGENCE: documentScrollable/);
+  assert.throws(() => compareScrollContract(legacy, scrollProof({ ancestorHeight: 1120, overflowY: "visible" }), contract), /SCROLL_DIVERGENCE: ancestorClipped/);
+  assert.throws(() => compareScrollContract(legacy, scrollProof({ ancestorHeight: 1100 }), contract), /SCROLL_DIVERGENCE: ancestorClientHeight/);
+  assert.throws(() => compareScrollContract(legacy, { observation: {} }, contract), /observation.scroll/);
+});
 import { structuredNodes } from "../support/structured-figma-fixture.mjs";
 
 const raster = (scale = 1, shift = 0, alpha = 255) => {
@@ -52,6 +104,90 @@ const raster = (scale = 1, shift = 0, alpha = 255) => {
   }
   return image;
 };
+
+test("a reused trigger needs its own matching legacy and target pixels", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ui-coverage-"));
+  try {
+    const legacyPath = path.join(root, "legacy.png");
+    const targetPath = path.join(root, "target.png");
+    await writeFile(legacyPath, PNG.sync.write(raster()));
+    await writeFile(targetPath, PNG.sync.write(raster()));
+    const capture = { mode: "element", rootLocator: "action-trigger", deviceScaleFactor: 1,
+      colorScheme: "light", reducedMotion: "reduce", matte: "#ffffff",
+      compare: { width: 40, height: 20 }, imageWidth: 40, imageHeight: 20 };
+    const claim = { id: "ACTION-TRIGGER", locator: "action-trigger", scrollContract:
+      { owner: "ELEMENT", documentScrollable: false, ancestorClipped: true } };
+    const legacy = { record: { capture }, snapshot: scrollProof(), screenshotPath: legacyPath };
+    const target = { record: { capture }, snapshot: scrollProof(), screenshotPath: targetPath };
+    assert.equal((await compareAppearanceCoverage(claim, legacy, target)).pixels.diffPixels, 0);
+    await writeFile(targetPath, PNG.sync.write(raster(1, 4)));
+    await assert.rejects(compareAppearanceCoverage(claim, legacy, target), /VISUAL_DIVERGENCE/);
+    await writeFile(targetPath, PNG.sync.write(raster()));
+    target.snapshot = scrollProof({ documentHeight: 1262 });
+    await assert.rejects(compareAppearanceCoverage(claim, legacy, target), /SCROLL_DIVERGENCE/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("format 20 verification binds every claim to both runtime proofs and fails on missing affordance or scroll parity", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ui-proof-"));
+  try {
+    const roots = { legacyRoot: path.join(root, "legacy"), targetRoot: path.join(root, "target") };
+    const uiBehavior = {
+      id: "UI-1", behaviorId: "BEH-1", kind: "PRESENTATION", runtimeStates: ["DEFAULT"],
+      interactions: [], scenarioIds: ["SCN-1"],
+      requiredObservations: [{ id: "OBS-1", state: "DEFAULT", role: "button", name: "Choose date", predicate: "visibility", expected: true }],
+      requiredAppearance: [{ id: "APP-1", state: "DEFAULT", role: "button", name: "Choose date", locator: "date-trigger" }],
+      scrollContracts: [{ state: "DEFAULT", owner: "ELEMENT", documentScrollable: false, ancestorClipped: true }],
+    };
+    const state = { formatVersion: 20, targetModule: "orders", dataSourceMode: "real", designSource: "target-system",
+      requirementsAuthority: { digest: "requirements" }, legacyRevision: { revision: "a".repeat(40) }, artifactHashes: {} };
+    const baseline = { legacy: { hasVisibleUi: true, uiBehaviors: [uiBehavior] },
+      target: { uiMismatches: [] }, behaviorRows: [{ id: "PAR-1", behaviorId: "BEH-1" }], visualRows: null };
+    const digest = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const capture = { mode: "element", rootLocator: "date-trigger", deviceScaleFactor: 1, colorScheme: "light",
+      reducedMotion: "reduce", matte: "#ffffff", compare: { width: 40, height: 20 }, imageWidth: 40, imageHeight: 20 };
+    const uiContractDigest = digest(JSON.stringify({ uiBehavior }));
+    const make = async (origin, options = {}) => {
+      const base = origin === "LEGACY" ? roots.legacyRoot : roots.targetRoot;
+      const prefix = `evidence/slice-a/ui/${origin.toLowerCase()}`;
+      await mkdir(path.join(base, "evidence/slice-a/ui"), { recursive: true });
+      const controls = options.missingTrigger ? [{ role: "textbox", name: "Date", locator: "date-input", state: "DEFAULT", visible: true,
+        assertions: [{ predicate: "visibility", expected: true }] }] :
+        [{ role: "button", name: "Choose date", locator: "date-trigger", state: "DEFAULT", visible: true,
+          assertions: [{ predicate: "visibility", expected: true }] }];
+      const proof = { proofFormat: "playwright-ui-proof/v1", sliceId: "slice-a", uiBehaviorId: "UI-1", state: "DEFAULT",
+        traceId: "PAR-1", scenarioIds: ["SCN-1"], observation: { url: "/orders", controls,
+          scroll: scrollProof(options.scroll).observation.scroll }, interactions: [] };
+      const proofBytes = Buffer.from(JSON.stringify(proof));
+      const imageBytes = PNG.sync.write(raster(1, options.shift ?? 0));
+      await writeFile(path.join(base, `${prefix}.proof.json`), proofBytes);
+      await writeFile(path.join(base, `${prefix}.png`), imageBytes);
+      return { provider: "playwright", origin, producer: "playwright", environment: "chromium", route: "/orders",
+        viewport: { width: 1280, height: 720 }, executedAt: "2026-10-16T10:00:00.000Z", result: "PASS",
+        uiBehaviorId: "UI-1", state: "DEFAULT", appearanceClaimId: "APP-1", interactions: [],
+        reference: `${prefix}.proof.json`, hash: digest(proofBytes),
+        screenshot: { reference: `${prefix}.png`, hash: digest(imageBytes) },
+        capture: { ...capture, role: origin === "LEGACY" ? "LEGACY_AUTHORITY" : "TARGET_VERIFICATION" },
+        boundTo: { target: "orders", requirementsDigest: "requirements", dataSourceMode: "real", sliceId: "slice-a",
+          uiContractDigest, ...(origin === "LEGACY" ? { legacyRevision: state.legacyRevision.revision } : { implementationDigest: "impl" }) },
+      };
+    };
+    const run = (uiEvidence) => validateUiRuntimeEvidence({ evidence: { uiEvidence, uiEvidenceLimitations: [] },
+      implementation: { traceIds: ["PAR-1"] }, baseline, sliceId: "slice-a", state, roots, root,
+      implementationDigests: async () => ({ current: "impl", legacy: "impl" }) });
+    const legacy = await make("LEGACY");
+    const target = await make("TARGET");
+    await assert.rejects(run([target]), /VISUAL_COVERAGE_MISSING/);
+    assert.equal((await run([legacy, target])).at(-1).appearanceClaimId, "APP-1");
+    await assert.rejects(run([legacy, await make("TARGET", { missingTrigger: true })]), /required observation|visible appearance claim/);
+    await assert.rejects(run([legacy, await make("TARGET", { scroll: { documentHeight: 1262 } })]), /SCROLL_DIVERGENCE/);
+    await assert.rejects(run([legacy, await make("TARGET", { shift: 4 })]), /VISUAL_DIVERGENCE/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Slice C: PNG decode, 2x box filter, alpha matte, and pixel deltas", () => {
   const image = raster();

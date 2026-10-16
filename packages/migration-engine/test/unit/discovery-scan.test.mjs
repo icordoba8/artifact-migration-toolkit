@@ -17,14 +17,17 @@ import { promisify } from "node:util";
 
 import {
   CENSUS_ALGORITHM_VERSION,
+  assertExternalUiTrace,
   discoveryDigest,
   kindOf,
   loadTypeScript,
   PRODUCTION_REACHABILITY,
+  readCanonicalModuleBoundary,
   runDiscoveryScan,
   structuralUnits,
   VISUAL_KINDS,
 } from "../../src/census/index.mjs";
+import { assertExternalUiCapabilityRows } from "../../src/slices/index.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -95,6 +98,80 @@ const ALIASED = {
     moduleResolution: "bundler",
   },
 };
+
+test("external JSX imports require exact behavior and source-backed capability dispositions", () => {
+  const use = { from: "app/form/page.tsx", spec: "@example/date-picker", symbol: "DatePicker" };
+  const scan = { externalUi: [use] };
+  const token = JSON.stringify([use.from, use.spec, use.symbol]);
+  assert.throws(() => assertExternalUiTrace(scan, { uiBehaviors: [] }), /EXTERNAL_UI_TRACEABILITY/);
+  assert.throws(() => assertExternalUiTrace(scan, { uiBehaviors: [{ externalUiImports: ["stale"] }] }), /EXTERNAL_UI_TRACEABILITY/);
+  assert.doesNotThrow(() => assertExternalUiTrace(scan, { uiBehaviors: [{ externalUiImports: [token] }] }));
+  const roots = { legacyRoot: "/legacy", targetRoot: "/target" };
+  assert.throws(() => assertExternalUiCapabilityRows(scan, [], roots), /EXTERNAL_UI_CAPABILITY_GAP/);
+  assert.throws(() => assertExternalUiCapabilityRows(scan, [{ id: "C1", externalUiImports: [token], legacyEvidence: ["app/other.tsx"] }], roots), /must cite its legacy source/);
+  assert.doesNotThrow(() => assertExternalUiCapabilityRows(scan, [{ id: "C1", externalUiImports: [token], legacyEvidence: [use.from] }], roots));
+});
+
+test("format 20 refuses a historical scanner pin before running discovery", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "sm-scan-format-"));
+  try {
+    await mkdir(path.join(root, "inventories"));
+    await writeFile(path.join(root, "inventories/module-classification.json"), JSON.stringify({
+      version: 2, algorithmVersion: 3, moduleRoots: [{ path: "app/form", reason: "Fixture route" }],
+    }));
+    await assert.rejects(readCanonicalModuleBoundary(root, { formatVersion: 20 }, {
+      legacyRoot: root, targetRoot: "/target",
+    }), /requires discovery scanner algorithm 4/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("algorithm 4 includes governing Next.js ancestors and their styles without claiming ownership", async () => {
+  const f = await fixture({
+    "src/app/layout.tsx": "import './shell.css'; export default function Layout({ children }) { return <main>{children}</main>; }\n",
+    "src/app/shell.css": "main { min-height: 100vh; }\n",
+    "src/app/(admin)/layout.tsx": "import { Card } from '../../ui/card'; export default function Layout({ children }) { return <Card>{children}</Card>; }\n",
+    "src/ui/card.tsx": "import './card.css'; export const Card = ({ children }) => <section>{children}</section>;\n",
+    "src/ui/card.css": "section { height: 90vh; overflow: hidden; }\n",
+    "src/app/(admin)/orders/page.tsx": "import { Table } from '../../../features/orders/table'; export default () => <Table />;\n",
+    "src/features/orders/table.tsx": "export const Table = () => <div />;\n",
+    "src/app/unrelated/layout.tsx": "import './unrelated.css'; export default () => null;\n",
+    "src/app/unrelated/unrelated.css": "body { color: red; }\n",
+  });
+  try {
+    const current = await scanVersion(f.root, ["src/features/orders"], 4);
+    const old = await scanVersion(f.root, ["src/features/orders"], 3);
+    assert.deepEqual(current.census, ["src/features/orders/table.tsx"]);
+    assert.ok(current.boundary.governingFramework.some((row) => row.path === "src/app/(admin)/layout.tsx" &&
+      row.evidence.some((edge) => edge.kind === "FRAMEWORK_ANCESTOR")));
+    assert.ok(current.boundary.governingFramework.some((row) => row.path === "src/app/layout.tsx"));
+    assert.ok(current.boundary.supporting.some((row) => row.path === "src/ui/card.css" && row.type === "STYLE"));
+    assert.ok(current.boundary.supporting.some((row) => row.path === "src/app/shell.css" && row.type === "STYLE"));
+    assert.ok(!current.supporting.some((file) => file.includes("unrelated")));
+    assert.ok(!old.boundary.governingFramework.some((row) => row.path === "src/app/(admin)/layout.tsx"));
+    assert.equal((await scanVersion(f.root, ["src/features/orders"], 3)).discoveryDigest, old.discoveryDigest);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("algorithm 4 retains externally rendered controls as bound UI imports", async () => {
+  const f = await fixture({
+    "src/app/orders/page.tsx": "import { Form } from '../../features/orders/form'; export default () => <Form />;\n",
+    "src/features/orders/form.tsx": "import { DatePicker as Picker } from '@widgets/calendar'; export const Form = () => <Picker />;\n",
+    "src/app/unrelated/page.tsx": "import { Clock } from '@widgets/clock'; export default () => <Clock />;\n",
+  });
+  try {
+    const current = await scanVersion(f.root, ["src/features/orders"], 4);
+    assert.deepEqual(current.externalUi, [{ from: "src/features/orders/form.tsx", spec: "@widgets/calendar", symbol: "DatePicker" }]);
+    const old = await scanVersion(f.root, ["src/features/orders"], 3);
+    assert.equal(old.externalUi, undefined);
+    assert.equal((await scanVersion(f.root, ["src/features/orders"], 3)).discoveryDigest, old.discoveryDigest);
+  } finally {
+    await f.cleanup();
+  }
+});
 
 // --- A. the census, which no graph shape can shrink -------------------------
 
@@ -362,14 +439,14 @@ test("relevant or declared Next.js conventions govern the module boundary", asyn
     { tsconfig: ALIASED },
   );
   try {
-    // The roles page reaches the module and proxy.ts is explicit. Unrelated
-    // framework files remain outside this module's boundary.
+    // The page reaches the module, its parent layout governs it, and proxy.ts
+    // is explicit. Unrelated framework files remain outside the boundary.
     const result = await scan(f.root, ["src/features/auth"], ["src/proxy.ts"]);
     const discovered = new Map(result.entryPoints.map((e) => [e.path, e.discovery]));
     for (const file of ["src/app/(auth)/login/page.tsx", "src/proxy.ts"]) {
       assert.equal(discovered.get(file), "FRAMEWORK", `${file} is a framework entry point`);
     }
-    assert.equal(discovered.has("src/app/layout.tsx"), false);
+    assert.equal(discovered.get("src/app/layout.tsx"), "FRAMEWORK");
     assert.equal(discovered.has("src/app/api/session/route.ts"), false);
     assert.equal(result.reachability["src/features/auth/form.tsx"], "REACHABLE_FROM_ENTRY");
   } finally {
@@ -406,6 +483,7 @@ test("an owned Next.js error boundary is a framework entry without a declaration
       [
         [`${route}/error.tsx`, "FRAMEWORK"],
         [`${route}/page.tsx`, "FRAMEWORK"],
+        ["src/app/layout.tsx", "FRAMEWORK"],
       ],
     );
     assert.deepEqual(result.declaredEntryPoints, []);
@@ -413,7 +491,7 @@ test("an owned Next.js error boundary is a framework entry without a declaration
     // stays UNREACHABLE, and an unrelated route never enters the boundary.
     assert.equal(result.reachability[`${route}/_components/unused.tsx`], "UNREACHABLE");
     const boundaryPaths = Object.values(result.boundary).flat().map((entry) => entry.path);
-    assert.ok(!boundaryPaths.some((file) => file.includes("/reports/") || file === "src/app/layout.tsx"));
+    assert.ok(!boundaryPaths.some((file) => file.includes("/reports/")));
 
     // A migration pinned to algorithm 2 keeps its recorded result and digest.
     const pinned = await scanVersion(f.root, roots, 2);

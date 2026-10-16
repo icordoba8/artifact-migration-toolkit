@@ -24,6 +24,7 @@ export {
   validateSlicePlan,
 } from "./plan.mjs";
 export {
+  assertExternalUiCapabilityRows,
   canonicalClaim,
   diffEntries,
   implementationCoversDrift,

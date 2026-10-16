@@ -482,7 +482,8 @@ constants by a contract test — the table cannot drift from the code.
 
 | Persisted source       | Result                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| contract 5, format 19  | active production creation default and supported ceiling; direct-ledger `STANDARD_LOCAL` decisions use explicit `AGENT_RELAYED` authority |
+| contract 5, format 20  | active production creation default and supported ceiling; authored UI appearance and scroll coverage is required for visible UI |
+| contract 5, format 19  | remains readable/resumable with its pinned appearance semantics and direct-ledger `STANDARD_LOCAL` decisions; never silently promoted to 20 |
 | contract 5, format 18  | remains readable/resumable with historical citation decisions and frozen `requiredObservations`; explicit 18→19 upgrade only |
 | contract 5, format 17  | owes 17→18; DISCOVER_LEGACY may first validate and pin the legacy inventory, after which the upgrade freezes the lifecycle until it commits (see Format upgrades) |
 | contract 5, format 16  | executes the full lifecycle with controlled same-slice rework and unclaimed-drift refusal at FINALIZE; never promoted to 17 |
@@ -497,7 +498,7 @@ constants by a contract test — the table cannot drift from the code.
 | contract 2 or 3        | refused as unsupported; files are never touched                                                                       |
 | newer than supported   | refused; update start-migration first                                                                                 |
 
-Module default/active = 19; supported = 19. Artifact default/active = 14;
+Module default/active = 20; supported = 20. Artifact default/active = 14;
 supported = 14, including delegated children. No pilot flag, signer or protected
 policy is required. Existing records never silently upgrade: module 18 uses the
 explicit pre-pin 18 -> 19 path; artifact 13 uses the explicit pristine 13 -> 14
@@ -506,6 +507,11 @@ authority covers `ARTIFACT_DECISION` and `VISUAL_UNBACKED` only; not
 `GROUP_APPROVAL`, and `EXCEPTION_RECORDED` is unchanged. The retained WebAuthn
 signer provides optional protected `HUMAN_ATTESTED` authority; its deployment and
 activation requirements never gate standard migration operation.
+Format 20 requires new authored legacy coverage and is created only for new
+module records. A format-19 record, including a completed one, retains its
+historical verdict and evidence; renewed format-20 validation starts a separate
+record under the ordinary initialization workflow. Do not rewrite a pinned
+legacy inventory to manufacture adoption.
 
 ### Format bump policy
 
@@ -1096,6 +1102,13 @@ current checkpoint is missing.
   (`showToolbar: false`, `showPagination: false`, `compactMode: true`), not
   "a table exists". Discovery is not blocked when the legacy app is offline —
   author from source and record the gap.
+  Trace external JSX package imports reported by scanner algorithm 4 to
+  `uiBehaviors[].externalUiImports` and source-backed capability rows. Record
+  every required control and state as `requiredObservations` and
+  `requiredAppearance` with its actual locator, including affordances, icons,
+  triggers, open states, and caller styling. For each runtime state author one
+  `scrollContracts` row naming the scroll owner, document scrolling and
+  ancestor clipping. A shared target component still needs these claims.
 - `VERIFY_SLICES` — drive the target runtime and assert observable behavior:
   the required control exists, the action exists, search filters, pagination
   moves, visibility and permission rules hold, navigation works, the
@@ -1109,10 +1122,21 @@ Capture protocol, per required UI behavior:
    surface, not the picture.
 3. `browser_click` / `browser_type` / `browser_select_option` for each declared
    interaction; record `expected` (from discovery) and `actual` (observed).
-4. `browser_take_screenshot` once per state, into
+4. `browser_take_screenshot` for each required appearance claim and state, into
    `evidence/<slice-id>/ui/`.
 
-Budget: one screenshot per origin/behavior/state, no duplicate digests
+Format 20 pairs one `LEGACY` and one `TARGET` hash-verified Playwright proof and
+PNG per `appearanceClaimId`. The capture `rootLocator` and observed control
+`locator` must equal the authored claim locator. A region verifies only its
+own claim. Separate focused regions and states may collectively cover a view;
+a full-page capture is not required. Each proof includes measured document,
+scroll-owner and ancestor scroll facts. The engine compares the actual PNGs
+at the established legacy-runtime pixel threshold and checks the scroll facts
+independently; a matching grid crop cannot certify surrounding controls or
+document scrolling. When a visual acceptance matrix also applies, bind its row
+to one matching target capture with `visualRowId`.
+
+For formats through 19, the historical budget is one screenshot per origin/behavior/state, no duplicate digests
 _within an origin_ (identical legacy and target captures are parity, not a
 duplicate), one viewport per slice unless the behavior is `RESPONSIVE` or the
 state is `DESKTOP`/`MOBILE`. Every `reference` must be a file you actually

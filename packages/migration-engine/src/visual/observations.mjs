@@ -1,4 +1,4 @@
-import { REQUIRED_OBSERVATIONS_FORMAT } from "../formats/index.mjs";
+import { REQUIRED_OBSERVATIONS_FORMAT, UI_COVERAGE_FORMAT } from "../formats/index.mjs";
 import {
   assertArray,
   assertNonEmpty,
@@ -129,4 +129,118 @@ export const assertRequiredObservations = (item, seenIds = new Set()) => {
       );
     }
   }
+};
+
+/** Format 20's authored appearance set is pinned with the legacy inventory. */
+export const assertRequiredAppearance = (item, seenIds = new Set()) => {
+  const label = `${item.id}.requiredAppearance`;
+  const claims = assertArray(item.requiredAppearance, label);
+  const states = item.runtimeStates ?? [];
+  const interactions = (item.interactions ?? []).map((row) => row.id);
+  for (const [index, claim] of claims.entries()) {
+    const at = `${label}[${index}]`;
+    assertPlainObject(claim, at);
+    assertNonEmpty(claim.id, `${at}.id`);
+    if (seenIds.has(claim.id)) throw new Error(`${at}.id '${claim.id}' is not unique.`);
+    seenIds.add(claim.id);
+    if (!states.includes(claim.state)) throw new Error(`${at}.state must be a discovered runtime state.`);
+    for (const field of ["role", "name", "locator"]) assertNonEmpty(claim[field], `${at}.${field}`);
+    if (claim.afterInteractionId !== undefined && !interactions.includes(claim.afterInteractionId)) {
+      throw new Error(`${at}.afterInteractionId is not a discovered interaction.`);
+    }
+  }
+  for (const state of states) {
+    if (!claims.some((claim) => claim.state === state && !claim.afterInteractionId)) {
+      throw new Error(`${label} has no initial appearance claim for '${state}'.`);
+    }
+  }
+  for (const observation of item.requiredObservations ?? []) {
+    if (observation.predicate === "url" || observation.expected === false) continue;
+    if (!claims.some((claim) => claim.state === observation.state &&
+      claim.role === observation.role && claim.name === observation.name &&
+      claim.afterInteractionId === observation.afterInteractionId)) {
+      throw new Error(`${label} does not cover required control '${observation.id}' in '${observation.state}'.`);
+    }
+  }
+  for (const interaction of interactions) {
+    if (!claims.some((claim) => claim.afterInteractionId === interaction)) {
+      throw new Error(`${label} has no post-action appearance claim for '${interaction}'.`);
+    }
+  }
+  const scroll = assertArray(item.scrollContracts, `${item.id}.scrollContracts`);
+  if (scroll.length !== states.length || new Set(scroll.map((row) => row.state)).size !== states.length) {
+    throw new Error(`${item.id}.scrollContracts must have exactly one row per runtime state.`);
+  }
+  for (const row of scroll) {
+    assertPlainObject(row, `${item.id}.scrollContracts row`);
+    if (!states.includes(row.state) || !["NONE", "DOCUMENT", "ELEMENT"].includes(row.owner) ||
+      typeof row.documentScrollable !== "boolean" || typeof row.ancestorClipped !== "boolean") {
+      throw new Error(`${item.id}.scrollContracts has an unsupported state, owner or scroll fact.`);
+    }
+  }
+  const imports = assertArray(item.externalUiImports, `${item.id}.externalUiImports`);
+  for (const token of imports) assertNonEmpty(token, `${item.id}.externalUiImports entry`);
+  if (new Set(imports).size !== imports.length) throw new Error(`${item.id}.externalUiImports contains duplicates.`);
+  return { claims, scroll };
+};
+
+const scrollMetrics = (snapshot, label) => {
+  const scroll = assertPlainObject(snapshot?.observation?.scroll, `${label}.observation.scroll`);
+  const document = assertPlainObject(scroll.document, `${label}.document`);
+  const measure = (item, at) => {
+    for (const field of ["clientHeight", "scrollHeight"]) {
+      if (!Number.isInteger(item?.[field]) || item[field] < 0) throw new Error(`${at}.${field} must be a nonnegative integer.`);
+    }
+  };
+  measure(document, `${label}.document`);
+  const owner = assertPlainObject(scroll.owner, `${label}.owner`);
+  if (!["NONE", "DOCUMENT", "ELEMENT"].includes(owner.kind)) throw new Error(`${label}.owner.kind is invalid.`);
+  if (owner.kind === "ELEMENT") {
+    assertNonEmpty(owner.locator, `${label}.owner.locator`);
+    measure(owner, `${label}.owner`);
+    if (!["auto", "scroll"].includes(owner.overflowY) || owner.scrollHeight <= owner.clientHeight + 1) {
+      throw new Error(`${label}.owner is not a measured scrollable element.`);
+    }
+  }
+  const ancestors = assertArray(scroll.ancestors, `${label}.ancestors`);
+  for (const [index, ancestor] of ancestors.entries()) {
+    assertPlainObject(ancestor, `${label}.ancestors[${index}]`);
+    assertNonEmpty(ancestor.locator, `${label}.ancestors[${index}].locator`);
+    measure(ancestor, `${label}.ancestors[${index}]`);
+    if (!["auto", "scroll", "hidden", "clip", "visible"].includes(ancestor.overflowY)) {
+      throw new Error(`${label}.ancestors[${index}].overflowY is invalid.`);
+    }
+  }
+  if (owner.kind === "ELEMENT" && ancestors.length === 0) throw new Error(`${label}.ancestors must measure the scroll owner's parent.`);
+  const documentScrollable = document.scrollHeight > document.clientHeight + 1;
+  if (owner.kind === "DOCUMENT" && !documentScrollable || owner.kind === "NONE" && documentScrollable) {
+    throw new Error(`${label}.owner disagrees with measured document scrolling.`);
+  }
+  return {
+    owner: owner.kind,
+    documentScrollable,
+    ancestorClipped: ancestors.some((row) => ["hidden", "clip"].includes(row.overflowY)),
+    ownerClientHeight: owner.kind === "ELEMENT" ? owner.clientHeight : document.clientHeight,
+    ancestorClientHeight: ancestors.length ? Math.min(...ancestors.map((row) => row.clientHeight)) : null,
+  };
+};
+
+export const compareScrollContract = (legacyProof, targetProof, contract) => {
+  const legacy = scrollMetrics(legacyProof, "LEGACY scroll");
+  const target = scrollMetrics(targetProof, "TARGET scroll");
+  for (const [field, expected] of Object.entries({
+    owner: contract.owner,
+    documentScrollable: contract.documentScrollable,
+    ancestorClipped: contract.ancestorClipped,
+  })) {
+    if (legacy[field] !== expected || target[field] !== expected) {
+      throw new Error(`SCROLL_DIVERGENCE: ${field} expected ${JSON.stringify(expected)}, LEGACY ${JSON.stringify(legacy[field])}, TARGET ${JSON.stringify(target[field])}.`);
+    }
+  }
+  for (const field of ["ownerClientHeight", "ancestorClientHeight"]) {
+    if (legacy[field] !== null && target[field] !== null && Math.abs(legacy[field] - target[field]) > 1) {
+      throw new Error(`SCROLL_DIVERGENCE: ${field} differs by more than 1px (${legacy[field]} versus ${target[field]}).`);
+    }
+  }
+  return { legacy, target, result: "PASS", format: UI_COVERAGE_FORMAT };
 };

@@ -55,10 +55,13 @@ export {
   visualAuthorityOf,
 } from "./authority.mjs";
 export {
+  assertRequiredAppearance,
   assertRequiredObservations,
+  compareScrollContract,
   uiBehaviorIsRequired,
 } from "./observations.mjs";
 export {
+  compareAppearanceCoverage,
   compareVisualEvidence,
   compareVisualFact,
   pendingVisualUnbackedCandidates,

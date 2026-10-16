@@ -23,7 +23,7 @@ import { promisify } from "node:util";
 
 import { buildRelease } from "../../../../scripts/release.mjs";
 import { candidateReleaseRoot } from "../support/candidate-release-root.mjs";
-import { createUnstampedRecord } from "../support/consumer-fixture.mjs";
+import { CONSUMER_FORMAT, createUnstampedRecord } from "../support/consumer-fixture.mjs";
 import { downgradeToV4, readTree } from "../support/downgrade-v4.mjs";
 import { stopChild } from "../support/portability.mjs";
 import {
@@ -99,7 +99,7 @@ const seedConsumer = async (t, prefix) => {
   t.after(() => consumer.cleanup());
   await consumer.authorDiscoverLegacy();
   const seeded = await consumer.snapshot();
-  assert.equal(seeded.state.formatVersion, MIGRATION_FORMAT_VERSION, "seeded at the current format");
+  assert.equal(seeded.state.formatVersion, CONSUMER_FORMAT, "seeded at the historical consumer format");
   assert.equal(seeded.state.toolkitIdentity, undefined, "the seed must be unstamped");
   assert.equal(seeded.state.status, "ACTIVE");
   return consumer;
@@ -152,7 +152,7 @@ test("an installed toolkit resumes an existing unstamped Format 17 record only a
   assert.equal(after.history.at(-1).event, "STEP_COMPLETED");
   assert.deepEqual(after.state.toolkitIdentity, toolkit.identity, "the advance dropped the identity");
   // 7. The format the record runs at is untouched by the toolkit that runs it.
-  assert.equal(after.state.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(after.state.formatVersion, CONSUMER_FORMAT);
   assert.equal(after.state.contractVersion, before.state.contractVersion);
   assert.equal(after.state.workflowVersion, before.state.workflowVersion);
   assert.equal(after.decisions, before.decisions, "the decision ledger changed during a lifecycle advance");
@@ -939,11 +939,15 @@ test("E2E-D: the built bundle states both engines' upgrade floors and registries
   assert.deepEqual(supports, toolkit.manifest.supports);
 
   assert.equal(supports.moduleFormat, MIGRATION_FORMAT_VERSION);
-  assert.equal(supports.moduleFormatSupported, 19);
+  assert.equal(supports.moduleFormatSupported, 20);
   assert.equal(supports.formatUpgradeFloor, 17);
+  // 19 -> 20 is declared so the ceiling is reachable, but its plan always
+  // blocks: authored appearance coverage cannot be inferred from a format-19
+  // record.
   assert.deepEqual(supports.formatUpgraders, [
     { from: 17, to: 18, id: "UI_OBSERVATIONS_ADOPTED", version: 1 },
     { from: 18, to: 19, id: "DIRECT_LEDGER_DECISIONS_ADOPTED", version: 1 },
+    { from: 19, to: 20, id: "UI_COVERAGE_ADOPTED", version: 1 },
   ]);
 
   assert.equal(supports.artifactFormat, 14);

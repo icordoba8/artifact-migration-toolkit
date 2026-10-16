@@ -59,6 +59,7 @@ export {
   validateTargetInventory,
 } from "./inventory.mjs";
 export {
+  assertExternalUiTrace,
   validateDiscoveryCompleteness,
 } from "./completeness.mjs";
 export {

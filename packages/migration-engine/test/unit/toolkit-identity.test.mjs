@@ -433,6 +433,10 @@ const unstampedConsumer = async () => {
   const { createUnstampedRecord } = await import("../support/consumer-fixture.mjs");
   return createUnstampedRecord();
 };
+const consumerFormat = async () => {
+  const { CONSUMER_FORMAT } = await import("../support/consumer-fixture.mjs");
+  return CONSUMER_FORMAT;
+};
 
 /** This checkout, run as a command: an unidentified toolkit installation. */
 const sourceEngine = path.join(repositoryRoot, "packages/migration-engine");
@@ -574,7 +578,7 @@ test("status and validation read an unstamped record, report UNSTAMPED, and writ
   assert.equal(report.toolkitIdentityStatus, "UNSTAMPED");
   validateToolkitIdentity(report.activeToolkitIdentity);
   // Reported side by side, and the format is untouched by the toolkit release.
-  assert.equal(report.formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(report.formatVersion, await consumerFormat());
 
   const readOnly = await runEngine(
     engineIn(bundle, "."),
@@ -681,7 +685,7 @@ test("after adoption the same toolkit resumes the record normally", async (t) =>
     consumer.root,
   );
   assert.equal(resumed.code, 0, resumed.output);
-  assert.equal(JSON.parse(resumed.stdout).formatVersion, MIGRATION_FORMAT_VERSION);
+  assert.equal(JSON.parse(resumed.stdout).formatVersion, await consumerFormat());
 
   // And the mutation that was refused before adoption now runs: adoption is the
   // thing that lifts the block, not a side effect of something else.

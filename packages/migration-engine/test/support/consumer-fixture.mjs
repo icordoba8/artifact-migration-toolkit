@@ -1,4 +1,6 @@
-// A minimal consumer holding one integrity-valid, *unstamped* Format 17 record.
+// A minimal consumer holding one integrity-valid, *unstamped* existing record.
+// Existing consumer records predate Format 20, so the seed is pinned to the
+// historical Format 19 shape (`CONSUMER_FORMAT`); it never promotes.
 //
 // Built by this checkout, which has no `build-identity.json` and is therefore
 // an unidentified runtime -- so the record it produces is unstamped, which is
@@ -14,6 +16,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { historicalBootstrap } from "./historical-bootstrap.mjs";
 import { removeTree } from "./portability.mjs";
 
 import { resolveRegistryPath } from "../../src/store/index.mjs";
@@ -24,6 +27,9 @@ import {
 } from "../../src/lifecycle/index.mjs";
 
 export { SPEC, LEGACY_INVENTORY, MODULE_CLASSIFICATION };
+
+/** The historical format every seeded consumer record runs at. */
+export const CONSUMER_FORMAT = 19;
 
 const execFileAsync = promisify(execFile);
 
@@ -209,6 +215,7 @@ export const createUnstampedRecord = async ({
   });
 
   const recordRoot = path.join(targetRoot, ".agents/knowledge/migrations/modules/auth");
+  await historicalBootstrap(recordRoot, CONSUMER_FORMAT);
   const statePath = path.join(recordRoot, "state.json");
 
   /** Everything a transition could possibly have touched, as comparable data. */

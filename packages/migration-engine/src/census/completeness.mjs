@@ -6,7 +6,7 @@ import {
   readRecordedDecisions,
   requireModuleDecision,
 } from "../decisions/index.mjs";
-import { initialArtifacts, usesDirectLedgerDecisions } from "../formats/index.mjs";
+import { initialArtifacts, usesDirectLedgerDecisions, usesUiCoverage } from "../formats/index.mjs";
 import { assertArray, assertNonEmpty, assertPlainObject, isPlainObject } from "../shared/index.mjs";
 import { readJson } from "../store/index.mjs";
 import {
@@ -73,6 +73,16 @@ export const moduleDecisionCandidate = (state, projectRoot, input) =>
   usesDirectLedgerDecisions(state)
     ? createNewFormatDecisionCandidate({ projectRoot, ...input })
     : createDecisionCandidate(input);
+
+export const assertExternalUiTrace = (scan, inventory) => {
+  const discovered = new Set((scan.externalUi ?? []).map((use) => JSON.stringify([use.from, use.spec, use.symbol])));
+  const traced = new Set((inventory.uiBehaviors ?? []).flatMap((behavior) => behavior.externalUiImports ?? []));
+  const missing = [...discovered].filter((token) => !traced.has(token));
+  const stale = [...traced].filter((token) => !discovered.has(token));
+  if (missing.length || stale.length) {
+    throw new Error(`EXTERNAL_UI_TRACEABILITY: discovered JSX package imports require exact UI behavior dispositions; missing ${JSON.stringify(missing)}, stale ${JSON.stringify(stale)}.`);
+  }
+};
 
 export const validateDiscoveryCompleteness = async (
   root,
@@ -146,6 +156,7 @@ export const validateDiscoveryCompleteness = async (
     path.join(root, initialArtifacts.legacyInventory),
     "Legacy inventory",
   );
+  if (usesUiCoverage(state)) assertExternalUiTrace(scan, inventory);
   await assertLegacyEvidenceWithinBoundary(inventory, scan, roots);
   const behaviorIds = new Set(
     (inventory.behaviors ?? []).map((behavior) => behavior?.id),

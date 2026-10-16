@@ -419,7 +419,7 @@ const initialize = async (fixture, { currentFormat = false, ...overrides } = {})
     boundInputs: preview.boundInputs,
     ...overrides,
   });
-  if (!currentFormat) result.state = await historicalBootstrap(fixture.migrationRoot, 18);
+  if (!currentFormat || currentFormat === 19) result.state = await historicalBootstrap(fixture.migrationRoot, currentFormat === 19 ? 19 : 18);
   return { resolution, preview, result };
 };
 
@@ -4729,6 +4729,7 @@ test("an isolated clean roles fixture completes DISCOVERY_COMPLETENESS without a
       registryBinding: preview.registryBinding,
       boundInputs: preview.boundInputs,
     });
+    await historicalBootstrap(fixture.migrationRoot, 18);
     await writeFile(
       path.join(fixture.migrationRoot, "steps/02-discover-legacy.md"),
       STEP_DOC("02", "Discover legacy"),
@@ -4998,6 +4999,7 @@ test("a runtime redirect over a destructured parameter base creates no EDGE_RESO
       registryBinding: preview.registryBinding,
       boundInputs: preview.boundInputs,
     });
+    await historicalBootstrap(fixture.migrationRoot, 18);
     await writeFile(
       path.join(fixture.migrationRoot, "steps/02-discover-legacy.md"),
       STEP_DOC("02", "Discover legacy"),
@@ -15301,7 +15303,7 @@ test("I3: a REJECTED ROOT_DECLARATION never authorizes the app route (format 19)
       ],
       DIRECT_LEDGER.classification,
     );
-    await atRootCompleteness(fixture, classification, { bootstrap: { currentFormat: true } });
+    await atRootCompleteness(fixture, classification, { bootstrap: { currentFormat: 19 } });
     assert.equal((await state(fixture)).formatVersion, 19);
     const [candidate, ...rest] = await pendingRootPaths(fixture);
     assert.equal(candidate.subject.path, "src/app/auth");
@@ -17011,7 +17013,7 @@ const driftAtFinalize = async (fixture, overrides = {}) => {
   assert.match(failure?.message ?? "", /UNCLAIMED_TARGET_DRIFT/);
 };
 const DIRECT_LEDGER = {
-  bootstrap: { currentFormat: true },
+  bootstrap: { currentFormat: 19 },
   classification: {
     ...MODULE_CLASSIFICATION,
     version: 2,
@@ -17160,7 +17162,7 @@ test("R-W10-a: the SKILL.md compatibility table cannot drift from the exported c
   );
 });
 
-test("R-W10-c: formats 10, 11, 17, 18 and 19 stay non-promoting, and every other supported format is executable", () => {
+test("R-W10-c: authored formats through 20 stay non-promoting, and every supported format is executable", () => {
   // Two different questions with two different answers. Conflating them is what
   // made a first attempt at deriving this set turn every format-10 record
   // unexecutable: 10 and 11 are never promoted *into*, but a record already at
@@ -17169,7 +17171,7 @@ test("R-W10-c: formats 10, 11, 17, 18 and 19 stay non-promoting, and every other
   // 19 joins the set for the third reason: it changes where a decision's
   // authority comes from, so an advance that promoted into it would reinterpret
   // receipts the record already recorded under citation rules.
-  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18, 19]);
+  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18, 19, 20]);
   for (const version of SUPPORTED_FORMAT_VERSIONS) {
     assert.equal(
       formatIsSupported(version),
@@ -17178,7 +17180,7 @@ test("R-W10-c: formats 10, 11, 17, 18 and 19 stay non-promoting, and every other
     );
     assert.equal(
       formatIsPromoting(version),
-      ![10, 11, 17, 18, 19].includes(version),
+      ![10, 11, 17, 18, 19, 20].includes(version),
     );
   }
   // Bumping the constant cannot orphan the format that was current a moment
@@ -17203,12 +17205,12 @@ test("R-W10-e: a format newer than supported is refused with the update message"
   }
 });
 
-test("ODA-1: format 19 is supported and active; historical records never silently promote", () => {
-  assert.equal(MIGRATION_FORMAT_SUPPORTED, DIRECT_LEDGER_DECISIONS_FORMAT);
-  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 19);
+test("ODA-1: format 20 is active while format 19 retains direct-ledger semantics", async () => {
+  assert.equal(MIGRATION_FORMAT_SUPPORTED, 20);
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 20);
   assert.equal(MIGRATION_FORMAT_SUPPORTED, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
   assert.equal(formatIsSupported(19), true);
-  assert.equal(formatIsSupported(20), false);
+  assert.equal(formatIsSupported(20), true);
   assert.equal(usesDirectLedgerDecisions({ formatVersion: 19 }), true);
   assert.equal(usesDirectLedgerDecisions({ formatVersion: 18 }), false);
 
@@ -17245,6 +17247,27 @@ test("ODA-1: format 19 is supported and active; historical records never silentl
     nextIncrement(FORMAT_UPGRADERS, 18, MIGRATION_FORMAT_SUPPORTED, FORMAT_UPGRADE_FLOOR),
     { from: 18, to: 19, row },
   );
+  // 19 -> 20 is declared only so the ceiling is reachable. Even the explicit
+  // adoption cursor stops at 19, and the increment's own plan always blocks.
+  assert.equal(
+    nextIncrement(FORMAT_UPGRADERS, 19, DIRECT_LEDGER_DECISIONS_FORMAT, FORMAT_UPGRADE_FLOOR),
+    null,
+  );
+  const coverageRow = FORMAT_UPGRADERS.find((entry) => entry.from === 19);
+  assert.equal(coverageRow.to, 20);
+  assert.equal((await coverageRow.plan({})).blockers.length, 1);
+  await assert.rejects(coverageRow.commit({}), /cannot be applied to an existing record/);
+});
+
+test("new module records start at format 20 without mutating historical records", async () => {
+  const fixture = await createFixture();
+  try {
+    const { result } = await initialize(fixture, { currentFormat: true });
+    assert.equal(result.state.formatVersion, 20);
+    assert.equal((await state(fixture)).formatVersion, 20);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 /* ------- P2-3: the one policy-aware direct-ledger resolver (format 19) -------

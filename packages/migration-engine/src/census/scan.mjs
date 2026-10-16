@@ -46,14 +46,15 @@ import {
   isLexicallyWithin as isWithin,
   portablePath as portable,
 } from "../shared/index.mjs";
+import { externalJsxUses, frameworkAncestorEdges, frameworkEntryFor } from "./framework.mjs";
 
 /**
  * Bump only when the scan's own rules change what a correct run produces.
  * FINALIZE recomputes with the version a migration recorded, so an in-flight
  * migration is never silently held to rules that postdate its checkpoint.
  */
-export const CENSUS_ALGORITHM_VERSION = 3;
-export const SUPPORTED_ALGORITHM_VERSIONS = new Set([1, 2, 3]);
+export const CENSUS_ALGORITHM_VERSION = 4;
+export const SUPPORTED_ALGORITHM_VERSIONS = new Set([1, 2, 3, 4]);
 
 export class DiscoveryScannerVersionError extends Error {
   constructor(code, message) {
@@ -120,36 +121,6 @@ export const REACHABILITY_VALUES = [
   "REACHABLE_TEST_ONLY",
   "UNREACHABLE",
 ];
-
-/** Next.js file conventions: an operator cannot omit these by not declaring them. */
-const NEXT_APP_FILES = new Set([
-  "page",
-  "layout",
-  "template",
-  "loading",
-  "error",
-  "global-error",
-  "not-found",
-  "default",
-  "route",
-  "forbidden",
-  "unauthorized",
-  "robots",
-  "sitemap",
-  "manifest",
-  "icon",
-  "apple-icon",
-  "opengraph-image",
-  "twitter-image",
-]);
-
-/** Project-root conventions. `proxy` is Next 16's rename of `middleware`. */
-const NEXT_ROOT_FILES = new Set([
-  "proxy",
-  "middleware",
-  "instrumentation",
-  "instrumentation-client",
-]);
 
 const TEST_PATTERN =
   /(^|\/)(tests?|__tests__|e2e)\/|\.(test|spec|e2e-spec|integration-spec)\.[^/]+$/;
@@ -1403,6 +1374,7 @@ export const runDiscoveryScan = async ({
   const exportedNames = new Map();
   const external = new Set();
   const externalEdges = [];
+  const externalUiCandidates = [];
   const outgoing = new Map();
   const addOutgoing = (from, to) => {
     if (!outgoing.has(from)) outgoing.set(from, new Set());
@@ -1425,6 +1397,13 @@ export const runDiscoveryScan = async ({
           algorithmVersion,
         )
       : styleEdges(text, algorithmVersion);
+    if (algorithmVersion >= 4 && isScript(relativePath)) {
+      for (const use of externalJsxUses(ts, path.join(legacyRoot, relativePath), text)) {
+        if (resolveSpecifier(use.spec, relativePath).external) {
+          externalUiCandidates.push({ from: relativePath, ...use });
+        }
+      }
+    }
     if (algorithmVersion >= 2 && isScript(relativePath)) {
       exportedNames.set(
         relativePath,
@@ -1499,27 +1478,8 @@ export const runDiscoveryScan = async ({
 
   for (const relativePath of tracked) {
     if (!isScript(relativePath)) continue;
-    const segments = relativePath.split("/");
-    const base = path.basename(relativePath, path.extname(relativePath));
-    if (segments.includes("app") && NEXT_APP_FILES.has(base)) {
-      addEntryPoint(
-        relativePath,
-        "FRAMEWORK",
-        `Next.js app-directory convention '${base}'.`,
-      );
-      continue;
-    }
-    if (segments.length <= 2 && NEXT_ROOT_FILES.has(base)) {
-      addEntryPoint(
-        relativePath,
-        "FRAMEWORK",
-        `Next.js project-root convention '${base}'.`,
-      );
-      continue;
-    }
-    if (segments.length <= 2 && base.startsWith("next.config")) {
-      addEntryPoint(relativePath, "FRAMEWORK", "Next.js configuration.");
-    }
+    const reason = frameworkEntryFor(relativePath);
+    if (reason) addEntryPoint(relativePath, "FRAMEWORK", reason);
   }
 
   const inbound = [];
@@ -1873,6 +1833,24 @@ export const runDiscoveryScan = async ({
   const resolvedTargets = new Map();
   const syntheticEdges = [];
   const findingProcessed = new Set();
+
+  // Next.js composes layouts by directory ancestry, without an import from the
+  // layout to its child page. Keep that relation outside the owned census.
+  if (algorithmVersion >= 4) {
+    const routes = [...new Set([...reverseReachable, ...declaredPaths, ...census])].sort();
+    for (const edge of await frameworkAncestorEdges({
+      routes, trackedSet, censusSet, extensions: SCRIPT_EXTENSIONS,
+      assertSafe: (file) => assertNotSymlink(legacyRoot, file),
+    })) {
+      frameworkSet.add(edge.from);
+      consumerSet.delete(edge.from);
+      supportingSet.delete(edge.from);
+      syntheticEdges.push(edge);
+      relevantEdgeKeys.add(edgeKey(edge));
+      addDemand(edge.from);
+    }
+    processSupportQueue();
+  }
 
   const currentRelevant = () =>
     new Set([
@@ -2260,6 +2238,9 @@ export const runDiscoveryScan = async ({
           .map((edge) => edge.spec),
       ),
     ].sort(),
+    ...(algorithmVersion >= 4 ? { externalUi: externalUiCandidates
+      .filter((use) => relevantPaths.has(use.from))
+      .sort((a, b) => a.from.localeCompare(b.from) || a.spec.localeCompare(b.spec) || a.symbol.localeCompare(b.symbol)) } : {}),
     edges: allRelevantEdges,
     findings: relevantFindings,
     unresolved: relevantUnresolved,
@@ -2302,6 +2283,7 @@ export const discoveryDigest = (scan) => {
     resolution: scan.resolution,
     census: scan.census,
     edges: scan.edges,
+    ...(scan.algorithmVersion >= 4 ? { externalUi: scan.externalUi } : {}),
     findings: scan.findings,
     unresolved: scan.unresolved,
     ...(scan.algorithmVersion >= 2

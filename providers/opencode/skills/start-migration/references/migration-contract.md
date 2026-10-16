@@ -273,8 +273,9 @@ the same normal command re-selects the same target deterministically.
 One versioned resolver computes the boundary during `DISCOVER_LEGACY` and again
 from the final editable classification during `DISCOVERY_COMPLETENESS`,
 `--scan`, pending-decision derivation, and `FINALIZE`. Every classification and
-persisted scan records an explicit supported integer `algorithmVersion` (1, 2
-or 3). Algorithm 3 also treats a Next.js convention file inside a module root
+persisted scan records an explicit supported integer `algorithmVersion` (1, 2,
+3, or 4). Format 20 requires algorithm 4; older formats retain their pinned
+algorithm. Algorithm 3 also treats a Next.js convention file inside a module root
 (`error.tsx`, `page.tsx`, ...) as a framework entry point, so it needs no
 declaration; algorithm 2 seeded only conventions outside the roots. A missing, non-integer, or unsupported recorded version raises a typed
 scanner-version error before rescanning; it never falls through to the current
@@ -1322,6 +1323,32 @@ beside it under `evidence/<slice-id>/ui/`. `uiEvidence` rows are produced by the
 repository's registered Playwright MCP server and bind the runtime observation
 to the slice implementation digest, UI contract digest, target, requirements,
 data-source mode, behavior, and state:
+
+Module format 20 adds `requiredAppearance[]`, `scrollContracts[]`, and
+`externalUiImports[]` to every visible `uiBehaviors[]` row in the pinned legacy
+inventory. A `requiredAppearance` item has `id`, `state`, exact accessible
+`role` and `name`, and `locator`; a post-action claim also has
+`afterInteractionId`. Every visible required observation and declared
+interaction must be covered. `scrollContracts` has exactly one row per runtime
+state with `state`, `owner` (`NONE`, `DOCUMENT`, or `ELEMENT`),
+`documentScrollable`, and `ancestorClipped`. `externalUiImports` contains the
+exact JSON-array tokens `[from,spec,symbol]` reported by scanner algorithm 4;
+the same tokens appear on source-backed capability rows, regardless of whether
+the target reuses a package, replaces it, or uses native controls.
+
+At `VERIFY_SLICES`, format-20 `uiEvidence` has a LEGACY and TARGET row for each
+`appearanceClaimId`, each with a hash-verified structured proof, PNG, and
+`capture.rootLocator` equal to the claim locator. The proof control also has
+that locator. The LEGACY row binds `boundTo.legacyRevision`; the TARGET row
+binds the implementation digest. The proof's `observation.scroll` measures
+`document` `{clientHeight,scrollHeight}`, `owner` with `kind` and, for an
+element owner, `locator`, heights and `overflowY`, plus each measured ancestor's
+`locator`, heights and `overflowY`. The engine derives document scrolling,
+ancestor clipping and scroll-owner dimensions from those measurements and
+compares them separately from PNG pixels. A target row that also satisfies a
+visual-acceptance matrix row names it with `visualRowId`; every required matrix
+row must have one bound target capture. Formats through 19 retain their pinned
+UI evidence semantics.
 
 ```json
 {

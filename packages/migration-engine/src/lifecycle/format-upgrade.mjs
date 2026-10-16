@@ -93,6 +93,13 @@ const FORMAT_UPGRADE_HANDLERS = {
     // transaction is declared below it.
     commit: (args) => adoptDirectLedgerDecisions(args),
   },
+  [DIRECT_LEDGER_DECISIONS_FORMAT]: {
+    domain: () => {
+      throw new Error("Format 20 requires newly authored legacy appearance and scroll coverage. Existing format-19 records retain their pinned contract; start a new migration record for renewed validation.");
+    },
+    plan: async () => ({ blockers: ["Format 20 cannot be inferred from a format-19 record."], candidateDigest: null }),
+    commit: async () => { throw new Error("Format 20 cannot be applied to an existing record."); },
+  },
 };
 
 export const FORMAT_UPGRADERS = Object.freeze(
@@ -221,7 +228,7 @@ export const pendingFormatUpgrade = async (
   // Creation defaults do not upgrade historical authority. Only explicit
   // adoption raises the existing-record cursor beyond required observations.
   const runtimeFormat = adoptDirectLedger
-    ? MIGRATION_FORMAT_SUPPORTED
+    ? DIRECT_LEDGER_DECISIONS_FORMAT
     : REQUIRED_OBSERVATIONS_FORMAT;
   const increment = nextIncrement(
     FORMAT_UPGRADERS,

@@ -3,6 +3,7 @@ import {
   initialArtifacts,
   UI_REMEDIATION_FILE,
   usesRequiredObservations,
+  usesUiCoverage,
   usesUiVerification,
 } from "../formats/index.mjs";
 import {
@@ -236,7 +237,7 @@ export const validateLegacyInventory = async (
   root,
   roots,
   state,
-  { assertRequiredObservations },
+  { assertRequiredObservations, assertRequiredAppearance },
 ) => {
   const persisted = assertPlainObject(
     await readJson(
@@ -393,6 +394,9 @@ export const validateLegacyInventory = async (
       }
       if (usesRequiredObservations(state)) {
         assertRequiredObservations(item, observationIds);
+      }
+      if (usesUiCoverage(state)) {
+        assertRequiredAppearance(item);
       }
     }
   }

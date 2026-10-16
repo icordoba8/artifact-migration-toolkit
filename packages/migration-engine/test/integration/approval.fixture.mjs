@@ -150,7 +150,7 @@ const initialize = async (fixture, { ponytail, currentFormat = false } = {}) => 
     registryBinding: preview.registryBinding,
     boundInputs: preview.boundInputs,
   });
-  if (!currentFormat) result.state = await historicalBootstrap(fixture.migrationRoot, 18);
+  if (!currentFormat || currentFormat === 19) result.state = await historicalBootstrap(fixture.migrationRoot, currentFormat === 19 ? 19 : 18);
   return result;
 };
 
@@ -442,7 +442,7 @@ const atDirectLedgerCompleteness = async (
   classification,
   base = MODULE_CLASSIFICATION,
 ) => {
-  await initialize(fixture, { currentFormat: true });
+  await initialize(fixture, { currentFormat: 19 });
   await authorDiscoverLegacy(fixture, directLedgerClassification(base));
   await advanceDirect(fixture);
   await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");

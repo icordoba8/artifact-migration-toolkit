@@ -15,6 +15,7 @@ import {
   usesVisualAcceptance,
   VISUAL_ACCEPTANCE_FILE,
   VISUAL_ACCEPTANCE_FORMAT,
+  UI_COVERAGE_FORMAT,
 } from "../formats/index.mjs";
 import {
   assertArray,
@@ -51,7 +52,7 @@ import {
   structuredCapabilityProfile,
   validateStructuredContract,
 } from "./evidence.mjs";
-import { uiBehaviorIsRequired } from "./observations.mjs";
+import { compareScrollContract, uiBehaviorIsRequired } from "./observations.mjs";
 
 /** The operator decision kind that alone can leave a required visual state unbacked. */
 export const VISUAL_UNBACKED_KIND = "VISUAL_UNBACKED";
@@ -180,6 +181,34 @@ export const PROVISIONAL_VISUAL_DIFF_THRESHOLDS = Object.freeze({
   "legacy-runtime": 0.0005,
   "figma-mcp": 0.05,
 });
+
+/** A format-20 claim is compared at its own locator, with scroll facts beside pixels. */
+export const compareAppearanceCoverage = async (claim, legacy, target) => {
+  const source = legacy.record.capture;
+  const destination = target.record.capture;
+  for (const field of ["mode", "rootLocator", "deviceScaleFactor", "colorScheme", "reducedMotion", "matte"]) {
+    if (source[field] !== destination[field]) throw new Error(`VISUAL_CAPTURE_MISMATCH: '${claim.id}' ${field} differs.`);
+  }
+  if (JSON.stringify(source.compare) !== JSON.stringify(destination.compare)) {
+    throw new Error(`VISUAL_CAPTURE_MISMATCH: '${claim.id}' compare dimensions differ.`);
+  }
+  const read = async (entry) => {
+    const image = decodePng(await readFile(entry.screenshotPath));
+    if (image.width !== entry.record.capture.imageWidth || image.height !== entry.record.capture.imageHeight) {
+      throw new Error(`VISUAL_CAPTURE_MISMATCH: '${claim.id}' screenshot dimensions differ from its capture.`);
+    }
+    return image;
+  };
+  const pixels = perceptualDelta(await read(legacy), await read(target), {
+    ...source.compare, matte: source.matte,
+  });
+  if (pixels.diffRatio > PROVISIONAL_VISUAL_DIFF_THRESHOLDS["legacy-runtime"]) {
+    throw new Error(`VISUAL_DIVERGENCE: '${claim.id}' diffRatio ${pixels.diffRatio} exceeds ${PROVISIONAL_VISUAL_DIFF_THRESHOLDS["legacy-runtime"]}.`);
+  }
+  return { appearanceClaimId: claim.id, pixels,
+    scroll: compareScrollContract(legacy.snapshot, target.snapshot, claim.scrollContract),
+    format: UI_COVERAGE_FORMAT };
+};
 
 /** The one v2 image and control comparison used by both migration engines. */
 export const compareVisualEvidence = async ({

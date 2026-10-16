@@ -43,6 +43,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
     requirements: [
       "Pages, routes, list/detail surfaces, transitions, back/close flows, redirects, permissions, actions, states, APIs, events, errors, and edge cases.",
       "Every behavior and route-flow has a stable ID and concrete evidence in `inventories/legacy.json`.",
+      "Every visible UI behavior names required appearance claims for its controls and states, one measured scroll contract per state, and any externally rendered JSX imports from the discovery scan.",
       "Independent list and detail views are recorded as separate surfaces when the legacy flow exposes them independently.",
     ],
   }),
@@ -57,6 +58,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
       "Every census file has exactly one row in `inventories/module-classification.json` with a closed-enum `disposition`, including files nothing imports.",
       "A production-reachable component, style, image, SVG, or other visual asset is BEHAVIOR_BACKED or approved for exclusion by an operator decision; agent-authored rationale alone never dismisses one.",
       "Every SUPPORTING file outside the roots records `requiredBy`, every unresolved first-party reference is resolved, and every blocking finding carries an EDGE_RESOLUTION decision.",
+      "Relevant Next.js ancestor layouts and templates, plus their imported wrappers and styles, remain governing or supporting evidence outside the owned census; external JSX package imports trace to UI behaviors.",
     ],
   }),
   "steps/03-assess-target.md": renderStep({
@@ -105,6 +107,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
       "Merging independent list and detail surfaces is a gap unless `REDESIGNED_APPROVED` includes approval and acceptance evidence.",
       "Ignoring an available target-required design-system component is a `DESIGN_SYSTEM_GAP` unless an exception is approved.",
       "Every required capability has one row in `matrices/capability-ownership.json` classified `TARGET_REUSE`, `SHARED_PREREQUISITE`, `FEATURE_LOCAL`, or `DO_NOT_MIGRATE`, from legacy evidence, target evidence, and architecture authorities.",
+      "Externally rendered JSX imports also appear on source-backed capability rows; TARGET_REUSE never waives appearance or interaction verification in its consumer context.",
       "A capability is `SHARED_PREREQUISITE` only when at least two consumers other than this module are proven; its `targetOwner` is outside the migrating feature.",
       "A missing architecture authority is recorded in `authorityGaps`, never invented or cited as if present.",
       ...(designSource === "figma-mcp"

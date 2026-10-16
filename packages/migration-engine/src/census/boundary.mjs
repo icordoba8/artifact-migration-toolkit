@@ -5,6 +5,7 @@ import {
   MODULE_CLASSIFICATION_FILE,
   usesDiscoveryCompleteness,
   usesSourceAttribution,
+  usesUiCoverage,
 } from "../formats/index.mjs";
 import {
   assertArray,
@@ -84,6 +85,9 @@ export const readCanonicalModuleBoundary = async (
     "Module classification",
     `Record one of ${[...SUPPORTED_ALGORITHM_VERSIONS].join(", ")} explicitly before scanning.`,
   );
+  if (usesUiCoverage(state) && algorithmVersion < 4) {
+    throw new Error("Format 20 requires discovery scanner algorithm 4 to capture framework ancestors and external UI imports.");
+  }
   const { runDiscoveryScan } = await import("./scan.mjs");
   const scan =
     precomputed ??

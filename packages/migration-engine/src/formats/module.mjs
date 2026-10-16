@@ -11,7 +11,7 @@ import { nextIncrement, upgradeIsActive } from "./upgrade.mjs";
 
 export const RESUMABLE_CONTRACT_VERSION = 5;
 
-export const MIGRATION_FORMAT_VERSION = 19;
+export const MIGRATION_FORMAT_VERSION = 20;
 
 export const WORKFLOW_VERSION = "5.0";
 
@@ -161,6 +161,12 @@ export const DIRECT_LEDGER_DECISIONS_FORMAT = 19;
 export const usesDirectLedgerDecisions = (state) =>
   (state?.formatVersion ?? 1) >= DIRECT_LEDGER_DECISIONS_FORMAT;
 
+/** Format 20 pins authored appearance claims and measured scroll acceptance. */
+export const UI_COVERAGE_FORMAT = 20;
+
+export const usesUiCoverage = (state) =>
+  (state?.formatVersion ?? 1) >= UI_COVERAGE_FORMAT;
+
 /**
  * The two independent controls, never inferred from one constant.
  *
@@ -169,7 +175,7 @@ export const usesDirectLedgerDecisions = (state) =>
  * `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS` is the format ordinary creation stamps.
  * Creation and compatibility are independent of the historical upgrade cursor.
  */
-export const MIGRATION_FORMAT_SUPPORTED = DIRECT_LEDGER_DECISIONS_FORMAT;
+export const MIGRATION_FORMAT_SUPPORTED = UI_COVERAGE_FORMAT;
 
 export const FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = MIGRATION_FORMAT_VERSION;
 
@@ -358,9 +364,8 @@ export const SELF_HEALING_FORMAT_VERSIONS = new Set(
  * BUILD_BASELINE close without the matrix and then have PLAN demand it, since
  * the format is read before the stamp is written.
  *
- * Every other bump is additive and derivable, so a record simply behaves as the
- * feature's default by omission and is stamped at the highest format whose
- * vocabulary it actually uses.
+ * Other listed bumps are additive and derivable. Formats 17–20 have separate
+ * explicit adoption rules because they add authored evidence or authority.
  */
 export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
   DISCOVERY_COMPLETENESS_FORMAT,
@@ -371,6 +376,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
   // into it would reinterpret authority it already recorded under citation
   // rules. It is reached only by the explicit, journalled pre-pin adoption.
   DIRECT_LEDGER_DECISIONS_FORMAT,
+  UI_COVERAGE_FORMAT,
 ]);
 
 /**
@@ -381,6 +387,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
  * no third place, which is what the negation chain kept growing.
  */
 export const FORMAT_FEATURES = [
+  [UI_COVERAGE_FORMAT, usesUiCoverage],
   [DIRECT_LEDGER_DECISIONS_FORMAT, usesDirectLedgerDecisions],
   [REQUIRED_OBSERVATIONS_FORMAT, usesRequiredObservations],
   [VISUAL_ACCEPTANCE_FORMAT, usesVisualAcceptance],
@@ -746,6 +753,17 @@ export const FORMAT_INCREMENTS = Object.freeze([
     // pinned -- that is the eligibility window -- so there is nothing to
     // transform, only a stamp to move. What makes it explicit is the
     // confirmation digest, not a file.
+    requiredInput: null,
+    activation: null,
+  }),
+  // Authored legacy claims cannot be inferred from a completed format-19
+  // inventory. Existing records retain format-19 semantics; new records start
+  // at 20. A separate renewed-validation workflow would be needed to adopt.
+  Object.freeze({
+    from: DIRECT_LEDGER_DECISIONS_FORMAT,
+    to: UI_COVERAGE_FORMAT,
+    id: "UI_COVERAGE_ADOPTED",
+    version: 1,
     requiredInput: null,
     activation: null,
   }),
