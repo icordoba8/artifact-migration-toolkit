@@ -768,6 +768,47 @@ test("one migration_run moves the revision by one and appends one history event"
   }
 });
 
+// QW1: a committed advance is a safe context boundary because the next
+// iteration needs nothing but the record. Each `only` is a separate server
+// session, so nothing crosses from the advancing call to the resuming one
+// except persisted state.
+test("after a committed advance, a fresh session resumes the same next iteration from status alone", async () => {
+  const fixture = await createFixture();
+  try {
+    await initialize(fixture);
+    await authorDiscoverLegacy(fixture);
+
+    const advanced = structured(
+      await only(fixture, call(1, "migration_run", { module: "auth" })),
+    );
+    assert.equal(advanced.outcome, "CONTINUE");
+    assert.ok(advanced.progress.nextWork.command, "CONTINUE keeps a runnable next command");
+
+    const status = structured(
+      await only(fixture, call(1, "migration_status", { module: "auth" })),
+    );
+    assert.deepEqual(status.progress.nextWork, advanced.progress.nextWork);
+    assert.equal(status.progress.nextWork.checkpoint, (await state(fixture)).currentStep);
+
+    const events = await historyEvents(fixture);
+    const resumed = structured(
+      await only(fixture, call(1, "migration_run", { module: "auth" })),
+    );
+    // The resumed iteration asks for exactly the checkpoint status named, with
+    // the bounded request and schemaRef, and does not skip it.
+    assert.equal(resumed.outcome, "CONTINUE");
+    assert.equal(resumed.request.step, status.progress.nextWork.checkpoint);
+    assert.equal(resumed.request.primaryArtifact, status.progress.nextWork.artifact);
+    assert.equal(
+      resumed.request.schemaRef,
+      `references/migration-contract.md#${status.progress.nextWork.checkpoint}`,
+    );
+    assert.equal(await historyEvents(fixture), events);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 for (const [label, prepare, outcome] of [
   [
     "CONTINUE",

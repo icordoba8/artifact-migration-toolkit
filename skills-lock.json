@@ -3,11 +3,11 @@
   "skills": {
     "migrate-artifact": {
       "skillPath": "skills/migrate-artifact",
-      "computedHash": "b19e3e07612b99cc75259b0d52f699bb00ca8ab15dfe555cf33f72f1bc16ad50"
+      "computedHash": "8e93cdd6bea3280ccafdc9483f07aadedf62392f96aa33724aa8d2c947b8b732"
     },
     "start-migration": {
       "skillPath": "skills/start-migration",
-      "computedHash": "f72df89faa1ba2a6b7e148fe9a8593160a9c44169047b3d64b3eb9170fd333a5"
+      "computedHash": "fd8c6339317e9cae8e6babb42111a606d7fa2c88da66155ea705ffd72c914691"
     }
   }
 }

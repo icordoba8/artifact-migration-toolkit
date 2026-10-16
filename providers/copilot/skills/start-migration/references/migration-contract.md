@@ -1,6 +1,6 @@
 # Migration Contract
 
-Contents: [Registry](#registry) · [Version-5 lifecycle](#version-5-lifecycle-and-v50-workflow-revision)
+Contents: [Checkpoint authoring index](#checkpoint-authoring-index) · [Registry](#registry) · [Version-5 lifecycle](#version-5-lifecycle-and-v50-workflow-revision)
 · [OpenSpec requirements authority](#openspec-requirements-authority) · [State-only contract](#state-only-contract)
 · [Pre-execution confirmation contract](#pre-execution-confirmation-contract) · [Step documents](#step-documents)
 · [Legacy/target inventories](#legacy-inventory) · [Behavior parity](#behavior-parity) · [Route adaptation](#route-adaptation)
@@ -19,6 +19,102 @@ Contents: [Registry](#registry) · [Version-5 lifecycle](#version-5-lifecycle-an
 > changes, adopting this candidate as the live skill is a **format-affecting change** and needs its
 > own upgrade path before replacing the original skill; see the replacement plan in
 > `start-migration-evaluation.md`. No such upgrade path is built here.
+
+## Checkpoint authoring index
+
+A `CONTINUE` request's `schemaRef` (`references/migration-contract.md#<STEP>`)
+lands on its checkpoint below. Read that entry and the sections it links; the
+rest of this file is not needed for the checkpoint. Each linked section is the
+authoritative field-level contract, and the engine's validator is the final
+word: a refusal names the failing field. A pre-format-10 record has no
+`DISCOVERY_COMPLETENESS`; every other entry applies to it unchanged, with the
+format gates each linked section states.
+
+### <a id="RESOLVE"></a>RESOLVE
+
+- Author: the OpenSpec requirements file, supplied through the bootstrap
+  helper; `steps/01-resolve.md`.
+- Rules: [OpenSpec requirements authority](#openspec-requirements-authority),
+  [Pre-execution confirmation contract](#pre-execution-confirmation-contract),
+  [Step documents](#step-documents).
+
+### <a id="DISCOVER_LEGACY"></a>DISCOVER_LEGACY
+
+- Author: `inventories/legacy.json`, the declared roots in
+  `inventories/module-classification.json`, `steps/02-discover-legacy.md`.
+- Rules: [Legacy inventory](#legacy-inventory),
+  [Visible-UI verification](#visible-ui-verification-format-12) (`uiBehaviors`;
+  format 20 appearance, scroll and external-import rows are in
+  [Runtime evidence rows](#runtime-evidence-rows)),
+  [Canonical module-boundary model](#canonical-module-boundary-model-format-10),
+  [Step documents](#step-documents).
+
+### <a id="DISCOVERY_COMPLETENESS"></a>DISCOVERY_COMPLETENESS
+
+- Author: one row per census file in `inventories/module-classification.json`,
+  `steps/02a-discovery-completeness.md`. `--scan` prints the census to author
+  against; `inventories/discovery-scan.json` is engine-written.
+- Rules: [Module classification](#inventoriesmodule-classificationjson-authored),
+  [Discovery scan](#inventoriesdiscovery-scanjson-machine-generated),
+  [Operator decisions](#decisionsoperator-decisionsndjson-operator-only),
+  [Canonical module-boundary model](#canonical-module-boundary-model-format-10).
+
+### <a id="ASSESS_TARGET"></a>ASSESS_TARGET
+
+- Author: `inventories/target.json`, `steps/03-assess-target.md`; with a
+  Figma design source, the design context and frames that section names.
+- Rules: [Target inventory](#target-inventory),
+  [Visible-UI verification](#visible-ui-verification-format-12),
+  [Figma visual acceptance](#figma-visual-acceptance-format-17).
+
+### <a id="BUILD_BASELINE"></a>BUILD_BASELINE
+
+- Author: `matrices/behavior-parity.json`, `matrices/route-adaptation.json`,
+  `matrices/target-native.json`, `matrices/design-system-usage.json`,
+  `matrices/capability-ownership.json`, `steps/04-build-baseline.md`.
+- Rules: [Behavior parity](#behavior-parity),
+  [Route adaptation](#route-adaptation),
+  [Design-system usage](#design-system-usage),
+  [Capability ownership](#capability-ownership),
+  [Target-native behavior](#target-native-behavior).
+
+### <a id="PLAN"></a>PLAN
+
+- Author: `slices/index.json`, `steps/05-plan.md`.
+- Rules: [Slice index and records](#slice-index-and-records).
+
+### <a id="IMPLEMENT_SLICES"></a>IMPLEMENT_SLICES
+
+- Author: the active slice's target changes and `slices/<slice-id>.json`;
+  record its evidence in `steps/06-implement-slices.md`.
+- Rules: [Slice index and records](#slice-index-and-records),
+  [Slice rework and preserved evidence](#slice-rework-and-preserved-evidence),
+  [Unclaimed target drift](#unclaimed-target-drift),
+  [Step documents](#step-documents) (phase-spanning status).
+
+### <a id="VERIFY_SLICES"></a>VERIFY_SLICES
+
+- Author: `evidence/<slice-id>/result.json`, its UI evidence files when the
+  slice owns visible UI, `steps/07-verify-slices.md`.
+- Rules: [Slice index and records](#slice-index-and-records) (result
+  `commands`), [Runtime evidence rows](#runtime-evidence-rows),
+  [Screenshot budget](#screenshot-budget),
+  [Figma visual acceptance](#figma-visual-acceptance-format-17),
+  [Returning an active slice to implementation](#returning-an-active-slice-to-implementation).
+
+### <a id="FINALIZE"></a>FINALIZE
+
+- Author: `gates.json` (seven gates, bound fresh evidence),
+  `steps/08-finalize.md`.
+- Rules: [Final gates](#final-gates),
+  [Content identity for ordinary file pins](#content-identity-for-ordinary-file-pins),
+  [Unclaimed target drift](#unclaimed-target-drift).
+
+### <a id="COMPLETE"></a>COMPLETE
+
+- Author: nothing; revalidation only.
+- Rules: [Integrity, resumption, and invalidation](#integrity-resumption-and-invalidation),
+  [Reopening a `COMPLETE` migration](#reopening-a-complete-migration-on-post-finalization-evidence).
 
 ## Registry
 
@@ -965,8 +1061,8 @@ Every step Markdown file contains:
 ```
 
 Before validation, set the status to `COMPLETE` and replace every `[TODO]` with
-concrete evidence. Completing one step never authorizes the next step in the
-same session.
+concrete evidence. Completing a step document never authorizes the next step by
+itself; only the engine's validated advance and its typed outcome do.
 
 `steps/06-implement-slices.md` and `steps/07-verify-slices.md` each span every
 slice of their phase. Each slice's advance still requires the document to hold

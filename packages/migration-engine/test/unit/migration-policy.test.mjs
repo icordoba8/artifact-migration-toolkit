@@ -6,7 +6,10 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+
+import { anchorsOf, fragmentLinksOf, sectionAt } from "../support/markdown-anchors.mjs";
 
 import {
   activeArtifact,
@@ -370,6 +373,45 @@ test("a pre-10 record is described with its own eight-step lifecycle", () => {
   assert.deepEqual(authoringRequest(stateAt("PLAN")).lifecycle, MIGRATION_STEPS);
 });
 
+// QW2: a schemaRef that lands nowhere sends the agent through the whole
+// contract and into engine source. Every lifecycle the engine still serves,
+// pre-10 included, must land on that checkpoint's own authoring entry.
+test("every schemaRef lands on its checkpoint's authoring entry in the shipped contract", async () => {
+  const contract = await readFile(
+    new URL("../../../../skills/start-migration/references/migration-contract.md", import.meta.url),
+    "utf8",
+  );
+  const anchors = anchorsOf(contract);
+  for (const fragment of fragmentLinksOf(contract)) {
+    assert.ok(anchors.has(fragment), `contract link #${fragment} lands nowhere`);
+  }
+  for (const formatVersion of [9, 20]) {
+    const lifecycle = authoringRequest(stateAt("RESOLVE", { formatVersion })).lifecycle;
+    const states = [
+      ...lifecycle.map((step) => stateAt(step, { formatVersion })),
+      stateAt("COMPLETE", { formatVersion }),
+      stateAt("IMPLEMENT_SLICES", { formatVersion, activeSlice: "auth-001", pendingSlices: ["auth-001"] }),
+      stateAt("VERIFY_SLICES", { formatVersion, activeSlice: "auth-001", pendingSlices: ["auth-001"] }),
+    ];
+    for (const state of states) {
+      const request = authoringRequest(state);
+      const [file, fragment] = request.schemaRef.split("#");
+      assert.equal(file, "references/migration-contract.md");
+      assert.ok(anchors.has(fragment), `${request.schemaRef} lands nowhere`);
+      const entry = sectionAt(contract, fragment);
+      assert.ok(entry, `${fragment} has no anchored authoring entry`);
+      // The entry names what this request asks for and links its field rules.
+      if (request.primaryArtifact) {
+        assert.ok(
+          entry.includes(request.primaryArtifact.replace("auth-001", "<slice-id>")),
+          `${fragment} does not name ${request.primaryArtifact}`,
+        );
+      }
+      assert.ok(fragmentLinksOf(entry).length > 0, `${fragment} links no field-level rules`);
+    }
+  }
+});
+
 // -- §11.6 the typed outcome, and the bytes it renders to.
 
 const directiveBefore = ({ moduleName, mode, stop }) =>
@@ -472,6 +514,39 @@ test("renderLoopDirective is byte-identical to the pre-change implementation", (
     renderLoopDirective({ moduleName: "auth", mode: "step", outcome: "BLOCKED" }),
     "",
   );
+});
+
+// QW1: the skill's context-boundary rule may only place a boundary where the
+// engine already continues, and must name every operator-facing stop as not
+// one, so the guidance can neither pause a CONTINUE nor continue past a STOP.
+test("the skill's safe context boundaries are exactly the outcomes the loop continues through", async () => {
+  const skill = await readFile(
+    new URL("../../../../skills/start-migration/SKILL.md", import.meta.url),
+    "utf8",
+  );
+  const start = skill.indexOf("### 6. Context boundaries");
+  assert.notEqual(start, -1, "SKILL.md lost its Context boundaries section");
+  const paragraph = skill
+    .slice(start, skill.indexOf("\n## ", start))
+    .split("\n\n")
+    .find((text) => text.includes("**safe context boundary**"))
+    .replace(/\s+/g, " ");
+  const outcomesIn = (text) =>
+    [...text.matchAll(/`([A-Z_]+)`/g)].map(([, token]) => token).filter((token) => MIGRATION_OUTCOMES.includes(token));
+  const [safe, unsafe] = paragraph.split("It is **not** a boundary");
+  const safeOutcomes = outcomesIn(safe);
+  const unsafeOutcomes = outcomesIn(unsafe);
+  assert.deepEqual([...new Set(safeOutcomes)].sort(), ["CONTINUE", "FORMAT_UPGRADED"]);
+  assert.deepEqual(
+    [...new Set(unsafeOutcomes)].sort(),
+    ["AWAITING_CONFIRMATION", "FORMAT_UPGRADE", "OPERATOR_DECISION"],
+  );
+  for (const outcome of safeOutcomes) {
+    assert.match(renderLoopDirective({ moduleName: "auth", outcome }), /^loop: CONTINUE /, outcome);
+  }
+  for (const outcome of unsafeOutcomes) {
+    assert.match(renderLoopDirective({ moduleName: "auth", outcome }), /^loop: STOP /, outcome);
+  }
 });
 
 test("a committed increment continues the loop; an owed one stops it", () => {

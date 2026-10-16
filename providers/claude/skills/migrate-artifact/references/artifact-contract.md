@@ -6,17 +6,17 @@ source root, target root, or artifact record root as stated below. Every
 
 ## Checkpoints
 
-| Checkpoint | Authored file(s) |
-| --- | --- |
-| `RESOLVE` | Engine bootstrap only |
-| `DISCOVER_LEGACY` | `inventories/source.json` |
-| `DISCOVERY_COMPLETENESS` | `inventories/completeness.json` |
-| `ASSESS_TARGET` | `inventories/target.json` |
-| `BUILD_BASELINE` | `matrices/parity.json`, `target-native.json`, `design-system.json`, `global-contract.json` |
-| `PLAN` | `slices/index.json` |
-| `IMPLEMENT_SLICES` | `slices/<slice>.json` |
-| `VERIFY_SLICES` | `evidence/<slice>/result.json` plus its `ui/` files |
-| `FINALIZE` | `gates.json` |
+| Checkpoint | Authored file(s) | Rules |
+| --- | --- | --- |
+| <a id="resolve"></a>`RESOLVE` | Engine bootstrap only | — |
+| <a id="discover-legacy"></a>`DISCOVER_LEGACY` | `inventories/source.json` | [Inventories](#inventories) |
+| <a id="discovery-completeness"></a>`DISCOVERY_COMPLETENESS` | `inventories/completeness.json` | [Inventories](#inventories) |
+| <a id="assess-target"></a>`ASSESS_TARGET` | `inventories/target.json` | [Inventories](#inventories) |
+| <a id="build-baseline"></a>`BUILD_BASELINE` | `matrices/parity.json`, `target-native.json`, `design-system.json`, `global-contract.json` | [Matrices And Slices](#matrices-and-slices) |
+| <a id="plan"></a>`PLAN` | `slices/index.json` | [Matrices And Slices](#matrices-and-slices) |
+| <a id="implement-slices"></a>`IMPLEMENT_SLICES` | `slices/<slice>.json` | [Matrices And Slices](#matrices-and-slices) |
+| <a id="verify-slices"></a>`VERIFY_SLICES` | `evidence/<slice>/result.json` plus its `ui/` files | [Runtime Evidence](#runtime-evidence) |
+| `FINALIZE` | `gates.json` | [Finalize](#finalize) |
 
 ## Inventories
 

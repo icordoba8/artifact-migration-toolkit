@@ -27,10 +27,12 @@ import { historicalBootstrap } from "../support/historical-bootstrap.mjs";
 import { traceFs } from "../support/fs-trace.mjs";
 import { nonFigmaCases, OTHER_FIGMA_AUTHORITY, RECORDED_FIGMA, SAME_FIGMA_AUTHORITY } from "../support/design-source-cases.mjs";
 import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
+import { anchorsOf, fragmentLinksOf } from "../support/markdown-anchors.mjs";
 
 import {
   FINAL_GATES,
   MIGRATION_OUTCOMES,
+  MIGRATION_STEPS,
   parserResolutionError,
   runDiscoveryScan,
 } from "../../src/core.mjs";
@@ -1143,6 +1145,33 @@ test("resume is exact and an unauthored checkpoint appends no history", async ()
     }
     assert.deepEqual(await stateOf(fixture), before);
     assert.equal(await readFile(historyFile, "utf8"), history);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// QW2: the artifact engine's schemaRef must land on its checkpoint's row of the
+// shipped contract, the one place that names the authored files and rule
+// section for that checkpoint.
+test("every artifact checkpoint schemaRef lands on its contract row", async () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const contract = await readFile(path.join(repositoryRoot, "skills/migrate-artifact/references/artifact-contract.md"), "utf8");
+  const anchors = anchorsOf(contract);
+  for (const fragment of fragmentLinksOf(contract)) {
+    assert.ok(anchors.has(fragment), `artifact contract link #${fragment} lands nowhere`);
+  }
+  const fixture = await createFixture();
+  try {
+    await bootstrap(fixture);
+    const { request } = await runArtifact(fixture.options);
+    const ref = (step) => `references/artifact-contract.md#${step.toLowerCase().replaceAll("_", "-")}`;
+    assert.equal(request.schemaRef, ref(request.checkpoint));
+    for (const step of MIGRATION_STEPS) {
+      const fragment = ref(step).split("#")[1];
+      assert.ok(anchors.has(fragment), `${ref(step)} lands nowhere`);
+      const row = contract.split("\n").find((line) => line.includes(`<a id="${fragment}"></a>`) || line.startsWith(`| \`${step}\` |`));
+      assert.ok(row?.includes(`\`${step}\``), `${fragment} does not land on the ${step} row`);
+    }
   } finally {
     await fixture.cleanup();
   }

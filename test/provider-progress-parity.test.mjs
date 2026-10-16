@@ -227,3 +227,31 @@ test("every provider receives the canonical decision authority and artifact prot
     }
   }
 });
+
+/**
+ * QW1. The context-boundary rule reaches every provider tree intact, and no
+ * tree claims a context reset the hosts do not give a skill.
+ */
+const CONTEXT_BOUNDARY_CLAUSES = [
+  "Continuation is automatic; carrying conversation forward is not part of it.",
+  "status first, then `nextWork` and the `request`",
+  "A boundary never skips work",
+  "Instructions cannot remove tokens already in a conversation; only the host can",
+  "none lets a skill trigger either, and this skill invokes neither.",
+  'Never stop, hand off, or ask the operator to compact or say "continue" to reach one.',
+  "Read that entry and the sections it links, not the whole contract.",
+];
+
+test("every provider receives the same context-boundary rule and no invented reset", async () => {
+  for (const tree of ["skills", ...Object.keys(providers).map((provider) => `providers/${provider}/skills`)]) {
+    const prose = (await read(`${tree}/start-migration/SKILL.md`)).replace(/\s+/g, " ");
+    for (const clause of CONTEXT_BOUNDARY_CLAUSES) {
+      assert.ok(prose.includes(clause), `${tree}/start-migration lost: ${clause}`);
+    }
+    // Continuation is not tied to keeping one conversation alive.
+    assert.doesNotMatch(prose, /`next=` names, in the same session/, tree);
+    assert.doesNotMatch(prose, /CONTINUE` runs in the same session/, tree);
+    // No skill-callable reset exists on any host; none may be named.
+    assert.doesNotMatch(prose, /\b(reset|clear|compact)[_-]context\b|migration_(reset|clear|compact)\b/i, tree);
+  }
+});

@@ -195,7 +195,16 @@ MCP path. Read the `outcome`, never the human `log`.
 - evidence named by `nextWork`;
 - schema or reference files `nextWork` explicitly requires.
 
-Nothing broader. Then author the requested artifact and run again.
+A `CONTINUE` result's `request` lists the checkpoint's `artifacts` and
+`dependencies`, and its `schemaRef` names one entry of
+`references/migration-contract.md` (`#<STEP>`). Read that entry and the
+sections it links, not the whole contract. Do not read engine source to learn
+an authoring rule: a refused validation names the failing field, and the linked
+section documents it.
+
+Nothing broader. Do not reread completed checkpoints' artifacts, earlier
+inventories or matrices the request does not list, this skill while it is
+still in context, or earlier command and browser output. Then author the requested artifact and run again.
 
 ### 5. Obey the typed outcome literally
 
@@ -212,6 +221,40 @@ Providers never decide checkpoint progression themselves. Never infer the next
 checkpoint, skip one that "looks done", or continue from conversation memory.
 Never select a format-specific transition: which increment is owed, and how it
 commits, is the engine's decision, reported as a typed outcome.
+
+### 6. Context boundaries
+
+Continuation is automatic; carrying conversation forward is not part of it.
+The persisted record is the only authority, so no iteration needs what an
+earlier one read or concluded.
+
+A **safe context boundary** is the moment an engine run returns having
+committed progress — `CONTINUE` after a checkpoint or slice advance, or
+`FORMAT_UPGRADED` — before anything for the next iteration is authored. It is
+**not** a boundary while authored files await their run, an
+`AWAITING_CONFIRMATION` preview awaits confirmation, an `OPERATOR_DECISION` or
+`FORMAT_UPGRADE` input awaits the operator, a background operation is still
+running, or the engine reports recovery or a blocker.
+
+After a safe boundary, the next iteration is the normal invocation `next=`
+names, exactly as on a new session: status first, then `nextWork` and the
+`request`, then only the bounded context of step 4. Treat anything remembered
+from earlier iterations as unverified; where it disagrees with the engine, the
+engine wins. A boundary never skips work: the next checkpoint or slice is the
+one the engine names, authored and validated in full.
+
+Instructions cannot remove tokens already in a conversation; only the host
+can, by compacting it or starting a new session. Claude Code, Codex, OpenCode
+and GitHub Copilot manage that themselves, compacting near their context limit
+or on operator request (`/compact` where the host provides it); none lets a
+skill trigger either, and this skill invokes neither. A safe boundary is where such a
+compaction, or a new session resumed with `/start-migration <module>`, loses
+nothing. Never stop, hand off, or ask the operator to compact or say "continue"
+to reach one.
+
+Engine-generated step documents that say "one active slice per session" or
+"the next session" mean one engine iteration. They bound what an iteration may
+do; they never require a new conversation and never pause a `CONTINUE`.
 
 ## Authorities and boundaries
 
@@ -865,7 +908,7 @@ read, or a quick engine call needs no background process, and manufacturing one
 is noise.
 
 Routine continuation stays automatic, exactly as "Loop directive and handoff"
-requires: `loop: CONTINUE` runs in the same session without asking the operator
+requires: `loop: CONTINUE` runs immediately, without asking the operator
 to say "continue", and polling a background operation is not a stop condition.
 Only a typed stop ends the loop, and the decisions that need a human still need
 one — yielding between bounded calls never stands in for operator approval.
@@ -999,7 +1042,7 @@ Full JSON schemas for every artifact below live in
 9. **`FINALIZE`** — recheck the _entire_ migration, not just the last
    slice: every behavior/route/target-native/design-system row terminal,
    provenance clean of copied legacy code, and all seven mandatory gates in
-   `gates.json` `PASS` with fresh, bound evidence (see "Gate evidence" in
+   `gates.json` `PASS` with fresh, bound evidence (see "Final gates" in
    `references/migration-contract.md`). `FUNCTIONAL_PARITY_GATE` can never
    be `NOT_APPLICABLE`. A Ponytail target requires the owning gate rows to
    carry typed evidence (`kind`/`reference`), never prose. Advance to
@@ -1043,10 +1086,12 @@ Obey it literally. A command that exits non-zero without printing one has
 already failed and stops the loop; `--mode step` prints none at all, because
 the operator drives every iteration there by hand.
 
-On `CONTINUE`, run exactly the command `next=` names, in the same session. Do
-not emit a handoff block, do not print a `Next command:` line, and never ask
-the operator to say "continue" — a successful checkpoint or slice advance is
-not a stopping point.
+On `CONTINUE`, run exactly the command `next=` names, immediately. Do not
+emit a handoff block, do not print a `Next command:` line, and never ask the
+operator to say "continue" — a successful checkpoint or slice advance is not a
+stopping point. It is a safe context boundary (see Execution protocol,
+*Context boundaries*): the next iteration resumes from the engine, not from
+what this conversation still holds.
 
 A committed format increment continues through that same line:
 `FORMAT_UPGRADED` prints `loop: CONTINUE next=/start-migration <module>`, so
