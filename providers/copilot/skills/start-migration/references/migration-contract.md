@@ -2197,6 +2197,24 @@ it.
 
 `FUNCTIONAL_PARITY_GATE` cannot be omitted or made not applicable.
 
+Read the binding instead of guessing it. `migration_evidence_binding`
+(CLI: `artifact-migration-validate <module> --evidence-binding --reference
+<path>...`) returns the current `boundTo` values, the earliest acceptable
+`producedAt`, and the content identity of each named evidence file inside the
+legacy or target repository — the same values validation compares against. It
+writes nothing and reads no file outside those repositories. Write the evidence
+files first, then read the binding, then write `gates.json`: any later change
+to either tree changes a dirty-tree digest. A command result's `outputDigest`
+is read the same way. Never submit a placeholder digest to learn the expected
+one.
+
+A refused `gates.json`, or a refused list of command results, reports every
+independent problem in one run: the refusal numbers them, and the `CONTINUE`
+request carries them as `validationIssues` (`artifact`, `code`, `fields`,
+`message`), one entry per cause with every field it affects. Prerequisites
+still stop first and alone: an unreadable document, a wrong gate set, or a
+record whose integrity or authority does not verify.
+
 ## Content identity for ordinary file pins
 
 Every digest that identifies *a file* — an `artifactHashes` pin, `brief.digest`,

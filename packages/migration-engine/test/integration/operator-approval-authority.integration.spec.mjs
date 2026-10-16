@@ -947,6 +947,7 @@ test("R-W2-e: no argv option, environment variable, or tool argument can produce
   for (const name of [
     "migration_status",
     "migration_scan",
+    "migration_evidence_binding",
     "migration_pending_decisions",
     "migration_run",
     "artifact_run",

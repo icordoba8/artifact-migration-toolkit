@@ -6,6 +6,8 @@ import {
   assertPlainObject,
   commonAncestor,
   isLexicallyWithin as isWithin,
+  issueCollector,
+  throwIssues,
 } from "../shared/index.mjs";
 import { fileExists, fileIdentity, fileIdentityMatches } from "./files.mjs";
 
@@ -71,30 +73,29 @@ export const assertCommandResults = async (commands, label, roots) => {
   if (list.length === 0) {
     throw new Error(`${label} requires at least one executed command result.`);
   }
+  // QW3: every entry, and every field of an entry, is independent of the
+  // others; only the digest depends on its own output file resolving.
+  const { issues, add, check } = issueCollector();
   for (const [index, entry] of list.entries()) {
     const at = `${label}[${index}]`;
-    assertPlainObject(entry, at);
-    assertNonEmpty(entry.command, `${at}.command`);
+    if (!(await check(at, () => assertPlainObject(entry, at)))) continue;
+    await check(`${at}.command`, () => assertNonEmpty(entry.command, `${at}.command`));
     if (entry.exitCode !== 0) {
-      throw new Error(
-        `${at} ('${entry.command}') recorded exitCode ${entry.exitCode}; a verification command must exit 0.`,
-      );
+      add(`${at}.exitCode`, `${at} ('${entry.command}') recorded exitCode ${entry.exitCode}; a verification command must exit 0.`, { code: "COMMAND_FAILED" });
     }
-    assertIsoTimestamp(entry.executedAt, `${at}.executedAt`);
-    assertNonEmpty(entry.runner, `${at}.runner`);
+    await check(`${at}.executedAt`, () => assertIsoTimestamp(entry.executedAt, `${at}.executedAt`));
+    await check(`${at}.runner`, () => assertNonEmpty(entry.runner, `${at}.runner`));
     const claim = evidencePathClaim(entry.outputPath);
     const resolved = claim && (await resolveEvidencePath(claim, roots));
     if (!resolved) {
-      throw new Error(
-        `${at}.outputPath '${entry.outputPath}' does not exist under the legacy or target repository. Record the captured output as a real file.`,
-      );
+      add(`${at}.outputPath`, `${at}.outputPath '${entry.outputPath}' does not exist under the legacy or target repository. Record the captured output as a real file.`, { code: "EVIDENCE_REFERENCE_MISSING" });
+      continue;
     }
     if (!(await fileIdentityMatches(entry.outputDigest, resolved))) {
-      throw new Error(
-        `${at}.outputDigest does not match '${entry.outputPath}': recorded ${entry.outputDigest}, actual ${await fileIdentity(resolved)}.`,
-      );
+      add(`${at}.outputDigest`, `${at}.outputDigest does not match '${entry.outputPath}': recorded ${entry.outputDigest}, actual ${await fileIdentity(resolved)}.`, { code: "EVIDENCE_HASH_MISMATCH" });
     }
   }
+  throwIssues(label, issues);
 };
 
 /**
@@ -110,20 +111,20 @@ export const assertEvidenceReference = async (entry, label, roots, options = {})
   // not evidence -- same bar as `assertCommandResults`.
   if (!claim) {
     if (!options.require) return;
-    throw new Error(
+    throw Object.assign(new Error(
       `${label}.reference '${entry.reference}' is not a persisted artifact path. Record the captured runtime evidence as a real file under the legacy or target repository.`,
-    );
+    ), { validationCode: "EVIDENCE_REFERENCE_MISSING" });
   }
   const resolved = await resolveEvidencePath(claim, roots);
   if (!resolved) {
-    throw new Error(
+    throw Object.assign(new Error(
       `${label}.reference names '${claim}', which does not exist under the legacy or target repository.`,
-    );
+    ), { validationCode: "EVIDENCE_REFERENCE_MISSING" });
   }
   if (!(await fileIdentityMatches(entry.hash, resolved))) {
-    throw new Error(
+    throw Object.assign(new Error(
       `${label}.hash does not match the current bytes of '${claim}'. Recorded ${entry.hash}, actual ${await fileIdentity(resolved)}. Regenerate the evidence against the current tree.`,
-    );
+    ), { validationCode: "EVIDENCE_HASH_MISMATCH" });
   }
   return resolved;
 };

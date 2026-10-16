@@ -159,6 +159,7 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
     "artifact_run",
     "artifact_status",
+    "migration_evidence_binding",
     "migration_pending_decisions",
     "migration_relay_decision",
     "migration_run",
@@ -181,6 +182,8 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
     assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), [
       "cwd",
       "module",
+      // QW3: the evidence binding names the files it digests; nothing else.
+      ...(tool.name === "migration_evidence_binding" ? ["references"] : []),
       "registry",
       "slice",
       "target",
@@ -400,7 +403,7 @@ test("a malformed frame is a parse error and the connection survives", async () 
   assert.equal(raw.length, 2);
   assert.equal(raw[0].error.code, -32700);
   assert.equal(raw[0].id, null);
-  assert.equal(raw[1].result.tools.length, 7);
+  assert.equal(raw[1].result.tools.length, 8);
 });
 
 // --- §11.6 no approval path --------------------------------------------------
@@ -414,6 +417,7 @@ test("no sequence of tool calls appends to the operator decisions ledger", async
     const names = [
       "migration_status",
       "migration_scan",
+      "migration_evidence_binding",
       "migration_pending_decisions",
       "migration_run",
       "migration_approve",
@@ -1219,7 +1223,7 @@ test("an unresponsive MCP provider times out, cleans pending, and ignores a late
     await serving;
     assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
     assert.equal(JSON.parse(frames.find((frame) => frame.id === 2).result.content.at(-1).text).outcome, "OPERATOR_DECISION");
-    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 7);
+    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 8);
     assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
     assert.equal(await decisionLedger(fixture), null);
   } finally {

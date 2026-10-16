@@ -60,6 +60,7 @@ export {
   loadOpenSpecAuthority,
   validateOpenSpecProposal,
 } from "./openspec.mjs";
+export { previewEvidenceBinding } from "./gates.mjs";
 export {
   previewDiscoveryScan,
   readMigrationContext,

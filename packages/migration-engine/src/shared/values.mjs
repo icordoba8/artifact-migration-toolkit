@@ -92,3 +92,55 @@ export const sameMembers = (actual, expected, label) => {
     throw new Error(`${label} must be exactly [${right.join(", ")}].`);
   }
 };
+
+/**
+ * QW3. Checks that do not depend on one another run together, and every
+ * failure is reported by one refusal instead of one refusal per run. `check`
+ * records a thrown refusal against its field and returns false, so the caller
+ * can skip only the checks that depended on it. Issues with the same `cause`
+ * (one stale binding shared by every evidence entry) are reported once, naming
+ * every field. Nothing here ever accepts: one recorded issue is a refusal.
+ */
+const MAX_REPORTED_ISSUES = 25;
+
+export const issueCollector = () => {
+  const issues = [];
+  const add = (field, message, { code = "INVALID", cause } = {}) => {
+    issues.push({ field, code, message, cause: cause ?? `${field}\u0000${message}` });
+  };
+  const check = async (field, run, options = {}) => {
+    try {
+      await run();
+      return true;
+    } catch (error) {
+      add(field, error.message, { ...options, code: error.validationCode ?? options.code });
+      return false;
+    }
+  };
+  return { issues, add, check };
+};
+
+/**
+ * Throws the collected issues as one error, or returns when there are none. A
+ * single issue keeps its exact message; several are numbered in check order,
+ * bounded at MAX_REPORTED_ISSUES, and also carried as `validationIssues`.
+ */
+export const throwIssues = (artifact, issues) => {
+  if (issues.length === 0) return;
+  const grouped = new Map();
+  for (const { field, code, message, cause } of issues) {
+    const known = grouped.get(cause);
+    if (known) known.fields.push(field);
+    else grouped.set(cause, { artifact, code, fields: [field], message });
+  }
+  const all = [...grouped.values()];
+  const reported = all.slice(0, MAX_REPORTED_ISSUES);
+  const also = ({ fields }) => (fields.length > 1 ? ` [same cause at ${fields.slice(1).join(", ")}]` : "");
+  const message =
+    all.length === 1
+      ? `${reported[0].message}${also(reported[0])}`
+      : `${artifact} has ${all.length} independent problems, all reported by this run: ` +
+        reported.map((issue, index) => `(${index + 1}) ${issue.message}${also(issue)}`).join(" ") +
+        (all.length > reported.length ? ` (+${all.length - reported.length} more not listed)` : "");
+  throw Object.assign(new Error(message), { validationIssues: reported });
+};

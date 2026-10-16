@@ -53,8 +53,10 @@ export {
   assertUniqueIds,
   exactObject,
   isPlainObject,
+  issueCollector,
   now,
   sameMembers,
+  throwIssues,
   unique,
   versionOne,
 } from "./values.mjs";

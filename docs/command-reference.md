@@ -127,6 +127,7 @@ absolute path; run every command from the repository being migrated.
 | --- | --- | --- |
 | `migration_status` | `artifact-migration-discover <module> --status` | nothing |
 | `migration_scan` | `artifact-migration-discover <module> --scan` | nothing |
+| `migration_evidence_binding` | `artifact-migration-validate <module> --evidence-binding [--reference <path>]...` | nothing |
 | `migration_pending_decisions` | `artifact-migration-decision <module> --pending` | nothing |
 | `migration_run` | `artifact-migration-run <module> [options] --json` | at most one advance |
 | `migration_relay_decision` | `artifact-migration-decision <module> --relay <reference> --decision APPROVE\|REJECT` | one relayed operator decision |

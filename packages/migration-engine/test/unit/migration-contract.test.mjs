@@ -69,6 +69,7 @@ import {
   getMigrationStatus,
   previewDiscoveryScan,
   previewAdvance,
+  previewEvidenceBinding,
   pendingTargetDriftCandidatesCompat as pendingTargetDriftCandidates,
   previewMigrationExecution,
   readState,
@@ -189,6 +190,7 @@ import {
 } from "../../src/slices/index.mjs";
 import { pendingTargetDriftCandidates as slicesDriftCandidates } from "../../src/slices/index.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
+import { parseValidateArguments, runValidateCli } from "../../src/cli/validate-migration.mjs";
 import { createSession, handleMessage } from "../../src/mcp-server.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -4113,6 +4115,274 @@ test("P1-10: a gate hash must match the referenced file's current bytes", async 
     });
     await advance(fixture);
     assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- QW3: independent blockers in one run, and the binding read, not guessed --
+
+/** Every byte a refused run could have written: state, history, integrity. */
+const recordNavigation = async (fixture) =>
+  Promise.all(
+    ["state.json", "history/history.ndjson", "integrity.json"].map((file) =>
+      readFile(path.join(fixture.migrationRoot, file), "utf8").catch(() => null),
+    ),
+  );
+
+const atFinalize = async (fixture) => {
+  await driveTo(fixture, "SLICES");
+  await completeStepDoc(fixture, "FINALIZE");
+  await writeMatrices(fixture, true);
+};
+
+const writeGates = (fixture, rows) =>
+  writeJson(path.join(fixture.migrationRoot, "gates.json"), { version: 1, gates: rows });
+
+const refusalOf = (promise) =>
+  promise.then(
+    () => assert.fail("expected a refusal"),
+    (error) => error,
+  );
+
+/** Six independent problems, two of them the same stale binding. */
+const sixProblemGates = (base) => {
+  const ok = gateEvidence(base);
+  const staleTarget = { ...ok, boundTo: { ...ok.boundTo, targetDirtyDigest: "stale-target-tree" } };
+  return GATES.map((gate, index) => ({
+    gate,
+    result: index === 0 ? "FAIL" : "PASS",
+    attempts: index === 1 ? 9 : 1,
+    evidence: [
+      [ok, ok, gateEvidence({ ...base, reference: "target/src/ghost-report.json" }), staleTarget, staleTarget, null, { ...ok, producer: "" }][index],
+    ].filter(Boolean),
+  }));
+};
+
+test("QW3: one FINALIZE run reports every independent gates.json problem, typed, ordered and deduplicated", async () => {
+  const fixture = await createFixture();
+  try {
+    await atFinalize(fixture);
+    const base = await gateBindingContext(fixture);
+    await writeGates(fixture, sixProblemGates(base));
+    const before = await recordNavigation(fixture);
+
+    const refused = await refusalOf(advance(fixture));
+    assert.deepEqual(
+      refused.validationIssues.map(({ artifact, code, fields }) => [artifact, code, fields]),
+      [
+        ["gates.json", "GATE_NOT_PASS", ["ARCHITECTURE_PLAN_GATE.result"]],
+        ["gates.json", "INVALID", ["TARGETED_VERIFY.attempts"]],
+        ["gates.json", "EVIDENCE_REFERENCE_MISSING", ["FUNCTIONAL_PARITY_GATE.evidence[0].reference"]],
+        // One stale tree, two entries: one cause, both fields.
+        ["gates.json", "EVIDENCE_BINDING_STALE", [
+          "SIMPLIFY_ONCE.evidence[0].boundTo.targetDirtyDigest",
+          "ARCHITECTURE_IMPLEMENTATION_GATE.evidence[0].boundTo.targetDirtyDigest",
+        ]],
+        ["gates.json", "GATE_EVIDENCE_MISSING", ["PRECOMMIT_GATE.evidence"]],
+        ["gates.json", "INVALID", ["FINAL_VERIFY.evidence[0].producer"]],
+      ],
+    );
+    assert.match(refused.message, /^gates\.json has 6 independent problems, all reported by this run: \(1\) Gate ARCHITECTURE_PLAN_GATE is not PASS\./);
+    // The message keeps each refusal's own words, so a single-cause reader still matches.
+    for (const issue of refused.validationIssues) assert.ok(refused.message.includes(issue.message), issue.message);
+    // Deterministic, and nothing was written.
+    assert.deepEqual((await refusalOf(advance(fixture))).validationIssues, refused.validationIssues);
+    assert.deepEqual(await recordNavigation(fixture), before);
+
+    // Before QW3 each of the six surfaced in its own refused run (7 runs to
+    // COMPLETE); now one refused run lists them and the corrected file passes.
+    await writeGates(fixture, GATES.map((gate) => ({ gate, result: "PASS", attempts: 1, evidence: [gateEvidence(base)] })));
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("QW3: dependent checks are skipped, never reported as independent problems", async () => {
+  const fixture = await createFixture();
+  try {
+    await atFinalize(fixture);
+    const ok = gateEvidence(await gateBindingContext(fixture));
+    const { boundTo: _dropped, ...unbound } = ok;
+    await writeGates(fixture, GATES.map((gate, index) => ({
+      gate,
+      result: "PASS",
+      attempts: 1,
+      evidence: [
+        index === 0 ? unbound
+          // A real file with a malformed hash: the format is the problem, not a mismatch.
+          : index === 1 ? { ...ok, reference: "target/src/placeholder.ts", hash: "sha256:not-hex" }
+          : index === 2 ? { ...ok, producedAt: "yesterday" }
+          : ok,
+      ],
+    })));
+    const refused = await refusalOf(advance(fixture));
+    assert.deepEqual(refused.validationIssues.map(({ fields }) => fields[0]), [
+      "ARCHITECTURE_PLAN_GATE.evidence[0].boundTo",
+      "TARGETED_VERIFY.evidence[0].hash",
+      "FUNCTIONAL_PARITY_GATE.evidence[0].producedAt",
+    ]);
+    assert.doesNotMatch(refused.message, /is bound to|does not match the current bytes|predates/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("QW3: prerequisites still refuse first and alone", async () => {
+  const fixture = await createFixture();
+  try {
+    await atFinalize(fixture);
+    const base = await gateBindingContext(fixture);
+    // A wrong gate set: no row is checked, however broken.
+    await writeGates(fixture, sixProblemGates(base).slice(1));
+    const refused = await refusalOf(advance(fixture));
+    assert.equal(refused.message, "gates.json must contain exactly the seven mandatory gates.");
+    assert.equal(refused.validationIssues, undefined);
+
+    // One problem keeps its exact historical message.
+    await writeGates(fixture, GATES.map((gate, index) => ({
+      gate, result: index === 3 ? "FAIL" : "PASS", attempts: 1, evidence: [gateEvidence(base)],
+    })));
+    assert.equal((await refusalOf(advance(fixture))).message, "Gate SIMPLIFY_ONCE is not PASS.");
+
+    // A record whose integrity no longer verifies is refused before any gate is read.
+    const statePath = path.join(fixture.migrationRoot, "state.json");
+    const persisted = await readJson(statePath);
+    await writeJson(statePath, { ...persisted, revision: persisted.revision + 7 });
+    const resolution = await resolutionFor(fixture);
+    await assert.rejects(previewEvidenceBinding({ ...resolution, moduleName: "auth" }), (error) => !error.validationIssues);
+    await assert.rejects(advance(fixture), (error) => !error.validationIssues);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("QW3: the binding preview returns exactly what FINALIZE accepts, reads nothing outside the repositories, and writes nothing", async () => {
+  const fixture = await createFixture();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "qw3-outside-"));
+  try {
+    await atFinalize(fixture);
+    await writeFile(path.join(outside, "secret.txt"), "not evidence\n");
+    // Validation's resolution also reaches the repositories' common parent and
+    // follows symlinks; the preview digests neither.
+    await mkdir(path.join(fixture.root, "shared-notes"), { recursive: true });
+    await writeFile(path.join(fixture.root, "shared-notes/secret.txt"), "not evidence\n");
+    await symlink(path.join(outside, "secret.txt"), path.join(fixture.targetRoot, "src/outside-link.txt"));
+    const resolution = await resolutionFor(fixture);
+    const before = await recordNavigation(fixture);
+    const escape = path.relative(fixture.root, path.join(outside, "secret.txt")).split(path.sep).join("/");
+    const binding = await previewEvidenceBinding({
+      ...resolution,
+      moduleName: "auth",
+      references: ["target/src/placeholder.ts", "target/src/ghost-report.json", escape, "pnpm --dir target test", "shared-notes/secret.txt", "target/src/outside-link.txt"],
+    });
+    assert.deepEqual(await recordNavigation(fixture), before);
+
+    const expected = await gateBindingContext(fixture);
+    assert.deepEqual(binding.boundTo, {
+      target: "auth",
+      legacyRevision: expected.legacyRevision,
+      targetRevision: expected.targetRevision,
+      requirementsDigest: expected.requirementsDigest,
+      dataSourceMode: "standard",
+      legacyDirtyDigest: expected.legacyDirtyDigest,
+      targetDirtyDigest: expected.targetDirtyDigest,
+    });
+    const [placeholder, ghost, escaped, prose, parent, linked] = binding.references;
+    assert.equal(parent.hash, null, "the common parent is not a repository");
+    assert.equal(linked.hash, null, "a symlink out of the repository is not followed");
+    // The probes would be unclaimed target drift at FINALIZE; remove them and read again.
+    await rm(path.join(fixture.targetRoot, "src/outside-link.txt"));
+    await rm(path.join(fixture.root, "shared-notes"), { recursive: true });
+    Object.assign(binding, await previewEvidenceBinding({ ...resolution, moduleName: "auth", references: [placeholder.reference] }));
+    assert.match(placeholder.hash, /^sha256:(text-lf-v1:)?[0-9a-f]{64}$/);
+    assert.equal(ghost.hash, null);
+    assert.match(ghost.problem, /does not exist/);
+    assert.equal(escaped.hash, null, "a path outside both repositories is never digested");
+    assert.equal(prose.hash, null);
+    assert.equal(prose.path, null);
+
+    const entry = (hash) => ({
+      ...gateEvidence(expected),
+      reference: placeholder.reference,
+      hash,
+      producedAt: new Date().toISOString(),
+      boundTo: binding.boundTo,
+    });
+    assert.ok(Date.parse(binding.producedAtNotBefore) <= Date.now());
+    // A guessed digest is still refused, with its code...
+    await writeGates(fixture, GATES.map((gate) => ({ gate, result: "PASS", attempts: 1, evidence: [entry(`sha256:${"0".repeat(64)}`)] })));
+    const refused = await refusalOf(advance(fixture));
+    assert.deepEqual([...new Set(refused.validationIssues.map(({ code }) => code))], ["EVIDENCE_HASH_MISMATCH"]);
+    assert.equal(refused.validationIssues[0].fields.length, 7, "one wrong digest, one cause");
+    // ...and the read one passes on the first try.
+    await writeGates(fixture, GATES.map((gate) => ({ gate, result: "PASS", attempts: 1, evidence: [entry(placeholder.hash)] })));
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+  } finally {
+    await rm(outside, { recursive: true, force: true });
+    await fixture.cleanup();
+  }
+});
+
+test("QW3: command results report every independent problem at VERIFY_SLICES", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a");
+    const evidencePath = path.join(fixture.migrationRoot, "evidence/slice-a/result.json");
+    const evidence = await readJson(evidencePath);
+    const [first] = evidence.commands;
+    evidence.commands = [
+      { ...first, exitCode: 1, outputDigest: `sha256:${"0".repeat(64)}` },
+      { ...first, runner: "", outputPath: "target/src/missing-output.txt" },
+    ];
+    await writeJson(evidencePath, evidence);
+    const before = await recordNavigation(fixture);
+    const refused = await refusalOf(advance(fixture, { slice: "slice-a" }));
+    assert.deepEqual(refused.validationIssues.map(({ code, fields }) => [code, fields[0]]), [
+      ["COMMAND_FAILED", "slice-a evidence commands[0].exitCode"],
+      ["EVIDENCE_HASH_MISMATCH", "slice-a evidence commands[0].outputDigest"],
+      ["INVALID", "slice-a evidence commands[1].runner"],
+      ["EVIDENCE_REFERENCE_MISSING", "slice-a evidence commands[1].outputPath"],
+    ]);
+    assert.deepEqual(await recordNavigation(fixture), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("QW3: CLI and MCP carry the same issues and the same binding", async () => {
+  const fixture = await createFixture();
+  try {
+    await atFinalize(fixture);
+    await writeGates(fixture, sixProblemGates(await gateBindingContext(fixture)));
+    const before = await recordNavigation(fixture);
+    const cli = JSON.parse((await runCli(fixture, () => runMigration(["auth", "--mode", "auto", "--json"]))).stdout);
+    const mcp = JSON.parse(
+      (await rpc(fixture, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "migration_run", arguments: { module: "auth" } } }))
+        .result.content.at(-1).text,
+    );
+    assert.equal(cli.outcome, "CONTINUE");
+    assert.equal(mcp.outcome, "CONTINUE");
+    assert.equal(cli.request.validationIssues.length, 6);
+    assert.deepEqual(mcp.request.validationIssues, cli.request.validationIssues);
+    assert.equal(mcp.reason, cli.reason);
+    assert.deepEqual(await recordNavigation(fixture), before);
+
+    const references = ["--reference", "target/src/placeholder.ts"];
+    const cliBinding = JSON.parse((await runCli(fixture, () => runValidateCli(["auth", "--evidence-binding", ...references]))).stdout);
+    const mcpBinding = JSON.parse(
+      (await rpc(fixture, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "migration_evidence_binding", arguments: { module: "auth", references: ["target/src/placeholder.ts"] } } }))
+        .result.content.at(-1).text,
+    );
+    assert.deepEqual(mcpBinding, cliBinding);
+    assert.throws(() => parseValidateArguments(["auth", "--reference", "x/y.txt"]), /Usage/);
+    assert.throws(() => parseValidateArguments(["auth", "--evidence-binding", "--complete"]), /Usage/);
   } finally {
     await fixture.cleanup();
   }

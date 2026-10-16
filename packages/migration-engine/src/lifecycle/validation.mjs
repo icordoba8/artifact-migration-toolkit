@@ -44,7 +44,6 @@ import {
 } from "../formats/index.mjs";
 import {
   assertArray,
-  assertIsoTimestamp,
   assertNonEmpty,
   assertPlainObject,
   assertSafeName,
@@ -52,19 +51,15 @@ import {
   assertUniqueIds,
   dirtyManifest,
   gitRevision,
-  isContentIdentity,
   isLexicallyWithin as isWithin,
-  isPlainObject,
 } from "../shared/index.mjs";
 import {
   assertCommandResults,
-  assertEvidenceReference,
   assertEvidenceResolves,
   evidencePathClaim,
   fileExists,
   fileIdentityMatches,
   migrationRoot,
-  readHistoryEvents,
   readJson,
   resolveEvidencePath,
 } from "../store/index.mjs";
@@ -95,7 +90,6 @@ import {
   pendingTargetDriftCandidates,
   readTargetBaseline,
   settleFact,
-  TARGET_DIRTY_SCOPE,
   targetBaselineDrift,
   targetRelativePath,
   TERMINAL_DESIGN_SYSTEM,
@@ -106,7 +100,6 @@ import {
 import {
   BEHAVIOR_DISPOSITIONS,
   CAPABILITY_DISPOSITIONS,
-  FINAL_GATES,
   PARITY_STATUSES,
   SHARED_CONSUMER_THRESHOLD,
   SLICE_EARNED_PARITY,
@@ -114,6 +107,7 @@ import {
 } from "./checkpoints.mjs";
 import { artifactArgumentsFor, artifactCommandFor } from "./artifact-record.mjs";
 import { getArtifactStatus, validateArtifactComplete } from "./artifact-status.mjs";
+import { validateGates } from "./gates.mjs";
 import { assertStepDocumentComplete } from "./record.mjs";
 import { validateExternalUiCapabilities } from "./ui-coverage.mjs";
 export const validateLegacyInventory = (root, roots, state) =>
@@ -1130,229 +1124,6 @@ const withUiProofReopenHint = async (root, sliceId, state, roots) => {
     error.message += ` Completed slices ${lacking.join(", ")} lack ${UI_PROOF_FORMAT} UI proof; recover them with: --reopen-ui ${lacking.join(",")}.`;
     throw error;
   }
-};
-
-// Contract 5 decision 1.3: typed Ponytail evidence, never a regex over prose.
-const PONYTAIL_GATE_EVIDENCE = {
-  full: [["SIMPLIFY_ONCE", "review"]],
-  "full-audit": [
-    ["SIMPLIFY_ONCE", "review"],
-    ["PRECOMMIT_GATE", "audit"],
-  ],
-};
-
-// Fix B (candidate change; analysis/inventory.md Defect "Gate evidence has no
-// freshness, hash, or binding enforcement" / `references/migration-contract.md`
-// "Final gates"): each evidence entry is now a structured, bound record
-// instead of an arbitrary string. Rejects an entry (and therefore the gate)
-// when a required field is missing, when `boundTo` disagrees with the
-// migration's current resolved target/legacy revision/target revision/
-// requirements digest/data-source mode, or when `producedAt` predates the
-// most recently pinned legacy revision or requirements digest -- evidence
-// timestamped before the thing it claims to satisfy was even pinned is stale
-// by construction.
-const assertEvidenceEntry = (entry, label, context) => {
-  assertPlainObject(entry, label);
-  assertNonEmpty(entry.kind, `${label}.kind`);
-  assertNonEmpty(entry.reference, `${label}.reference`);
-  assertIsoTimestamp(entry.producedAt, `${label}.producedAt`);
-  assertNonEmpty(entry.producer, `${label}.producer`);
-  assertNonEmpty(entry.environment, `${label}.environment`);
-  if (!isContentIdentity(entry.hash)) {
-    throw new Error(
-      `${label}.hash must be a SHA-256 digest ('sha256:<64 hex>') of the referenced artifact, or of the reference string if it isn't a file.`,
-    );
-  }
-  const boundTo = assertPlainObject(entry.boundTo, `${label}.boundTo`);
-  assertNonEmpty(boundTo.target, `${label}.boundTo.target`);
-  assertNonEmpty(boundTo.legacyRevision, `${label}.boundTo.legacyRevision`);
-  assertNonEmpty(boundTo.targetRevision, `${label}.boundTo.targetRevision`);
-  assertNonEmpty(
-    boundTo.requirementsDigest,
-    `${label}.boundTo.requirementsDigest`,
-  );
-  if (!["standard", "mock"].includes(boundTo.dataSourceMode)) {
-    throw new Error(
-      `${label}.boundTo.dataSourceMode must be 'standard' or 'mock'.`,
-    );
-  }
-  if (boundTo.target !== context.target) {
-    throw new Error(
-      `${label} is bound to target '${boundTo.target}', which does not match the migration's current target '${context.target}'.`,
-    );
-  }
-  if (boundTo.legacyRevision !== context.legacyRevision) {
-    throw new Error(
-      `${label} is bound to legacy revision '${boundTo.legacyRevision}', which does not match the current legacy revision '${context.legacyRevision}'. Evidence from a stale legacy revision never satisfies a gate.`,
-    );
-  }
-  if (boundTo.targetRevision !== context.targetRevision) {
-    throw new Error(
-      `${label} is bound to target revision '${boundTo.targetRevision}', which does not match the current target revision '${context.targetRevision}'. Evidence from a stale target revision never satisfies a gate.`,
-    );
-  }
-  if (boundTo.requirementsDigest !== context.requirementsDigest) {
-    throw new Error(
-      `${label} is bound to requirements digest '${boundTo.requirementsDigest}', which does not match the current requirements digest '${context.requirementsDigest}'. Evidence from a changed spec never satisfies a gate.`,
-    );
-  }
-  if (boundTo.dataSourceMode !== context.dataSourceMode) {
-    throw new Error(
-      `${label} is bound to data-source mode '${boundTo.dataSourceMode}', which does not match the migration's current data-source mode '${context.dataSourceMode}'. Mock-mode evidence never satisfies a standard-mode gate, or vice versa.`,
-    );
-  }
-  assertNonEmpty(
-    boundTo.legacyDirtyDigest,
-    `${label}.boundTo.legacyDirtyDigest`,
-  );
-  assertNonEmpty(
-    boundTo.targetDirtyDigest,
-    `${label}.boundTo.targetDirtyDigest`,
-  );
-  // Nothing is committed before FINALIZE, so `legacyRevision`/`targetRevision`
-  // never move while a slice edits a file. Binding the dirty manifest too
-  // means any uncommitted change to either tree -- even one no evidence entry
-  // ever names -- invalidates evidence authored before it happened.
-  if (boundTo.legacyDirtyDigest !== context.legacyDirtyDigest) {
-    throw new Error(
-      `${label} is bound to legacy dirty-tree digest '${boundTo.legacyDirtyDigest}', which does not match the current uncommitted legacy tree '${context.legacyDirtyDigest}'. Evidence from before an uncommitted legacy change never satisfies a gate.`,
-    );
-  }
-  if (boundTo.targetDirtyDigest !== context.targetDirtyDigest) {
-    throw new Error(
-      `${label} is bound to target dirty-tree digest '${boundTo.targetDirtyDigest}', which does not match the current uncommitted target tree '${context.targetDirtyDigest}'. Evidence from before an uncommitted target change never satisfies a gate.`,
-    );
-  }
-  if (Date.parse(entry.producedAt) < Date.parse(context.freshSince)) {
-    throw new Error(
-      `${label}.producedAt (${entry.producedAt}) predates the most recently pinned legacy revision or requirements digest (${context.freshSince}). Evidence timestamped before the thing it claims to satisfy was pinned is stale by construction.`,
-    );
-  }
-  return entry;
-};
-
-/** When `legacyRevision`/`requirementsAuthority` were last pinned, for the
- * gate-evidence freshness check. Both are fixed at bootstrap; `legacyRevision`
- * can move forward again via a `REFRESHED` history event. */
-const pinnedInputTimestamps = async (root, state) => {
-  const events = await readHistoryEvents(root);
-  let legacyRevisionPinnedAt = state.createdAt;
-  for (const event of events) {
-    if (
-      // A stale-evidence reopen (`from` FINALIZE/ACTIVE) never re-pins the
-      // legacy revision, so it must not age the gate evidence bound to it.
-      (event.event === "REFRESHED" ||
-        (event.event === "UI_REMEDIATION_REOPENED" &&
-          !["FINALIZE", "ACTIVE"].includes(event.from)) ||
-        (event.event === "COMPLETE_REOPENED" && event.toLegacyRevision)) &&
-      typeof event.at === "string"
-    ) {
-      if (
-        legacyRevisionPinnedAt === undefined ||
-        event.at > legacyRevisionPinnedAt
-      ) {
-        legacyRevisionPinnedAt = event.at;
-      }
-    }
-  }
-  return {
-    requirementsAuthorityPinnedAt: state.createdAt,
-    legacyRevisionPinnedAt,
-  };
-};
-
-const validateGates = async (root, state, roots) => {
-  const document = assertPlainObject(
-    await readJson(path.join(root, initialArtifacts.gates), "Final gates"),
-    "Final gates",
-  );
-  const gates = assertArray(document.gates, "Final gates");
-  const names = assertUniqueIds(
-    gates.map((row) => ({ ...row, id: row.gate })),
-    "Final gates",
-  );
-  if (
-    names.size !== FINAL_GATES.length ||
-    FINAL_GATES.some((gate) => !names.has(gate))
-  ) {
-    throw new Error(
-      "gates.json must contain exactly the seven mandatory gates.",
-    );
-  }
-
-  const currentLegacyRevision = await gitRevision(roots.legacyRoot);
-  const currentTargetRevision = await gitRevision(roots.targetRoot);
-  const currentLegacyDirty = await dirtyManifest(roots.legacyRoot);
-  const currentTargetDirty = await dirtyManifest(
-    roots.targetRoot,
-    TARGET_DIRTY_SCOPE,
-  );
-  const { requirementsAuthorityPinnedAt, legacyRevisionPinnedAt } =
-    await pinnedInputTimestamps(root, state);
-  const freshSince =
-    requirementsAuthorityPinnedAt > legacyRevisionPinnedAt
-      ? requirementsAuthorityPinnedAt
-      : legacyRevisionPinnedAt;
-  const bindingContext = {
-    target: state.targetModule,
-    legacyRevision: currentLegacyRevision.revision,
-    targetRevision: currentTargetRevision.revision,
-    requirementsDigest: state.requirementsAuthority.digest,
-    dataSourceMode: state.dataSourceMode,
-    legacyDirtyDigest: currentLegacyDirty.digest,
-    targetDirtyDigest: currentTargetDirty.digest,
-    freshSince,
-  };
-
-  for (const gate of gates) {
-    if (gate.result !== "PASS") {
-      throw new Error(`Gate ${gate.gate} is not PASS.`);
-    }
-    if (
-      !Number.isInteger(gate.attempts) ||
-      gate.attempts < 1 ||
-      gate.attempts > 3
-    ) {
-      throw new Error(`${gate.gate} attempts must be between 1 and 3.`);
-    }
-    const evidence = assertArray(gate.evidence, `${gate.gate}.evidence`);
-    if (evidence.length === 0) {
-      throw new Error(`${gate.gate} requires concrete evidence.`);
-    }
-    for (const [index, entry] of evidence.entries()) {
-      const label = `${gate.gate}.evidence[${index}]`;
-      assertEvidenceEntry(entry, label, bindingContext);
-      await assertEvidenceReference(entry, label, roots);
-    }
-  }
-  for (const [gateName, kind] of PONYTAIL_GATE_EVIDENCE[state?.ponytail] ??
-    []) {
-    const gateRow = gates.find((row) => row.gate === gateName);
-    const evidence = gateRow?.ponytailEvidence;
-    if (!isPlainObject(evidence)) {
-      throw new Error(
-        `Ponytail target '${state.ponytail}' requires gate ${gateName} to record a ponytailEvidence object of kind "${kind}".`,
-      );
-    }
-    // The type/binding/freshness check runs first; Ponytail's `kind`
-    // requirement is layered on top of it, never a substitute for it.
-    assertEvidenceEntry(
-      evidence,
-      `${gateName}.ponytailEvidence`,
-      bindingContext,
-    );
-    await assertEvidenceReference(
-      evidence,
-      `${gateName}.ponytailEvidence`,
-      roots,
-    );
-    if (evidence.kind !== kind) {
-      throw new Error(
-        `Ponytail target '${state.ponytail}' requires gate ${gateName} to record ponytailEvidence of kind "${kind}", found "${evidence.kind}".`,
-      );
-    }
-  }
-  return gates;
 };
 
 // Contract 5 decision 1.4: the brief is immutable once recorded.

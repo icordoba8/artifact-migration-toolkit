@@ -186,6 +186,7 @@ export {
   pendingTargetDriftCandidatesCompat as pendingTargetDriftCandidates,
   previewAdvance,
   previewDiscoveryScan,
+  previewEvidenceBinding,
   previewMigrationExecution,
   previewUiObservationsAdoption,
   readMigrationContext,

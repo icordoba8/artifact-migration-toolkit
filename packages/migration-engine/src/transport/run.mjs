@@ -553,6 +553,10 @@ export const runMigration = async (
           ...(error.unlistedChangedFiles
             ? { unlistedChangedFiles: error.unlistedChangedFiles }
             : {}),
+          // QW3: every independent problem the validation found, typed.
+          ...(error.validationIssues
+            ? { validationIssues: error.validationIssues }
+            : {}),
         },
       });
     }

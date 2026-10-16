@@ -185,7 +185,7 @@ export const SOURCE_LINE_CEILING = 1000;
 export const OVERSIZED_SOURCES = {
   "census/scan.mjs": 2296,
   "decisions/record.mjs": 1642,
-  "lifecycle/validation.mjs": 1583,
+  "lifecycle/validation.mjs": 1354,
   "lifecycle/artifact-checkpoints.mjs": 1358,
   "visual/evidence.mjs": 1355,
   "lifecycle/record.mjs": 1058,

@@ -1043,8 +1043,10 @@ Full JSON schemas for every artifact below live in
    slice: every behavior/route/target-native/design-system row terminal,
    provenance clean of copied legacy code, and all seven mandatory gates in
    `gates.json` `PASS` with fresh, bound evidence (see "Final gates" in
-   `references/migration-contract.md`). `FUNCTIONAL_PARITY_GATE` can never
-   be `NOT_APPLICABLE`. A Ponytail target requires the owning gate rows to
+   `references/migration-contract.md`; read each entry's `boundTo` and file
+   digest with `migration_evidence_binding`, never by submitting a guess).
+   `FUNCTIONAL_PARITY_GATE` can never be `NOT_APPLICABLE`. A Ponytail target
+   requires the owning gate rows to
    carry typed evidence (`kind`/`reference`), never prose. Advance to
    `COMPLETE`, then run `artifact-migration-validate <module> --complete`.
    `COMPLETE` means ready for commit — it never commits, pushes, or opens a

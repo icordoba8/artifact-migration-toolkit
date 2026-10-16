@@ -44,6 +44,7 @@ import {
   MIGRATION_MODES,
   pendingDecisionCandidates,
   previewDiscoveryScan,
+  previewEvidenceBinding,
   relayOperatorDecision,
   renderLoopDirective,
   renderProgressBlock,
@@ -478,6 +479,24 @@ const TOOLS = [
       "Recompute the discovery census the module classification is written against. Writes nothing.",
     inputSchema: INPUT_SCHEMA,
     call: readOnly(previewDiscoveryScan),
+  },
+  {
+    name: "migration_evidence_binding",
+    description:
+      "Read the boundTo values a FINALIZE gate evidence entry must carry now, and the current digest of each named evidence file inside the legacy or target repository. Writes nothing and takes no lock.",
+    inputSchema: {
+      ...INPUT_SCHEMA,
+      properties: {
+        ...INPUT_SCHEMA.properties,
+        references: {
+          type: "array",
+          items: { type: "string" },
+          description: "Evidence references to digest, as they will appear in gates.json or a result's outputPath.",
+        },
+      },
+    },
+    call: async (arguments_) =>
+      previewEvidenceBinding({ ...(await registryFor(arguments_)), references: arguments_.references ?? [] }),
   },
   {
     name: "migration_pending_decisions",
