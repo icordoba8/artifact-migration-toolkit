@@ -87,7 +87,7 @@ async function main() {
     fail("Independent verifier must reside OUTSIDE the agent-writable consumer");
   const verifierSha256 = createHash("sha256").update(await readFile(verifier)).digest("hex");
   if (marker.verifierSha256 !== verifierSha256) fail("Independent verifier digest does not match the pinned digest");
-  const record = path.join(root, ".agents", "knowledge", "migrations", "modules", options.module, "state.json");
+  const record = path.join(root, ".agents", "knowledge", "migrations", "modules", options.target, "state.json");
   const already = await readFile(record, "utf8").catch(error => {
     if (error.code === "ENOENT") return null;
     throw error;
