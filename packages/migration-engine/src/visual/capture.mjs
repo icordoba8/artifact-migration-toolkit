@@ -38,7 +38,9 @@ const SECRET_PARAM = /(password|passwd|secret|token|cookie|authorization|credent
 // One-time codes and SSO assertions are credentials too (`/callback?code=...`):
 // any whole word of the key, camelCase or snake_case. Fail-closed, so
 // `zipCode` refuses as well; a single word such as `zipcode` does not.
-const SECRET_WORDS = new Set(["code", "otp", "ticket", "jwt", "nonce", "assertion"]);
+// ponytail: a deny-list cannot be complete; the contract still forbids URL secrets.
+const SECRET_WORDS = new Set(["code", "otp", "ticket", "jwt", "nonce", "assertion",
+  "auth", "key", "pin", "pass", "sid", "sso", "saml", "hmac", "bearer"]);
 const secretParam = (url) => [...url.searchParams.keys()].find((key) => SECRET_PARAM.test(key) ||
   key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]+/).some((word) => SECRET_WORDS.has(word)));
 

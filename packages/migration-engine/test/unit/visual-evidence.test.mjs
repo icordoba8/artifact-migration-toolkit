@@ -1053,6 +1053,8 @@ test("MC2: the capture request, locator grammar and taxonomy transform are the t
     [{ route: "/cb?oauth_code=1" }, /credential-like query parameter 'oauth_code'/],
     [{ route: "/cb?oneTimeCode=1" }, /credential-like query parameter 'oneTimeCode'/],
     [{ route: "/a?zipCode=1" }, /credential-like query parameter 'zipCode'/],
+    [{ route: "/landing?auth=TOPSECRET" }, /credential-like query parameter 'auth'/],
+    [{ route: "/a?userKey=1" }, /credential-like query parameter 'userKey'/],
     [{ storageState: "session.json" }, /storageState must be an absolute path/],
     [{ viewport: { width: 0, height: 720 } }, /viewport must be/],
     [{ counts: { width: "div" } }, /outside the taxonomy/],

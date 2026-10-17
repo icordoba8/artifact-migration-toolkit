@@ -44,25 +44,27 @@ export const externalJsxUses = (ts, fileName, text) => {
     if (!(ts.isIdentifier(call.expression) && call.expression.text === "require")) return null;
     return { spec: call.arguments[0].text, member: call === node ? null : node.name.text };
   };
-  const dynamicImport = (node) => {
+  // Every `import("x")` under a node; a loader may name more than one.
+  const dynamicImports = (node, found = []) => {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        node.arguments.length >= 1 && ts.isStringLiteralLike(node.arguments[0])) return node.arguments[0].text;
-    return ts.forEachChild(node, dynamicImport);
+        node.arguments.length >= 1 && ts.isStringLiteralLike(node.arguments[0])) found.push(node.arguments[0].text);
+    ts.forEachChild(node, (child) => { dynamicImports(child, found); });
+    return found;
   };
+  const lazy = new Map();
   const bindRequire = (node) => {
     if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) &&
         ts.isStringLiteralLike(node.moduleReference.expression)) {
       bindings.set(node.name.text, { spec: node.moduleReference.expression.text, symbol: "*" });
     }
     if (ts.isVariableDeclaration(node) && node.initializer) {
-      // Through wrapping calls too: `memo(dynamic(() => import(x)))`.
-      const loaderImport = (call) => {
-        if (!ts.isCallExpression(call)) return undefined;
-        return call.arguments.map((argument) => ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)
-          ? dynamicImport(argument.body) : loaderImport(argument)).find(Boolean);
-      };
-      const dynamic = required(node.initializer) ? undefined : loaderImport(node.initializer);
-      const module = required(node.initializer) ?? (dynamic ? { spec: dynamic, member: null } : null);
+      // Through wrapping calls too: `memo(dynamic(() => import(x)))`. Every
+      // loaded module counts; one that is not rendered only costs a trace.
+      const loaderImports = (call) => !ts.isCallExpression(call) ? [] : call.arguments.flatMap((argument) =>
+        ts.isArrowFunction(argument) || ts.isFunctionExpression(argument) ? dynamicImports(argument.body) : loaderImports(argument));
+      const module = required(node.initializer);
+      const loaded = module ? [] : loaderImports(node.initializer);
+      if (loaded.length > 0 && ts.isIdentifier(node.name)) lazy.set(node.name.text, loaded);
       if (module && ts.isIdentifier(node.name)) bindings.set(node.name.text, { spec: module.spec, symbol: module.member ?? "*" });
       if (module && !module.member && ts.isObjectBindingPattern(node.name)) {
         for (const element of node.name.elements) {
@@ -81,8 +83,8 @@ export const externalJsxUses = (ts, fileName, text) => {
       const tag = node.tagName;
       const root = ts.isIdentifier(tag) ? tag.text :
         ts.isPropertyAccessExpression(tag) && ts.isIdentifier(tag.expression) ? tag.expression.text : null;
-      const imported = bindings.get(root);
-      if (imported) {
+      for (const imported of [bindings.get(root), ...(lazy.get(root) ?? []).map((spec) => ({ spec, symbol: "*" }))]) {
+        if (!imported) continue;
         const symbol = imported.symbol === "*" && ts.isPropertyAccessExpression(tag)
           ? tag.name.text : imported.symbol;
         uses.set(JSON.stringify([imported.spec, symbol]), { spec: imported.spec, symbol });
