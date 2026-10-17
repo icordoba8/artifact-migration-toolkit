@@ -90,6 +90,22 @@ development matrix locally for the same SHA; CI already ran it. Publish only
 after the packaging checks pass, then run `pnpm release:record <version>` from
 the published asset.
 
+## Real-agent production acceptance
+
+Green Ubuntu CI, the deterministic installed-full-lifecycle fixture and package
+verification prove the engine and its distribution; they do **not** prove that a
+real Claude Code, OpenCode or Codex session can bootstrap and execute the skill
+without prompt repair. A stable release advertised as ready for autonomous
+migration **MUST** also satisfy [black-box real-agent acceptance](agent-e2e-acceptance.md)
+on the exact immutable release candidate and every provider/platform declared
+supported. Preserve all evidence and state the model/provider versions.
+
+Do not treat missing agent credentials, a synthetic/OpenSpec-prefilled fixture,
+an LLM-free rehearsal, or an unrecorded native progress UI as a waiver. Mark any
+unverified provider/platform **NOT_TESTED**, and do not claim production-ready
+compatibility for it. A genuine operator authorization is a deliberate stop,
+not an error to bypass for an unattended acceptance run.
+
 ## Format bump
 
 Bumping `MIGRATION_FORMAT_VERSION` requires editing **one constant plus one
