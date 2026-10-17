@@ -23600,6 +23600,54 @@ test("MC1: a missing or degraded capture stays unresolved, and a stale authority
   }
 });
 
+// A --reopen-ui record keeps ui-remediation.json through --refresh, so it can
+// reach BUILD_BASELINE again; the validator then reads the remediated UI rows.
+test("MC1: an adopted UI remediation decides which legacy-runtime rows are derived, as it does for the validator", async () => {
+  const [mismatch] = TARGET_INVENTORY.uiMismatches;
+  const remediate = (fixture, uiBehaviors, uiMismatches) =>
+    writeJson(path.join(fixture.migrationRoot, "ui-remediation.json"), { version: 1, hasVisibleUi: true, uiBehaviors, uiMismatches });
+  const waived = await createFixture();
+  try {
+    // Raw inventories require UIB-1; the adopted remediation waives it.
+    await legacyBaselineWith(waived, {});
+    await remediate(waived, LEGACY_INVENTORY.uiBehaviors, [{ ...mismatch, disposition: "NOT_APPLICABLE" }]);
+    const before = await snapshot(waived.migrationRoot);
+    const summary = await prefill(waived);
+    assert.equal(summary.written, false);
+    assert.deepEqual(summary.unresolved, []);
+    assert.deepEqual(await snapshot(waived.migrationRoot), before);
+  } finally {
+    await waived.cleanup();
+  }
+  const widened = await createFixture();
+  try {
+    // The remediation adds a state no frame captured: derived where pinned, reported where not.
+    await legacyBaselineWith(widened, {});
+    const [uiBehavior] = LEGACY_INVENTORY.uiBehaviors;
+    await remediate(widened, [{
+      ...uiBehavior,
+      runtimeStates: [...uiBehavior.runtimeStates, "EMPTY"],
+      requiredObservations: [...uiBehavior.requiredObservations,
+        { id: "UIO-9", state: "EMPTY", role: "button", name: "Sign in", predicate: "visibility", expected: true }],
+    }], [mismatch]);
+    const summary = await prefill(widened);
+    assert.equal(summary.derived.rows, 1);
+    const matrix = await readJson(path.join(widened.migrationRoot, "matrices/visual-acceptance.json"));
+    assert.deepEqual(matrix.rows.map(({ uiBehaviorId, state }) => `${uiBehaviorId}::${state}`), [LEGACY_FRAME_ID]);
+    assert.deepEqual(summary.unresolved.find(({ field }) => field === "rows[] | unbacked[]").items, ["UIB-1::EMPTY (no frame)"]);
+    // With the derived row authored, the validator's only gap is the one prefill reported.
+    const authored = taxonomyExpect(FIGMA_VIEWPORT);
+    for (const [name, fact] of Object.entries(matrix.rows[0].expect)) {
+      fact.locator = authored[name].locator;
+      fact.kind ??= authored[name].kind;
+    }
+    await writeVisualAcceptance(widened, matrix);
+    await assert.rejects(advance(widened), /VISUAL_CONTRACT_GAP: required UI behavior 'UIB-1' state 'EMPTY'/);
+  } finally {
+    await widened.cleanup();
+  }
+});
+
 test("MC1: result digests are QW3's content identities; command facts and outcomes are never written", async () => {
   const fixture = await createFixture();
   const outside = await mkdtemp(path.join(os.tmpdir(), "mc1-outside-"));

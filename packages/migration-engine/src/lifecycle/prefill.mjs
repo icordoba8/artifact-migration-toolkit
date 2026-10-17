@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { readCanonicalModuleBoundary } from "../census/index.mjs";
+import { readCanonicalModuleBoundary, withUiRemediation } from "../census/index.mjs";
 import {
   initialArtifacts,
   LEGACY_RUNTIME_CONTEXT_FILE,
@@ -148,8 +148,9 @@ const visualAcceptanceDraft = async ({ root, state }) => {
       `${VISUAL_ACCEPTANCE_FILE} is prefilled only for designSource legacy-runtime, where each pinned frame is exactly one runtime state. Under figma-mcp, binding a runtime state to a design node and state is an authored judgment; target-system has no visual contract.`,
     );
   }
-  const legacy = await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory");
-  const target = await readJson(path.join(root, initialArtifacts.targetInventory), "Target inventory");
+  // The validator's own view: an adopted UI remediation replaces the UI rows.
+  const legacy = await withUiRemediation(root, state, await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory"), "uiBehaviors");
+  const target = await withUiRemediation(root, state, await readJson(path.join(root, initialArtifacts.targetInventory), "Target inventory"), "uiMismatches");
   // The validator's own reader: hashes, revision and capture block re-checked,
   // facts re-derived from the pinned measurements. A stale capture refuses here.
   const frames = await authority.validateContext(root, state, undefined, legacy);
