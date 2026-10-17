@@ -55,9 +55,13 @@ export const externalJsxUses = (ts, fileName, text) => {
       bindings.set(node.name.text, { spec: node.moduleReference.expression.text, symbol: "*" });
     }
     if (ts.isVariableDeclaration(node) && node.initializer) {
-      const loader = ts.isCallExpression(node.initializer) &&
-        node.initializer.arguments.find((argument) => ts.isArrowFunction(argument) || ts.isFunctionExpression(argument));
-      const dynamic = required(node.initializer) || !loader ? undefined : dynamicImport(loader.body);
+      // Through wrapping calls too: `memo(dynamic(() => import(x)))`.
+      const loaderImport = (call) => {
+        if (!ts.isCallExpression(call)) return undefined;
+        const loader = call.arguments.find((argument) => ts.isArrowFunction(argument) || ts.isFunctionExpression(argument));
+        return loader ? dynamicImport(loader.body) : call.arguments.map(loaderImport).find(Boolean);
+      };
+      const dynamic = required(node.initializer) ? undefined : loaderImport(node.initializer);
       const module = required(node.initializer) ?? (dynamic ? { spec: dynamic, member: null } : null);
       if (module && ts.isIdentifier(node.name)) bindings.set(node.name.text, { spec: module.spec, symbol: module.member ?? "*" });
       if (module && !module.member && ts.isObjectBindingPattern(node.name)) {

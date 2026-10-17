@@ -36,16 +36,11 @@ const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const SECRET_PARAM = /(password|passwd|secret|token|cookie|authorization|credential|api[_-]?key|session)|(^|[_-])sig(nature)?$|^saml(request|response)?$/i;
 // One-time codes and SSO assertions are credentials too (`/callback?code=...`):
-// a whole word of the key, camelCase or snake_case. `code` alone or after an
-// auth word refuses; `zipCode` and `promo_code` do not.
-const SECRET_WORDS = new Set(["otp", "ticket", "jwt", "nonce", "assertion"]);
-const AUTH_WORDS = new Set(["auth", "authorization", "access", "verification", "login", "reset", "device", "otp", "oauth", "sso"]);
-const secretParam = (url) => [...url.searchParams.keys()].find((key) => {
-  if (SECRET_PARAM.test(key)) return true;
-  const words = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]+/).filter(Boolean);
-  return words.some((word) => SECRET_WORDS.has(word)) ||
-    (words.at(-1) === "code" && (words.length === 1 || words.slice(0, -1).some((word) => AUTH_WORDS.has(word))));
-});
+// any whole word of the key, camelCase or snake_case. Fail-closed, so
+// `zipCode` refuses as well; a single word such as `zipcode` does not.
+const SECRET_WORDS = new Set(["code", "otp", "ticket", "jwt", "nonce", "assertion"]);
+const secretParam = (url) => [...url.searchParams.keys()].find((key) => SECRET_PARAM.test(key) ||
+  key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]+/).some((word) => SECRET_WORDS.has(word)));
 
 const text = (value, label, max = 500) => {
   if (typeof value !== "string" || !value.trim() || value.length > max) invalid(`${label} must be a non-empty string of at most ${max} characters.`);

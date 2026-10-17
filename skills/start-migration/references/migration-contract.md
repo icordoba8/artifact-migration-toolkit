@@ -852,7 +852,8 @@ controls. The claim's behavior must be traced by the active slice. A scroll
 container inside the claim element refuses the claim capture
 (`CAPTURE_VALUE_UNSUPPORTED`) rather than writing a row that omits it. A route
 or page URL with a credential-like query parameter, one-time `code`, `ticket`
-and SAML parameters included, refuses the capture. The capture writes new files only, under the
+and SAML parameters included, refuses the capture. Key words are matched whole
+in camelCase or snake_case, so `oneTimeCode` and also `zipCode` refuse. The capture writes new files only, under the
 module lock. The frame is checked by `validateLegacyRuntimeContext` before it
 joins the context. A failure removes whatever the call wrote. Cookies, storage,
 headers and typed passwords are never read or persisted.
@@ -1493,7 +1494,8 @@ the same tokens appear on source-backed capability rows, regardless of whether
 the target reuses a package, replaces it, or uses native controls. Algorithm 4
 binds a package rendered as JSX through `import`, `require()`, `import x =
 require()` or a loader call whose function argument imports it (such as
-`next/dynamic` or `lazy`); a member that is not spelled out is `*`. A scroll container
+`next/dynamic` or `lazy`, also when wrapped, as in `memo(dynamic(...))`); a
+member that is not spelled out is `*`. A scroll container
 inside a claimed element is not part of that claim's scroll contract, which
 measures the claimed element and its ancestors only.
 
