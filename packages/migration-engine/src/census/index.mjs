@@ -57,6 +57,7 @@ export {
   UI_RUNTIME_STATES,
   validateLegacyInventory,
   validateTargetInventory,
+  withUiRemediation,
 } from "./inventory.mjs";
 export {
   assertExternalUiTrace,

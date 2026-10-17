@@ -44,6 +44,7 @@ import {
   MIGRATION_MODES,
   pendingDecisionCandidates,
   previewDiscoveryScan,
+  captureLegacyRuntimeEvidence,
   prefillCheckpointDraft,
   previewEvidenceBinding,
   relayOperatorDecision,
@@ -505,6 +506,24 @@ const TOOLS = [
       "Write the engine-derivable part of the current checkpoint's authored artifact in place (classification rows from the scan, legacy-runtime visual rows from the pinned capture, evidence digests and gate bindings) and return a summary of what is still to author. Fills absent fields only; never overwrites, pins, approves or advances.",
     inputSchema: INPUT_SCHEMA,
     call: async (arguments_) => prefillCheckpointDraft(await registryFor(arguments_)),
+  },
+  {
+    name: "migration_capture",
+    description:
+      "Capture one legacy-runtime state in a real browser and persist the evidence: an ASSESS_TARGET authority frame (legacy-runtime records) or, with appearanceClaimId, the format-20 LEGACY capture of one appearance claim at VERIFY_SLICES. Returns a compact summary; never overwrites, pins, approves, advances or marks PASS.",
+    inputSchema: {
+      ...INPUT_SCHEMA,
+      properties: {
+        ...INPUT_SCHEMA.properties,
+        request: {
+          type: "object",
+          description:
+            "{origin, route, viewport {width,height}, controls? [{role,name,locator}], setup? [{type,target,value?}], colorScheme?, matte?, browser?, storageState?, timeoutMs?} plus either {uiBehaviorId, state, rootLocator, counts {name: locator}} for a frame or {appearanceClaimId, interaction?} for a claim.",
+        },
+      },
+    },
+    call: async (arguments_) =>
+      captureLegacyRuntimeEvidence({ ...(await registryFor(arguments_)), request: arguments_.request }),
   },
   {
     name: "migration_pending_decisions",

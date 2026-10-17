@@ -184,8 +184,13 @@ jobs:
 
       # Lifecycle, formats, decisions, integrity, MCP, discovery, artifact, and
       # the external-installation / rendered-command path suites.
+      # MC2: the capture suites drive a real browser (the runner's Google
+      # Chrome through the pinned playwright-core); the gate makes a missing
+      # browser a failure instead of a skip.
       - name: Run the engine suites
         if: ${{ matrix.shard == 3 }}
+        env:
+          ARTIFACT_MIGRATION_BROWSER_GATE: "1"
         run: pnpm engine:test
 
       - name: Run the TypeScript artifact suites

@@ -58,7 +58,7 @@ const UI_SECRET_VALUE_PATTERN =
   /((^|\s)(bearer|basic)\s+\S|(password|passwd|secret|token|credential|api[_-]?key|authorization)\s*[:=]\s*\S)/i;
 
 /** Refuses to persist credential material inside runtime UI evidence. */
-const assertNoUiSecret = (value, label) => {
+export const assertNoUiSecret = (value, label) => {
   const walk = (node, trail) => {
     if (typeof node === "string") {
       if (UI_SECRET_VALUE_PATTERN.test(node)) {
@@ -85,6 +85,10 @@ const assertNoUiSecret = (value, label) => {
   walk(value, "");
   return value;
 };
+
+/** The UI contract a runtime row binds: the behavior and its mismatch, as pinned. MC2 binds LEGACY rows with it. */
+export const uiContractDigestOf = (uiBehavior, mismatch) =>
+  `sha256:${hashContent(JSON.stringify({ uiBehavior, mismatch }))}`;
 
 // Track A6: `implementationDigests` is the slices-owned, read-only digest of
 // the claimed bytes, passed in by the lifecycle seam and called at the same
@@ -259,12 +263,10 @@ export const validateUiRuntimeEvidence = async ({
         exercised.add(`${uiBehavior.id}::${interaction.id}`);
     }
     const binding = assertPlainObject(record.boundTo, `${label}.boundTo`);
-    const expectedUiContractDigest = `sha256:${hashContent(
-      JSON.stringify({
-        uiBehavior,
-        mismatch: mismatchByBehavior.get(uiBehavior.id),
-      }),
-    )}`;
+    const expectedUiContractDigest = uiContractDigestOf(
+      uiBehavior,
+      mismatchByBehavior.get(uiBehavior.id),
+    );
     for (const [field, expected] of Object.entries({
       target: state.targetModule,
       requirementsDigest: state.requirementsAuthority.digest,

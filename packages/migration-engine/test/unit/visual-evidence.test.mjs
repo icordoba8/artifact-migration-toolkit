@@ -47,7 +47,15 @@ import {
   figmaShadows,
   strokeFromComputedStyle,
   compareVisualFact,
+  captureInBrowser,
+  claimCapturePlan,
+  legacyAppearanceRow,
+  parseCaptureRequest,
+  parseLocator,
+  taxonomyValues,
 } from "../../src/visual/index.mjs";
+import { fileIdentity } from "../../src/store/index.mjs";
+import { CAPTURE_BROWSER_SKIP, startCaptureServer } from "../support/capture-fixture.mjs";
 
 const scrollProof = ({ documentHeight = 1080, ancestorHeight = 972, overflowY = "hidden" } = {}) => ({
   observation: { scroll: {
@@ -1021,4 +1029,151 @@ test("a node that returned no strokes/effects key proves neither a record nor an
   assert.deepEqual(figmaShadows({ id: "8:40" }), {});
   assert.equal(fact("7:21", "stroke"), undefined);
   assert.equal(fact("7:21", "boxShadow"), undefined);
+});
+
+// --- MC2: engine-native legacy-runtime capture --------------------------------
+
+test("MC2: the capture request, locator grammar and taxonomy transform are the trust boundary", () => {
+  const base = { origin: "http://localhost:4200", route: "/flights?tab=2", viewport: { width: 1280, height: 720 },
+    uiBehaviorId: "UIB-1", state: "DEFAULT", rootLocator: "main", counts: { rows: "tr" } };
+  const plan = parseCaptureRequest(base);
+  assert.equal(parseCaptureRequest({ ...base, route: "/a?design=1&signup=2" }).route, "/a?design=1&signup=2");
+  assert.deepEqual([plan.mode, plan.url, plan.colorScheme, plan.matte, plan.timeoutMs], ["frame", "http://localhost:4200/flights?tab=2", "light", "#ffffff", 15000]);
+  for (const [change, refusal] of [
+    [{ origin: "file:///etc" }, /origin must be exactly an http\(s\) origin/],
+    [{ origin: "http://user:pw@localhost:4200" }, /origin must be exactly/],
+    [{ route: "https://elsewhere.example/" }, /route must be a path/],
+    [{ route: "/a?api_key=1" }, /credential-like query parameter 'api_key'/],
+    [{ route: "/a?x_sig=1" }, /credential-like query parameter 'x_sig'/],
+    [{ storageState: "session.json" }, /storageState must be an absolute path/],
+    [{ viewport: { width: 0, height: 720 } }, /viewport must be/],
+    [{ counts: { width: "div" } }, /outside the taxonomy/],
+    [{ setup: [{ type: "evaluate", target: "main" }] }, /setup\[0\]\.type must be one of/],
+    [{ setup: [{ type: "click", target: "main", value: "x" }] }, /value is not allowed for 'click'/],
+    [{ script: "document.body.remove()" }, /Unsupported frame request key\(s\): script/],
+    [{ interaction: { type: "click", target: "x" } }, /Unsupported frame request key\(s\): interaction/],
+  ]) {
+    assert.throws(() => parseCaptureRequest({ ...base, ...change }), refusal);
+  }
+  // Parsed, never evaluated: anything else is handed to Playwright as a selector string.
+  assert.deepEqual(parseLocator("getByRole('button', { name: 'Save \\'all\\'' })"), { method: "getByRole", argument: "button", options: { name: "Save 'all'" } });
+  assert.deepEqual(parseLocator('page.getByTestId("grid")'), { method: "getByTestId", argument: "grid", options: {} });
+  assert.deepEqual(parseLocator("getByText('Exact', { exact: true })"), { method: "getByText", argument: "Exact", options: { exact: true } });
+  assert.deepEqual(parseLocator("getByRole('x'); process.exit(1)"), { selector: "getByRole('x'); process.exit(1)" });
+  assert.deepEqual(parseLocator("#grid > .row"), { selector: "#grid > .row" });
+
+  const raw = {
+    width: 320, height: 200, padding: ["8px", "8px", "8px", "8px"], gap: ["12px", "12px"],
+    color: "rgb(0, 0, 0)", backgroundColor: "rgba(0, 0, 0, 0)", fontFamily: "Arial", fontSize: "14px", fontWeight: "400",
+    lineHeight: "20px", borderWidth: ["0px", "0px", "0px", "0px"], borderColor: Array(4).fill("rgb(0, 0, 0)"),
+    borderRadius: Array(4).fill("0px"), boxShadow: "none", opacity: "1", visibility: "visible",
+    assets: ["/b.svg", "/a.svg", "data:image/png;base64,AAAA", "/a.svg"], inlineSvg: 0,
+  };
+  const measured = taxonomyValues(raw, { rows: 3 });
+  assert.deepEqual(measured.unsupported, []);
+  assert.deepEqual([measured.values.padding, measured.values.gap, measured.values.rows], ["8px", "12px", 3]);
+  assert.deepEqual(measured.computed, {});
+  assert.deepEqual(measured.values.assets, ["/a.svg", "/b.svg", `data:sha256:${createHash("sha256").update("data:image/png;base64,AAAA").digest("hex")}`]);
+  for (const name of REQUIRED_FACT_NAMES) assert.notEqual(measured.values[name], undefined, name);
+  // Nothing is guessed: per-side values and keywords the normalizer refuses on both sides stay refused.
+  const refused = taxonomyValues({ ...raw, padding: ["8px", "16px", "8px", "16px"], gap: ["normal", "normal"], lineHeight: "normal", inlineSvg: 2 }, { rows: 1 });
+  assert.deepEqual(refused.unsupported.map((line) => line.split(" computed ")[0]), ["padding", "gap", "lineHeight"]);
+  assert.match(refused.unsupported[0], /padding computed "8px 16px 8px 16px"/);
+  assert.match(refused.limitations[0], /2 inline <svg> element\(s\)/);
+});
+
+const CLAIM_VIEWPORT = { width: 640, height: 480 };
+const CLAIM_BEHAVIOR = {
+  id: "UIB-1", behaviorId: "BEH-1", kind: "PRESENTATION", runtimeStates: ["DEFAULT"], scenarioIds: ["SCN-1"],
+  interactions: [{ id: "UIX-1", expected: "The account menu opens." }],
+  requiredObservations: [{ id: "OBS-1", state: "DEFAULT", role: "button", name: "Sign in", predicate: "visibility", expected: true }],
+  requiredAppearance: [
+    { id: "APP-1", state: "DEFAULT", role: "button", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })" },
+    { id: "APP-2", state: "DEFAULT", afterInteractionId: "UIX-1", role: "menu", name: "Account", locator: "getByRole('menu', { name: 'Account' })" },
+  ],
+  scrollContracts: [{ state: "DEFAULT", owner: "ELEMENT", documentScrollable: false, ancestorClipped: false }],
+};
+
+test("MC2: format-20 LEGACY claim captures satisfy the claim, scroll and pixel validators; the verdict stays authored", { skip: CAPTURE_BROWSER_SKIP ?? false }, async () => {
+  const server = await startCaptureServer();
+  const root = await mkdtemp(path.join(os.tmpdir(), "mc2-claim-"));
+  try {
+    const roots = { legacyRoot: path.join(root, "legacy"), targetRoot: path.join(root, "target") };
+    const state = { formatVersion: 20, targetModule: "auth", dataSourceMode: "real", designSource: "target-system",
+      requirementsAuthority: { digest: "requirements" }, legacyRevision: { revision: "a".repeat(40) }, artifactHashes: {} };
+    const [initial, afterMenu] = CLAIM_BEHAVIOR.requiredAppearance;
+    const plan = (claim, interaction) => claimCapturePlan(parseCaptureRequest({ origin: server.origin, route: "/auth/sign-in",
+      viewport: CLAIM_VIEWPORT, appearanceClaimId: claim.id, ...(interaction ? { interaction } : {}) }), CLAIM_BEHAVIOR, claim);
+    const persist = async (base, origin, claim, captured) => {
+      const prefix = `evidence/slice-a/ui/${origin.toLowerCase()}/${claim.id}`;
+      await mkdir(path.join(base, path.dirname(prefix)), { recursive: true });
+      const file = async (suffix, bytes) => {
+        await writeFile(path.join(base, `${prefix}${suffix}`), bytes);
+        return { reference: `${prefix}${suffix}`, hash: await fileIdentity(path.join(base, `${prefix}${suffix}`)) };
+      };
+      return { snapshot: await file(".proof.json", JSON.stringify(captured.snapshot)), screenshot: await file(".png", captured.screenshot) };
+    };
+
+    // An interaction that never ran cannot be photographed: the menu is not there.
+    await assert.rejects(captureInBrowser({ ...plan(afterMenu, { type: "click", target: "#more" }), interaction: undefined, timeoutMs: 1000 }),
+      /CAPTURE_ELEMENT_MISSING: Claim locator .* is not visible/);
+
+    // The pinned behavior the slice verifies: the initial claim only.
+    const uiBehavior = { ...CLAIM_BEHAVIOR, interactions: [], requiredAppearance: [initial] };
+    const legacyCapture = await captureInBrowser(plan(initial));
+    const legacyRow = legacyAppearanceRow({ state, sliceId: "slice-a", uiBehavior, claim: initial, plan: plan(initial),
+      captured: legacyCapture, files: await persist(roots.legacyRoot, "LEGACY", initial, legacyCapture) });
+    assert.equal(legacyRow.result, null);
+    assert.equal(legacyRow.capture.role, "LEGACY_AUTHORITY");
+    assert.equal(legacyRow.boundTo.legacyRevision, state.legacyRevision.revision);
+    // Test scaffolding only: an independent TARGET capture of the same app, which the slice would author itself.
+    const targetCapture = await captureInBrowser(plan(initial));
+    const targetFiles = await persist(roots.targetRoot, "TARGET", initial, {
+      ...targetCapture,
+      snapshot: { ...targetCapture.snapshot, sliceId: "slice-a", traceId: "PAR-1", scenarioIds: ["SCN-1"],
+        observation: { ...targetCapture.snapshot.observation, controls: targetCapture.snapshot.observation.controls.map((control) =>
+          ({ ...control, assertions: [{ predicate: "visibility", expected: true }] })) } },
+    });
+    const targetRow = { ...legacyRow, origin: "TARGET", result: "PASS", reference: targetFiles.snapshot.reference, hash: targetFiles.snapshot.hash,
+      screenshot: targetFiles.screenshot, capture: { ...legacyRow.capture, role: "TARGET_VERIFICATION" },
+      boundTo: { ...legacyRow.boundTo, legacyRevision: undefined, implementationDigest: "impl" } };
+    const baseline = { legacy: { hasVisibleUi: true, uiBehaviors: [uiBehavior] }, target: { uiMismatches: [] },
+      behaviorRows: [{ id: "PAR-1", behaviorId: "BEH-1" }], visualRows: null };
+    const run = (rows) => validateUiRuntimeEvidence({ evidence: { uiEvidence: rows, uiEvidenceLimitations: [] },
+      implementation: { traceIds: ["PAR-1"] }, baseline, sliceId: "slice-a", state, roots, root,
+      implementationDigests: async () => ({ current: "impl", legacy: "impl" }) });
+    // Observed is not judged: the engine-written LEGACY row is refused until the agent authors its result.
+    await assert.rejects(run([legacyRow, targetRow]), /result must be PASS/);
+    const [comparison] = (await run([{ ...legacyRow, result: "PASS" }, targetRow])).slice(-1);
+    assert.equal(comparison.appearanceClaimId, "APP-1");
+    assert.equal(comparison.pixels.diffPixels, 0);
+    assert.equal(comparison.scroll.result, "PASS");
+    assert.equal(comparison.scroll.legacy.owner, "ELEMENT");
+
+    // A post-action claim: observed absent before the interaction, visible and scroll-measured after it.
+    const menuPlan = plan(afterMenu, { type: "click", target: "#more" });
+    const menu = await captureInBrowser(menuPlan);
+    const [before] = menu.snapshot.observation.controls;
+    assert.deepEqual([before.present, before.visible], [false, false]);
+    assert.equal(menu.snapshot.observation.scroll, undefined);
+    const [{ id, action, postAction }] = menu.snapshot.interactions;
+    assert.deepEqual({ id, action }, { id: "UIX-1", action: { type: "click", target: "#more" } });
+    assert.equal(postAction.controls[0].visible, true);
+    assert.equal(postAction.controls[0].locator, afterMenu.locator);
+    const menuRow = legacyAppearanceRow({ state, sliceId: "slice-a", uiBehavior: CLAIM_BEHAVIOR, claim: afterMenu, plan: menuPlan,
+      captured: menu, files: await persist(roots.legacyRoot, "LEGACY", afterMenu, menu) });
+    assert.deepEqual(menuRow.interactions, [{ id: "UIX-1", expected: "The account menu opens.", actual: null, outcome: null }]);
+    const pair = (row, captured, base) => ({ record: row, snapshot: { ...captured.snapshot, observation: captured.snapshot.interactions[0].postAction },
+      screenshotPath: path.join(base, row.screenshot.reference) });
+    const menuTarget = await captureInBrowser(menuPlan);
+    const menuTargetFiles = await persist(roots.targetRoot, "TARGET", afterMenu, menuTarget);
+    const coverage = await compareAppearanceCoverage({ ...afterMenu, scrollContract: CLAIM_BEHAVIOR.scrollContracts[0] },
+      pair(menuRow, menu, roots.legacyRoot),
+      pair({ ...menuRow, screenshot: menuTargetFiles.screenshot, capture: { ...menuRow.capture, role: "TARGET_VERIFICATION" } }, menuTarget, roots.targetRoot));
+    assert.equal(coverage.pixels.diffPixels, 0);
+    assert.equal(coverage.scroll.result, "PASS");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await server.close();
+  }
 });

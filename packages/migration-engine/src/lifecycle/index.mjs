@@ -61,6 +61,7 @@ export {
   validateOpenSpecProposal,
 } from "./openspec.mjs";
 export { previewEvidenceBinding } from "./gates.mjs";
+export { captureLegacyRuntimeEvidence } from "./capture.mjs";
 export { prefillCheckpointDraft } from "./prefill.mjs";
 export {
   previewDiscoveryScan,

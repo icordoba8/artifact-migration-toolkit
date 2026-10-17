@@ -27,6 +27,9 @@ importers:
       pixelmatch:
         specifier: 7.2.0
         version: 7.2.0
+      playwright-core:
+        specifier: 1.62.1
+        version: 1.62.1
       pngjs:
         specifier: 7.0.0
         version: 7.0.0
@@ -392,6 +395,11 @@ packages:
 
   pixelmatch@7.2.0:
     resolution: {integrity: sha512-xhcb4yHu9sM/G7foGzoLtXYcC0zHEaOXXjRKhGup0fw78Nf2Tkiapv4EQyMzrbcmQPsllAI7DbFY2UT7PlI9Pg==}
+    hasBin: true
+
+  playwright-core@1.62.1:
+    resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
+    engines: {node: '>=20'}
     hasBin: true
 
   pngjs@7.0.0:
@@ -887,6 +895,8 @@ snapshots:
   pixelmatch@7.2.0:
     dependencies:
       pngjs: 7.0.0
+
+  playwright-core@1.62.1: {}
 
   pngjs@7.0.0: {}
 

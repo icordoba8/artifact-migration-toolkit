@@ -49,7 +49,7 @@ const load = (file) => import(pathToFileURL(path.join(src, file)).href);
 
 const LIFECYCLE_FILES = [
   "adoption.mjs", "advance.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-record.mjs",
-  "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "checkpoints.mjs", "context.mjs",
+  "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "capture.mjs", "checkpoints.mjs", "context.mjs",
   "contract-upgrade.mjs", "format-upgrade.mjs", "gates.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "prefill.mjs", "preview.mjs",
   "progress.mjs", "record.mjs", "recorder.mjs", "registry.mjs", "reopen.mjs", "status.mjs", "templates.mjs",
   "toolkit-identity.mjs", "ui-coverage.mjs", "validation.mjs",
@@ -116,6 +116,7 @@ const BASE_EXPORTS = {
     // Added after BASE (QW3), deliberately: the read-only gate evidence binding.
     previewEvidenceBinding: 1,
     // Added after BASE (MC1), deliberately: the explicit checkpoint-draft prefill.
+    captureLegacyRuntimeEvidence: 1,
     prefillCheckpointDraft: 1,
     previewMigrationExecution: 0, previewUiObservationsAdoption: 1, principalSatisfiesRequirement: 2,
     projectModuleDecision: 1, rawDecisionLedgerBytes: 1, rawDecisionLedgerDigest: 1, readAutoDecisions: 1,
@@ -204,7 +205,7 @@ test("A8-ARCH-1: lifecycle has one public entry, which only re-exports the BASE 
     for (const name of Object.values(renamed)) assert.ok(taken.has(name), `${facade} takes ${name}`);
   }
   assert.deepEqual(Object.keys(lifecycle).sort(), [...taken].sort());
-  assert.equal(Object.keys(lifecycle).length, 108);
+  assert.equal(Object.keys(lifecycle).length, 109);
 });
 
 test("A8-ARCH-2: outside lifecycle/, only lifecycle/index.mjs is named; old lifecycle paths are named only by facades and the aggregator", async () => {
@@ -452,7 +453,7 @@ test("A8-ARCH-9: installed paths and location-sensitive loaders resolve as befor
     const from = createRequire(new URL("artifact/artifact-migration.mjs", ${base}));
     const keys = ["ts-discovery-compiler"].map((name) => from.resolve(name));
     const visual = createRequire(new URL("visual-evidence.mjs", ${base}));
-    keys.push(...["pngjs", "pixelmatch"].map((name) => visual.resolve(name)));
+    keys.push(...["pngjs", "pixelmatch", "playwright-core"].map((name) => visual.resolve(name)));
     for (const file of ${JSON.stringify(["lifecycle/index.mjs", ...Object.keys(FACADES), "core.mjs"])}) await import(new URL(file, ${base}).href);
     console.log(JSON.stringify({
       cjs: keys.map((key) => Object.hasOwn(require.cache, key)),
@@ -462,5 +463,5 @@ test("A8-ARCH-9: installed paths and location-sensitive loaders resolve as befor
   `;
   const { stdout, stderr } = await execFileAsync(process.execPath, ["--input-type=module", "-e", probe], { cwd: os.tmpdir() });
   assert.equal(stderr, "");
-  assert.deepEqual(JSON.parse(stdout), { cjs: [false, false, false], lifecycle: true, webauthn: [] });
+  assert.deepEqual(JSON.parse(stdout), { cjs: [false, false, false, false], lifecycle: true, webauthn: [] });
 });

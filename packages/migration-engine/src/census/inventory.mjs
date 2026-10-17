@@ -233,6 +233,20 @@ export const assertTargetAssessmentChecklist = async (root, roots, authority) =>
  * Track A5 seam: the format-18 observation rule is visual's. It arrives as a
  * pure validator, called at the same point of the same loop as before.
  */
+/**
+ * The one UI overlay: a format-12+ record's adopted UI remediation replaces the
+ * persisted inventory's visible-UI flag and its UI rows (`uiBehaviors` on the
+ * legacy side, `uiMismatches` on the target side). MC2 captures read the same.
+ */
+export const withUiRemediation = async (root, state, persisted, rows) => {
+  const remediation = usesUiVerification(state)
+    ? await readOptionalJson(path.join(root, UI_REMEDIATION_FILE), "UI remediation")
+    : null;
+  return remediation
+    ? { ...persisted, hasVisibleUi: remediation.hasVisibleUi, [rows]: remediation[rows] }
+    : persisted;
+};
+
 export const validateLegacyInventory = async (
   root,
   roots,
@@ -246,19 +260,7 @@ export const validateLegacyInventory = async (
     ),
     "Legacy inventory",
   );
-  const remediation = usesUiVerification(state)
-    ? await readOptionalJson(
-        path.join(root, UI_REMEDIATION_FILE),
-        "UI remediation",
-      )
-    : null;
-  const inventory = remediation
-    ? {
-        ...persisted,
-        hasVisibleUi: remediation.hasVisibleUi,
-        uiBehaviors: remediation.uiBehaviors,
-      }
-    : persisted;
+  const inventory = await withUiRemediation(root, state, persisted, "uiBehaviors");
   const behaviors = assertArray(inventory.behaviors, "Legacy behaviors");
   if (behaviors.length === 0) {
     throw new Error("Legacy inventory must contain at least one behavior.");
@@ -438,19 +440,7 @@ export const validateTargetInventory = async (root, roots, legacy, state) => {
     ),
     "Target inventory",
   );
-  const remediation = usesUiVerification(state)
-    ? await readOptionalJson(
-        path.join(root, UI_REMEDIATION_FILE),
-        "UI remediation",
-      )
-    : null;
-  const inventory = remediation
-    ? {
-        ...persisted,
-        hasVisibleUi: remediation.hasVisibleUi,
-        uiMismatches: remediation.uiMismatches,
-      }
-    : persisted;
+  const inventory = await withUiRemediation(root, state, persisted, "uiMismatches");
   if (!TARGET_STATES.has(inventory.implementationState)) {
     throw new Error(
       `Invalid target implementation state '${inventory.implementationState}'.`,

@@ -44,12 +44,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { writeStructuredFigmaContext } from "../support/structured-lifecycle-fixture.mjs";
 import { comparisonPath, renderedCommandPattern } from "../support/portability.mjs";
+import { CAPTURE_BROWSER_SKIP, startCaptureServer, unusedOrigin } from "../support/capture-fixture.mjs";
 
 import {
   dirtyManifest,
   gitRevision,
 } from "../../src/shared/index.mjs";
 import {
+  entryExists,
+  fileIdentity,
   previewRegistryUpdate,
   readRegistry,
   readTree,
@@ -72,6 +75,7 @@ import {
   previewAdvance,
   previewEvidenceBinding,
   prefillCheckpointDraft,
+  captureLegacyRuntimeEvidence,
   pendingTargetDriftCandidatesCompat as pendingTargetDriftCandidates,
   previewMigrationExecution,
   readState,
@@ -171,6 +175,10 @@ import {
   assertRequiredObservations,
   FIXED_VISUAL_TOLERANCE,
   HARDENED_VISUAL_VERSION,
+  captureInBrowser,
+  claimCapturePlan,
+  parseCaptureRequest,
+  validateUiRuntimeEvidence,
 } from "../../src/visual/index.mjs";
 import {
   createDecisionCandidate,
@@ -23762,5 +23770,345 @@ test("MC1: a format-20 record is drafted from scanner algorithm 4 and refuses an
     assert.deepEqual(await snapshot(fixture.migrationRoot), before);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+// --- MC2: the engine captures the legacy runtime; the agent authors no harness ---
+
+const CAPTURE_DIR = "inventories/legacy-runtime/UIB-1-DEFAULT";
+const CAPTURE_VIEWPORT = { width: 640, height: 480 };
+const browserTest = (name, body) => test(name, { skip: CAPTURE_BROWSER_SKIP ?? false }, body);
+
+const frameRequest = (origin, extra = {}) => ({
+  origin,
+  route: "/auth/sign-in",
+  viewport: CAPTURE_VIEWPORT,
+  uiBehaviorId: "UIB-1",
+  state: "DEFAULT",
+  rootLocator: "getByRole('main', { name: 'Sign in' })",
+  controls: [{ role: "button", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })" }],
+  counts: { rows: "getByRole('row')" },
+  ...extra,
+});
+
+const captureFrame = async (fixture, request) =>
+  captureLegacyRuntimeEvidence({ ...(await resolutionFor(fixture)), moduleName: "auth", request });
+
+/** Every path the call changed, added or removed under the record. */
+const recordDelta = (before, after) =>
+  [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => before[key] !== after[key]).sort();
+
+browserTest("MC2: a real browser captures the legacy authority frame; the validator pins it and MC1 prefills from it", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    await legacyAtAssessTarget(fixture);
+    const root = fixture.migrationRoot;
+    const before = await snapshot(root);
+    const summary = await captureFrame(fixture, frameRequest(server.origin));
+    // Exactly the evidence group and the context; state, history, integrity and decisions untouched.
+    assert.deepEqual(recordDelta(before, await snapshot(root)), [
+      `${CAPTURE_DIR}/measurements.json`, `${CAPTURE_DIR}/screenshot.png`, `${CAPTURE_DIR}/snapshot.json`, LEGACY_CONTEXT_FILE,
+    ].sort());
+    const recorded = await state(fixture);
+    assert.equal(recorded.currentStep, "ASSESS_TARGET");
+    const { frames: [frame], version } = await readJson(path.join(root, LEGACY_CONTEXT_FILE));
+    assert.equal(version, 2);
+    assert.equal(frame.id, LEGACY_FRAME_ID);
+    assert.equal(frame.legacyRevision, recorded.legacyRevision.revision);
+    assert.deepEqual(frame.states, ["DEFAULT"]);
+    assert.equal(frame.url, `${server.origin}/auth/sign-in`);
+    assert.deepEqual(frame.extraction, { retrievedAt: frame.capturedAt, fidelity: "COMPLETE", limitations: [] });
+    const { capture } = frame;
+    assert.deepEqual({ ...capture, compare: undefined, imageWidth: undefined, imageHeight: undefined }, {
+      role: "LEGACY_AUTHORITY", mode: "element", rootLocator: "getByRole('main', { name: 'Sign in' })", deviceScaleFactor: 1,
+      colorScheme: "light", reducedMotion: "reduce", matte: "#ffffff", compare: undefined, imageWidth: undefined, imageHeight: undefined,
+    });
+    // Genuine pixels of the element: its own size at scale 1, its own 1px border colour at the edge.
+    const png = PNG.sync.read(await readFile(path.join(root, frame.sources.screenshot.reference)));
+    assert.deepEqual([png.width, png.height], [capture.imageWidth, capture.imageHeight]);
+    assert.deepEqual(capture.compare, { width: png.width, height: png.height });
+    const edge = (Math.floor(png.height / 2) * png.width) * 4;
+    assert.deepEqual([...png.data.subarray(edge, edge + 3)], [217, 225, 234]);
+    for (const kind of ["snapshot", "screenshot", "measurements"]) {
+      assert.ok(frame.sources[kind].reference.startsWith(`${CAPTURE_DIR}/`));
+      assert.equal(frame.sources[kind].hash, await fileIdentity(path.join(root, frame.sources[kind].reference)));
+    }
+    // Measured, in the browser's own spelling; the validator normalizes.
+    const measurements = await readJson(path.join(root, frame.sources.measurements.reference));
+    assert.deepEqual(measurements.viewport, CAPTURE_VIEWPORT);
+    assert.deepEqual([Math.round(measurements.values.width), Math.round(measurements.values.height)], [png.width, png.height]);
+    assert.deepEqual({ ...measurements.values, width: undefined, height: undefined }, {
+      width: undefined, height: undefined, padding: "16px", gap: "12px", color: "rgb(22, 32, 44)",
+      backgroundColor: "rgb(255, 255, 255)", fontFamily: "Arial, sans-serif", fontSize: "14px", fontWeight: "600",
+      lineHeight: "20px", borderWidth: "1px", borderColor: "rgb(217, 225, 234)", borderRadius: "4px",
+      boxShadow: "rgba(0, 0, 0, 0.2) 0px 1px 2px 0px", opacity: "1", visibility: "visible", assets: ["/logo.svg"], rows: 4,
+    });
+    assert.equal(measurements.provenance.element, frame.rootLocator);
+    assert.equal(measurements.provenance.tagName, "main");
+    const proof = await readJson(path.join(root, frame.sources.snapshot.reference));
+    assert.equal(proof.proofFormat, "playwright-ui-proof/v1");
+    assert.deepEqual(proof.observation.controls, [{ role: "button", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })",
+      state: "DEFAULT", present: true, visible: true, count: 1, text: "Sign in" }]);
+    // The surface scrolls inside .shell, not the document: measured, not inferred from the crop.
+    const { scroll } = proof.observation;
+    assert.equal(scroll.owner.kind, "ELEMENT");
+    assert.equal(scroll.owner.locator, "html > body > div:nth-child(1)");
+    assert.equal(scroll.owner.clientHeight, 240);
+    assert.ok(scroll.owner.scrollHeight > 241);
+    assert.equal(scroll.document.clientHeight, 480);
+    assert.deepEqual(scroll.ancestors.map((row) => [row.locator, row.overflowY]), [["html > body > div:nth-child(1)", "auto"], ["html > body", "visible"]]);
+    // A compact summary; the evidence stays on disk and nothing claims a verdict.
+    assert.equal(summary.mode, "frame");
+    assert.deepEqual(summary.written.slice(-1), [LEGACY_CONTEXT_FILE]);
+    assert.equal(summary.measured.scrollOwner, "ELEMENT");
+    assert.deepEqual(summary.captured.counts, { rows: 4 });
+    assert.ok(JSON.stringify(summary).length < 3000);
+    assert.doesNotMatch(JSON.stringify({ summary, frame }), /"PASS"/);
+
+    // A second capture of the same state is refused, byte for byte.
+    const captured = await snapshot(root);
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin)), /CAPTURE_EXISTS: .*already records frame 'UIB-1::DEFAULT'/);
+    assert.deepEqual(await snapshot(root), captured);
+
+    // The ordinary ASSESS_TARGET close validates and pins it.
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+    assert.ok((await state(fixture)).artifactHashes[LEGACY_CONTEXT_FILE]);
+    const pinned = await snapshot(root);
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin)), /CAPTURE_REFUSED: An authority frame is captured .* at BUILD_BASELINE/);
+    assert.deepEqual(await snapshot(root), pinned);
+
+    // MC1 derives the acceptance row from the captured authority; locators stay unauthored.
+    await completeStepDoc(fixture, "BUILD_BASELINE");
+    await writeMatrices(fixture);
+    await registerAuth(fixture);
+    await prefill(fixture);
+    const [row] = (await readJson(path.join(root, "matrices/visual-acceptance.json"))).rows;
+    assert.equal(row.legacyFrameId, LEGACY_FRAME_ID);
+    assert.deepEqual(row.viewport, CAPTURE_VIEWPORT);
+    assert.deepEqual(row.expect.color, { kind: "equals", value: "#16202c", locator: null });
+    assert.deepEqual(row.expect.padding, { kind: "px", value: 16, locator: null });
+    assert.deepEqual(row.expect.assets, { kind: "equals", value: ["/logo.svg"], locator: null });
+    assert.deepEqual(row.expect.rows, { kind: null, value: 4, locator: null });
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
+browserTest("MC2: unreachable apps, missing or ambiguous elements, unreached states, foreign origins, secrets and unsupported values refuse with no byte written", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    await legacyAtAssessTarget(fixture);
+    const root = fixture.migrationRoot;
+    const refusals = [
+      [frameRequest(await unusedOrigin()), /CAPTURE_UNREACHABLE: .*could not be loaded/],
+      [frameRequest(server.origin, { route: "/missing" }), /CAPTURE_UNREACHABLE: .*answered HTTP 404/],
+      [frameRequest(server.origin, { rootLocator: "#absent", timeoutMs: 1000 }), /CAPTURE_ELEMENT_MISSING: Root locator '#absent' is not visible/],
+      [frameRequest(server.origin, { rootLocator: "getByRole('row')" }), /CAPTURE_LOCATOR_AMBIGUOUS: .*matches 4 elements/],
+      [frameRequest(server.origin, { controls: [{ role: "link", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })" }] }),
+        /CAPTURE_OBSERVATION_FAILED: control at .* does not expose role 'link' with accessible name 'Sign in'/],
+      [frameRequest(server.origin, { setup: [{ type: "click", target: "#never-rendered" }], timeoutMs: 1000 }), /CAPTURE_STATE_NOT_REACHED: setup\[0\] click '#never-rendered' did not complete/],
+      // A step that runs but does not produce the state: the state's own control is not shown.
+      [frameRequest(server.origin, { setup: [{ type: "click", target: "#more" }], controls: [{ role: "status", name: "Signed in", locator: "#signed" }] }),
+        /CAPTURE_STATE_NOT_REACHED: State 'DEFAULT' does not show status 'Signed in' at '#signed' \(hidden\)/],
+      [frameRequest(server.origin, { setup: [{ type: "click", target: "#away" }] }), /CAPTURE_ORIGIN_VIOLATION: setup\[0\] navigated to 'http:\/\/capture-elsewhere\.invalid'/],
+      [frameRequest(server.origin, { setup: [{ type: "fill", target: "#pw", value: "hunter2" }] }), /CAPTURE_SECRET_INPUT/],
+      [frameRequest(server.origin, { route: "/line-height" }), /CAPTURE_VALUE_UNSUPPORTED: .*lineHeight computed "normal"/],
+      [frameRequest(server.origin, { private: true }), /CAPTURE_REQUEST_INVALID: Unsupported frame request key\(s\): private/],
+      [frameRequest(`${server.origin}/app`), /CAPTURE_REQUEST_INVALID: origin must be exactly an http\(s\) origin/],
+      [frameRequest(server.origin, { route: "//capture-elsewhere.invalid/x" }), /CAPTURE_REQUEST_INVALID: route must be a path/],
+      [frameRequest(server.origin, { route: "/auth/sign-in?access_token=abc" }), /CAPTURE_REQUEST_INVALID: route carries the credential-like query parameter 'access_token'/],
+      [frameRequest(server.origin, { uiBehaviorId: "../UIB-1" }), /CAPTURE_REQUEST_INVALID: uiBehaviorId must match/],
+      [frameRequest(server.origin, { state: "EMPTY" }), /CAPTURE_REFUSED: 'UIB-1' state 'EMPTY' is not a discovered state/],
+      [frameRequest(server.origin, { counts: undefined }), /CAPTURE_REQUEST_INVALID: counts must name 1-10 structure counts/],
+      [frameRequest(server.origin, { storageState: path.join(root, "state.json") }), /CAPTURE_REFUSED: storageState lives inside the migration record/],
+      [{ origin: server.origin, route: "/auth/sign-in", viewport: CAPTURE_VIEWPORT, appearanceClaimId: "APP-1" }, /CAPTURE_REFUSED: An appearance-claim capture needs a format-20 record at VERIFY_SLICES/],
+    ];
+    for (const [request, refusal] of refusals) {
+      const before = await snapshot(root);
+      await assert.rejects(captureFrame(fixture, request), refusal);
+      assert.deepEqual(await snapshot(root), before, String(refusal));
+    }
+
+    // Version 1 is history only: a capture never joins a v1 context.
+    const contextFile = path.join(root, LEGACY_CONTEXT_FILE);
+    await writeJson(contextFile, { version: 1, frames: [] });
+    let before = await snapshot(root);
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin)), /CAPTURE_REFUSED: .* must be a version-2 context/);
+    assert.deepEqual(await snapshot(root), before);
+    await rm(contextFile);
+
+    // An outbound symlink is never written through.
+    const outside = await mkdtemp(path.join(os.tmpdir(), "mc2-outside-"));
+    await mkdir(path.join(root, "inventories"), { recursive: true });
+    before = await snapshot(root);
+    await symlink(outside, path.join(root, "inventories/legacy-runtime"));
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin)), /Refusing symlink output path/);
+    assert.deepEqual(await readdir(outside), []);
+    await rm(path.join(root, "inventories/legacy-runtime"));
+    assert.deepEqual(await snapshot(root), before);
+
+    // A failure after the evidence is written removes exactly that evidence.
+    const linked = path.join(outside, "context.json");
+    await writeJson(linked, { version: 2, frames: [] });
+    const linkedBytes = await readFile(linked, "utf8");
+    await symlink(linked, contextFile);
+    before = await snapshot(root);
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin)), /Refusing symlink output path/);
+    assert.deepEqual(await snapshot(root), before);
+    assert.equal(await entryExists(path.join(root, CAPTURE_DIR)), false);
+    assert.equal(await readFile(linked, "utf8"), linkedBytes);
+    await rm(contextFile);
+    await rm(outside, { recursive: true, force: true });
+
+    // An observed gap is recorded as DEGRADED with its reason, never as COMPLETE.
+    const summary = await captureFrame(fixture, frameRequest(server.origin, { route: "/degraded", setup: [{ type: "hover", target: "#more" }] }));
+    const { frames: [frame] } = await readJson(contextFile);
+    // How the state was reached is recorded with the evidence.
+    assert.deepEqual((await readJson(path.join(root, frame.sources.snapshot.reference))).setup, [{ type: "hover", target: "#more" }]);
+    assert.equal(frame.extraction.fidelity, "DEGRADED");
+    assert.match(frame.extraction.limitations[0], /1 inline <svg> element\(s\) inside the root carry no resolvable asset identifier/);
+    assert.deepEqual(summary.limitations, frame.extraction.limitations);
+    assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
+browserTest("MC2: CLI and MCP run the same capture; an authorized session is used and never persisted", async () => {
+  const server = await startCaptureServer();
+  const cli = await createFixture();
+  const mcp = await createFixture();
+  try {
+    await legacyAtAssessTarget(cli);
+    await legacyAtAssessTarget(mcp);
+    const requestFile = path.join(cli.root, "capture.json");
+    const sessionFile = path.join(cli.root, "session.json");
+    await writeJson(sessionFile, server.storageState());
+    const request = frameRequest(server.origin, { route: "/private", storageState: sessionFile });
+    await writeJson(requestFile, request);
+    // Without the session the private page is refused, not captured.
+    await assert.rejects(captureFrame(cli, { ...request, storageState: undefined }), /CAPTURE_UNREACHABLE: .*answered HTTP 401/);
+    const fromCli = JSON.parse((await runCli(cli, () => runValidateCli(["auth", "--capture", requestFile]))).stdout);
+    const response = await rpc(mcp, { jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "migration_capture", arguments: { module: "auth", request } } });
+    assert.ok(response.result, JSON.stringify(response));
+    const fromMcp = JSON.parse(response.result.content.at(-1).text);
+    const comparable = ({ durationMs, ...rest }) => rest;
+    assert.deepEqual(comparable(fromMcp), comparable(fromCli));
+    for (const fixture of [cli, mcp]) {
+      const files = await snapshot(fixture.migrationRoot);
+      for (const relative of Object.keys(files)) {
+        const bytes = await readFile(path.join(fixture.migrationRoot, relative), "utf8");
+        assert.doesNotMatch(bytes, /SECRET-(COOKIE|LOCAL)-VALUE|session\.json/, relative);
+      }
+    }
+    assert.throws(() => parseValidateArguments(["auth", "--capture", requestFile, "--prefill"]), /Usage/);
+    assert.throws(() => parseValidateArguments(["--capture", requestFile]), /Usage/);
+  } finally {
+    await cli.cleanup();
+    await mcp.cleanup();
+    await server.close();
+  }
+});
+
+const FORMAT20_LEGACY = {
+  ...LEGACY_INVENTORY,
+  uiBehaviors: LEGACY_INVENTORY.uiBehaviors.map((uiBehavior) => ({
+    ...uiBehavior,
+    requiredAppearance: [
+      { id: "APP-1", state: "DEFAULT", role: "button", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })" },
+      { id: "APP-2", state: "DEFAULT", afterInteractionId: "UIX-1", role: "status", name: "Signed in", locator: "#signed" },
+    ],
+    scrollContracts: [{ state: "DEFAULT", owner: "ELEMENT", documentScrollable: false, ancestorClipped: false }],
+    externalUiImports: [],
+  })),
+};
+
+browserTest("MC2: a format-20 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
+      classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 4, moduleRoots: [moduleRoot] } });
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    const recorded = await state(fixture);
+    assert.deepEqual([recorded.formatVersion, recorded.currentStep, recorded.activeSlice], [20, "VERIFY_SLICES", "slice-a"]);
+    const root = fixture.migrationRoot;
+    const claim = (appearanceClaimId, extra = {}) => captureFrame(fixture, { origin: server.origin, route: "/auth/sign-in",
+      viewport: CAPTURE_VIEWPORT, appearanceClaimId, ...extra });
+    const before = await snapshot(root);
+    await assert.rejects(claim("APP-2"), /CAPTURE_REQUEST_INVALID: Claim 'APP-2' is observed after interaction 'UIX-1'/);
+    await assert.rejects(claim("APP-1", { interaction: { type: "click", target: "#more" } }), /initial-state claim; "interaction" is not allowed/);
+    await assert.rejects(claim("APP-9"), /CAPTURE_REFUSED: Appearance claim 'APP-9' is not pinned/);
+    assert.deepEqual(await snapshot(root), before);
+
+    const initial = await claim("APP-1");
+    const afterSignIn = await claim("APP-2", { interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" } });
+    assert.deepEqual(recordDelta(before, await snapshot(root)), [
+      "evidence/slice-a/result.json",
+      "evidence/slice-a/ui/legacy/APP-1.png", "evidence/slice-a/ui/legacy/APP-1.proof.json",
+      "evidence/slice-a/ui/legacy/APP-2.png", "evidence/slice-a/ui/legacy/APP-2.proof.json",
+    ]);
+    assert.deepEqual([initial.mode, initial.written.at(-1), afterSignIn.written.at(-1)],
+      ["claim", "evidence/slice-a/result.json uiEvidence[0]", "evidence/slice-a/result.json uiEvidence[1]"]);
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+    const evidence = await readJson(path.join(root, "evidence/slice-a/result.json"));
+    const [first, second] = evidence.uiEvidence;
+    assert.deepEqual([first.origin, first.result, first.appearanceClaimId, first.capture.rootLocator],
+      ["LEGACY", null, "APP-1", "getByRole('button', { name: 'Sign in' })"]);
+    assert.deepEqual(second.interactions, [{ id: "UIX-1", expected: "The primary action submits and the form reports success.", actual: null, outcome: null }]);
+    assert.equal(first.boundTo.legacyRevision, recorded.legacyRevision.revision);
+    assert.equal(first.reference, path.relative(fixture.targetRoot, path.join(root, "evidence/slice-a/ui/legacy/APP-1.proof.json")).split(path.sep).join("/"));
+    await assert.rejects(claim("APP-1"), /CAPTURE_EXISTS: .*already records the LEGACY row of claim 'APP-1'/);
+
+    // The slice validator, on the record's own pinned inventories: the written rows bind, and
+    // become acceptable only once the agent authors what the engine left null.
+    const legacy = await readJson(path.join(root, "inventories/legacy.json"));
+    const baseline = { legacy, target: await readJson(path.join(root, "inventories/target.json")),
+      behaviorRows: (await readJson(path.join(root, "matrices/behavior-parity.json"))).rows, visualRows: null };
+    const uiBehavior = legacy.uiBehaviors[0];
+    // Test scaffolding only: TARGET captures the slice would author through its own Playwright run.
+    const target = async (appearanceClaimId, row, interaction) => {
+      const captured = await captureInBrowser(claimCapturePlan(parseCaptureRequest({ origin: server.origin, route: "/auth/sign-in",
+        viewport: CAPTURE_VIEWPORT, appearanceClaimId, controls: [{ role: "button", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })" }],
+        ...(interaction ? { interaction } : {}) }), uiBehavior,
+      uiBehavior.requiredAppearance.find((item) => item.id === appearanceClaimId)));
+      const assertions = (observation) => ({ ...observation, controls: observation.controls.map((control) =>
+        ({ ...control, assertions: [{ predicate: "presence", expected: control.present }] })) });
+      const proof = { ...captured.snapshot, sliceId: "slice-a", traceId: "BR-1", scenarioIds: ["AUTH-SCN-001"],
+        observation: assertions(captured.snapshot.observation),
+        interactions: captured.snapshot.interactions.map((item) => ({ ...item, postAction: assertions(item.postAction) })) };
+      const directory = path.join(fixture.targetRoot, "src/evidence");
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, `${appearanceClaimId}.proof.json`), JSON.stringify(proof));
+      await writeFile(path.join(directory, `${appearanceClaimId}.png`), captured.screenshot);
+      const file = async (name) => ({ reference: `src/evidence/${name}`, hash: await fileIdentity(path.join(directory, name)) });
+      const { reference, hash } = await file(`${appearanceClaimId}.proof.json`);
+      return { ...row, origin: "TARGET", result: "PASS", reference, hash, screenshot: await file(`${appearanceClaimId}.png`),
+        interactions: row.interactions.map((item) => ({ ...item, actual: "Signed in was reported.", outcome: "PASS" })),
+        capture: { ...row.capture, role: "TARGET_VERIFICATION" },
+        boundTo: { ...row.boundTo, legacyRevision: undefined, implementationDigest: "impl" } };
+    };
+    const targets = [await target("APP-1", first), await target("APP-2", second, { type: "click", target: "getByRole('button', { name: 'Sign in' })" })];
+    const run = (rows) => validateUiRuntimeEvidence({ evidence: { uiEvidence: rows, uiEvidenceLimitations: [] },
+      implementation: { traceIds: ["BR-1", "RR-1"] }, baseline, sliceId: "slice-a", state: recorded,
+      roots: { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot }, root,
+      implementationDigests: async () => ({ current: "impl", legacy: "impl" }) });
+    await assert.rejects(run([first, second, ...targets]), /result must be PASS/);
+    const authored = [{ ...first, result: "PASS" },
+      { ...second, result: "PASS", interactions: [{ ...second.interactions[0], actual: "Signed in was reported.", outcome: "PASS" }] }];
+    const comparisons = await run([...authored, ...targets]);
+    assert.deepEqual(comparisons.map((item) => [item.appearanceClaimId, item.pixels.diffPixels, item.scroll.result]),
+      [["APP-1", 0, "PASS"], ["APP-2", 0, "PASS"]]);
+  } finally {
+    await fixture.cleanup();
+    await server.close();
   }
 });

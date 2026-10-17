@@ -70,6 +70,15 @@ export {
   VISUAL_UNBACKED_KIND,
 } from "./acceptance.mjs";
 export {
+  captureInBrowser,
+  claimCapturePlan,
+  legacyAppearanceRow,
+  parseCaptureRequest,
+  parseLocator,
+  refuseCapture,
+  taxonomyValues,
+} from "./capture.mjs";
+export {
   completedSlicesLackingUiProofV1,
   reopenUiEligible,
   reopenUiIneligible,

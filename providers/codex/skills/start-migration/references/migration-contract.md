@@ -72,6 +72,8 @@ format gates each linked section states.
 
 - Author: `inventories/target.json`, `steps/03-assess-target.md`; with a
   Figma design source, the design context and frames that section names.
+- Capture (`legacy-runtime` only): `migration_capture` writes one frame per
+  call (see **Engine capture** under [State-only contract](#state-only-contract)).
 - Rules: [Target inventory](#target-inventory),
   [Visible-UI verification](#visible-ui-verification-format-12),
   [Figma visual acceptance](#figma-visual-acceptance-format-17).
@@ -824,6 +826,33 @@ evidence never resolves under `inventories/legacy-runtime/`; a declared
 `capture.role` must match the slot it is cited from (`TARGET_VERIFICATION` for
 slice evidence). Byte-identical authority and target screenshots at disjoint
 paths are a perfect 1:1 match and pass — no rule compares them for inequality.
+**Engine capture.** `migration_capture` (CLI
+`artifact-migration-validate <module> --capture <request.json>`) drives a real
+Chromium-family browser against the explicit `origin` and `route` and persists
+what it observed. With `{uiBehaviorId, state, rootLocator, counts}` at
+`ASSESS_TARGET` of a `legacy-runtime` record, it writes
+`inventories/legacy-runtime/<uiBehaviorId>-<state>/` `snapshot.json`,
+`screenshot.png` and `measurements.json` and appends the frame. The frame
+carries the screenshot's own dimensions, `deviceScaleFactor: 1`,
+`reducedMotion: "reduce"`, the pinned `legacyRevision` and content identities.
+The taxonomy values come from the root element's computed style. Per-side
+values collapse only when all sides agree. A value the normalizer refuses
+(such as `gap: normal`, `line-height: normal` or unequal padding) refuses the
+capture; no number is guessed. Every control the state shows (the pinned
+initial claims plus any named in the request) must be visible, or the capture
+refuses with `CAPTURE_STATE_NOT_REACHED`. `setup` steps are recorded in the
+snapshot without their values. Inline SVG without an identifier
+makes the frame `DEGRADED`. With `{appearanceClaimId, interaction?}` at
+`VERIFY_SLICES` of a format-20 record, it writes the claim's LEGACY proof and
+PNG under `evidence/<slice>/ui/legacy/` and appends its LEGACY `uiEvidence`
+row with `result: null`. The proof records controls checked against the
+browser's accessible role and name. An initial claim's scroll metrics are in
+`observation.scroll`; a post-action claim's are in its `postAction`, beside its
+controls. The claim's behavior must be traced by the active slice. The capture writes new files only, under the
+module lock. The frame is checked by `validateLegacyRuntimeContext` before it
+joins the context. A failure removes whatever the call wrote. Cookies, storage,
+headers and typed passwords are never read or persisted.
+
 `legacySources` and `targetAdoption` are format-15 fields; a record created
 before format 15 carries neither, and one that carries them at an older format
 is refused.

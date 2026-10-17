@@ -1199,6 +1199,28 @@ independently; a matching grid crop cannot certify surrounding controls or
 document scrolling. When a visual acceptance matrix also applies, bind its row
 to one matching target capture with `visualRowId`.
 
+**Legacy captures are the engine's.** Capture legacy evidence with
+`migration_capture { module, cwd, request }` (CLI: `artifact-migration-validate
+<module> --capture <request.json>`), never with `browser_*` scripting or a
+harness of your own. TARGET captures stay on the Playwright MCP.
+
+- `designSource: legacy-runtime` at `ASSESS_TARGET`, one call per state:
+  `{origin, route, viewport, uiBehaviorId, state, rootLocator, counts {name:
+  locator}, controls?, setup?}`. It writes the frame's snapshot, element
+  screenshot and measurements under `inventories/legacy-runtime/` and adds the
+  frame to `inventories/legacy-runtime-context.json`.
+- Format 20 at `VERIFY_SLICES`: `{origin, route, viewport, appearanceClaimId,
+  interaction?}`. It writes the claim's LEGACY proof and PNG and its LEGACY
+  `uiEvidence` row. `result` and the interaction's `actual`/`outcome` stay yours.
+
+`origin` is the running legacy app, and the route stays on it. `setup` and
+`interaction` steps are `click`, `fill`, `press`, `hover`, `check`, `uncheck` or
+`select` on a locator: never a script and never a typed credential (pass an
+authorized test session as an absolute `storageState` path). Every control the
+state shows must be visible, or the state counts as not reached. The capture
+never overwrites, pins or marks PASS. A refusal names what was not reached and
+writes nothing.
+
 For formats through 19, the historical budget is one screenshot per origin/behavior/state, no duplicate digests
 _within an origin_ (identical legacy and target captures are parity, not a
 duplicate), one viewport per slice unless the behavior is `RESPONSIVE` or the
