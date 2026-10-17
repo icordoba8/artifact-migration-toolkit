@@ -35,6 +35,40 @@ export const externalJsxUses = (ts, fileName, text) => {
     }
     if (named && ts.isNamespaceImport(named)) bindings.set(named.name.text, { spec, symbol: "*" });
   }
+  // `require("x")`, `require("x").Member`, or any `import("x")` inside the
+  // initializer (`dynamic(() => import("x"))`, `lazy(...)`): the module is
+  // known, a member only when it is spelled out; otherwise "*", never guessed.
+  const required = (node) => {
+    const call = ts.isPropertyAccessExpression(node) ? node.expression : node;
+    if (!ts.isCallExpression(call) || call.arguments.length !== 1 || !ts.isStringLiteralLike(call.arguments[0])) return null;
+    if (!(ts.isIdentifier(call.expression) && call.expression.text === "require")) return null;
+    return { spec: call.arguments[0].text, member: call === node ? null : node.name.text };
+  };
+  const dynamicImport = (node) => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        node.arguments.length >= 1 && ts.isStringLiteralLike(node.arguments[0])) return node.arguments[0].text;
+    return ts.forEachChild(node, dynamicImport);
+  };
+  const bindRequire = (node) => {
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) &&
+        ts.isStringLiteralLike(node.moduleReference.expression)) {
+      bindings.set(node.name.text, { spec: node.moduleReference.expression.text, symbol: "*" });
+    }
+    if (ts.isVariableDeclaration(node) && node.initializer) {
+      const dynamic = required(node.initializer) ? undefined : dynamicImport(node.initializer);
+      const module = required(node.initializer) ?? (dynamic ? { spec: dynamic, member: null } : null);
+      if (module && ts.isIdentifier(node.name)) bindings.set(node.name.text, { spec: module.spec, symbol: module.member ?? "*" });
+      if (module && !module.member && ts.isObjectBindingPattern(node.name)) {
+        for (const element of node.name.elements) {
+          if (!ts.isIdentifier(element.name)) continue;
+          const property = element.propertyName && ts.isIdentifier(element.propertyName) ? element.propertyName.text : element.name.text;
+          bindings.set(element.name.text, { spec: module.spec, symbol: property });
+        }
+      }
+    }
+    ts.forEachChild(node, bindRequire);
+  };
+  bindRequire(source);
   const uses = new Map();
   const visit = (node) => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {

@@ -46,6 +46,7 @@ const PAGES = {
   "/auth/sign-in": page(),
   "/degraded": page({ extra: '<svg width="8" height="8" aria-hidden="true"><circle cx="4" cy="4" r="4"/></svg>' }),
   "/line-height": page({ mainStyle: "line-height:normal" }),
+  "/inner-scroll": page({ extra: '<div style="height:24px;overflow-y:auto"><div style="height:120px">History</div></div>' }),
 };
 
 /** The session the private page needs, as a Playwright storageState names it. */

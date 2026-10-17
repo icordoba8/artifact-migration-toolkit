@@ -1037,7 +1037,7 @@ test("MC2: the capture request, locator grammar and taxonomy transform are the t
   const base = { origin: "http://localhost:4200", route: "/flights?tab=2", viewport: { width: 1280, height: 720 },
     uiBehaviorId: "UIB-1", state: "DEFAULT", rootLocator: "main", counts: { rows: "tr" } };
   const plan = parseCaptureRequest(base);
-  assert.equal(parseCaptureRequest({ ...base, route: "/a?design=1&signup=2" }).route, "/a?design=1&signup=2");
+  assert.equal(parseCaptureRequest({ ...base, route: "/a?design=1&signup=2&zipcode=1&otpless=1" }).route, "/a?design=1&signup=2&zipcode=1&otpless=1");
   assert.deepEqual([plan.mode, plan.url, plan.colorScheme, plan.matte, plan.timeoutMs], ["frame", "http://localhost:4200/flights?tab=2", "light", "#ffffff", 15000]);
   for (const [change, refusal] of [
     [{ origin: "file:///etc" }, /origin must be exactly an http\(s\) origin/],
@@ -1045,6 +1045,10 @@ test("MC2: the capture request, locator grammar and taxonomy transform are the t
     [{ route: "https://elsewhere.example/" }, /route must be a path/],
     [{ route: "/a?api_key=1" }, /credential-like query parameter 'api_key'/],
     [{ route: "/a?x_sig=1" }, /credential-like query parameter 'x_sig'/],
+    [{ route: "/callback?code=abc&state=x" }, /credential-like query parameter 'code'/],
+    [{ route: "/a?auth_code=1" }, /credential-like query parameter 'auth_code'/],
+    [{ route: "/sso?SAMLResponse=1" }, /credential-like query parameter 'SAMLResponse'/],
+    [{ route: "/cas?ticket=ST-1" }, /credential-like query parameter 'ticket'/],
     [{ storageState: "session.json" }, /storageState must be an absolute path/],
     [{ viewport: { width: 0, height: 720 } }, /viewport must be/],
     [{ counts: { width: "div" } }, /outside the taxonomy/],
@@ -1117,6 +1121,15 @@ test("MC2: format-20 LEGACY claim captures satisfy the claim, scroll and pixel v
     // An interaction that never ran cannot be photographed: the menu is not there.
     await assert.rejects(captureInBrowser({ ...plan(afterMenu, { type: "click", target: "#more" }), interaction: undefined, timeoutMs: 1000 }),
       /CAPTURE_ELEMENT_MISSING: Claim locator .* is not visible/);
+
+    // A scroll container inside the claim element is outside the format-20 scroll
+    // contract: the capture refuses instead of writing a row that omits it.
+    const region = { id: "APP-R", state: "DEFAULT", role: "main", name: "Sign in", locator: "getByRole('main', { name: 'Sign in' })" };
+    const regionPlan = (route) => claimCapturePlan(parseCaptureRequest({ origin: server.origin, route,
+      viewport: CLAIM_VIEWPORT, appearanceClaimId: region.id }), CLAIM_BEHAVIOR, region);
+    await assert.rejects(captureInBrowser(regionPlan("/inner-scroll")),
+      /CAPTURE_VALUE_UNSUPPORTED: Claim locator .*scroll container\(s\) inside the captured element/);
+    assert.ok((await captureInBrowser(regionPlan("/auth/sign-in"))).snapshot.observation.scroll);
 
     // The pinned behavior the slice verifies: the initial claim only.
     const uiBehavior = { ...CLAIM_BEHAVIOR, interactions: [], requiredAppearance: [initial] };

@@ -34,7 +34,8 @@ const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], c
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
 const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-const SECRET_PARAM = /(password|passwd|secret|token|cookie|authorization|credential|api[_-]?key|session)|(^|[_-])sig(nature)?$/i;
+// One-time codes and SSO assertions are credentials too (`/callback?code=...`).
+const SECRET_PARAM = /(password|passwd|secret|token|cookie|authorization|credential|api[_-]?key|session)|(^|[_-])(sig(nature)?|code|otp|ticket|jwt|nonce|assertion)$|^saml(request|response)?$/i;
 
 const text = (value, label, max = 500) => {
   if (typeof value !== "string" || !value.trim() || value.length > max) invalid(`${label} must be a non-empty string of at most ${max} characters.`);
@@ -434,6 +435,11 @@ export const captureInBrowser = async (plan) => {
     const unseen = main.observation.controls.filter((control) => !control.visible);
     if (unseen.length > 0) {
       refuseCapture("CAPTURE_STATE_NOT_REACHED", `State '${plan.state}'${plan.interaction ? ` after interaction '${plan.interaction.id}'` : ""} does not show ${unseen.map((control) => `${control.role} '${control.name}' at '${control.locator}' (${control.present ? "hidden" : "absent"})`).join(", ")}.`);
+    }
+    // A claim row has no field the validator reads a limitation from, so a
+    // scroll container inside the claim element is refused, never written away.
+    if (plan.mode === "claim" && main.limitations.length > 0) {
+      refuseCapture("CAPTURE_VALUE_UNSUPPORTED", `Claim locator '${plan.rootLocator}': ${main.limitations.join("; ")}. The format-20 scroll contract measures the claim element and its ancestors only; a LEGACY row would omit what was observed, so none is written.`);
     }
     onOrigin("the capture");
     operations.screenshots += 1;

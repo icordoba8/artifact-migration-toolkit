@@ -17,7 +17,7 @@
  * refusal at any point leaves no new byte behind. TARGET verification stays the
  * agent's own capture; legacy evidence never stands in for it.
  */
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   initialArtifacts,
@@ -156,9 +156,10 @@ const prepare = async ({ targetRoot, moduleName, request }) => {
   if (state.status !== "ACTIVE") refused(`The record is ${state.status}; evidence is captured only for an ACTIVE checkpoint.`);
   await assertCurrentOpenSpecAuthority(targetRoot, state);
   if (request.storageState) {
-    const session = path.resolve(request.storageState);
-    if (!(await stat(session).catch(() => null))?.isFile()) refused(`storageState '${request.storageState}' is not a readable file.`);
-    if (portablePath(path.relative(root, session)).split("/")[0] !== "..") {
+    // Both sides by realpath: a symlink outside the record may not point into it.
+    const session = await realpath(path.resolve(request.storageState)).catch(() => null);
+    if (!session || !(await stat(session)).isFile()) refused(`storageState '${request.storageState}' is not a readable file.`);
+    if (portablePath(path.relative(await realpath(root), session)).split("/")[0] !== "..") {
       refused("storageState lives inside the migration record; an authorized session file is read, never persisted as evidence.");
     }
   }

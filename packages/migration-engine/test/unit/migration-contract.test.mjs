@@ -23715,6 +23715,20 @@ test("MC1: gate entries get the current binding and digests only; a recorded bin
     const earlier = new Date(Date.now() - 60_000);
     await utimes(changed, earlier, earlier);
 
+    // A change committed after the run is clean, but the binding names the new
+    // revision: binding the old evidence to it would launder it just the same.
+    await writeFile(path.join(fixture.targetRoot, "src/late.ts"), "export const late = 1;\n");
+    const committedLater = new Date(Date.now() + 120_000).toISOString();
+    await execFileAsync("git", ["add", "--", path.join(fixture.targetRoot, "src/late.ts")], { cwd: fixture.root });
+    await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test", "commit", "-q", "-m", "late"],
+      { cwd: fixture.root, env: { ...process.env, GIT_COMMITTER_DATE: committedLater, GIT_AUTHOR_DATE: committedLater } });
+    const committed = await prefill(fixture);
+    assert.ok((await readJson(path.join(fixture.migrationRoot, "gates.json"))).gates.every((gate) => gate.evidence[0].boundTo === undefined));
+    assert.match(committed.unresolved[0].items[0], /^ARCHITECTURE_PLAN_GATE\.evidence\[0\]\.boundTo \('commit [0-9a-f]+ in .*' changed after producedAt; re-run the verification\)$/);
+    // Undo the commit only; the uncommitted record and registry binding stay.
+    await execFileAsync("git", ["reset", "-q", "HEAD~1"], { cwd: fixture.root });
+    await rm(path.join(fixture.targetRoot, "src/late.ts"));
+
     const { boundTo: _drop2, hash: _hash2, ...prose } = gateEvidence(base);
     const stale = { ...gateEvidence(base), boundTo: { ...gateEvidence(base).boundTo, targetDirtyDigest: "stale-target-tree" } };
     await writeGates(fixture, GATES.map((gate, index) => ({
@@ -23951,6 +23965,9 @@ browserTest("MC2: unreachable apps, missing or ambiguous elements, unreached sta
   try {
     await legacyAtAssessTarget(fixture);
     const root = fixture.migrationRoot;
+    // Outside the record by path, inside it by realpath.
+    const sessionLink = path.join(fixture.root, "session-link.json");
+    await symlink(path.join(root, "state.json"), sessionLink);
     const refusals = [
       [frameRequest(await unusedOrigin()), /CAPTURE_UNREACHABLE: .*could not be loaded/],
       [frameRequest(server.origin, { route: "/missing" }), /CAPTURE_UNREACHABLE: .*answered HTTP 404/],
@@ -23973,6 +23990,8 @@ browserTest("MC2: unreachable apps, missing or ambiguous elements, unreached sta
       [frameRequest(server.origin, { state: "EMPTY" }), /CAPTURE_REFUSED: 'UIB-1' state 'EMPTY' is not a discovered state/],
       [frameRequest(server.origin, { counts: undefined }), /CAPTURE_REQUEST_INVALID: counts must name 1-10 structure counts/],
       [frameRequest(server.origin, { storageState: path.join(root, "state.json") }), /CAPTURE_REFUSED: storageState lives inside the migration record/],
+      [frameRequest(server.origin, { storageState: sessionLink }), /CAPTURE_REFUSED: storageState lives inside the migration record/],
+      [frameRequest(server.origin, { route: "/callback?code=abc" }), /CAPTURE_REQUEST_INVALID: route carries the credential-like query parameter 'code'/],
       [{ origin: server.origin, route: "/auth/sign-in", viewport: CAPTURE_VIEWPORT, appearanceClaimId: "APP-1" }, /CAPTURE_REFUSED: An appearance-claim capture needs a format-20 record at VERIFY_SLICES/],
     ];
     for (const [request, refusal] of refusals) {

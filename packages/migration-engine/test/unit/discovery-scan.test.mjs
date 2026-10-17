@@ -173,6 +173,28 @@ test("algorithm 4 retains externally rendered controls as bound UI imports", asy
   }
 });
 
+test("algorithm 4 binds required and dynamically imported packages too; an unspelled member stays '*'", async () => {
+  const f = await fixture({
+    "src/app/orders/page.tsx": "import { Form } from '../../features/orders/form'; export default () => <Form />;\n",
+    "src/features/orders/form.tsx": [
+      "import dynamic from 'next/dynamic';",
+      "import Kit = require('@kit/legacy');",
+      "const Chart = dynamic(() => import('@kit/chart'));",
+      "const Slider = require('@kit/slider').Slider;",
+      "export const Form = () => { const { Button: Action } = require('@kit/ui'); return <><Action /><Chart /><Slider /><Kit.Panel /></>; };",
+      "",
+    ].join("\n"),
+  });
+  try {
+    const current = await scanVersion(f.root, ["src/features/orders"], 4);
+    assert.deepEqual(current.externalUi.map(({ spec, symbol }) => `${spec}#${symbol}`).sort(),
+      ["@kit/chart#*", "@kit/legacy#Panel", "@kit/slider#Slider", "@kit/ui#Button"]);
+    assert.ok(current.externalUi.every((use) => use.from === "src/features/orders/form.tsx"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // --- A. the census, which no graph shape can shrink -------------------------
 
 test("a file with no imports and no importers is still in the census", async () => {

@@ -26,7 +26,7 @@ import {
   MODULE_CLASSIFICATION_FILE,
   VISUAL_ACCEPTANCE_FILE,
 } from "../formats/index.mjs";
-import { assertPlainObject, dirtyManifest, isPlainObject } from "../shared/index.mjs";
+import { assertPlainObject, dirtyManifest, execFileAsync, isPlainObject } from "../shared/index.mjs";
 import { TARGET_DIRTY_SCOPE } from "../slices/index.mjs";
 import {
   atomicWrite,
@@ -324,6 +324,12 @@ const citedFiles = async (gates, roots) => {
 const latestTreeChange = async (roots, cited) => {
   let latest = { at: 0, path: null };
   for (const [root, scope] of [[roots.legacyRoot, {}], [roots.targetRoot, TARGET_DIRTY_SCOPE]]) {
+    // The binding carries the revision too: a commit after the run is a change
+    // the dirty set no longer shows. Same scope as gitRevision: path, else HEAD.
+    const committed = async (...scopeArgs) =>
+      (await execFileAsync("git", ["-C", root, "log", "-1", "--format=%ct %h", ...scopeArgs], { encoding: "utf8" })).stdout.trim();
+    const [seconds, commit] = ((await committed("--", ".")) || (await committed())).split(" ");
+    if (Number(seconds) * 1000 > latest.at) latest = { at: Number(seconds) * 1000, path: `commit ${commit} in ${root}` };
     const base = await realpath(root);
     for (const entry of (await dirtyManifest(root, scope)).entries) {
       const file = path.join(base, entry.path);

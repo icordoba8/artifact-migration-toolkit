@@ -848,7 +848,11 @@ PNG under `evidence/<slice>/ui/legacy/` and appends its LEGACY `uiEvidence`
 row with `result: null`. The proof records controls checked against the
 browser's accessible role and name. An initial claim's scroll metrics are in
 `observation.scroll`; a post-action claim's are in its `postAction`, beside its
-controls. The claim's behavior must be traced by the active slice. The capture writes new files only, under the
+controls. The claim's behavior must be traced by the active slice. A scroll
+container inside the claim element refuses the claim capture
+(`CAPTURE_VALUE_UNSUPPORTED`) rather than writing a row that omits it. A route
+or page URL with a credential-like query parameter, one-time `code`, `ticket`
+and SAML parameters included, refuses the capture. The capture writes new files only, under the
 module lock. The frame is checked by `validateLegacyRuntimeContext` before it
 joins the context. A failure removes whatever the call wrote. Cookies, storage,
 headers and typed passwords are never read or persisted.
@@ -1486,7 +1490,12 @@ state with `state`, `owner` (`NONE`, `DOCUMENT`, or `ELEMENT`),
 `documentScrollable`, and `ancestorClipped`. `externalUiImports` contains the
 exact JSON-array tokens `[from,spec,symbol]` reported by scanner algorithm 4;
 the same tokens appear on source-backed capability rows, regardless of whether
-the target reuses a package, replaces it, or uses native controls.
+the target reuses a package, replaces it, or uses native controls. Algorithm 4
+binds a package rendered as JSX through `import`, `require()`, `import x =
+require()` or an `import()` inside a variable initializer (such as
+`next/dynamic`); a member that is not spelled out is `*`. A scroll container
+inside a claimed element is not part of that claim's scroll contract, which
+measures the claimed element and its ancestors only.
 
 At `VERIFY_SLICES`, format-20 `uiEvidence` has a LEGACY and TARGET row for each
 `appearanceClaimId`, each with a hash-verified structured proof, PNG, and
