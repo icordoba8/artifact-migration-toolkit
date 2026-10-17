@@ -17,17 +17,19 @@ const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];
-    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes"].includes(name) || !argv[i + 1] || name in options)
+    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal"].includes(name) || !argv[i + 1] || name in options)
       fail("Expected unique --provider, --cwd, --module, --target, --output and optional --timeout-minutes arguments");
     options[name] = argv[i + 1];
   }
   for (const required of ["--provider", "--cwd", "--module", "--target", "--output"]) if (!options[required]) fail("Missing " + required);
   if (!["claude", "codex", "opencode"].includes(options["--provider"])) fail("Unsupported provider");
   for (const key of ["--module", "--target"]) if (!/^[a-z][a-z0-9-]*$/.test(options[key])) fail("Unsafe " + key);
+  const goal = options["--goal"] ?? "bootstrap";
+  if (!["bootstrap", "complete"].includes(goal)) fail("Goal must be bootstrap or complete");
   const minutes = options["--timeout-minutes"] === undefined ? 50 : Number(options["--timeout-minutes"]);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 90) fail("Timeout must be between 1 and 90 minutes");
   return { provider: options["--provider"], cwd: path.resolve(options["--cwd"]), module: options["--module"],
-    target: options["--target"], output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
+    target: options["--target"], goal, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
 };
 
 const run = ({ command, argv, cwd, timeoutMs }) => new Promise((resolve, reject) => {
@@ -117,6 +119,8 @@ async function main() {
   const status = JSON.parse(statusRun.stdout);
   const state = JSON.parse(await readFile(record, "utf8"));
   const finished = state.currentStep === "COMPLETE" && status.currentStep === "COMPLETE";
+  const bootstrapped = state.completedSteps?.includes("RESOLVE") &&
+    status.progressChecklist?.includes("DISCOVER_LEGACY") && status.currentStep !== "RESOLVE";
   const verified = finished ? await run({
     command: process.execPath, argv: [verifier, root], cwd: root, timeoutMs: 300000,
   }) : null;
@@ -126,7 +130,7 @@ async function main() {
   }
   const combined = agent.stdout + "\n" + agent.stderr;
   const report = {
-    schemaVersion: 1, provider: options.provider, module: options.module, target: options.target,
+    schemaVersion: 1, provider: options.provider, module: options.module, target: options.target, goal: options.goal,
     startedAt, completedAt: new Date().toISOString(), invocation, toolkit: receipt.toolkit ?? null,
     agent: { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
       transcriptSha256: createHash("sha256").update(combined).digest("hex") },
@@ -137,13 +141,15 @@ async function main() {
       nativeUiCertified: false },
     independentVerification: verified ? { exitCode: verified.code, timedOut: verified.timedOut,
       verifierSha256 } : null,
-    verdict: finished && agent.code === 0 && !agent.timedOut && !agent.overflow &&
-      verified?.code === 0 && !verified.timedOut && status.progressChecklist ? "PASS" : "FAIL",
+    verdict: agent.code !== 0 || agent.timedOut || agent.overflow ? "FAIL" :
+      options.goal === "bootstrap" ? (bootstrapped ? "BOOTSTRAP_PASS" : "FAIL") :
+      finished && verified?.code === 0 && !verified.timedOut && status.progressChecklist ?
+        "E2E_COMPLETE_PASS" : "FAIL",
   };
   await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
   process.stdout.write(JSON.stringify({ output, verdict: report.verdict, currentStep: report.engine.currentStep,
     progressDisplayed: report.presentation.progressAppearsInAgentOutput }, null, 2) + "\n");
-  if (report.verdict !== "PASS") process.exitCode = 1;
+  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS"].includes(report.verdict)) process.exitCode = 1;
 }
 
 main().catch(error => { console.error("AGENT_ACCEPTANCE_ERROR:", error.message); process.exitCode = 1; });
