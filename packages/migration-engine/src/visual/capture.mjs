@@ -34,8 +34,18 @@ const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], c
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
 const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-// One-time codes and SSO assertions are credentials too (`/callback?code=...`).
-const SECRET_PARAM = /(password|passwd|secret|token|cookie|authorization|credential|api[_-]?key|session)|(^|[_-])(sig(nature)?|code|otp|ticket|jwt|nonce|assertion)$|^saml(request|response)?$/i;
+const SECRET_PARAM = /(password|passwd|secret|token|cookie|authorization|credential|api[_-]?key|session)|(^|[_-])sig(nature)?$|^saml(request|response)?$/i;
+// One-time codes and SSO assertions are credentials too (`/callback?code=...`):
+// a whole word of the key, camelCase or snake_case. `code` alone or after an
+// auth word refuses; `zipCode` and `promo_code` do not.
+const SECRET_WORDS = new Set(["otp", "ticket", "jwt", "nonce", "assertion"]);
+const AUTH_WORDS = new Set(["auth", "authorization", "access", "verification", "login", "reset", "device", "otp", "oauth", "sso"]);
+const secretParam = (url) => [...url.searchParams.keys()].find((key) => {
+  if (SECRET_PARAM.test(key)) return true;
+  const words = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split(/[_-]+/).filter(Boolean);
+  return words.some((word) => SECRET_WORDS.has(word)) ||
+    (words.at(-1) === "code" && (words.length === 1 || words.slice(0, -1).some((word) => AUTH_WORDS.has(word))));
+});
 
 const text = (value, label, max = 500) => {
   if (typeof value !== "string" || !value.trim() || value.length > max) invalid(`${label} must be a non-empty string of at most ${max} characters.`);
@@ -77,7 +87,7 @@ export const parseCaptureRequest = (request) => {
   const route = text(request.route, "route", 2000);
   const url = new URL(route, origin);
   if (!route.startsWith("/") || route.startsWith("//") || url.origin !== origin.origin) invalid(`route must be a path on ${origin.origin}.`);
-  const secret = [...url.searchParams.keys()].find((key) => SECRET_PARAM.test(key));
+  const secret = secretParam(url);
   if (secret) invalid(`route carries the credential-like query parameter '${secret}'; use an authorized test session instead of a URL secret.`);
   const viewport = request.viewport;
   if (!isPlainObject(viewport) || Object.keys(viewport).length !== 2 ||
@@ -472,7 +482,7 @@ export const captureInBrowser = async (plan) => {
         : [],
     };
     assertNoUiSecret(snapshot, "Captured snapshot");
-    const secret = [...new URL(page.url()).searchParams.keys()].find((key) => SECRET_PARAM.test(key));
+    const secret = secretParam(new URL(page.url()));
     if (secret) refuseCapture("CAPTURE_SECRET_URL", `The captured page URL carries the credential-like query parameter '${secret}'; capture from a sanitized test session.`);
     return {
       screenshot, image, snapshot, measured, operations,

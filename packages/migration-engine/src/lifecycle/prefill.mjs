@@ -329,7 +329,10 @@ const latestTreeChange = async (roots, cited) => {
     const committed = async (...scopeArgs) =>
       (await execFileAsync("git", ["-C", root, "log", "-1", "--format=%ct %h", ...scopeArgs], { encoding: "utf8" })).stdout.trim();
     const [seconds, commit] = ((await committed("--", ".")) || (await committed())).split(" ");
-    if (Number(seconds) * 1000 > latest.at) latest = { at: Number(seconds) * 1000, path: `commit ${commit} in ${root}` };
+    // Git stores whole seconds: the commit may be anywhere in that second, so
+    // evidence from the same second does not postdate it.
+    const at = (Number(seconds) + 1) * 1000;
+    if (at > latest.at) latest = { at, path: `commit ${commit} in ${root}` };
     const base = await realpath(root);
     for (const entry of (await dirtyManifest(root, scope)).entries) {
       const file = path.join(base, entry.path);

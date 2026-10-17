@@ -23718,7 +23718,8 @@ test("MC1: gate entries get the current binding and digests only; a recorded bin
     // A change committed after the run is clean, but the binding names the new
     // revision: binding the old evidence to it would launder it just the same.
     await writeFile(path.join(fixture.targetRoot, "src/late.ts"), "export const late = 1;\n");
-    const committedLater = new Date(Date.now() + 120_000).toISOString();
+    // The same whole second as producedAt: git cannot say which came first.
+    const committedLater = `@${Math.floor(Date.parse(unbound.producedAt) / 1000)} +0000`;
     await execFileAsync("git", ["add", "--", path.join(fixture.targetRoot, "src/late.ts")], { cwd: fixture.root });
     await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test", "commit", "-q", "-m", "late"],
       { cwd: fixture.root, env: { ...process.env, GIT_COMMITTER_DATE: committedLater, GIT_AUTHOR_DATE: committedLater } });

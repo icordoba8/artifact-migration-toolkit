@@ -1492,8 +1492,8 @@ exact JSON-array tokens `[from,spec,symbol]` reported by scanner algorithm 4;
 the same tokens appear on source-backed capability rows, regardless of whether
 the target reuses a package, replaces it, or uses native controls. Algorithm 4
 binds a package rendered as JSX through `import`, `require()`, `import x =
-require()` or an `import()` inside a variable initializer (such as
-`next/dynamic`); a member that is not spelled out is `*`. A scroll container
+require()` or a loader call whose function argument imports it (such as
+`next/dynamic` or `lazy`); a member that is not spelled out is `*`. A scroll container
 inside a claimed element is not part of that claim's scroll contract, which
 measures the claimed element and its ancestors only.
 

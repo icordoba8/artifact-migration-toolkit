@@ -1037,7 +1037,7 @@ test("MC2: the capture request, locator grammar and taxonomy transform are the t
   const base = { origin: "http://localhost:4200", route: "/flights?tab=2", viewport: { width: 1280, height: 720 },
     uiBehaviorId: "UIB-1", state: "DEFAULT", rootLocator: "main", counts: { rows: "tr" } };
   const plan = parseCaptureRequest(base);
-  assert.equal(parseCaptureRequest({ ...base, route: "/a?design=1&signup=2&zipcode=1&otpless=1" }).route, "/a?design=1&signup=2&zipcode=1&otpless=1");
+  assert.equal(parseCaptureRequest({ ...base, route: "/a?design=1&signup=2&zipcode=1&zipCode=1&promo_code=1&otpless=1" }).route, "/a?design=1&signup=2&zipcode=1&zipCode=1&promo_code=1&otpless=1");
   assert.deepEqual([plan.mode, plan.url, plan.colorScheme, plan.matte, plan.timeoutMs], ["frame", "http://localhost:4200/flights?tab=2", "light", "#ffffff", 15000]);
   for (const [change, refusal] of [
     [{ origin: "file:///etc" }, /origin must be exactly an http\(s\) origin/],
@@ -1049,6 +1049,8 @@ test("MC2: the capture request, locator grammar and taxonomy transform are the t
     [{ route: "/a?auth_code=1" }, /credential-like query parameter 'auth_code'/],
     [{ route: "/sso?SAMLResponse=1" }, /credential-like query parameter 'SAMLResponse'/],
     [{ route: "/cas?ticket=ST-1" }, /credential-like query parameter 'ticket'/],
+    [{ route: "/cb?authCode=1" }, /credential-like query parameter 'authCode'/],
+    [{ route: "/cb?oauth_code=1" }, /credential-like query parameter 'oauth_code'/],
     [{ storageState: "session.json" }, /storageState must be an absolute path/],
     [{ viewport: { width: 0, height: 720 } }, /viewport must be/],
     [{ counts: { width: "div" } }, /outside the taxonomy/],

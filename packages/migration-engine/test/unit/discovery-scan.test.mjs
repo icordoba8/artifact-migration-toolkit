@@ -173,7 +173,7 @@ test("algorithm 4 retains externally rendered controls as bound UI imports", asy
   }
 });
 
-test("algorithm 4 binds required and dynamically imported packages too; an unspelled member stays '*'", async () => {
+test("algorithm 4 binds required and lazily loaded packages too; an unspelled member stays '*', an import passed as data is not rendered", async () => {
   const f = await fixture({
     "src/app/orders/page.tsx": "import { Form } from '../../features/orders/form'; export default () => <Form />;\n",
     "src/features/orders/form.tsx": [
@@ -181,9 +181,12 @@ test("algorithm 4 binds required and dynamically imported packages too; an unspe
       "import Kit = require('@kit/legacy');",
       "const Chart = dynamic(() => import('@kit/chart'));",
       "const Slider = require('@kit/slider').Slider;",
-      "export const Form = () => { const { Button: Action } = require('@kit/ui'); return <><Action /><Chart /><Slider /><Kit.Panel /></>; };",
+      "import { withIcons, Local } from './local';",
+      "const Wrapped = withIcons(import('@kit/icons'), Local);",
+      "export const Form = () => { const { Button: Action } = require('@kit/ui'); return <><Action /><Chart /><Slider /><Kit.Panel /><Wrapped /></>; };",
       "",
     ].join("\n"),
+    "src/features/orders/local.ts": "export const withIcons = (icons, component) => component; export const Local = () => null;\n",
   });
   try {
     const current = await scanVersion(f.root, ["src/features/orders"], 4);
