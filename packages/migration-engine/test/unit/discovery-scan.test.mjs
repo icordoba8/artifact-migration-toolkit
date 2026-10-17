@@ -185,7 +185,8 @@ test("algorithm 4 binds required and lazily loaded packages too; an unspelled me
       "import { withIcons, Local } from './local';",
       "const Wrapped = withIcons(import('@kit/icons'), Local);",
       "const Memo = memo(dynamic(() => import('@kit/grid')));",
-      "export const Form = () => { const { Button: Action } = require('@kit/ui'); return <><Action /><Chart /><Slider /><Kit.Panel /><Wrapped /><Memo /></>; };",
+      "const Guarded = memo(dynamic(() => import('@kit/table')), () => true);",
+      "export const Form = () => { const { Button: Action } = require('@kit/ui'); return <><Action /><Chart /><Slider /><Kit.Panel /><Wrapped /><Memo /><Guarded /></>; };",
       "",
     ].join("\n"),
     "src/features/orders/local.ts": "export const withIcons = (icons, component) => component; export const Local = () => null;\n",
@@ -193,7 +194,7 @@ test("algorithm 4 binds required and lazily loaded packages too; an unspelled me
   try {
     const current = await scanVersion(f.root, ["src/features/orders"], 4);
     assert.deepEqual(current.externalUi.map(({ spec, symbol }) => `${spec}#${symbol}`).sort(),
-      ["@kit/chart#*", "@kit/grid#*", "@kit/legacy#Panel", "@kit/slider#Slider", "@kit/ui#Button"]);
+      ["@kit/chart#*", "@kit/grid#*", "@kit/legacy#Panel", "@kit/slider#Slider", "@kit/table#*", "@kit/ui#Button"]);
     assert.ok(current.externalUi.every((use) => use.from === "src/features/orders/form.tsx"));
   } finally {
     await f.cleanup();

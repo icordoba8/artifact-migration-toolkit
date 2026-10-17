@@ -477,8 +477,10 @@ export const captureInBrowser = async (plan) => {
         : [],
     };
     assertNoUiSecret(snapshot, "Captured snapshot");
-    const secret = secretParam(new URL(page.url()));
-    if (secret) refuseCapture("CAPTURE_SECRET_URL", `The captured page URL carries the credential-like query parameter '${secret}'; capture from a sanitized test session.`);
+    // Every URL the snapshot persists, the pre-action page included, and the final one.
+    const secret = [snapshot.observation.url, ...snapshot.interactions.map((item) => item.postAction.url), page.url()]
+      .map((url) => secretParam(new URL(url))).find(Boolean);
+    if (secret) refuseCapture("CAPTURE_SECRET_URL", `A captured page URL carries the credential-like query parameter '${secret}'; capture from a sanitized test session.`);
     return {
       screenshot, image, snapshot, measured, operations,
       capture: captureBlock(plan, image),

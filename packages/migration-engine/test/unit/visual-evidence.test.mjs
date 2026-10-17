@@ -1135,6 +1135,12 @@ test("MC2: format-20 LEGACY claim captures satisfy the claim, scroll and pixel v
       /CAPTURE_VALUE_UNSUPPORTED: Claim locator .*scroll container\(s\) inside the captured element/);
     assert.ok((await captureInBrowser(regionPlan("/auth/sign-in"))).snapshot.observation.scroll);
 
+    // A one-time code in the pre-action page is refused even when the action navigates away.
+    const signIn = { id: "APP-N", state: "DEFAULT", afterInteractionId: "UIX-1", role: "button", name: "Sign in", locator: "getByRole('button', { name: 'Sign in' })" };
+    await assert.rejects(captureInBrowser(claimCapturePlan(parseCaptureRequest({ origin: server.origin, route: "/sso",
+      viewport: CLAIM_VIEWPORT, appearanceClaimId: signIn.id, interaction: { type: "click", target: "#done" } }), CLAIM_BEHAVIOR, signIn)),
+      /CAPTURE_SECRET_URL: A captured page URL carries the credential-like query parameter 'code'/);
+
     // The pinned behavior the slice verifies: the initial claim only.
     const uiBehavior = { ...CLAIM_BEHAVIOR, interactions: [], requiredAppearance: [initial] };
     const legacyCapture = await captureInBrowser(plan(initial));

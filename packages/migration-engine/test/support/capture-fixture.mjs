@@ -47,6 +47,7 @@ const PAGES = {
   "/degraded": page({ extra: '<svg width="8" height="8" aria-hidden="true"><circle cx="4" cy="4" r="4"/></svg>' }),
   "/line-height": page({ mainStyle: "line-height:normal" }),
   "/inner-scroll": page({ extra: '<div style="height:24px;overflow-y:auto"><div style="height:120px">History</div></div>' }),
+  "/landing": page({ extra: '<a id="done" href="/auth/sign-in">Done</a>' }),
 };
 
 /** The session the private page needs, as a Playwright storageState names it. */
@@ -66,6 +67,11 @@ export const startCaptureServer = async () => {
       }
       response.writeHead(200, { "content-type": "text/html" });
       return response.end(PAGES["/auth/sign-in"]);
+    }
+    if (pathname === "/sso") {
+      // An identity provider's redirect: the one-time code lands in the URL.
+      response.writeHead(302, { location: "/landing?code=ONE-TIME" });
+      return response.end();
     }
     if (!PAGES[pathname]) {
       response.writeHead(404);
