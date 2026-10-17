@@ -162,7 +162,7 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     };
     await command("artifact-migration-discover", ["auth", "--registry", registry,
       "--target", "auth", "--openspec-proposal-stdin", "--mode", "auto"], SPEC);
-    assert.deepEqual((await json(registry)).modules.auth, { target: "auth" });
+    assert.equal((await json(path.join(record, "state.json"))).targetModule, "auth");
     assert.equal((await json(path.join(record, "state.json"))).revision, 1);
     assert.deepEqual((await json(path.join(record, "state.json"))).toolkitIdentity, manifest.toolkit);
     const legacyInventory = { ...LEGACY_INVENTORY, hasVisibleUi: false, uiBehaviors: [] };
