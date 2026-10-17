@@ -296,3 +296,24 @@ artifact journal recovery).
 | Approval boundary | Engine owner + security review |
 | Provider generation / `providers-sync.mjs` | Engine owner |
 | Docs, tests, CI only | One reviewer |
+
+**Owner-maintained releases.** When the engine owner is the
+project's only human maintainer, a reviewer row ("one reviewer
+who did not write it", "security review", "one reviewer") may be
+filled by an independent AI technical review, if all hold:
+
+1. The reviewing model did not author or co-author the reviewed
+   change: no model credited in its `Co-Authored-By` lines, and no
+   session that wrote it, may review it.
+2. The sign-off record labels it an AI review and names the
+   model, the date, the exact commits and files reviewed, the
+   verdict, and every finding with its disposition. It is never
+   recorded under a human's name or as a human approval.
+3. Every blocking or major finding is fixed, or explicitly
+   accepted by the engine owner, and the record says which.
+4. The engine owner gives final acceptance in their own row, by
+   name and date.
+
+No other gate changes: exact-SHA Ubuntu CI, release:check,
+build, verify, installed smoke and installation acceptance are
+still required.
