@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { getMigrationStatus } from "../packages/migration-engine/src/lifecycle/status.mjs";
 
 const cli = fileURLToPath(new URL("../packages/migration-engine/src/cli/discover-module.mjs", import.meta.url));
 const spec = [
@@ -41,6 +42,13 @@ test("fresh unregistered module bootstrap refuses invalid OpenSpec without write
     execFileSync("git", ["add", "-A"], { cwd: root });
     execFileSync("git", ["-c", "user.name=Acceptance Test", "-c",
       "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+
+    const before = await getMigrationStatus({ registryPath: registry, moduleName: "partners" });
+    assert.equal(before.status, "NOT_STARTED");
+    assert.equal(before.initialized, false);
+    assert.equal(before.progress, null);
+    assert.match(before.progressChecklist, /no persisted record/);
+    await assert.rejects(readFile(record, "utf8"), { code: "ENOENT" });
 
     const invoke = content => spawnSync(process.execPath,
       [cli, "partners", "--registry", registry, "--target", "partners",
