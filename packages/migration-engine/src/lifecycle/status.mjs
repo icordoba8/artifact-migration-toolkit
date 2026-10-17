@@ -16,7 +16,7 @@ import {
   WORKFLOW_VERSION,
 } from "../formats/index.mjs";
 import { gitRevision } from "../shared/index.mjs";
-import { readOptionalJson, readRegistry } from "../store/index.mjs";
+import { readOptionalJson, readRegistry, statePathFor } from "../store/index.mjs";
 import { visualAuthorityOf } from "../visual/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { activeArtifact, resumeGuidance } from "./checkpoints.mjs";
@@ -28,12 +28,47 @@ import { readState, validateCompletedHashes } from "./record.mjs";
 import { toolkitAdoptCommand } from "./toolkit-identity.mjs";
 import { assertBriefUnchanged, validateStep } from "./validation.mjs";
 
+/**
+ * A status-first invocation before the first bootstrap must be read-only and
+ * actionable, not an unregistered-module exception. There is no record yet:
+ * progress is deliberately null, and this pre-initialization message is not a
+ * fabricated checkpoint projection.
+ */
+const notStarted = (moduleName, target = null) => {
+  const command = `/start-migration ${moduleName} --target <target-module>`;
+  return {
+    module: moduleName,
+    target,
+    status: "NOT_STARTED",
+    initialized: false,
+    currentStep: "NOT_STARTED",
+    nextAction: "Inspect the legacy implementation, draft a real OpenSpec proposal with normative MUST or SHALL requirements and scenarios, and bootstrap through the official two-phase discover command.",
+    nextCommand: command,
+    progress: null,
+    progressChecklist:
+      `initialization: ${moduleName} -> ${target ?? "(unregistered)"}  status=NOT_STARTED (no persisted record)\n` +
+      `next: ${command}\n`,
+  };
+};
+
 export const getMigrationStatus = async ({ registryPath, moduleName }) => {
-  const { registryData, resolved } = await readContext({
-    registryPath,
-    moduleName,
-  });
-  const context = await readState(registryData.targetRoot, resolved.canonical);
+  let registryData;
+  let resolved;
+  try {
+    ({ registryData, resolved } = await readContext({ registryPath, moduleName }));
+  } catch (error) {
+    if (error.message !== `Module '${moduleName}' is not registered. Supply --target <target-module>.`)
+      throw error;
+    return notStarted(moduleName);
+  }
+  let context;
+  try {
+    context = await readState(registryData.targetRoot, resolved.canonical);
+  } catch (error) {
+    const missing = `Migration state does not exist: ${statePathFor(registryData.targetRoot, resolved.canonical)}`;
+    if (error.message !== missing) throw error;
+    return notStarted(moduleName, resolved.target);
+  }
   await assertCurrentOpenSpecAuthority(registryData.targetRoot, context.state);
   await validateCompletedHashes(context.root, context.state);
   await assertBriefUnchanged(context.root, context.state);
