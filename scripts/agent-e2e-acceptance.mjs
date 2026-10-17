@@ -74,11 +74,17 @@ async function main() {
   const root = await realpath(options.cwd);
   const output = path.resolve(options.output);
   if (output === root || output.startsWith(root + path.sep)) fail("Output must be outside the disposable consumer");
-  const marker = JSON.parse(await readFile(path.join(root, ".artifact-migration-acceptance.json"), "utf8"));
+  const markerPath = path.join(root, ".artifact-migration-acceptance.json");
+  const markerBytes = await readFile(markerPath, "utf8");
+  const marker = JSON.parse(markerBytes);
   if (marker.disposable !== true || marker.module !== options.module || marker.target !== options.target ||
-      !Array.isArray(marker.verify) || marker.verify.length < 1 || !marker.verify.every(x => typeof x === "string" && x.length > 0))
-    fail("The disposable consumer marker must identify module, target and an independent verification argv");
-  if (marker.verify[0] === "sh" || marker.verify[0] === "bash") fail("Verification must use explicit executable and argv, not a shell");
+      typeof marker.verifier !== "string" || typeof marker.verifierSha256 !== "string")
+    fail("Disposable consumer marker requires module, target, external verifier and its SHA-256");
+  const verifier = await realpath(marker.verifier);
+  if (verifier === root || verifier.startsWith(root + path.sep))
+    fail("Independent verifier must reside OUTSIDE the agent-writable consumer");
+  const verifierSha256 = createHash("sha256").update(await readFile(verifier)).digest("hex");
+  if (marker.verifierSha256 !== verifierSha256) fail("Independent verifier digest does not match the pinned digest");
   const record = path.join(root, ".agents", "knowledge", "migrations", "modules", options.module, "state.json");
   const already = await readFile(record, "utf8").catch(error => {
     if (error.code === "ENOENT") return null;
@@ -93,6 +99,10 @@ async function main() {
   await mkdir(output, { recursive: true });
   await writeFile(path.join(output, "agent.stdout.log"), agent.stdout);
   await writeFile(path.join(output, "agent.stderr.log"), agent.stderr);
+  if (await readFile(markerPath, "utf8") !== markerBytes)
+    fail("Agent modified the pinned acceptance marker (transcripts preserved)");
+  if (createHash("sha256").update(await readFile(verifier)).digest("hex") !== verifierSha256)
+    fail("Independent verifier changed during the agent run (transcripts preserved)");
   // The receipt is produced by the real skill runtime, never by this harness.
   const receipt = JSON.parse(await readFile(path.join(root, ".artifact-migration-tools",
     options.provider + ".json"), "utf8"));
@@ -108,7 +118,7 @@ async function main() {
   const state = JSON.parse(await readFile(record, "utf8"));
   const finished = state.currentStep === "COMPLETE" && status.currentStep === "COMPLETE";
   const verified = finished ? await run({
-    command: marker.verify[0], argv: marker.verify.slice(1), cwd: root, timeoutMs: 300000,
+    command: process.execPath, argv: [verifier, root], cwd: root, timeoutMs: 300000,
   }) : null;
   if (verified) {
     await writeFile(path.join(output, "independent-verify.stdout.log"), verified.stdout);
@@ -125,7 +135,8 @@ async function main() {
     presentation: { progressAppearsInAgentOutput: combined.includes("progress: " + options.module + " -> " + options.target),
       // This is NOT proof of native UI rendering; that needs a separate recording.
       nativeUiCertified: false },
-    independentVerification: verified ? { exitCode: verified.code, timedOut: verified.timedOut } : null,
+    independentVerification: verified ? { exitCode: verified.code, timedOut: verified.timedOut,
+      verifierSha256 } : null,
     verdict: finished && agent.code === 0 && !agent.timedOut && !agent.overflow &&
       verified?.code === 0 && !verified.timedOut && status.progressChecklist ? "PASS" : "FAIL",
   };
