@@ -23700,6 +23700,9 @@ test("MC1: gate entries get the current binding and digests only; a recorded bin
   const fixture = await createFixture();
   try {
     await atFinalize(fixture);
+    // Verification runs after the fixture's last commit. Git stores whole
+    // seconds, so evidence from that same second is (correctly) never bound.
+    await new Promise((resolve) => setTimeout(resolve, 1001 - (Date.now() % 1000)));
     const base = await gateBindingContext(fixture);
     const { boundTo: _drop, hash: _hash, ...unbound } = gateEvidence({ ...base, reference: "target/src/placeholder.ts" });
 
