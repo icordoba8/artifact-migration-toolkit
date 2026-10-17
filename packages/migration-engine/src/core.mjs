@@ -117,6 +117,7 @@ export {
   bootstrapMigration as executeMigration,
   previewAdvance,
   previewDiscoveryScan,
+  prefillCheckpointDraft,
   previewEvidenceBinding,
   previewMigrationExecution,
   previewUiObservationsAdoption,

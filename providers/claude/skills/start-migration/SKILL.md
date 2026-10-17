@@ -156,7 +156,8 @@ decision about what happens next.
 ```
 START -> STATUS FIRST -> persisted state? -> FAST RESUME (no completed-work rescan)
       -> nextWork from the engine -> read only bounded required context
-      -> author the requested artifact -> run -> obey the typed outcome -> repeat
+      -> prefill (where supported) -> author the requested artifact -> run
+      -> obey the typed outcome -> repeat
 ```
 
 ### 1. Status first
@@ -207,6 +208,18 @@ section documents it.
 Nothing broader. Do not reread completed checkpoints' artifacts, earlier
 inventories or matrices the request does not list, this skill while it is
 still in context, or earlier command and browser output. Then author the requested artifact and run again.
+
+**Prefill before authoring.** At `DISCOVERY_COMPLETENESS`, `BUILD_BASELINE`
+(`designSource: legacy-runtime`), `VERIFY_SLICES` and `FINALIZE`, run
+`migration_prefill { module, cwd }` (CLI: `artifact-migration-validate <module>
+--prefill`) first. It writes what the engine derives straight into the
+requested artifact: classification rows from the scan, visual rows from the
+pinned capture, evidence file digests and gate bindings. It fills only absent
+fields and returns a short summary whose `unresolved` list is your work.
+Author those fields, then run. Do not re-read or rewrite the derived values,
+and do not script a generator for them. A prefilled draft is not validated or
+accepted, and it never records an outcome, a timestamp, a verdict or an
+approval. Those are still yours to author, or the operator's.
 
 ### 5. Obey the typed outcome literally
 
@@ -959,8 +972,9 @@ Full JSON schemas for every artifact below live in
    roots and entry points remain editable until this checkpoint closes. Give
    every file the census finds under the final declared roots exactly one
    row in `inventories/module-classification.json` with a closed-enum
-   disposition — including files nothing imports. `--scan` prints the
-   recomputed census, graph, and findings to author against. A
+   disposition — including files nothing imports. `migration_prefill` writes
+   each census row's computed fields and every supporting row; `--scan` prints
+   the census, graph, and findings. A
    production-reachable component, style, image, SVG, or other visual asset is
    never dismissed on agent-authored rationale: it is `BEHAVIOR_BACKED` or
    `EXCLUDED_APPROVED` with a decision authorized under the record's policy (see
@@ -1045,8 +1059,9 @@ Full JSON schemas for every artifact below live in
    slice: every behavior/route/target-native/design-system row terminal,
    provenance clean of copied legacy code, and all seven mandatory gates in
    `gates.json` `PASS` with fresh, bound evidence (see "Final gates" in
-   `references/migration-contract.md`; read each entry's `boundTo` and file
-   digest with `migration_evidence_binding`, never by submitting a guess).
+   `references/migration-contract.md`; `migration_prefill` writes each absent
+   `boundTo` and file digest after the evidence exists, or read them with
+   `migration_evidence_binding`. Never submit a guess).
    `FUNCTIONAL_PARITY_GATE` can never be `NOT_APPLICABLE`. A Ponytail target
    requires the owning gate rows to
    carry typed evidence (`kind`/`reference`), never prose. Advance to

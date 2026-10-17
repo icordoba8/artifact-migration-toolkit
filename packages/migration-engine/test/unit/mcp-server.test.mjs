@@ -161,6 +161,7 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
     "artifact_status",
     "migration_evidence_binding",
     "migration_pending_decisions",
+    "migration_prefill",
     "migration_relay_decision",
     "migration_run",
     "migration_scan",
@@ -175,7 +176,11 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
     tools.map((tool) => tool.name).sort(),
   );
   const run = tools.find((tool) => tool.name === "migration_run");
-  const readOnlyTools = tools.filter((tool) => tool !== run && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
+  // MC1: prefill writes one authored draft, so it is not a read tool -- but it
+  // takes exactly the read tools' arguments: nothing that could carry authority.
+  const prefill = tools.find((tool) => tool.name === "migration_prefill");
+  assert.deepEqual(Object.keys(prefill.inputSchema.properties).sort(), ["cwd", "module", "registry", "slice", "target"]);
+  const readOnlyTools = tools.filter((tool) => tool !== run && tool !== prefill && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
   for (const tool of readOnlyTools) {
     assert.equal(typeof tool.description, "string");
     assert.deepEqual(tool.inputSchema.required, ["module"]);
@@ -403,7 +408,7 @@ test("a malformed frame is a parse error and the connection survives", async () 
   assert.equal(raw.length, 2);
   assert.equal(raw[0].error.code, -32700);
   assert.equal(raw[0].id, null);
-  assert.equal(raw[1].result.tools.length, 8);
+  assert.equal(raw[1].result.tools.length, 9);
 });
 
 // --- §11.6 no approval path --------------------------------------------------
@@ -418,6 +423,7 @@ test("no sequence of tool calls appends to the operator decisions ledger", async
       "migration_status",
       "migration_scan",
       "migration_evidence_binding",
+      "migration_prefill",
       "migration_pending_decisions",
       "migration_run",
       "migration_approve",
@@ -1223,7 +1229,7 @@ test("an unresponsive MCP provider times out, cleans pending, and ignores a late
     await serving;
     assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
     assert.equal(JSON.parse(frames.find((frame) => frame.id === 2).result.content.at(-1).text).outcome, "OPERATOR_DECISION");
-    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 8);
+    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 9);
     assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
     assert.equal(await decisionLedger(fixture), null);
   } finally {

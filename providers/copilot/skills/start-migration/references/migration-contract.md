@@ -26,7 +26,12 @@ A `CONTINUE` request's `schemaRef` (`references/migration-contract.md#<STEP>`)
 lands on its checkpoint below. Read that entry and the sections it links; the
 rest of this file is not needed for the checkpoint. Each linked section is the
 authoritative field-level contract, and the engine's validator is the final
-word: a refusal names the failing field. A pre-format-10 record has no
+word: a refusal names the failing field. Where an entry lists **Prefill**, run
+`migration_prefill` (CLI: `artifact-migration-validate <module> --prefill`)
+before authoring. It writes those derived values into the artifact, fills only
+absent fields, overwrites nothing, and returns the fields still to author as
+`unresolved`. The derived values are left as written. A judgment slot is
+written as `null`, and validation refuses it until it is authored. A pre-format-10 record has no
 `DISCOVERY_COMPLETENESS`; every other entry applies to it unchanged, with the
 format gates each linked section states.
 
@@ -54,6 +59,10 @@ format gates each linked section states.
 - Author: one row per census file in `inventories/module-classification.json`,
   `steps/02a-discovery-completeness.md`. `--scan` prints the census to author
   against; `inventories/discovery-scan.json` is engine-written.
+- Prefill: one `OWNED` row per unclassified census file (`path`, `scope`,
+  `reachability`, `kind`; `disposition: null`) and every missing supporting row
+  (`relation`, `type`, `path`, `requiredBy` at algorithm ≥ 2), from the
+  recorded scanner version. Findings and unresolved references are only listed.
 - Rules: [Module classification](#inventoriesmodule-classificationjson-authored),
   [Discovery scan](#inventoriesdiscovery-scanjson-machine-generated),
   [Operator decisions](#decisionsoperator-decisionsndjson-operator-only),
@@ -72,6 +81,13 @@ format gates each linked section states.
 - Author: `matrices/behavior-parity.json`, `matrices/route-adaptation.json`,
   `matrices/target-native.json`, `matrices/design-system-usage.json`,
   `matrices/capability-ownership.json`, `steps/04-build-baseline.md`.
+- Prefill (`legacy-runtime` only): `matrices/visual-acceptance.json` version-2
+  rows for each required state with a COMPLETE pinned frame. Each row gets
+  `legacyFrameId`, `viewport`, and every `expect` fact's value from the
+  capture, plus the kind of each taxonomy fact. Each `locator` and each
+  non-taxonomy `kind` is `null`. A state without a COMPLETE frame is only
+  listed: it needs a capture or an operator `VISUAL_UNBACKED` decision.
+  `figma-mcp` binds states to nodes by judgment, so it has no prefill.
 - Rules: [Behavior parity](#behavior-parity),
   [Route adaptation](#route-adaptation),
   [Design-system usage](#design-system-usage),
@@ -96,6 +112,10 @@ format gates each linked section states.
 
 - Author: `evidence/<slice-id>/result.json`, its UI evidence files when the
   slice owns visible UI, `steps/07-verify-slices.md`.
+- Prefill: each absent `outputDigest` and `{reference, hash}` digest in the
+  authored `result.json`, for files inside the legacy or target repository.
+  Commands, exit codes, runners, timestamps, outcomes and UI-evidence `boundTo`
+  stay authored.
 - Rules: [Slice index and records](#slice-index-and-records) (result
   `commands`), [Runtime evidence rows](#runtime-evidence-rows),
   [Screenshot budget](#screenshot-budget),
@@ -106,6 +126,13 @@ format gates each linked section states.
 
 - Author: `gates.json` (seven gates, bound fresh evidence),
   `steps/08-finalize.md`.
+- Prefill: each evidence entry's absent `hash`, and its absent `boundTo`
+  (the current binding). The binding is filled only when the entry's
+  `producedAt` is no earlier than the pinned inputs and than the last change
+  to any dirty file in either tree; otherwise prefill lists the entry. A
+  recorded `boundTo` is never refreshed. `result`, `attempts`, `kind`,
+  `producedAt`, `producer` and `environment` stay authored. Write the evidence
+  files and entries first.
 - Rules: [Final gates](#final-gates),
   [Content identity for ordinary file pins](#content-identity-for-ordinary-file-pins),
   [Unclaimed target drift](#unclaimed-target-drift).

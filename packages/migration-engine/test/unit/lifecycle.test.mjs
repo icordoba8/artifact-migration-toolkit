@@ -50,7 +50,7 @@ const load = (file) => import(pathToFileURL(path.join(src, file)).href);
 const LIFECYCLE_FILES = [
   "adoption.mjs", "advance.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-record.mjs",
   "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "checkpoints.mjs", "context.mjs",
-  "contract-upgrade.mjs", "format-upgrade.mjs", "gates.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "preview.mjs",
+  "contract-upgrade.mjs", "format-upgrade.mjs", "gates.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "prefill.mjs", "preview.mjs",
   "progress.mjs", "record.mjs", "recorder.mjs", "registry.mjs", "reopen.mjs", "status.mjs", "templates.mjs",
   "toolkit-identity.mjs", "ui-coverage.mjs", "validation.mjs",
 ];
@@ -115,6 +115,8 @@ const BASE_EXPORTS = {
     pendingTargetDriftCandidates: 3, pendingVisualUnbackedCandidates: 3, previewAdvance: 0, previewDiscoveryScan: 1,
     // Added after BASE (QW3), deliberately: the read-only gate evidence binding.
     previewEvidenceBinding: 1,
+    // Added after BASE (MC1), deliberately: the explicit checkpoint-draft prefill.
+    prefillCheckpointDraft: 1,
     previewMigrationExecution: 0, previewUiObservationsAdoption: 1, principalSatisfiesRequirement: 2,
     projectModuleDecision: 1, rawDecisionLedgerBytes: 1, rawDecisionLedgerDigest: 1, readAutoDecisions: 1,
     readCanonicalModuleBoundary: 3, readMigrationContext: 1, readOperatorDecisions: 1, readRecordedDecisions: 1,
@@ -202,7 +204,7 @@ test("A8-ARCH-1: lifecycle has one public entry, which only re-exports the BASE 
     for (const name of Object.values(renamed)) assert.ok(taken.has(name), `${facade} takes ${name}`);
   }
   assert.deepEqual(Object.keys(lifecycle).sort(), [...taken].sort());
-  assert.equal(Object.keys(lifecycle).length, 107);
+  assert.equal(Object.keys(lifecycle).length, 108);
 });
 
 test("A8-ARCH-2: outside lifecycle/, only lifecycle/index.mjs is named; old lifecycle paths are named only by facades and the aggregator", async () => {

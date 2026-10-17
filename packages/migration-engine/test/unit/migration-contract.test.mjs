@@ -27,6 +27,7 @@ import {
   readFile,
   readlink,
   rename,
+  utimes,
   rm,
   stat,
   symlink,
@@ -70,6 +71,7 @@ import {
   previewDiscoveryScan,
   previewAdvance,
   previewEvidenceBinding,
+  prefillCheckpointDraft,
   pendingTargetDriftCandidatesCompat as pendingTargetDriftCandidates,
   previewMigrationExecution,
   readState,
@@ -23381,6 +23383,383 @@ test("I7: single-checkpoint step documents still require Status COMPLETE", async
       `# ${number}. ${name}\n\n- Status: \`IN_PROGRESS\`\n\n## Result\n\nPartial.\n`,
     );
     await assert.rejects(advance(fixture), /05-plan\.md must record Status COMPLETE/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// --- MC1: the engine writes the mechanics, never a judgment -----------------
+
+const prefill = async (fixture) =>
+  prefillCheckpointDraft({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+
+const recordFile = (fixture, relative) => readFile(path.join(fixture.migrationRoot, relative), "utf8");
+
+/** A legacy module with a component, its stylesheet and one supporting file outside the root. */
+const commitClassifiableLegacy = async (fixture) => {
+  await writeFile(path.join(fixture.legacyRoot, "auth/form.tsx"),
+    'import { Button } from "../shared/button";\nimport "./form.css";\nexport const Form = () => <Button />;\n');
+  await writeFile(path.join(fixture.legacyRoot, "auth/form.css"), ".form { color: red; }\n");
+  await mkdir(path.join(fixture.legacyRoot, "shared"), { recursive: true });
+  await writeFile(path.join(fixture.legacyRoot, "shared/button.tsx"), "export const Button = () => <button />;\n");
+  await execFileAsync("git", ["add", "-A"], { cwd: fixture.root });
+  await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test", "commit", "-q", "-m", "classifiable"], { cwd: fixture.root });
+};
+
+for (const algorithmVersion of [1, 2]) {
+  test(`MC1: classification rows come from the algorithm-${algorithmVersion} scan; dispositions stay unresolved until authored`, async () => {
+    const fixture = await createFixture();
+    try {
+      await commitClassifiableLegacy(fixture);
+      // The one authored row the agent already wrote must survive byte for byte.
+      const classification = { ...MODULE_CLASSIFICATION, algorithmVersion };
+      await driveTo(fixture, "DISCOVER_LEGACY", advance, { classification });
+      await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+      const scan = await previewDiscoveryScan({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+      assert.deepEqual(scan.census, ["auth/form.css", "auth/form.tsx", "auth/marker.txt"]);
+      const navigation = await recordNavigation(fixture);
+
+      const summary = await prefill(fixture);
+      assert.equal(summary.step, "DISCOVERY_COMPLETENESS");
+      assert.equal(summary.artifact, CLASSIFICATION_PATH);
+      assert.equal(summary.written, true);
+      assert.deepEqual(summary.authority, { scanner: algorithmVersion, discoveryDigest: scan.discoveryDigest, census: 3 });
+      assert.deepEqual(summary.derived.rows, 3);
+      assert.deepEqual(summary.unresolved.map(({ field, count }) => [field, count]), [["files[].disposition", 2]]);
+      assert.deepEqual(summary.conflicts, []);
+      // Prefill writes one authored file; it never advances, pins or records.
+      assert.deepEqual(await recordNavigation(fixture), navigation);
+
+      const drafted = await readJson(path.join(fixture.migrationRoot, CLASSIFICATION_PATH));
+      assert.deepEqual(drafted.files[0], MODULE_CLASSIFICATION.files[0]);
+      assert.deepEqual(drafted.files.map((row) => row.path), ["auth/marker.txt", "auth/form.css", "auth/form.tsx"]);
+      for (const row of drafted.files.slice(1)) {
+        // Exactly the scan's facts plus an explicit unresolved disposition: no
+        // behavior id, rationale, evidence, decision or approval is invented.
+        assert.deepEqual(row, { path: row.path, scope: "OWNED", reachability: scan.reachability[row.path], kind: scan.kinds[row.path], disposition: null });
+      }
+      assert.deepEqual(drafted.supporting, [{
+        ...(algorithmVersion >= 2 ? { relation: "SUPPORTING", type: scan.boundary.supporting[0].type } : {}),
+        path: "shared/button.tsx",
+        requiredBy: ["auth/form.tsx"],
+      }]);
+
+      // The draft is not acceptance: validation refuses the unresolved rows.
+      await assert.rejects(advance(fixture), /disposition must be one of/);
+      assert.deepEqual(await recordNavigation(fixture), navigation);
+      // Identical inputs, identical bytes: a second run has nothing to add.
+      const bytes = await recordFile(fixture, CLASSIFICATION_PATH);
+      assert.equal((await prefill(fixture)).written, false);
+      assert.equal(await recordFile(fixture, CLASSIFICATION_PATH), bytes);
+
+      // Authoring the judgment is all that is left, and the normal path decides.
+      for (const row of drafted.files) Object.assign(row, MODULE_CLASSIFICATION.files[0], { path: row.path, kind: row.kind, reachability: row.reachability });
+      await writeClassification(fixture, drafted);
+      await advance(fixture);
+      assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+test("MC1: authored rows are reported, never corrected, and a symlinked artifact is refused without a byte changed", async () => {
+  const fixture = await createFixture();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "mc1-outside-"));
+  try {
+    await commitClassifiableLegacy(fixture);
+    await driveTo(fixture, "DISCOVER_LEGACY", advance, { classification: { ...MODULE_CLASSIFICATION, algorithmVersion: 2 } });
+    const wrong = { ...MODULE_CLASSIFICATION, algorithmVersion: 2, files: [{ ...MODULE_CLASSIFICATION.files[0], kind: "COMPONENT" }] };
+    await writeClassification(fixture, wrong);
+    const summary = await prefill(fixture);
+    assert.match(summary.conflicts[0], /auth\/marker\.txt/);
+    assert.equal((await readJson(path.join(fixture.migrationRoot, CLASSIFICATION_PATH))).files[0].kind, "COMPONENT");
+
+    // A symlinked artifact is never followed: the refusal leaves both files,
+    // and the directory, exactly as they were.
+    await writeClassification(fixture, { ...MODULE_CLASSIFICATION, algorithmVersion: 2 });
+    const linked = path.join(outside, "classification.json");
+    await cp(path.join(fixture.migrationRoot, CLASSIFICATION_PATH), linked);
+    await rm(path.join(fixture.migrationRoot, CLASSIFICATION_PATH));
+    await symlink(linked, path.join(fixture.migrationRoot, CLASSIFICATION_PATH));
+    const before = await snapshot(fixture.migrationRoot);
+    const outsideBefore = await readFile(linked, "utf8");
+    await assert.rejects(prefill(fixture), /symlink/i);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    assert.equal(await readFile(linked, "utf8"), outsideBefore);
+  } finally {
+    await fixture.cleanup();
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("MC1: legacy-runtime rows are derived from the pinned capture; kinds outside the taxonomy and locators stay the agent's", async () => {
+  const fixture = await createFixture();
+  try {
+    await legacyBaselineWith(fixture, {});
+    const navigation = await recordNavigation(fixture);
+    const summary = await prefill(fixture);
+    assert.equal(summary.artifact, "matrices/visual-acceptance.json");
+    assert.deepEqual(summary.authority, {
+      designSource: "legacy-runtime",
+      context: LEGACY_CONTEXT_FILE,
+      contextIdentity: await legacyPin(fixture),
+    });
+    assert.deepEqual(await recordNavigation(fixture), navigation);
+    const matrix = await readJson(path.join(fixture.migrationRoot, "matrices/visual-acceptance.json"));
+    assert.equal(matrix.version, 2);
+    const [row] = matrix.rows;
+    assert.deepEqual(
+      { ...row, expect: undefined },
+      { id: "VIS-001", uiBehaviorId: "UIB-1", state: "DEFAULT", legacyFrameId: LEGACY_FRAME_ID, viewport: FIGMA_VIEWPORT, expect: undefined },
+    );
+    assert.equal(row.tolerance, undefined);
+    // Every measured fact, in taxonomy order then by name; no fact invented.
+    assert.deepEqual(Object.keys(row.expect).sort(), Object.keys(MEASURED).sort());
+    assert.deepEqual(row.expect.color, { kind: "equals", value: "#16202c", locator: null });
+    assert.deepEqual(row.expect.padding, { kind: "px", value: 16, locator: null });
+    for (const name of ["letterSpacing", "layout", "navigation", "primaryActions"]) assert.equal(row.expect[name].kind, null, name);
+    assert.deepEqual(summary.unresolved.map(({ field, count }) => [field, count]), [
+      ["rows[].expect.*.locator", Object.keys(MEASURED).length],
+      ["rows[].expect.<fact>.kind", 4],
+    ]);
+
+    // The format-17/20 contract is still enforced on the draft.
+    await assert.rejects(advance(fixture), /locator/);
+    const authored = taxonomyExpect(FIGMA_VIEWPORT);
+    for (const [name, fact] of Object.entries(row.expect)) {
+      fact.locator = authored[name].locator;
+      fact.kind ??= authored[name].kind;
+    }
+    await writeVisualAcceptance(fixture, matrix);
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "PLAN");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("MC1: a missing or degraded capture stays unresolved, and a stale authority refuses", async () => {
+  const degraded = await createFixture();
+  try {
+    await legacyBaselineWith(degraded, {
+      extraction: { retrievedAt: "2026-09-29T00:00:00.000Z", fidelity: "DEGRADED", limitations: ["needs a backend fault"] },
+    });
+    const before = await snapshot(degraded.migrationRoot);
+    const summary = await prefill(degraded);
+    assert.equal(summary.written, false);
+    assert.deepEqual(summary.unresolved, [{
+      field: "rows[] | unbacked[]",
+      count: 1,
+      items: ["UIB-1::DEFAULT (frame DEGRADED)"],
+      need: summary.unresolved[0].need,
+    }]);
+    // No row, no unbacked entry, no decision: the gap is the operator's.
+    assert.deepEqual(await snapshot(degraded.migrationRoot), before);
+  } finally {
+    await degraded.cleanup();
+  }
+  const stale = await createFixture();
+  try {
+    await legacyBaselineWith(stale, {});
+    const measurements = path.join(stale.migrationRoot, LEGACY_AUTHORITY_DIR, "observations.json");
+    await writeFile(measurements, `${JSON.stringify({ viewport: FIGMA_VIEWPORT, values: { ...MEASURED, gap: "99px" } })}\n`);
+    const before = await snapshot(stale.migrationRoot);
+    await assert.rejects(prefill(stale), /no longer matches its recorded hash/);
+    assert.deepEqual(await snapshot(stale.migrationRoot), before);
+  } finally {
+    await stale.cleanup();
+  }
+  const approved = await createFixture();
+  try {
+    // A derived row would move the digest an operator's VISUAL_UNBACKED binds.
+    await legacyBaselineWith(approved, {});
+    await writeVisualAcceptance(approved, { version: 2, rows: [], unbacked: [{ uiBehaviorId: "UIB-1", state: "OTHER", reason: "Unreachable." }] });
+    const before = await snapshot(approved.migrationRoot);
+    await assert.rejects(prefill(approved), /already lists unbacked states/);
+    assert.deepEqual(await snapshot(approved.migrationRoot), before);
+  } finally {
+    await approved.cleanup();
+  }
+  const figma = await createFixture();
+  try {
+    await driveFigmaToBaseline(figma);
+    const before = await snapshot(figma.migrationRoot);
+    await assert.rejects(prefill(figma), /PREFILL_REFUSED: .*figma-mcp, binding a runtime state to a design node/);
+    assert.deepEqual(await snapshot(figma.migrationRoot), before);
+  } finally {
+    await figma.cleanup();
+  }
+});
+
+test("MC1: result digests are QW3's content identities; command facts and outcomes are never written", async () => {
+  const fixture = await createFixture();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "mc1-outside-"));
+  try {
+    await driveTo(fixture, "PLAN");
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    await authorEvidence(fixture, "slice-a");
+    const file = path.join(fixture.migrationRoot, "evidence/slice-a/result.json");
+    const authored = await readJson(file);
+    const [command] = authored.commands;
+    await writeFile(path.join(outside, "secret.txt"), "not evidence\n");
+    await symlink(path.join(outside, "secret.txt"), path.join(fixture.targetRoot, "src/escape.txt"));
+    const escape = { ...command, outputPath: "target/src/escape.txt" };
+    await writeJson(file, {
+      ...authored,
+      commands: [{ ...command, outputDigest: undefined }, { ...escape, outputDigest: null }],
+      uiEvidence: authored.uiEvidence.map((record) => ({ ...record, hash: null })),
+    });
+
+    const summary = await prefill(fixture);
+    const drafted = await readJson(file);
+    const binding = await previewEvidenceBinding({
+      ...(await resolutionFor(fixture)),
+      moduleName: "auth",
+      references: [command.outputPath, authored.uiEvidence[0].reference],
+    });
+    assert.equal(drafted.commands[0].outputDigest, binding.references[0].hash);
+    assert.equal(drafted.uiEvidence[0].hash, binding.references[1].hash);
+    // A symlink out of the repositories is never digested.
+    assert.equal(drafted.commands[1].outputDigest, null);
+    assert.deepEqual(summary.unresolved[0].items, ["result.commands[1].outputDigest: 'target/src/escape.txt' does not exist inside the legacy or target repository."]);
+    // Execution facts and the outcome are exactly what the agent recorded.
+    for (const field of ["command", "exitCode", "executedAt", "runner"]) assert.equal(drafted.commands[0][field], command[field]);
+    assert.equal(drafted.result, authored.result);
+    assert.deepEqual(drafted.uiEvidence[0].boundTo, authored.uiEvidence[0].boundTo);
+
+    drafted.commands.pop();
+    await rm(path.join(fixture.targetRoot, "src/escape.txt"));
+    await writeJson(file, drafted);
+    await advance(fixture, { slice: "slice-a" });
+    assert.ok((await state(fixture)).completedSlices.includes("slice-a"));
+  } finally {
+    await fixture.cleanup();
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("MC1: gate entries get the current binding and digests only; a recorded binding and every gate result stay authored", async () => {
+  const fixture = await createFixture();
+  try {
+    await atFinalize(fixture);
+    const base = await gateBindingContext(fixture);
+    const { boundTo: _drop, hash: _hash, ...unbound } = gateEvidence({ ...base, reference: "target/src/placeholder.ts" });
+
+    // A tree changed after the evidence claims to have been produced: nothing
+    // is bound, so the dirty-tree check still refuses evidence from before it.
+    const changed = path.join(fixture.targetRoot, "src/slice-a.ts");
+    const later = new Date(Date.now() + 60_000);
+    await utimes(changed, later, later);
+    await writeGates(fixture, GATES.map((gate) => ({ gate, result: "PASS", attempts: 1, evidence: [unbound] })));
+    const refusedBinding = await prefill(fixture);
+    assert.ok((await readJson(path.join(fixture.migrationRoot, "gates.json"))).gates.every((gate) => gate.evidence[0].boundTo === undefined));
+    assert.match(refusedBinding.unresolved[0].items[0], /^ARCHITECTURE_PLAN_GATE\.evidence\[0\]\.boundTo \('src\/slice-a\.ts' changed after producedAt; re-run the verification\)$/);
+    const earlier = new Date(Date.now() - 60_000);
+    await utimes(changed, earlier, earlier);
+
+    const { boundTo: _drop2, hash: _hash2, ...prose } = gateEvidence(base);
+    const stale = { ...gateEvidence(base), boundTo: { ...gateEvidence(base).boundTo, targetDirtyDigest: "stale-target-tree" } };
+    await writeGates(fixture, GATES.map((gate, index) => ({
+      gate,
+      result: index === 0 ? "PENDING" : "PASS",
+      attempts: 1,
+      evidence: [index === 1 ? prose : index === 2 ? stale : unbound],
+    })));
+    const navigation = await recordNavigation(fixture);
+    const ledger = await readFile(path.join(fixture.migrationRoot, DECISIONS_PATH), "utf8").catch(() => null);
+
+    const summary = await prefill(fixture);
+    const binding = await previewEvidenceBinding({ ...(await resolutionFor(fixture)), moduleName: "auth", references: ["target/src/placeholder.ts"] });
+    const gates = (await readJson(path.join(fixture.migrationRoot, "gates.json"))).gates;
+    assert.deepEqual(gates[0].evidence[0].boundTo, binding.boundTo);
+    assert.equal(gates[0].evidence[0].hash, binding.references[0].hash);
+    assert.equal(gates[1].evidence[0].hash, `sha256:${createHash("sha256").update(prose.reference).digest("hex")}`);
+    // Never refreshed: rebinding would launder evidence from before a change.
+    assert.equal(gates[2].evidence[0].boundTo.targetDirtyDigest, "stale-target-tree");
+    // No outcome, timestamp, producer or approval is written.
+    assert.equal(gates[0].result, "PENDING");
+    assert.equal(gates[0].evidence[0].producedAt, unbound.producedAt);
+    assert.deepEqual(summary.unresolved[0].items, ["ARCHITECTURE_PLAN_GATE.result"]);
+    assert.deepEqual(summary.authority, { boundTo: binding.boundTo, producedAtNotBefore: binding.producedAtNotBefore });
+    assert.deepEqual(await recordNavigation(fixture), navigation);
+    assert.equal(await readFile(path.join(fixture.migrationRoot, DECISIONS_PATH), "utf8").catch(() => null), ledger);
+
+    const refused = await refusalOf(advance(fixture));
+    assert.deepEqual(refused.validationIssues.map(({ code }) => code), ["GATE_NOT_PASS", "EVIDENCE_BINDING_STALE"]);
+    gates[0].result = "PASS";
+    gates[2].evidence[0] = { ...gates[0].evidence[0] };
+    await writeGates(fixture, gates);
+    await advance(fixture);
+    assert.equal((await state(fixture)).status, "COMPLETE");
+    // A completed record has nothing to prefill, and nothing is touched.
+    const before = await snapshot(fixture.migrationRoot);
+    await assert.rejects(prefill(fixture), /PREFILL_REFUSED: Checkpoint COMPLETE/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("MC1: CLI and MCP write the same draft and the same summary; other checkpoints refuse", async () => {
+  const fixture = await createFixture();
+  try {
+    await commitClassifiableLegacy(fixture);
+    await driveTo(fixture, "DISCOVER_LEGACY", advance, { classification: { ...MODULE_CLASSIFICATION, algorithmVersion: 2 } });
+    const original = await recordFile(fixture, CLASSIFICATION_PATH);
+    const cli = JSON.parse((await runCli(fixture, () => runValidateCli(["auth", "--prefill"]))).stdout);
+    const cliBytes = await recordFile(fixture, CLASSIFICATION_PATH);
+    await writeFile(path.join(fixture.migrationRoot, CLASSIFICATION_PATH), original);
+    const mcp = JSON.parse(
+      (await rpc(fixture, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "migration_prefill", arguments: { module: "auth" } } }))
+        .result.content.at(-1).text,
+    );
+    assert.deepEqual(mcp, cli);
+    assert.equal(await recordFile(fixture, CLASSIFICATION_PATH), cliBytes);
+    // The summary names the work; the document stays on disk.
+    assert.ok(JSON.stringify(cli).length < cliBytes.length);
+    assert.throws(() => parseValidateArguments(["auth", "--prefill", "--complete"]), /Usage/);
+    assert.throws(() => parseValidateArguments(["auth", "--prefill", "--slice", "slice-a"]), /Usage/);
+  } finally {
+    await fixture.cleanup();
+  }
+  const planning = await createFixture();
+  try {
+    await driveTo(planning, "BUILD_BASELINE");
+    const before = await snapshot(planning.migrationRoot);
+    await assert.rejects(prefill(planning), /PREFILL_REFUSED: Checkpoint PLAN \(ACTIVE\) has no engine prefill/);
+    assert.deepEqual(await snapshot(planning.migrationRoot), before);
+  } finally {
+    await planning.cleanup();
+  }
+});
+
+test("MC1: a format-20 record is drafted from scanner algorithm 4 and refuses an older pin", async () => {
+  const fixture = await createFixture();
+  try {
+    await commitClassifiableLegacy(fixture);
+    const { decisionId: _id, ...root } = MODULE_CLASSIFICATION.moduleRoots[0];
+    const classification = { version: 2, algorithmVersion: 4, moduleRoots: [root], declaredEntryPoints: [], files: [] };
+    // No visible UI, so DISCOVER_LEGACY needs no format-20 appearance rows.
+    const legacy = { ...LEGACY_INVENTORY, hasVisibleUi: false, uiBehaviors: [] };
+    await driveTo(fixture, "DISCOVER_LEGACY", advance, { bootstrap: { currentFormat: true }, classification, legacy });
+    assert.equal((await state(fixture)).formatVersion, 20);
+    const summary = await prefill(fixture);
+    const scan = await previewDiscoveryScan({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+    assert.equal(summary.authority.scanner, 4);
+    assert.equal(summary.authority.discoveryDigest, scan.discoveryDigest);
+    const drafted = await readJson(path.join(fixture.migrationRoot, CLASSIFICATION_PATH));
+    assert.deepEqual(drafted.files.map((row) => [row.path, row.kind, row.reachability, row.disposition]),
+      scan.census.map((file) => [file, scan.kinds[file], scan.reachability[file], null]));
+    assert.deepEqual(drafted.supporting, scan.boundary.supporting.map((entry) => ({
+      relation: "SUPPORTING", type: entry.type, path: entry.path, requiredBy: scan.requiredBy[entry.path],
+    })));
+    assert.equal(summary.derived.rows, scan.census.length + scan.supporting.length);
+    await writeClassification(fixture, { ...classification, algorithmVersion: 3 });
+    const before = await snapshot(fixture.migrationRoot);
+    await assert.rejects(prefill(fixture), /Format 20 requires discovery scanner algorithm 4/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
   } finally {
     await fixture.cleanup();
   }

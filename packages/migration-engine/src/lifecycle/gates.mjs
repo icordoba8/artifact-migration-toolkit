@@ -37,7 +37,7 @@ import { assertCurrentOpenSpecAuthority } from "./openspec.mjs";
 import { readState } from "./record.mjs";
 
 // Contract 5 decision 1.3: typed Ponytail evidence, never a regex over prose.
-const PONYTAIL_GATE_EVIDENCE = {
+export const PONYTAIL_GATE_EVIDENCE = {
   full: [["SIMPLIFY_ONCE", "review"]],
   "full-audit": [
     ["SIMPLIFY_ONCE", "review"],
@@ -249,6 +249,33 @@ export const validateGates = async (root, state, roots) => {
 };
 
 /**
+ * One evidence reference's current content identity, or why it has none.
+ * Stricter than validation's resolution on purpose: a digest is only read for
+ * a file really inside one of the two repositories (`repositories` are their
+ * realpaths), never one reached through their common parent or a symlink out
+ * of them. Shared by the QW3 preview and the MC1 prefill.
+ */
+export const referenceDigest = async (reference, roots, repositories) => {
+  const claim = evidencePathClaim(reference);
+  const resolved = claim && (await resolveEvidencePath(claim, roots));
+  const real = resolved && (await realpath(resolved));
+  const file = real && repositories.some((root) => isLexicallyWithin(root, real)) ? resolved : null;
+  return file
+    ? { reference, path: claim, hash: await fileIdentity(real) }
+    : {
+        reference,
+        path: claim,
+        hash: null,
+        problem: claim
+          ? `'${claim}' does not exist inside the legacy or target repository.`
+          : "Not a file path; a reference that is not a file carries the digest of the reference string itself.",
+      };
+};
+
+export const repositoryRealpaths = (roots) =>
+  Promise.all([roots.legacyRoot, roots.targetRoot].map((root) => realpath(root)));
+
+/**
  * QW3. Read-only: the binding a gate evidence entry must carry right now, and
  * the current content identity of each named evidence file -- the values the
  * FINALIZE validation compares against, from the same readers, so they need
@@ -264,32 +291,14 @@ export const previewEvidenceBinding = async ({ registryPath, moduleName, referen
   await assertCurrentOpenSpecAuthority(registryData.targetRoot, state);
   const roots = { legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot };
   const { freshSince, ...boundTo } = await gateBindingContext(root, state, roots);
-  const repositories = await Promise.all([roots.legacyRoot, roots.targetRoot].map((root) => realpath(root)));
+  const repositories = await repositoryRealpaths(roots);
   return {
     module: resolved.canonical,
     currentStep: state.currentStep,
     boundTo,
     producedAtNotBefore: freshSince,
     references: await Promise.all(
-      references.map(async (reference) => {
-        const claim = evidencePathClaim(reference);
-        const resolved = claim && (await resolveEvidencePath(claim, roots));
-        // Stricter than validation's resolution on purpose: a digest is only
-        // read for a file really inside one of the two repositories, never one
-        // reached through their common parent or a symlink out of them.
-        const real = resolved && (await realpath(resolved));
-        const file = real && repositories.some((root) => isLexicallyWithin(root, real)) ? resolved : null;
-        return file
-          ? { reference, path: claim, hash: await fileIdentity(file) }
-          : {
-              reference,
-              path: claim,
-              hash: null,
-              problem: claim
-                ? `'${claim}' does not exist inside the legacy or target repository.`
-                : "Not a file path; a reference that is not a file carries the digest of the reference string itself.",
-            };
-      }),
+      references.map((reference) => referenceDigest(reference, roots, repositories)),
     ),
     note: "Values describe both trees now. Write every evidence file first, then read this, then write gates.json (the migration record is outside the dirty-tree scope). Any later change to either tree changes a dirty-tree digest; read it again.",
   };

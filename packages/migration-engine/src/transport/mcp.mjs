@@ -44,6 +44,7 @@ import {
   MIGRATION_MODES,
   pendingDecisionCandidates,
   previewDiscoveryScan,
+  prefillCheckpointDraft,
   previewEvidenceBinding,
   relayOperatorDecision,
   renderLoopDirective,
@@ -497,6 +498,13 @@ const TOOLS = [
     },
     call: async (arguments_) =>
       previewEvidenceBinding({ ...(await registryFor(arguments_)), references: arguments_.references ?? [] }),
+  },
+  {
+    name: "migration_prefill",
+    description:
+      "Write the engine-derivable part of the current checkpoint's authored artifact in place (classification rows from the scan, legacy-runtime visual rows from the pinned capture, evidence digests and gate bindings) and return a summary of what is still to author. Fills absent fields only; never overwrites, pins, approves or advances.",
+    inputSchema: INPUT_SCHEMA,
+    call: async (arguments_) => prefillCheckpointDraft(await registryFor(arguments_)),
   },
   {
     name: "migration_pending_decisions",
