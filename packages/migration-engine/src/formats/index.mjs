@@ -97,6 +97,7 @@ export {
   usesDirectLedgerDecisions,
   usesUiCoverage,
   usesApiContract,
+  comparesLegacyPixels,
   usesDiscoveryCompleteness,
   usesIntegrityAnchor,
   usesMultiSource,

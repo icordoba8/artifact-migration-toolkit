@@ -1248,8 +1248,13 @@ own claim. Separate focused regions and states may collectively cover a view;
 a full-page capture is not required. Each proof includes measured document,
 scroll-owner and ancestor scroll facts. The engine compares the actual PNGs
 at the established legacy-runtime pixel threshold and checks the scroll facts
-independently; a matching grid crop cannot certify surrounding controls or
-document scrolling. When a visual acceptance matrix also applies, bind its row
+independently -- from format 21 only under `designSource: legacy-runtime`: under
+`target-system` or `figma-mcp` the target design system owns styling, so each
+pair proves the claimed control visible under the same capture conditions with
+the same scroll behavior (owner, document scrolling, clipping), never legacy
+pixels or box sizes; style the target with its own design system, not legacy
+CSS. A matching grid crop cannot certify surrounding controls or document
+scrolling. When a visual acceptance matrix also applies, bind its row
 to one matching target capture with `visualRowId`.
 
 **Legacy captures are the engine's.** Capture legacy evidence with

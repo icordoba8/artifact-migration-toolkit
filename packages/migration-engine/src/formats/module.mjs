@@ -177,6 +177,17 @@ export const usesApiContract = (state) =>
   (state?.formatVersion ?? 1) >= API_CONTRACT_FORMAT;
 
 /**
+ * Format 21 also scopes format-20 appearance parity to the design authority.
+ * Only a legacy-runtime record -- or any record below 21 -- holds a claim's
+ * TARGET pixels and box sizes to its LEGACY capture. Under target-system or
+ * figma-mcp the target's design system owns styling, so both captures still
+ * prove the claimed control visible, under the same capture conditions, with
+ * the same scroll behavior, but legacy pixels are not the authority.
+ */
+export const comparesLegacyPixels = (state) =>
+  !usesApiContract(state) || state.designSource === "legacy-runtime";
+
+/**
  * The two independent controls, never inferred from one constant.
  *
  * `MIGRATION_FORMAT_SUPPORTED` is the highest format this engine can read,

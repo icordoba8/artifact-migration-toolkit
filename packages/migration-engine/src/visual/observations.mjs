@@ -225,7 +225,7 @@ const scrollMetrics = (snapshot, label) => {
   };
 };
 
-export const compareScrollContract = (legacyProof, targetProof, contract) => {
+export const compareScrollContract = (legacyProof, targetProof, contract, dimensions = true) => {
   const legacy = scrollMetrics(legacyProof, "LEGACY scroll");
   const target = scrollMetrics(targetProof, "TARGET scroll");
   for (const [field, expected] of Object.entries({
@@ -237,7 +237,7 @@ export const compareScrollContract = (legacyProof, targetProof, contract) => {
       throw new Error(`SCROLL_DIVERGENCE: ${field} expected ${JSON.stringify(expected)}, LEGACY ${JSON.stringify(legacy[field])}, TARGET ${JSON.stringify(target[field])}.`);
     }
   }
-  for (const field of ["ownerClientHeight", "ancestorClientHeight"]) {
+  for (const field of dimensions ? ["ownerClientHeight", "ancestorClientHeight"] : []) {
     if (legacy[field] !== null && target[field] !== null && Math.abs(legacy[field] - target[field]) > 1) {
       throw new Error(`SCROLL_DIVERGENCE: ${field} differs by more than 1px (${legacy[field]} versus ${target[field]}).`);
     }

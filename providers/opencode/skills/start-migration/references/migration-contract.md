@@ -1537,7 +1537,14 @@ binds the implementation digest. The proof's `observation.scroll` measures
 element owner, `locator`, heights and `overflowY`, plus each measured ancestor's
 `locator`, heights and `overflowY`. The engine derives document scrolling,
 ancestor clipping and scroll-owner dimensions from those measurements and
-compares them separately from PNG pixels. A target row that also satisfies a
+compares them separately from PNG pixels. From format 21 the PNG pixels,
+compare dimensions and scroll heights are compared only for `designSource:
+legacy-runtime` (`comparesLegacyPixels`); under `target-system` or `figma-mcp`
+the target design system is the styling authority, so the pair still needs
+both hash-verified proofs observing the visible claimed control, identical
+capture conditions, and the same scroll owner, document scrolling and ancestor
+clipping, and the comparison records `pixels: null` with `authority:
+"TARGET_DESIGN_SYSTEM"`. Format 20 keeps its pixel parity. A target row that also satisfies a
 visual-acceptance matrix row names it with `visualRowId`; every required matrix
 row must have one bound target capture. Formats through 19 retain their pinned
 UI evidence semantics.

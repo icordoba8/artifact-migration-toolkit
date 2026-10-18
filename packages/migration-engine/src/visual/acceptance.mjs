@@ -182,12 +182,21 @@ export const PROVISIONAL_VISUAL_DIFF_THRESHOLDS = Object.freeze({
   "figma-mcp": 0.05,
 });
 
-/** A format-20 claim is compared at its own locator, with scroll facts beside pixels. */
-export const compareAppearanceCoverage = async (claim, legacy, target) => {
+/**
+ * A format-20 claim is compared at its own locator, with scroll facts beside
+ * pixels. `legacyPixels` false (`comparesLegacyPixels`): the target design
+ * system owns styling, so only capture conditions and scroll behavior compare.
+ */
+export const compareAppearanceCoverage = async (claim, legacy, target, legacyPixels = true) => {
   const source = legacy.record.capture;
   const destination = target.record.capture;
   for (const field of ["mode", "rootLocator", "deviceScaleFactor", "colorScheme", "reducedMotion", "matte"]) {
     if (source[field] !== destination[field]) throw new Error(`VISUAL_CAPTURE_MISMATCH: '${claim.id}' ${field} differs.`);
+  }
+  if (!legacyPixels) {
+    return { appearanceClaimId: claim.id, pixels: null, authority: "TARGET_DESIGN_SYSTEM",
+      scroll: compareScrollContract(legacy.snapshot, target.snapshot, claim.scrollContract, false),
+      format: UI_COVERAGE_FORMAT };
   }
   if (JSON.stringify(source.compare) !== JSON.stringify(destination.compare)) {
     throw new Error(`VISUAL_CAPTURE_MISMATCH: '${claim.id}' compare dimensions differ.`);

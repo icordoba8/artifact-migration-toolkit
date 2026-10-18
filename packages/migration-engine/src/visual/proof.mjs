@@ -4,6 +4,7 @@ import { UI_RUNTIME_STATES } from "../census/index.mjs";
 import {
   REQUIRED_OBSERVATIONS_FORMAT,
   UI_PROOF_FORMAT,
+  comparesLegacyPixels,
   usesUiCoverage,
   usesRequiredObservations,
   usesUiVerification,
@@ -611,7 +612,7 @@ export const validateUiRuntimeEvidence = async ({
           throw new Error(`VISUAL_COVERAGE_MISSING: '${claim.id}' needs bound LEGACY and TARGET captures of '${claim.locator}'.`);
         }
         const scrollContract = uiBehavior.scrollContracts.find((row) => row.state === claim.state);
-        visualComparison.push(await compareAppearanceCoverage({ ...claim, scrollContract }, pair.LEGACY, pair.TARGET));
+        visualComparison.push(await compareAppearanceCoverage({ ...claim, scrollContract }, pair.LEGACY, pair.TARGET, comparesLegacyPixels(state)));
       }
     }
   }

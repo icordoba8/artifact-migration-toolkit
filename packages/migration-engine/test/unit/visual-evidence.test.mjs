@@ -55,6 +55,7 @@ import {
   taxonomyValues,
 } from "../../src/visual/index.mjs";
 import { fileIdentity } from "../../src/store/index.mjs";
+import { comparesLegacyPixels } from "../../src/formats/index.mjs";
 import { CAPTURE_BROWSER_SKIP, startCaptureServer } from "../support/capture-fixture.mjs";
 
 const scrollProof = ({ documentHeight = 1080, ancestorHeight = 972, overflowY = "hidden" } = {}) => ({
@@ -133,6 +134,40 @@ test("a reused trigger needs its own matching legacy and target pixels", async (
     await writeFile(targetPath, PNG.sync.write(raster()));
     target.snapshot = scrollProof({ documentHeight: 1262 });
     await assert.rejects(compareAppearanceCoverage(claim, legacy, target), /SCROLL_DIVERGENCE/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("format 21 holds a target-design-system claim to capture conditions and scroll behavior, not legacy pixels", async () => {
+  assert.equal(comparesLegacyPixels({ formatVersion: 20, designSource: "target-system" }), true, "format 20 semantics are pinned");
+  assert.equal(comparesLegacyPixels({ formatVersion: 21, designSource: "legacy-runtime" }), true);
+  assert.equal(comparesLegacyPixels({ formatVersion: 21, designSource: "target-system" }), false);
+  assert.equal(comparesLegacyPixels({ formatVersion: 21, designSource: "figma-mcp" }), false);
+  const root = await mkdtemp(path.join(os.tmpdir(), "ui-coverage-target-system-"));
+  try {
+    const legacyPath = path.join(root, "legacy.png");
+    const targetPath = path.join(root, "target.png");
+    await writeFile(legacyPath, PNG.sync.write(raster()));
+    // The target design system restyles and resizes the same control.
+    await writeFile(targetPath, PNG.sync.write(raster(2, 3)));
+    const capture = (size) => ({ mode: "element", rootLocator: "action-trigger", deviceScaleFactor: 1,
+      colorScheme: "light", reducedMotion: "reduce", matte: "#ffffff",
+      compare: { width: 40 * size, height: 20 * size }, imageWidth: 40 * size, imageHeight: 20 * size });
+    const claim = { id: "ACTION-TRIGGER", locator: "action-trigger", scrollContract:
+      { owner: "ELEMENT", documentScrollable: false, ancestorClipped: true } };
+    const legacy = { record: { capture: capture(1) }, snapshot: scrollProof(), screenshotPath: legacyPath };
+    const target = { record: { capture: capture(2) }, snapshot: scrollProof({ ancestorHeight: 960 }), screenshotPath: targetPath };
+    await assert.rejects(compareAppearanceCoverage(claim, legacy, target), /VISUAL_CAPTURE_MISMATCH: 'ACTION-TRIGGER' compare dimensions differ/);
+    const coverage = await compareAppearanceCoverage(claim, legacy, target, false);
+    assert.equal(coverage.pixels, null);
+    assert.equal(coverage.authority, "TARGET_DESIGN_SYSTEM");
+    assert.equal(coverage.scroll.result, "PASS");
+    // Scroll behavior and capture conditions are still the legacy contract.
+    await assert.rejects(compareAppearanceCoverage(claim, legacy, { ...target, snapshot: scrollProof({ documentHeight: 1262 }) }, false),
+      /SCROLL_DIVERGENCE: documentScrollable/);
+    await assert.rejects(compareAppearanceCoverage(claim, legacy, { ...target, record: { capture: { ...capture(2), colorScheme: "dark" } } }, false),
+      /VISUAL_CAPTURE_MISMATCH: 'ACTION-TRIGGER' colorScheme differs/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
