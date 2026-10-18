@@ -50,13 +50,21 @@ test("fresh unregistered module bootstrap refuses invalid OpenSpec without write
     assert.match(before.progressChecklist, /no persisted record/);
     await assert.rejects(readFile(record, "utf8"), { code: "ENOENT" });
 
+    const run = spawnSync(process.execPath,
+      [fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+        "partners", "--registry", registry, "--target", "partners", "--mode", "auto"],
+      { cwd: target, encoding: "utf8" });
+    assert.match(run.stdout, /artifact-migration-discover partners --target partners --openspec-proposal-stdin/);
+    assert.match(run.stdout, /loop: STOP reason=BLOCKED/);
+    await assert.rejects(readFile(record, "utf8"), { code: "ENOENT" });
+
     const invoke = content => spawnSync(process.execPath,
       [cli, "partners", "--registry", registry, "--target", "partners",
         "--mode", "auto", "--openspec-proposal-stdin"],
       { cwd: target, input: content, encoding: "utf8" });
     const invalidRun = invoke(invalid);
     assert.notEqual(invalidRun.status, 0, "invalid OpenSpec was accepted");
-    assert.match(invalidRun.stderr + invalidRun.stdout, /SHALL|MUST/);
+    assert.match(invalidRun.stderr + invalidRun.stdout, /must use SHALL or MUST\. Expected form: /);
     await assert.rejects(readFile(record, "utf8"), { code: "ENOENT" });
     await assert.rejects(readFile(authority, "utf8"), { code: "ENOENT" });
 

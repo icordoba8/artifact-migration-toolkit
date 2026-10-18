@@ -325,7 +325,9 @@ installed CLI. Neither front end can attest a module-19 decision.
    and may present an engine-owned review (see Operator decisions). The runtime
    preflight registers the server in this provider's MCP configuration (see
    `provider-compatibility.md`). Read `outcome` from the tool result, not the
-   `log`.
+   `log`. Neither MCP nor `run` bootstraps: a fresh module's `BLOCKED` names
+   the `artifact-migration-discover` call to make (see Pre-execution
+   confirmation).
 2. **Bash — the fallback when that server is not connected.**
 
    ```bash
@@ -735,6 +737,20 @@ memory, and pass the same bytes to both helper calls through the internal
 `--openspec-proposal-stdin` option. The helper validates the proposal and shows
 its SHA-256 digest during preview; the digest is part of the confirmation ID.
 Do not write a temporary/placeholder spec or restore a deleted one manually.
+
+The proposal must have this shape; every capability ID is uppercase and every
+obligation sits in body text, not in a heading:
+
+```markdown
+### Requirement: PARTNERS-REQ-001 Partner lookup
+The target MUST return the partner record matching the requested identifier.
+
+#### Scenario: PARTNERS-SCN-001 Known partner
+A request for an existing partner identifier returns that partner's record.
+```
+
+A refused proposal writes nothing. Correct it from the refusal and preview
+again without asking the user; the refusal message gives the expected form.
 
 The design source is a bootstrap input, collected with the others. It defaults
 to `target-system` — the target project's own design system — and a bootstrap

@@ -190,7 +190,7 @@ export const previewMigrationExecution = async ({
     } catch (error) {
       requirementsBlocker = existingState
         ? error.message
-        : `OpenSpec source '${requirementsSourceFor(resolved.target)}' is validly absent at NOT_STARTED/RESOLVE because RESOLVE creates it. Generate the evidence-based proposal in memory and rerun this read-only preview with that proposal.`;
+        : `OpenSpec source '${requirementsSourceFor(resolved.target)}' is validly absent at NOT_STARTED/RESOLVE because RESOLVE creates it. Draft the evidence-based proposal in memory and bootstrap with those bytes on stdin: \`artifact-migration-discover ${resolved.canonical} --target ${resolved.target} --openspec-proposal-stdin\` with the same \`--mode\`; when it prints a confirmation ID, rerun the identical call with \`--confirm-execution <id>\`. \`run\` and MCP never bootstrap.`;
     }
   }
 

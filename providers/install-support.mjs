@@ -519,7 +519,8 @@ const PID_REALM = (() => {
 })();
 
 /**
- * Is the lock owner recorded in `file` provably dead?
+ * Is the lock owner recorded in `file` provably dead? Null when it is;
+ * otherwise why not, for the refusal to name.
  *
  * Only when the entry is a regular file of bounded size, read without following
  * a symlink (O_NOFOLLOW where the OS has it, and the opened file must be the
@@ -529,29 +530,36 @@ const PID_REALM = (() => {
  * realm, an unexpected probe error -- is ambiguous, and ambiguity fails closed:
  * reclaiming a live installer's lock would run two config writers at once.
  */
-const lockOwnerDead = async (file, uuid) => {
+const lockOwnerAlive = async (file, uuid) => {
+  const unreadable = 'its owner entry is unreadable or malformed';
   let handle;
   let owner;
   try {
     const vetted = await lstat(file);
-    if (!vetted.isFile() || vetted.size > MAX_OWNER_BYTES) return false;
+    if (!vetted.isFile() || vetted.size > MAX_OWNER_BYTES) return unreadable;
     handle = await open(file, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
     const opened = await handle.stat();
-    if (!opened.isFile() || opened.dev !== vetted.dev || opened.ino !== vetted.ino) return false;
+    if (!opened.isFile() || opened.dev !== vetted.dev || opened.ino !== vetted.ino) return unreadable;
     const buffer = Buffer.alloc(MAX_OWNER_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > MAX_OWNER_BYTES) return false;
+    if (bytesRead > MAX_OWNER_BYTES) return unreadable;
     owner = JSON.parse(buffer.toString('utf8', 0, bytesRead));
-  } catch { return false; } finally { await handle?.close().catch(() => undefined); }
-  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || owner.hostname !== os.hostname() || PID_REALM === null || owner.realm !== PID_REALM || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
-  try { process.kill(owner.pid, 0); return false; }
-  catch (error) { return error.code === 'ESRCH'; }
+  } catch { return unreadable; } finally { await handle?.close().catch(() => undefined); }
+  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || !Number.isInteger(owner.pid) || owner.pid <= 0) return unreadable;
+  const who = `pid ${owner.pid} (${owner.action ?? 'unknown action'}, started ${owner.startedAt ?? 'at an unknown time'})`;
+  if (owner.hostname !== os.hostname()) return `it is held by ${who} on host ${owner.hostname}, which this host cannot probe`;
+  if (PID_REALM === null || owner.realm !== PID_REALM) return `it is held by ${who} in another PID namespace (${owner.realm ?? 'unrecorded'}; this process: ${PID_REALM ?? 'unknown'}), such as another sandboxed shell, where this process cannot prove the owner exited`;
+  try { process.kill(owner.pid, 0); return `it is held by ${who}, which is still running`; }
+  catch (error) {
+    if (error.code === 'ESRCH') return null;
+    return `it is held by ${who}, ${error.code === 'EPERM' ? 'which is still running as another user' : `whose liveness probe answered ${error.code}`}`;
+  }
 };
 
 /**
  * Frees a lock nothing provably holds: 'dead' when a dead owner was removed,
  * 'empty' when there was no owner left (a release or reclaim cut short),
- * 'legacy' for a protocol-1 `install.lock` file, null to fail closed. Each
+ * 'legacy' for a protocol-1 `install.lock` file, `{ reason }` to fail closed. Each
  * removal is keyed by identity -- the dead owner's own entry name, `rmdir` of
  * an empty directory -- so a reclaimer that lost the race removes nothing of
  * the winner's.
@@ -562,11 +570,14 @@ const reclaim = async (lock) => {
   // Written by a protocol-1 installer, which does not honour this format: never
   // ours to remove, whoever wrote it and whether or not they are alive.
   if (info.isFile()) return 'legacy';
-  if (!info.isDirectory()) return null;
+  if (!info.isDirectory()) return { reason: 'the lock path is not a directory' };
   const entries = await readdir(lock).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; });
   if (entries.length === 0) { await rmdirIfEmpty(lock); return 'empty'; }
   const [entry] = entries;
-  if (entries.length !== 1 || !OWNER_ENTRY.test(entry) || !await lockOwnerDead(path.join(lock, entry), entry.slice(0, -5))) return null;
+  const reason = entries.length !== 1 || !OWNER_ENTRY.test(entry)
+    ? 'it does not hold exactly one owner entry'
+    : await lockOwnerAlive(path.join(lock, entry), entry.slice(0, -5));
+  if (reason) return { reason };
   await unlink(path.join(lock, entry)).catch(ignore('ENOENT', 'ENOTDIR'));
   await rmdirIfEmpty(lock);
   return 'dead';
@@ -591,6 +602,7 @@ export async function adapter(provider, options = {}) {
   const claim = () => rename(staging, lock).then(() => true, error => { if (OCCUPIED.has(error.code)) return false; throw error; });
   let held = false;
   let recoveredLock = false;
+  let blocked;
   try {
     await mkdir(staging);
     await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), realm: PID_REALM, startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
@@ -599,9 +611,12 @@ export async function adapter(provider, options = {}) {
     // owner loses that claim and fails closed with the existing message.
     const freed = held ? null : await reclaim(lock);
     if (freed === 'legacy') throw refuse('INSTALL_LEGACY_LOCK', `${LOCKED}: ${lock} is a lock file from a protocol-1 release, which is never reclaimed automatically. Stop every installer and migration command on this root, old releases included, then remove it by hand (docs/lock-protocol-cutover.md).`, { lock });
-    if (freed) { held = await claim(); recoveredLock = held && freed === 'dead'; }
+    if (typeof freed === 'string') { held = await claim(); recoveredLock = held && freed === 'dead'; }
+    if (!held) blocked = freed?.reason ?? 'another installer took it first';
   } finally { if (!held) await rm(staging, { recursive: true, force: true }); }
-  if (!held) throw new Error(LOCKED);
+  // Diagnosed, never bypassed: only the operator can settle an owner this
+  // process cannot prove gone.
+  if (!held) throw new Error(`${LOCKED}: ${lock}: ${blocked}. If no installer or migration command is running for this root, remove that directory by hand.`);
   try {
     const result = await applyAdapter(provider, options);
     // Reported, not persisted: the receipt records what is installed, and a

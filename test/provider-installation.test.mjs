@@ -813,6 +813,22 @@ test('only ESRCH proves an installer gone: every other probe answer keeps its lo
   } finally { process.kill = kill; }
 });
 
+test('a lock that cannot be reclaimed is refused with its path and the reason, untouched', LOCK_TIMEOUT, async () => {
+  for (const [label, owner, reason] of [
+    ['live', { pid: process.pid }, /held by pid \d+ \(install, started .+\), which is still running/],
+    ['other namespace', { realm: 'linux:pid:[1]' }, /in another PID namespace \(linux:pid:\[1\]; this process: .+\)/],
+    ['other host', { hostname: 'elsewhere.invalid' }, /on host elsewhere\.invalid/],
+  ]) {
+    const { root, lock, options } = await lockRoot(`diagnosed ${label}`);
+    await seedOwner(lock, owner);
+    const before = await treeOf(root);
+    const refusal = await adapter('codex', options).then(() => assert.fail(`${label}: installed`), error => error.message);
+    assert.ok(refusal.startsWith(`Installation locked; inspect interrupted installation before retrying: ${lock}: `), refusal);
+    assert.match(refusal, reason, label);
+    assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
+  }
+});
+
 test('an install owner entry swapped for a symlink after it was vetted is never followed', LOCK_TIMEOUT, async () => {
   const { root, lock, options } = await lockRoot('swapped owner entry');
   const uuid = await seedOwner(lock, { pid: process.pid });

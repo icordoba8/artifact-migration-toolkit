@@ -15,6 +15,13 @@ const OPEN_SPEC_REQUIREMENT =
 const OPEN_SPEC_SCENARIO =
   /^#### Scenario: ([A-Z][A-Z0-9]*-SCN-\d{3,})(?:\s+.+)?$/;
 
+// Appended to every authoring refusal so an agent can correct its proposal
+// from the error alone.
+const OPEN_SPEC_FORM =
+  " Expected form: '### Requirement: <CAPABILITY>-REQ-001 <title>', a body line " +
+  "stating the obligation with SHALL or MUST (heading text does not count), then " +
+  "'#### Scenario: <CAPABILITY>-SCN-001 <title>' with its body.";
+
 const parseOpenSpec = (content, source) => {
   const requirementIds = [];
   const scenarioIds = [];
@@ -25,12 +32,12 @@ const parseOpenSpec = (content, source) => {
     if (!current) return;
     if (!current.normative) {
       throw new Error(
-        `OpenSpec requirement '${current.id}' in ${source} must use SHALL or MUST.`,
+        `OpenSpec requirement '${current.id}' in ${source} must use SHALL or MUST.` + OPEN_SPEC_FORM,
       );
     }
     if (current.scenarios === 0) {
       throw new Error(
-        `OpenSpec requirement '${current.id}' in ${source} requires a scenario.`,
+        `OpenSpec requirement '${current.id}' in ${source} requires a scenario.` + OPEN_SPEC_FORM,
       );
     }
   };
@@ -41,7 +48,7 @@ const parseOpenSpec = (content, source) => {
       const match = line.match(OPEN_SPEC_REQUIREMENT);
       if (!match) {
         throw new Error(
-          `OpenSpec requirement headings in ${source} must start with a stable <CAPABILITY>-REQ-<NNN> id.`,
+          `OpenSpec requirement headings in ${source} must start with a stable <CAPABILITY>-REQ-<NNN> id.` + OPEN_SPEC_FORM,
         );
       }
       const id = match[1];
@@ -53,12 +60,12 @@ const parseOpenSpec = (content, source) => {
     }
     if (line.startsWith("#### Scenario:")) {
       if (!current) {
-        throw new Error(`OpenSpec scenario in ${source} has no requirement.`);
+        throw new Error(`OpenSpec scenario in ${source} has no requirement.` + OPEN_SPEC_FORM);
       }
       const match = line.match(OPEN_SPEC_SCENARIO);
       if (!match) {
         throw new Error(
-          `OpenSpec scenario headings in ${source} must start with a stable <CAPABILITY>-SCN-<NNN> id.`,
+          `OpenSpec scenario headings in ${source} must start with a stable <CAPABILITY>-SCN-<NNN> id.` + OPEN_SPEC_FORM,
         );
       }
       const id = match[1];
@@ -75,7 +82,7 @@ const parseOpenSpec = (content, source) => {
   finishRequirement();
   if (requirementIds.length === 0) {
     throw new Error(
-      `OpenSpec source ${source} requires at least one requirement.`,
+      `OpenSpec source ${source} requires at least one requirement.` + OPEN_SPEC_FORM,
     );
   }
   return { requirementIds, scenarioIds };
