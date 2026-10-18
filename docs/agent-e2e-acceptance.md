@@ -73,9 +73,30 @@ exit nonzero unless the migrated behavior matches an independently prepared
 legacy/reference contract. Pin the exact verifier SHA-256 and keep it out of
 agent access. The runner rejects changes to the marker or verifier.
 
-Ensure the candidate skills are installed and the selected provider CLI is
-authenticated. Run from the **toolkit repository under test**, giving the
-fresh target root:
+Ensure the candidate skills **and the candidate engine runtime** are already
+installed in the disposable consumer. Before launching an agent, this runner
+requires a provider-specific receipt at
+`.artifact-migration-tools/<provider>.json`; a missing or conflicting receipt
+fails with `ACCEPTANCE_PRECONDITION` rather than a raw filesystem error.
+It independently verifies the receipt's selected release against the pinned
+manifest and checks that the discover command is the binary from that bundle.
+After the agent returns, it re-verifies the same release to detect on-disk
+toolkit tampering. Installing a candidate only *during* the scored invocation
+is insufficient for this harness; the installation flow requires a separate
+preflight/installation acceptance record.
+
+**Security limitation:** pre/post checks can detect a modified installed bundle
+remaining after the run, but cannot prove the bundle was unchanged at *every*
+instant of a run. They also cannot prevent an unconstrained coding agent from
+editing and restoring migration state, or writing outside the consumer to a
+shared runtime store. A final functional verifier is necessary but does not
+prove the engine's in-run integrity. Therefore run certified acceptance in an
+OS-enforced isolated executor with a read-only trusted toolkit store, and keep
+the verifier and report output outside the agent's writable filesystem. When
+isolation is unavailable, report an observed functional result only; do **not**
+call the provider production-certified.
+
+Run from the **toolkit repository under test**, giving the fresh target root:
 
 ```bash
 node scripts/agent-e2e-acceptance.mjs \
