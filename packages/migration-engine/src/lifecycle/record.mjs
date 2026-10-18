@@ -221,7 +221,7 @@ const DERIVED_PINS = {
 };
 
 /** The file a pinned key is derived from; for a real path, itself. */
-const pinnedSourcePath = (root, relativePath) =>
+export const pinnedSourcePath = (root, relativePath) =>
   path.join(root, DERIVED_PINS[relativePath]?.source ?? relativePath);
 
 /**
@@ -247,7 +247,7 @@ export const hashPinnedArtifact = async (root, relativePath) => {
  * preserved roots older records already carry; this engine writes neither, and
  * refusing to re-spell them is the whole point of naming them here.
  */
-const isBytePinned = (relativePath) =>
+export const isBytePinned = (relativePath) =>
   reworkPathParts(relativePath) !== null ||
   relativePath.startsWith(`${REOPEN_ROOT}/`) ||
   relativePath.startsWith(`${ADOPTION_ROOT}/`) ||
@@ -449,7 +449,7 @@ const assertHistoryAppendOnly = async (root, state, anchor) => {
  * What RESOLVE pins, for whatever this record is: the step document always, and
  * the target baseline when the record adopted an existing implementation.
  */
-const resolveStepPins = (state) =>
+export const resolveStepPins = (state) =>
   IMMUTABLE_STEP_ARTIFACTS.RESOLVE.filter(
     (relative) => relative !== TARGET_BASELINE_FILE || isBrownfield(state),
   );
@@ -578,18 +578,18 @@ const assertStateGraph = async (root, state, pendingJournal) => {
       requiredHashes = new Set(resolveStepPins(state));
       continue;
     }
-    // Reopening discovery is legal only from DISCOVERY_COMPLETENESS, so
-    // nothing downstream can exist to lose. It drops exactly one step and its
-    // pins, which is what makes `inventories/legacy.json` editable again.
+    // Drops DISCOVER_LEGACY and its pins; from past DISCOVERY_COMPLETENESS, all after RESOLVE (preserved bytes stay pinned).
     if (event.event === "REOPENED") {
       revision += 1;
       currentStep = "DISCOVER_LEGACY";
       activeSlice = null;
-      completedSteps.delete("DISCOVER_LEGACY");
-      for (const relative of IMMUTABLE_STEP_ARTIFACTS.DISCOVER_LEGACY) {
-        requiredHashes.delete(relative);
-      }
       uiRemediationReopened = false;
+      if (event.from !== "DISCOVERY_COMPLETENESS") {
+        [completedSteps, completedSlices, requiredHashes] = [new Set(["RESOLVE"]), [], new Set(resolveStepPins(state))];
+        for (const relative of event.preserved ?? []) preservedReworkHashes.add(relative);
+      }
+      completedSteps.delete("DISCOVER_LEGACY");
+      for (const relative of IMMUTABLE_STEP_ARTIFACTS.DISCOVER_LEGACY) requiredHashes.delete(relative);
       continue;
     }
     if (event.event === "UI_REMEDIATION_REOPENED") {

@@ -87,6 +87,7 @@ import {
   validateCompletedHashes,
 } from "./record.mjs";
 import { pendingTransactions } from "./registry.mjs";
+import { reopenDiscoveryBlocker } from "./discovery-reopen.mjs";
 import { reopenAttemptsOf, reopenCompletePlan, reopenUiNotApplicable } from "./reopen.mjs";
 import { stateMappingMismatch } from "./templates.mjs";
 import { assertBriefUnchanged, sliceAmendmentFor } from "./validation.mjs";
@@ -533,11 +534,8 @@ export const previewMigrationExecution = async ({
             : state.artifacts.steps[expectedCheckpoint];
 
   if (reopenDiscovery) {
-    if (state.currentStep !== "DISCOVERY_COMPLETENESS") {
-      blockers.push(
-        `--reopen-discovery is legal only from DISCOVERY_COMPLETENESS; the current checkpoint is '${state.currentStep}'.`,
-      );
-    }
+    const blocker = reopenDiscoveryBlocker(state);
+    if (blocker) blockers.push(blocker);
     action = "Reopen DISCOVER_LEGACY to describe unclassified module files";
     reason =
       "The census found module files the legacy inventory does not describe; inventories/legacy.json is pinned and must be reopened to fix that.";

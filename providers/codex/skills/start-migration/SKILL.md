@@ -1035,6 +1035,12 @@ Full JSON schemas for every artifact below live in
    If the fix belongs in `inventories/legacy.json`, `--reopen-discovery`
    returns to `DISCOVER_LEGACY` for one revision without invalidating
    anything else. Complete `steps/02a-discovery-completeness.md`.
+   If a later checkpoint proves the inventory itself wrong (for example
+   `CAPTURE_ELEMENT_MISSING` for a pinned claim locator) and no slice is
+   verified yet, `--reopen-discovery` still returns to `DISCOVER_LEGACY`: it
+   releases every later checkpoint, preserves the released bytes under
+   `reopen/discovery-<revision>/`, and never accepts legacy drift. Correct the
+   claim, then rebuild each later checkpoint; never edit evidence to fit it.
 4. **`ASSESS_TARGET`** — inspect the target independently, even where a
    route/feature/test already exists; classify it `ABSENT`, `PLACEHOLDER`,
    `PARTIAL`, `INCOMPATIBLE`, or `IMPLEMENTED_UNVERIFIED`, and record every
@@ -1216,7 +1222,10 @@ current checkpoint is missing.
   `uiBehaviors[].externalUiImports` and source-backed capability rows. Record
   every required control and state as `requiredObservations` and
   `requiredAppearance` with its actual locator, including affordances, icons,
-  triggers, open states, and caller styling. For each runtime state author one
+  triggers, open states, and caller styling. A claim's `role` and `name` are
+  what the browser's accessibility tree exposes for the element its `locator`
+  resolves; roles such as `paragraph` or `status` never take their accessible
+  name from visible text, so claim the named element that contains such text. For each runtime state author one
   `scrollContracts` row naming the scroll owner, document scrolling and
   ancestor clipping. A shared target component still needs these claims.
 - `VERIFY_SLICES` — drive the target runtime and assert observable behavior:

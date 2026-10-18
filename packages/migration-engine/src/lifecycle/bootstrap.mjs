@@ -89,10 +89,10 @@ import {
   validateCompletedHashes,
 } from "./record.mjs";
 import { assertNoPendingTransaction } from "./registry.mjs";
+import { reopenDiscoveryUnderLock } from "./discovery-reopen.mjs";
 import {
   amendSliceUnderLock,
   reopenCompleteUnderLock,
-  reopenDiscoveryUnderLock,
   reopenUiUnderLock,
   reworkSliceUnderLock,
 } from "./reopen.mjs";

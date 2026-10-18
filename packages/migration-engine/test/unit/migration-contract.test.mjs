@@ -6361,36 +6361,39 @@ test("--reopen-discovery returns to DISCOVER_LEGACY without losing anything else
   }
 });
 
-test("--reopen-discovery from any other checkpoint is blocked and writes nothing", async () => {
-  const fixture = await createFixture();
-  try {
-    await driveTo(fixture, "DISCOVERY_COMPLETENESS");
-    const before = await snapshot(fixture.migrationRoot);
-    const resolution = await resolutionFor(fixture);
-    const preview = await previewMigrationExecution({
-      ...resolution,
-      moduleName: "auth",
-      reopenDiscovery: true,
-    });
-    assert.equal(preview.requiresConfirmation, false);
-    assert.match(
-      preview.blockers.join("; "),
-      /legal only from DISCOVERY_COMPLETENESS/,
-    );
-    await assert.rejects(
-      bootstrapMigration({
+// Before discovery closed there is nothing to reopen; after a slice is verified,
+// invalidating that verification is the operator's --refresh, never the agent's.
+for (const stopAfter of [null, "SLICES"]) {
+  test(`--reopen-discovery ${stopAfter ? "after a verified slice" : "before DISCOVERY_COMPLETENESS"} is blocked and writes nothing`, async () => {
+    const fixture = await createFixture();
+    try {
+      if (stopAfter) await driveTo(fixture, stopAfter);
+      else await initialize(fixture);
+      const before = await snapshot(fixture.migrationRoot);
+      const resolution = await resolutionFor(fixture);
+      const preview = await previewMigrationExecution({
         ...resolution,
         moduleName: "auth",
         reopenDiscovery: true,
-        boundInputs: preview.boundInputs,
-      }),
-      /legal only from DISCOVERY_COMPLETENESS/,
-    );
-    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
-  } finally {
-    await fixture.cleanup();
-  }
-});
+      });
+      assert.equal(preview.requiresConfirmation, false);
+      const refusal = /legal from DISCOVERY_COMPLETENESS, or from a later checkpoint before any slice is verified/;
+      assert.match(preview.blockers.join("; "), refusal);
+      await assert.rejects(
+        bootstrapMigration({
+          ...resolution,
+          moduleName: "auth",
+          reopenDiscovery: true,
+          boundInputs: preview.boundInputs,
+        }),
+        refusal,
+      );
+      assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
 
 test("UI-1: completed UI remediation reopens only named slice verification", async () => {
   const fixture = await createFixture();
@@ -24113,6 +24116,76 @@ const FORMAT20_LEGACY = {
     externalUiImports: [],
   })),
 };
+
+// The observed defect: discovery pinned a claim locator the legacy runtime never
+// shows, and the capture refuses it only at VERIFY_SLICES. Before any slice is
+// verified the agent reopens discovery itself; the bad claim is preserved, not erased.
+browserTest("late --reopen-discovery corrects an unresolvable pinned claim locator found at VERIFY_SLICES", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+    const classification = { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] };
+    const broken = { ...FORMAT20_LEGACY, uiBehaviors: FORMAT20_LEGACY.uiBehaviors.map((uiBehavior) => ({ ...uiBehavior,
+      requiredAppearance: [...uiBehavior.requiredAppearance,
+        { id: "APP-3", state: "DEFAULT", role: "paragraph", name: "6 work orders", locator: 'role=paragraph[name="6 work orders"]' }] })) };
+    // The second pass resumes the existing record, so it proposes no OpenSpec.
+    const toVerify = async (legacy, bootstrap = { currentFormat: true }) => {
+      await driveTo(fixture, "PLAN", advance, { bootstrap, legacy, classification });
+      await authorSlice(fixture, "slice-a");
+      await advance(fixture, { slice: "slice-a" });
+    };
+    await toVerify(broken);
+    const root = fixture.migrationRoot;
+    const claim = (appearanceClaimId) => captureFrame(fixture, { origin: server.origin, route: "/work-orders", viewport: CAPTURE_VIEWPORT, appearanceClaimId });
+    const atFailure = await snapshot(root);
+    await assert.rejects(claim("APP-3"), /CAPTURE_ELEMENT_MISSING: Claim locator 'role=paragraph\[name="6 work orders"\]' is not visible in state 'DEFAULT'/);
+    assert.deepEqual(await snapshot(root), atFailure);
+
+    const before = await state(fixture);
+    const brokenBytes = await readFile(path.join(root, "inventories/legacy.json"), "utf8");
+    const historyBefore = await readFile(path.join(root, "history/history.ndjson"), "utf8");
+    const resolution = await resolutionFor(fixture);
+    const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", reopenDiscovery: true });
+    assert.deepEqual(preview.blockers, []);
+    assert.equal(preview.expectedNextCheckpoint, "DISCOVER_LEGACY");
+    await bootstrapMigration({ ...resolution, moduleName: "auth", reopenDiscovery: true,
+      boundInputs: preview.boundInputs, registryBinding: preview.registryBinding });
+
+    const after = await state(fixture);
+    const directory = `reopen/discovery-${before.revision + 1}`;
+    assert.deepEqual([after.currentStep, after.revision, after.completedSteps, after.completedSlices, after.legacyRevision],
+      ["DISCOVER_LEGACY", before.revision + 1, ["RESOLVE"], [], before.legacyRevision]);
+    // Every released pin is invalidated and its bytes preserved and pinned for good.
+    assert.ok(after.invalidatedArtifacts.includes("inventories/legacy.json"));
+    assert.ok(!("inventories/legacy.json" in after.artifactHashes));
+    assert.equal(await readFile(path.join(root, directory, "inventories/legacy.json"), "utf8"), brokenBytes);
+    assert.ok(after.artifactHashes[`${directory}/inventories/legacy.json`]);
+    assert.ok(after.artifactHashes["steps/01-resolve.md"]);
+    // History is only appended to: the failed attempt stays on record.
+    const history = await readFile(path.join(root, "history/history.ndjson"), "utf8");
+    assert.ok(history.startsWith(historyBefore));
+    const reopened = (await historyEvents(fixture)).at(-1);
+    assert.deepEqual([reopened.event, reopened.from, reopened.slice], ["REOPENED", "VERIFY_SLICES", "slice-a"]);
+    assert.ok(reopened.preserved.includes(`${directory}/inventories/legacy.json`));
+    // A preserved byte is immutable like any rework evidence.
+    const preserved = path.join(root, directory, "inventories/legacy.json");
+    await writeFile(preserved, "{}");
+    await assert.rejects(advance(fixture), /Preserved reopen evidence changed after it was pinned/);
+    await writeFile(preserved, brokenBytes);
+
+    // The corrected inventory drops the claim no element can satisfy; its pinned claims capture.
+    await toVerify(FORMAT20_LEGACY, { currentFormat: true, openSpecProposal: undefined });
+    assert.deepEqual([(await state(fixture)).currentStep, (await state(fixture)).activeSlice], ["VERIFY_SLICES", "slice-a"]);
+    await assert.rejects(claim("APP-3"), /CAPTURE_REFUSED: Appearance claim 'APP-3' is not pinned/);
+    assert.equal((await claim("APP-1")).captured.uiBehaviorId, "UIB-1");
+    // The REOPENED event replays: the record still reads and resumes.
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
 
 browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
   const server = await startCaptureServer();

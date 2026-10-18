@@ -48,6 +48,8 @@ const PAGES = {
   "/line-height": page({ mainStyle: "line-height:normal" }),
   "/inner-scroll": page({ extra: '<div style="height:24px;overflow-y:auto"><div style="height:120px">History</div></div>' }),
   "/landing": page({ extra: '<a id="done" href="/auth/sign-in">Done</a>' }),
+  // Visible text whose <p> has no accessible name: role=paragraph[name=...] never matches it.
+  "/work-orders": page({ extra: "<p>6 work orders</p>" }),
 };
 
 /** The session the private page needs, as a Playwright storageState names it. */
