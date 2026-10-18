@@ -89,7 +89,8 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
     await cp(staged.stagingRoot, release, { recursive: true });
     const manifest = JSON.parse(manifestBytes.toString("utf8"));
     const pkg = JSON.parse(await readFile(path.join(release, "packages/migration-engine/package.json"), "utf8"));
-    await writeFile(path.join(target, ".artifact-migration-tools/opencode.json"),
+    const receiptPath = path.join(target, ".artifact-migration-tools/opencode.json");
+    await writeFile(receiptPath,
       JSON.stringify({ provider: "opencode", root: target, store, release, pin,
         toolkit: manifest.toolkit, commands: {
           "artifact-migration-discover": [process.execPath,
@@ -107,6 +108,27 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
     } catch (error) {
       if (error.code === "ERR_ASSERTION") throw error;
       assert.match(String(error.stderr), /modified the installed runtime receipt/);
+    }
+    // Restore the verified receipt, then tamper with the actual engine bundle.
+    // The independent pre/post manifest check must reject this run too.
+    await writeFile(receiptPath, JSON.stringify({ provider: "opencode", root: target, store, release, pin,
+      toolkit: manifest.toolkit, commands: {
+        "artifact-migration-discover": [process.execPath,
+          path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-discover"])],
+      } }));
+    const tamperPath = path.join(release, "packages/migration-engine/package.json");
+    await writeFile(path.join(bin, "opencode"),
+      "#!/bin/sh\nprintf x >> \\"$TEST_TAMPER_FILE\\"\n", { mode: 0o755 });
+    try {
+      execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
+        "--module", "auth", "--target", "auth", "--output", path.join(root, "tamper-reports")],
+        { encoding: "utf8", timeout: 60000, stdio: "pipe",
+          env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH,
+            TEST_TAMPER_FILE: tamperPath } });
+      assert.fail("Acceptance should have refused the modified engine bundle");
+    } catch (error) {
+      if (error.code === "ERR_ASSERTION") throw error;
+      assert.match(String(error.stderr), /installed runtime bundle modified or invalid/);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
