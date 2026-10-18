@@ -43,13 +43,32 @@ test("black-box acceptance requires an explicitly disposable consumer", async ()
   try {
     const argv = ["--provider", "codex", "--cwd", root, "--module", "auth",
       "--target", "auth", "--output", path.join(os.tmpdir(), "acceptance-report")];
-    assert.match(failRun(argv), /ACCEPTANCE_PRECONDITION:.*runtime receipt is missing/);
+    assert.match(failRun(argv), /ENOENT/);
     const verifier = path.join(root, "trusted-verifier.mjs");
     await writeFile(verifier, "process.exit(0);\n");
     await writeFile(path.join(root, ".artifact-migration-acceptance.json"),
       JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
         verifierSha256: createHash("sha256").update("process.exit(0);\n").digest("hex") }));
     assert.match(failRun(argv), /verifier must reside OUTSIDE/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("black-box acceptance reports a missing installed runtime receipt", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-no-receipt-"));
+  try {
+    const target = path.join(root, "target");
+    await mkdir(target);
+    const verifier = path.join(root, "verify.mjs");
+    const data = "process.exit(0);\\n".replace("\\\\n", "\\n");
+    await writeFile(verifier, data);
+    await writeFile(path.join(target, ".artifact-migration-acceptance.json"),
+      JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
+        verifierSha256: createHash("sha256").update(data).digest("hex") }));
+    assert.match(failRun(["--provider", "opencode", "--cwd", target, "--module", "auth",
+      "--target", "auth", "--output", path.join(root, "reports")]),
+      /ACCEPTANCE_PRECONDITION:.*runtime receipt is missing/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
