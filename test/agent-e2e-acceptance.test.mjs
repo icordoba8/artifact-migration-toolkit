@@ -288,6 +288,40 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
     }
   });
 
+test("OS-isolated agent deleting and recreating its migration record cannot obtain certification",
+  { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-isolated-reset-"));
+    try {
+      const { target, bin, pin } = await installedCandidate(root, path.join(root, "verifier"));
+      await writeFile(path.join(bin, "opencode"), [
+        "#!/bin/sh",
+        "mkdir -p .agents/knowledge/migrations/modules/auth",
+        "printf original > .agents/knowledge/migrations/modules/auth/first",
+        "rm -rf .agents/knowledge/migrations/modules/auth",
+        "mkdir -p .agents/knowledge/migrations/modules/auth",
+        "printf replacement > .agents/knowledge/migrations/modules/auth/second",
+        "exit 0", "",
+      ].join("\n"), { mode: 0o755 });
+      const output = path.join(root, "reports");
+      assert.throws(() => execFileSync(process.execPath, [script.pathname,
+        "--provider", "opencode", "--cwd", target, "--module", "auth",
+        "--target", "auth", "--output", output, "--goal", "complete", "--expected-pin", pin],
+      { encoding: "utf8", timeout: 60000, stdio: "pipe",
+        env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+      (error) => /ACCEPTANCE_RECORD_REPLACED/.test(String(error.stderr)));
+      const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+      assert.equal(report.verdict, "FAIL");
+      assert.equal(report.security.isolation, "OS_NAMESPACE");
+      assert.equal(report.security.trustedRuntimeIsolated, true);
+      assert.equal(report.security.certified, false);
+      assert.match(report.failure, /ACCEPTANCE_RECORD_REPLACED/);
+      assert.ok(report.security.recordContinuity.targetDirectoryRenameEvents >= 2);
+      assert.equal(report.agent.exitCode, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 test("under OS isolation a verifier in a broad directory (an ancestor of HOME) seals its script and node_modules, not HOME",
   { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-broad-"));
