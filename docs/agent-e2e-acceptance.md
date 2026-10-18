@@ -110,13 +110,36 @@ report directory are bind-mounted read-only, and every capability is dropped
 (`setpriv`) before the provider starts, so it can neither write nor remount
 them. Everything the agent starts is killed when it exits, so nothing can edit
 the report afterwards. `report.json` records `security.isolation`
-(`OS_NAMESPACE` or `NONE`), the read-only paths, and `security.certified`, which
-is true only for an isolated run whose installed pin equals `--expected-pin`.
-On a host without unprivileged namespaces the runner refuses; `--isolation none`
-then yields functional evidence with `certified: false`. The agent still shares
-the network and writes the consumer record through the engine, so the engine's
-`COMPLETE` remains the agent's own run, and the SHA-pinned verifier remains the
-functional verdict.
+(`OS_NAMESPACE` or `NONE`), the read-only paths, and `security.trustedRuntimeIsolated`, `security.recordContinuity`, and
+`security.certified`. The trusted-runtime isolation flag records only OS
+namespace isolation with the independently supplied candidate pin.
+`security.certified` is **never pre-awarded**: it is true only after a
+genuine `E2E_COMPLETE_PASS` with that isolation and no detected record
+replacement. It does not certify native task-UI recording or every supported
+platform. On a host without unprivileged namespaces the runner refuses;
+`--isolation none` yields functional evidence with `certified: false`.
+
+**Record continuity refusal:** the agent may legitimately write
+`modules/<target>/state.json` through the engine, but it must never remove and
+recreate the containing `modules/<target>` record directory to erase prior
+history. From before the provider starts, the trusted runner independently
+observes directory creation/removal events outside the agent namespace.
+A second rename of the module directory, a deleted/replaced modules parent,
+or an observer error yields `ACCEPTANCE_RECORD_REPLACED`, preserves the
+transcript and forces `security.certified: false` even if the final engine
+status looks like a clean fresh record. Regression tests simulate this exact
+delete-and-rebootstrap attack.
+
+**Security boundary:** filesystem notifications are best-effort and can be
+coalesced; they are not a cryptographically durable audit trail. No observed
+replacement is NOT proof that the agent left the record untouched. Complete
+adversarial protection needs engine-mediated writes with an append-only trusted
+anchor stored outside *all* agent-writable filesystem paths, or a broker that
+owns the record separately from the provider's shell. Until such an anchor is
+implemented and tested, treat `recordContinuity.assurance` as limited,
+not a guarantee of malicious-agent resistance. The agent still shares the
+network and writes the consumer record through the engine; the SHA-pinned
+independent verifier remains the functional verdict.
 
 Run from the **toolkit repository under test**, giving the fresh target root:
 
