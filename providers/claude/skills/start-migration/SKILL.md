@@ -1093,7 +1093,9 @@ Full JSON schemas for every artifact below live in
 8. **`VERIFY_SLICES`** — verify only the active slice: execute its
    acceptance scenarios and affected tests, covering entry, transitions,
    URL/history semantics, and terminal outcomes. Record
-   `evidence/<slice-id>/result.json`, repeating the same ID lists. A slice that owns visible UI behavior
+   `evidence/<slice-id>/result.json`, repeating the same ID lists, with each command's output
+   captured in a new file of its own. A completed slice's evidence, and every output it cites, is
+   immutable: never rewrite it to fit later work (`COMPLETED_EVIDENCE_CHANGED`). A slice that owns visible UI behavior
    also records Playwright runtime evidence for every required state and
    interaction (see "Runtime UI evidence"). When all slices pass, advance to
    `FINALIZE`.

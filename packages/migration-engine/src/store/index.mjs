@@ -56,6 +56,7 @@ export {
 } from "./files.mjs";
 export {
   assertCommandResults,
+  assertCompletedEvidenceIntact,
   assertEvidenceReference,
   assertEvidenceResolves,
   evidencePathClaim,

@@ -9,7 +9,7 @@ import {
   issueCollector,
   throwIssues,
 } from "../shared/index.mjs";
-import { fileExists, fileIdentity, fileIdentityMatches } from "./files.mjs";
+import { fileExists, fileIdentity, fileIdentityMatches, readJson } from "./files.mjs";
 
 // Evidence was validated as "a nonempty string", so arbitrary prose and paths
 // that never existed reached BUILD_BASELINE and were then hash-pinned as
@@ -127,4 +127,43 @@ export const assertEvidenceReference = async (entry, label, roots, options = {})
     ), { validationCode: "EVIDENCE_HASH_MISMATCH" });
   }
   return resolved;
+};
+
+/**
+ * A completed slice's result.json is hash-pinned, but the outputs it cites live
+ * in the repositories, where a later slice can overwrite them -- one shared
+ * output file re-run for the next slice. Every recorded digest of every
+ * completed slice is rechecked, so that overwrite is refused at the next
+ * advance, naming the slice it belongs to, instead of surfacing at FINALIZE
+ * after more evidence was built on it.
+ * ponytail: a `{reference, hash}` file that no longer resolves is left to the
+ * slice's own FINALIZE revalidation; only command outputs must still exist.
+ */
+export const assertCompletedEvidenceIntact = async (root, completedSlices, roots) => {
+  const changed = [];
+  const walk = async (node, sliceId) => {
+    if (Array.isArray(node)) {
+      for (const item of node) await walk(item, sliceId);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    for (const [pathKey, digestKey] of [["outputPath", "outputDigest"], ["reference", "hash"]]) {
+      const claim = typeof node[digestKey] === "string" ? evidencePathClaim(node[pathKey]) : null;
+      if (!claim) continue;
+      const resolved = (await resolveEvidencePath(claim, roots)) ??
+        ((await fileExists(path.resolve(root, claim))) ? path.resolve(root, claim) : null);
+      if (resolved ? !(await fileIdentityMatches(node[digestKey], resolved)) : pathKey === "outputPath") {
+        changed.push(`${sliceId} ${claim}`);
+      }
+    }
+    for (const value of Object.values(node)) await walk(value, sliceId);
+  };
+  for (const sliceId of completedSlices) {
+    await walk(await readJson(path.join(root, "evidence", sliceId, "result.json"), `Evidence for ${sliceId}`), sliceId);
+  }
+  if (changed.length > 0) {
+    throw Object.assign(new Error(
+      `COMPLETED_EVIDENCE_CHANGED: evidence recorded by completed slices no longer matches its digest: ${changed.join(", ")}. A completed slice's evidence is immutable: restore those bytes, and record the active slice's output in its own new file. Nothing was written.`,
+    ), { validationCode: "COMPLETED_EVIDENCE_CHANGED" });
+  }
 };

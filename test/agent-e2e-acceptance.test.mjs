@@ -136,12 +136,38 @@ test("without OS isolation, a rewritten receipt or engine bundle is still caught
     // Fake provider maliciously rewrites the installed receipt after preflight.
     await writeFile(path.join(bin, "opencode"), "#!/bin/sh\necho hacked > .artifact-migration-tools/opencode.json\n", { mode: 0o755 });
     assert.throws(() => unisolated("reports"), (error) => /modified the installed runtime receipt/.test(String(error.stderr)));
+    const tampered = JSON.parse(await readFile(path.join(root, "reports/report.json"), "utf8"));
+    assert.equal(tampered.verdict, "FAIL");
+    assert.match(tampered.failure, /modified the installed runtime receipt/);
+    assert.equal(tampered.agent.exitCode, 0);
     // Restore the verified receipt, then tamper with the actual engine bundle.
     // The independent pre/post manifest check must reject this run too.
     await writeFile(receiptPath, receipt);
     await writeFile(path.join(bin, "opencode"), '#!/bin/sh\nprintf x >> "$TEST_TAMPER_FILE"\n', { mode: 0o755 });
     assert.throws(() => unisolated("tamper-reports", { TEST_TAMPER_FILE: path.join(release, "packages/migration-engine/package.json") }),
       (error) => /installed runtime bundle modified or invalid/.test(String(error.stderr)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an agent that leaves no readable engine status still gets a fail-closed report", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-no-status-"));
+  try {
+    const { target, bin } = await installedCandidate(root);
+    // Exits 0 and creates no migration record, so the engine has no status to give.
+    await writeFile(path.join(bin, "opencode"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const output = path.join(root, "reports");
+    assert.throws(() => execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
+      "--module", "auth", "--target", "auth", "--output", output, "--isolation", "none"],
+    { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+    (error) => /Engine status failed/.test(String(error.stderr)));
+    const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+    assert.equal(report.verdict, "FAIL");
+    assert.match(report.failure, /Engine status failed/);
+    assert.equal(report.engine, undefined);
+    assert.equal(report.independentVerification, undefined);
+    assert.ok((await readFile(path.join(output, "engine-status.stderr.log"), "utf8")).length > 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

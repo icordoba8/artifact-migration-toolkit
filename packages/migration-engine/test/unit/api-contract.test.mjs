@@ -183,3 +183,19 @@ test("the OpenSpec must cite every derived response verbatim and nothing else", 
   assert.match(apiContractIssues(scan.apiContract, outside, "spec.md")[0], /^API_RESPONSE_MALFORMED: spec.md line 1/);
   assert.deepEqual([...openSpecResponses(spec(all)).cited.get(all[0])], ["ORDERS-SCN-001"]);
 });
+
+test("a Next.js frontend module owes nothing for a route handler outside its boundary, and stays UNRESOLVED for one inside", async () => {
+  const root = await repository({
+    "app/orders/page.jsx": "export default function Orders() { return <main><h1>Orders</h1></main>; }\n",
+    "app/orders/order-list.jsx": "export const OrderList = ({ rows }) => <ul>{rows.map((r) => <li key={r.id}>{r.id}</li>)}</ul>;\n",
+    "app/api/health/route.js": "export async function GET() { return Response.json({ ok: true }); }\n",
+  });
+  try {
+    const frontend = await runDiscoveryScan({ legacyRoot: root, moduleRoots: ["app/orders"], algorithmVersion: 5 });
+    assert.deepEqual(frontend.apiContract, { version: 1, obligations: [], unresolved: [] });
+    const owning = await runDiscoveryScan({ legacyRoot: root, moduleRoots: ["app/orders", "app/api/health"], algorithmVersion: 5 });
+    assert.deepEqual(owning.apiContract.unresolved.map((u) => u.endpoint), ["GET app/api/health/route.js"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

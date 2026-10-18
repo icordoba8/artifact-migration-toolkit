@@ -1027,7 +1027,7 @@ export const validateCompletedHashes = async (root, state) => {
           ? `REWORK_EVIDENCE_MISSING: the preserved failed verification attempt for slice '${rework.sliceId}' (attempt ${rework.attempt}) is gone. ${relativePath} was pinned when the rework was authorized and is never released by any later transition. It was deleted, not altered; restore it from version control before continuing.`
           : relativePath.startsWith(`${REOPEN_ROOT}/`)
             ? `REOPEN_EVIDENCE_MISSING: the verification evidence a COMPLETE reopen superseded is gone. ${relativePath} was pinned when the reopen was authorized and is never released by any later transition. It was deleted, not altered; restore it from version control before continuing.`
-            : `Completed artifact is missing: ${relativePath}. Reopen the responsible checkpoint.`,
+            : `Completed artifact is missing: ${relativePath}. It was pinned when its checkpoint closed, and every command -- reopen and rework included -- refuses until it is back: restore it (for example from version control).`,
       );
     }
     if (!(await pinnedArtifactMatches(root, relativePath, expected))) {
@@ -1035,12 +1035,12 @@ export const validateCompletedHashes = async (root, state) => {
         relativePath === BASELINE_ROWS_PIN
           ? `Behavior parity rows changed after BUILD_BASELINE closed: their immutable fields (${IMMUTABLE_BEHAVIOR_ROW_FIELDS.join(", ")}) no longer match what the checkpoint pinned. Only verificationStatus may move; reopen the responsible checkpoint.`
           : relativePath === DISCOVERY_PIN
-            ? `The recorded discovery digest changed after DISCOVERY_COMPLETENESS closed. ${DISCOVERY_SCAN_FILE} is machine-generated and is never edited by hand; rerun the checkpoint with --reopen-discovery.`
+            ? `The recorded discovery digest changed after DISCOVERY_COMPLETENESS closed. ${DISCOVERY_SCAN_FILE} is machine-generated and is never edited by hand; restore its bytes (for example from version control) -- every command, --reopen-discovery included, refuses until it matches.`
             : reworkPathParts(relativePath)
               ? `Preserved rework evidence changed after it was pinned: ${relativePath}. The failed verification attempt that authorized a rework is immutable; it was altered rather than deleted. Restore the original bytes.`
               : relativePath.startsWith(`${REOPEN_ROOT}/`)
                 ? `Preserved reopen evidence changed after it was pinned: ${relativePath}. The superseded verification a COMPLETE reopen preserved is immutable; it was altered rather than deleted. Restore the original bytes.`
-                : `Completed artifact changed after validation: ${relativePath}. Reopen the responsible checkpoint.`,
+                : `Completed artifact changed after validation: ${relativePath}. It was pinned when its checkpoint closed, and every command -- reopen and rework included -- refuses until it matches again: restore the validated bytes (for example from version control). Completed work is never rewritten to fit later work; the active checkpoint authors only its own artifacts.`,
       );
     }
   }

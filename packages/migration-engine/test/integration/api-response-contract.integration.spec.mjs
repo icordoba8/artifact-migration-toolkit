@@ -243,6 +243,24 @@ test("format 21 rechecks the declared roots, binds slice evidence to every trace
         await evidence(slice, tap(SIGN_IN, [conflict]));
         assert.match((await runTo("VERIFY_SLICES")).reason, /API_RESPONSE_UNVERIFIED: slice-a .*423 LOCKED_OUT/);
       }
+      if (slice.id === "slice-b") {
+        // The PR #7 OpenCode failure: the next slice re-ran one shared output
+        // file over a completed slice's evidence, then rewrote the completed
+        // slice's pinned result to match. Each is refused, naming the fix.
+        const shared = path.join(record, "evidence/slice-a/commands/test.txt");
+        const pinned = path.join(record, "evidence/slice-a/result.json");
+        const [output, result, before] = [await readFile(shared), await readFile(pinned), await readFile(path.join(record, "state.json"))];
+        await writeFile(shared, tap(SIGN_OUT));
+        assert.match((await runTo("VERIFY_SLICES")).reason, /COMPLETED_EVIDENCE_CHANGED: .*slice-a \S*evidence\/slice-a\/commands\/test\.txt.*restore those bytes/);
+        await writeFile(shared, output);
+        await writeFile(pinned, result.toString().replace("node --test target", "node --test target/all"));
+        const refused = call("run", ["auth", "--mode", "auto", "--json"]);
+        assert.notEqual(refused.status, 0);
+        assert.match(refused.stdout + refused.stderr, /Completed artifact changed after validation: evidence\/slice-a\/result\.json\. .*restore the validated bytes/);
+        assert.match(call("discover", ["auth", "--rework-slice", "slice-a", "--confirm-rework"]).stderr, /Completed artifact changed after validation/);
+        await writeFile(pinned, result);
+        assert.deepEqual(await readFile(path.join(record, "state.json")), before, "a refusal wrote the record");
+      }
       await evidence(slice, tap(owed));
       await runTo(slice.id === "slice-a" ? "IMPLEMENT_SLICES" : "FINALIZE");
     }

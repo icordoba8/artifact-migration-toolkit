@@ -55,7 +55,7 @@ import {
   isLexicallyWithin as isWithin,
 } from "../shared/index.mjs";
 import {
-  assertCommandResults,
+  assertCommandResults, assertCompletedEvidenceIntact,
   assertEvidenceResolves,
   evidencePathClaim,
   fileExists,
@@ -1180,6 +1180,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
     }
   }
   if (step === "BUILD_BASELINE") await validateBaseline(root, { roots, state });
+  if (["IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE"].includes(step)) await assertCompletedEvidenceIntact(root, (state.completedSlices ?? []).filter((id) => id !== (sliceId ?? state.activeSlice)), roots);
   // Returned so advanceMigration reuses this traversal instead of repeating it.
   if (step === "PLAN") return validatePlan(root, state, roots);
   if (step === "IMPLEMENT_SLICES") {

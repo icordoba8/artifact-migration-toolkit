@@ -105,14 +105,15 @@ const isolated = ({ command, argv }, readOnly) => ({ command: "unshare",
   argv: [...ISOLATE, "sh", "-c", ISOLATE_SETUP, "sh", String(readOnly.length), ...readOnly, command, ...argv] });
 
 // Each host's headless permission model, granting only the installed
-// registration and the consumer's own state directory -- never a sandbox bypass.
+// registration, the consumer's own Playwright MCP server (the skill's UI evidence
+// provider) and its state directory -- never a sandbox bypass.
 const commandFor = (provider, invocation, root) => {
   const ask = "Invoke the installed start-migration skill with exactly these arguments: " +
     invocation + ". Follow its existing contract; do not repair or modify the installed toolkit.";
   if (provider === "claude") return { command: "claude",
     argv: ["--print", invocation, "--output-format", "stream-json", "--verbose",
       "--mcp-config", ".mcp.json", "--permission-mode", "acceptEdits",
-      "--allowedTools", "Bash", "Read", "Edit", "Write", "Glob", "Grep", "mcp__start-migration"] };
+      "--allowedTools", "Bash", "Read", "Edit", "Write", "Glob", "Grep", "mcp__start-migration", "mcp__playwright"] };
   // OpenCode has no --command flag; --standalone keeps the run off the user's service.
   if (provider === "opencode") return { command: "opencode",
     argv: ["run", "--standalone", "--format", "json", "--auto", ask] };
@@ -129,6 +130,25 @@ async function main() {
   const root = await realpath(options.cwd);
   const output = path.resolve(options.output);
   if (output === root || output.startsWith(root + path.sep)) fail("Output must be outside the disposable consumer");
+  // From here on every outcome -- a refusal, a tamper finding, a missing status
+  // -- leaves a report.json: an absent report must never be read as a pass.
+  const report = { schemaVersion: 1, provider: options.provider, module: options.module, target: options.target,
+    goal: options.goal, verdict: "FAIL", failure: null };
+  try {
+    await score(options, root, output, report);
+  } catch (error) {
+    report.failure = error.message;
+    report.verdict = "FAIL";
+    await mkdir(output, { recursive: true });
+    await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
+    throw error;
+  }
+  process.stdout.write(JSON.stringify({ output, verdict: report.verdict, currentStep: report.engine.currentStep,
+    progressDisplayed: report.presentation.progressAppearsInAgentOutput }, null, 2) + "\n");
+  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS"].includes(report.verdict)) process.exitCode = 1;
+}
+
+async function score(options, root, output, report) {
   const markerPath = path.join(root, ".artifact-migration-acceptance.json");
   const markerBytes = await readFile(markerPath, "utf8");
   const marker = JSON.parse(markerBytes);
@@ -148,6 +168,7 @@ async function main() {
   if (already !== null) fail("Not a fresh consumer: migration record already exists");
   const invocation = '/start-migration ' + options.module + ' --target ' + options.target +
     ' --mode auto --ponytail full --design-source target-system';
+  report.invocation = invocation;
   const invocationCommand = commandFor(options.provider, invocation, root);
   // The receipt is the installation precondition. Check it before walking
   // provider files so a fresh consumer reports a useful error, not ENOENT.
@@ -170,6 +191,9 @@ async function main() {
       !/^sha256:[a-f0-9]{64}$/.test(installed.pin ?? "") ||
       installed.release !== path.join(installed.store, `${installed.toolkit?.version}-${installed.pin.slice(7)}`))
     fail("ACCEPTANCE_PRECONDITION: The installed runtime receipt has a conflicting provider, root, release or pin.");
+  report.toolkit = installed.toolkit ?? null;
+  report.candidate = { expectedPin: options.expectedPin, installedPin: installed.pin, independentPinRequiredForComplete: true,
+    matchesTrustedPin: options.expectedPin !== null && options.expectedPin === installed.pin };
   if (options.expectedPin && installed.pin !== options.expectedPin)
     fail("ACCEPTANCE_PRECONDITION: Installed engine pin does not match independently supplied --expected-pin.");
   const manifest = await verifyBundle(installed.release, installed.pin);
@@ -190,6 +214,11 @@ async function main() {
   await mkdir(output, { recursive: true });
   const readOnly = [...new Set(await Promise.all([installed.store, verifier, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
+  report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
+    readOnly: options.isolation === "os" ? readOnly : [],
+    // Certified only when the agent could not write the trusted paths and the
+    // candidate is the one pinned from outside the consumer.
+    certified: options.isolation === "os" && options.expectedPin !== null && options.expectedPin === installed.pin };
   if (options.isolation === "os") {
     const probe = await run({ ...isolated({ command: "true", argv: [] }, readOnly), cwd: root, timeoutMs: 30000 })
       .catch((error) => ({ code: 1, stderr: error.message }));
@@ -197,11 +226,14 @@ async function main() {
       "namespaces via unshare and setpriv): " + String(probe.stderr).trim() + ". Rerun with --isolation none for " +
       "functional evidence that is NOT security-certified.");
   }
-  const startedAt = new Date().toISOString();
+  report.startedAt = new Date().toISOString();
   const agent = await run({ ...(options.isolation === "os" ? isolated(invocationCommand, readOnly) : invocationCommand),
     cwd: root, timeoutMs: options.timeoutMs });
   await writeFile(path.join(output, "agent.stdout.log"), agent.stdout);
   await writeFile(path.join(output, "agent.stderr.log"), agent.stderr);
+  const combined = agent.stdout + "\n" + agent.stderr;
+  report.agent = { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
+    transcriptSha256: createHash("sha256").update(combined).digest("hex") };
   if (await readFile(markerPath, "utf8") !== markerBytes)
     fail("Agent modified the pinned acceptance marker (transcripts preserved)");
   if (createHash("sha256").update(await readFile(verifier)).digest("hex") !== verifierSha256)
@@ -215,10 +247,7 @@ async function main() {
   } catch (error) {
     fail("Agent left the installed runtime bundle modified or invalid (transcripts preserved): " + error.message);
   }
-  const receipt = installed;
-  const cli = receipt.commands?.["artifact-migration-discover"];
-  if (!Array.isArray(cli) || cli.length < 2 || !path.isAbsolute(cli[0]) || !path.isAbsolute(cli[1]))
-    fail("Installed receipt did not provide a verified absolute discover command");
+  const cli = installed.commands["artifact-migration-discover"];
   const statusRun = await run({ command: cli[0], argv: [...cli.slice(1), options.target, "--status"],
     cwd: root, timeoutMs: 120000 });
   await writeFile(path.join(output, "engine-status.stdout.log"), statusRun.stdout);
@@ -226,33 +255,22 @@ async function main() {
   if (statusRun.code !== 0) fail("Engine status failed after agent invocation; logs preserved");
   const status = JSON.parse(statusRun.stdout);
   const state = JSON.parse(await readFile(record, "utf8"));
+  report.engine = { currentStep: status.currentStep, state: status.status, revision: state.revision,
+    progressAvailable: typeof status.progressChecklist === "string" && status.progressChecklist.length > 0 };
   if (state.targetModule !== options.target || status.target !== options.target)
     fail("Migration record does not belong to the requested --target");
   const finished = state.currentStep === "COMPLETE" && status.currentStep === "COMPLETE";
   const bootstrapped = state.completedSteps?.includes("RESOLVE") &&
     status.progressChecklist?.includes("DISCOVER_LEGACY") && status.currentStep !== "RESOLVE";
+  // argv[3] is this report directory, for the verifier's own artifacts (screenshots).
   const verified = finished ? await run({
-    command: process.execPath, argv: [verifier, root], cwd: root, timeoutMs: 300000,
+    command: process.execPath, argv: [verifier, root, output], cwd: root, timeoutMs: 300000,
   }) : null;
   if (verified) {
     await writeFile(path.join(output, "independent-verify.stdout.log"), verified.stdout);
     await writeFile(path.join(output, "independent-verify.stderr.log"), verified.stderr);
   }
-  const combined = agent.stdout + "\n" + agent.stderr;
-  const report = {
-    schemaVersion: 1, provider: options.provider, module: options.module, target: options.target, goal: options.goal,
-    startedAt, completedAt: new Date().toISOString(), invocation, toolkit: receipt.toolkit ?? null,
-    candidate: { expectedPin: options.expectedPin, independentPinRequiredForComplete: true,
-      matchesTrustedPin: options.expectedPin !== null && options.expectedPin === installed.pin },
-    security: { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
-      readOnly: options.isolation === "os" ? readOnly : [],
-      // Certified only when the agent could not write the trusted paths and the
-      // candidate is the one pinned from outside the consumer.
-      certified: options.isolation === "os" && options.expectedPin !== null && options.expectedPin === installed.pin },
-    agent: { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
-      transcriptSha256: createHash("sha256").update(combined).digest("hex") },
-    engine: { currentStep: status.currentStep, state: status.status, revision: state.revision,
-      progressAvailable: typeof status.progressChecklist === "string" && status.progressChecklist.length > 0 },
+  Object.assign(report, { completedAt: new Date().toISOString(),
     presentation: { progressAppearsInAgentOutput: combined.includes("progress: " + options.module + " -> " + options.target),
       // This is NOT proof of native UI rendering; that needs a separate recording.
       nativeUiCertified: false },
@@ -261,12 +279,8 @@ async function main() {
     verdict: agent.code !== 0 || agent.timedOut || agent.overflow ? "FAIL" :
       options.goal === "bootstrap" ? (bootstrapped ? "BOOTSTRAP_PASS" : "FAIL") :
       finished && verified?.code === 0 && !verified.timedOut && status.progressChecklist ?
-        "E2E_COMPLETE_PASS" : "FAIL",
-  };
+        "E2E_COMPLETE_PASS" : "FAIL" });
   await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
-  process.stdout.write(JSON.stringify({ output, verdict: report.verdict, currentStep: report.engine.currentStep,
-    progressDisplayed: report.presentation.progressAppearsInAgentOutput }, null, 2) + "\n");
-  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS"].includes(report.verdict)) process.exitCode = 1;
 }
 
 main().catch(error => { console.error("AGENT_ACCEPTANCE_ERROR:", error.message); process.exitCode = 1; });
