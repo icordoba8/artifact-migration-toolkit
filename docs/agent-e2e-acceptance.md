@@ -111,6 +111,13 @@ node scripts/agent-e2e-acceptance.mjs \
 a real migration record past RESOLVE and the installed engine can project
 its canonical progress. It is **not** full certification.
 
+Use `--goal complete --expected-pin sha256:<64-hex-digits>` on a separate
+fresh consumer for the full path. **Obtain this digest independently from the
+release candidate's `release-manifest.json`, outside the agent-writable
+consumer, before invoking the runner.** The receipt cannot supply its own
+trust anchor: the runner compares its selected bundle pin against the
+independently provided expected pin and refuses a missing/mismatched one.
+
 Use `--goal complete` on a separate fresh consumer for the full path.
 `E2E_COMPLETE_PASS` additionally requires `COMPLETE` from the real engine
 and a successful run of the external, SHA-pinned reference verifier. A
