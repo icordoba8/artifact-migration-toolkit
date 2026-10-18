@@ -28,6 +28,16 @@ test("black-box acceptance refuses incomplete and invalid invocations", () => {
     "--target", "auth", "--output", "/tmp/acceptance"]), /Unsafe --module/);
 });
 
+test("complete acceptance requires a pin from outside the consumer", () => {
+  assert.match(failRun(["--provider", "opencode", "--cwd", ".", "--module", "auth",
+    "--target", "auth", "--output", "/tmp/acceptance", "--goal", "complete"]),
+    /requires --expected-pin/);
+  assert.match(failRun(["--provider", "opencode", "--cwd", ".", "--module", "auth",
+    "--target", "auth", "--output", "/tmp/acceptance", "--goal", "complete",
+    "--expected-pin", "sha256:untrusted"]),
+    /must be an exact SHA-256/);
+});
+
 test("black-box acceptance requires an explicitly disposable consumer", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-negative-"));
   try {
