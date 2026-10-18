@@ -68,10 +68,14 @@ In the disposable target root, create `.artifact-migration-acceptance.json`:
 ```
 
 The verifier must be an independent Node.js program stored **outside** the
-agent-writable workspace. It receives the target root as argv[2]; it must
-exit nonzero unless the migrated behavior matches an independently prepared
-legacy/reference contract. Pin the exact verifier SHA-256 and keep it out of
-agent access. The runner rejects changes to the marker or verifier.
+agent-writable workspace. It receives the target root as argv[2] and the
+report directory as argv[3] (for its own artifacts, such as screenshots); it
+must exit nonzero unless the migrated behavior matches an independently
+prepared legacy/reference contract. Pin the exact verifier SHA-256 and keep it
+out of agent access. The runner rejects changes to the marker or verifier.
+Keep the verifier in a directory of its own: when that directory does not
+contain the consumer, the runner seals the whole directory read-only, so the
+verifier's dependencies (a browser driver) are protected like its script.
 
 Ensure the candidate skills **and the candidate engine runtime** are already
 installed in the disposable consumer. Before launching an agent, this runner
@@ -141,11 +145,39 @@ carry out that acceptance interactively with actual human approval and retain
 the decision evidence separately. Timeouts, missing CLIs, blocked installs,
 invalid OpenSpec, failure to proceed and absent status result all fail closed.
 
+Every outcome after the output path is validated -- a precondition refusal, a
+tamper finding, an engine status that cannot be read -- writes `report.json`
+with `verdict: "FAIL"`, the `failure` and every fact gathered until then; an
+absent status is never read as `COMPLETE`, and nothing repairs the consumer
+after the scored invocation. Runs take `--timeout-minutes` up to 240.
+
 Artifacts written outside the consumer are `agent.stdout.log`,
 `agent.stderr.log`, `engine-status.stdout.log`,
 `engine-status.stderr.log`, optional `independent-verify.*.log`, and
 `report.json`. The latter deliberately sets `nativeUiCertified: false`;
 native UI proof is an additional screen recording.
+
+## Frontend acceptance
+
+A frontend migration verifies visible behavior in a browser, so the consumer
+registers a Playwright MCP server for each host (Claude Code `.mcp.json`,
+OpenCode `opencode.json`, Codex `.codex/config.toml`); run it `--headless
+--isolated` so parallel providers never share a browser profile, and give each
+consumer its own dev-server ports. The Claude Code invocation allows
+`mcp__playwright` next to `mcp__start-migration`.
+
+The independent verifier builds the migrated target with the target's own
+toolchain, serves the build itself and drives it in a real browser. The legacy
+application is the **behavior** authority: navigation, data, copy, validation
+messages, loading/empty/error states, state transitions, keyboard interaction
+and accessibility semantics. Under `--design-source target-system` the target
+design system is the **styling** authority: assert that the feature uses its
+components, has no horizontal overflow or overlapping controls at desktop and
+phone widths, and keeps unrelated target features working -- never legacy
+pixels. Prove the verifier both ways before scoring an agent: it passes a
+reference implementation, every behavior check passes on the legacy app
+itself, and each single-obligation mutant of the reference fails it. If no
+browser can run, visual acceptance is `NOT_TESTED`, never `PASS`.
 
 ## What can be signed off
 

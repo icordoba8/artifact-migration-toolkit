@@ -11,12 +11,13 @@ import { candidateReleaseRoot } from "../packages/migration-engine/test/support/
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
 
 /** A disposable consumer with a genuinely built, verified candidate installed for opencode. */
-const installedCandidate = async (root) => {
+const installedCandidate = async (root, verifierHome = root) => {
   const target = path.join(root, "target"), bin = path.join(root, "bin");
   await mkdir(path.join(target, ".opencode/skills"), { recursive: true });
   await mkdir(path.join(target, ".artifact-migration-tools"));
   await mkdir(bin);
-  const verifier = path.join(root, "verify.mjs");
+  await mkdir(verifierHome, { recursive: true });
+  const verifier = path.join(verifierHome, "verify.mjs");
   const verifierBytes = "process.exit(0);\n";
   await writeFile(verifier, verifierBytes);
   await writeFile(path.join(target, ".artifact-migration-acceptance.json"),
@@ -187,7 +188,10 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
   { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-isolated-"));
     try {
-      const { target, bin, verifier, release, receiptPath, receipt } = await installedCandidate(root);
+      // A verifier in its own directory is sealed whole, dependencies included.
+      const { target, bin, verifier, release, receiptPath, receipt } = await installedCandidate(root, path.join(root, "verifier"));
+      const dependency = path.join(root, "verifier", "driver.mjs");
+      await writeFile(dependency, "export default 1;\n");
       const output = path.join(root, "reports");
       const engineFile = path.join(release, "packages/migration-engine/package.json");
       const engineBytes = await readFile(engineFile, "utf8");
@@ -197,6 +201,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         attempt("receipt", "echo hacked > .artifact-migration-tools/opencode.json"),
         attempt("engine", `printf x >> '${engineFile}'`),
         attempt("verifier", `echo 'process.exit(0)' > '${verifier}'`),
+        attempt("dependency", `echo 'export default 0;' > '${dependency}'`),
         attempt("report", `echo forged > '${output}/report.json'`),
         attempt("remount", `mount -o remount,bind,rw '${release}'`),
         `(sleep 1; echo late > '${canary}') &`, ""].join("\n"), { mode: 0o755 });
@@ -206,7 +211,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
       // The fake agent creates no record, so the run fails afterwards -- but not on a tamper check.
       (error) => !/modified|Agent left/.test(String(error.stderr)));
       assert.deepEqual((await readFile(path.join(target, "observed"), "utf8")).trim().split("\n"),
-        ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "report=DENIED", "remount=DENIED"]);
+        ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "remount=DENIED"]);
       assert.equal(await readFile(receiptPath, "utf8"), receipt);
       assert.equal(await readFile(engineFile, "utf8"), engineBytes);
       await new Promise((resolve) => setTimeout(resolve, 2000));

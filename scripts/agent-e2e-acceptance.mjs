@@ -40,8 +40,9 @@ const argsOf = (argv) => {
     fail("Complete acceptance requires --expected-pin obtained independently from the candidate bundle before agent execution.");
   const isolation = options["--isolation"] ?? "os";
   if (!["os", "none"].includes(isolation)) fail("--isolation must be os or none");
+  // ponytail: 240 minutes covers a frontend migration with browser evidence; raise when a real run needs it.
   const minutes = options["--timeout-minutes"] === undefined ? 50 : Number(options["--timeout-minutes"]);
-  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 90) fail("Timeout must be between 1 and 90 minutes");
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 240) fail("Timeout must be between 1 and 240 minutes");
   return { provider: options["--provider"], cwd: path.resolve(options["--cwd"]), module: options["--module"],
     target: options["--target"], goal, expectedPin, isolation, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
 };
@@ -212,7 +213,11 @@ async function score(options, root, output, report) {
   const skillsBefore = await treeDigest(skills);
   // The report directory exists before the agent does, so it can be sealed too.
   await mkdir(output, { recursive: true });
-  const readOnly = [...new Set(await Promise.all([installed.store, verifier, receiptPath, markerPath, skills, output]
+  // A verifier directory that does not hold the consumer is sealed whole, so
+  // its own dependencies (a browser driver) are as untouchable as its script.
+  const verifierDir = path.dirname(verifier);
+  const sealedVerifier = root.startsWith(verifierDir + path.sep) ? verifier : verifierDir;
+  const readOnly = [...new Set(await Promise.all([installed.store, sealedVerifier, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],
