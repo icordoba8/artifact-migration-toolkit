@@ -31,7 +31,7 @@ test("black-box acceptance requires an explicitly disposable consumer", async ()
   try {
     const argv = ["--provider", "codex", "--cwd", root, "--module", "auth",
       "--target", "auth", "--output", path.join(os.tmpdir(), "acceptance-report")];
-    assert.match(failRun(argv), /ENOENT/);
+    assert.match(failRun(argv), /ACCEPTANCE_PRECONDITION:.*runtime receipt is missing/);
     const verifier = path.join(root, "trusted-verifier.mjs");
     await writeFile(verifier, "process.exit(0);\n");
     await writeFile(path.join(root, ".artifact-migration-acceptance.json"),
@@ -84,6 +84,36 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
       if (error.code === "ERR_ASSERTION") throw error;
       assert.match(String(error.stderr), /modified the installed runtime receipt/);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("black-box acceptance refuses an unverified installed engine before starting the agent", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-bundle-"));
+  try {
+    const target = path.join(root, "target");
+    const store = path.join(root, "store");
+    await mkdir(target);
+    await mkdir(path.join(target, ".opencode/skills"), { recursive: true });
+    await mkdir(path.join(target, ".artifact-migration-tools"));
+    const verifier = path.join(root, "verify.mjs");
+    const verifierBytes = "process.exit(0);\n";
+    await writeFile(verifier, verifierBytes);
+    await writeFile(path.join(target, ".artifact-migration-acceptance.json"),
+      JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
+        verifierSha256: createHash("sha256").update(verifierBytes).digest("hex") }));
+    const manifestBytes = '{"toolkit":{"name":"forged"}}\n';
+    const pin = "sha256:" + createHash("sha256").update(manifestBytes).digest("hex");
+    const release = path.join(store, "0.0.1-" + pin.slice(7));
+    await mkdir(release, { recursive: true });
+    await writeFile(path.join(release, "release-manifest.json"), manifestBytes);
+    await writeFile(path.join(target, ".artifact-migration-tools/opencode.json"),
+      JSON.stringify({ provider: "opencode", root: target, store, release, pin,
+        toolkit: { version: "0.0.1", name: "artifact-migration-tools" } }));
+    const result = failRun(["--provider", "opencode", "--cwd", target, "--module", "auth",
+      "--target", "auth", "--output", path.join(root, "reports")]);
+    assert.match(result, /Invalid exact toolkit identity/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
