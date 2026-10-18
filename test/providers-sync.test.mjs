@@ -1334,3 +1334,15 @@ test("current guidance links and named source paths resolve", async () => {
   }
   assert.deepEqual(problems, []);
 });
+
+// Regression (PR #7 OpenCode acceptance): a spec built from the domain layer
+// alone dropped the route layer's status table, so the target answered with
+// a framework default. Every provider must tell discovery to trace the wire.
+test("every provider discovery checklist requires tracing API responses onto the wire", async () => {
+  for (const dir of ["skills", ...["claude", "codex", "copilot", "opencode"].map(p => `providers/${p}/skills`)]) {
+    const text = await readFile(new URL(`../${dir}/start-migration/references/discovery-checklist.md`, import.meta.url), "utf8");
+    for (const rule of ["status code, machine-readable error identifier", "fallback for unmapped errors",
+      "never replace it with a framework or target default"])
+      assert.ok(text.replace(/\s+/g, " ").includes(rule), `${dir} discovery checklist lacks: ${rule}`);
+  }
+});

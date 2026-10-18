@@ -119,6 +119,10 @@ async function main() {
   const invocationCommand = commandFor(options.provider, invocation, root);
   const skills = path.join(root, SKILL_DIRS[options.provider]);
   const skillsBefore = await treeDigest(skills);
+  // The receipt is produced by the real skill runtime at install, never by this
+  // harness; pin it now so the agent cannot redirect the status command below.
+  const receiptPath = path.join(root, ".artifact-migration-tools", options.provider + ".json");
+  const receiptBytes = await readFile(receiptPath, "utf8");
   const startedAt = new Date().toISOString();
   const agent = await run({ ...invocationCommand, cwd: root, timeoutMs: options.timeoutMs });
   await mkdir(output, { recursive: true });
@@ -130,9 +134,9 @@ async function main() {
     fail("Independent verifier changed during the agent run (transcripts preserved)");
   if (await treeDigest(skills) !== skillsBefore)
     fail("Agent modified the installed skills (transcripts preserved)");
-  // The receipt is produced by the real skill runtime, never by this harness.
-  const receipt = JSON.parse(await readFile(path.join(root, ".artifact-migration-tools",
-    options.provider + ".json"), "utf8"));
+  if (await readFile(receiptPath, "utf8") !== receiptBytes)
+    fail("Agent modified the installed runtime receipt (transcripts preserved)");
+  const receipt = JSON.parse(receiptBytes);
   const cli = receipt.commands?.["artifact-migration-discover"];
   if (!Array.isArray(cli) || cli.length < 2 || !path.isAbsolute(cli[0]) || !path.isAbsolute(cli[1]))
     fail("Installed receipt did not provide a verified absolute discover command");

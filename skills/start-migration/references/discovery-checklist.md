@@ -89,6 +89,17 @@ height constraint, relevant ancestor overflow, whether the document may scroll,
 and nested scrolling where applicable. Measure the same viewport and fixture in
 legacy and target. Matching pixels inside a grid do not establish page scrolling.
 
+For each externally observable API operation, trace every success and failure
+path from where it originates (validation, conflict, state transition, not
+found, authorization) through each layer that maps it onto the wire. Record the
+status code, machine-readable error identifier, response body shape and
+relevant headers exactly as the legacy transport emits them, including the
+fallback for unmapped errors. A status table or default branch in a route,
+controller or middleware is part of the contract even when the domain layer
+never mentions it. Each traced response becomes an OpenSpec scenario that cites
+its source paths and is checked against the target. Record a response you
+cannot trace as `UNRESOLVED`; never replace it with a framework or target default.
+
 ## Evidence classification
 
 Classify each discovered behavior:
