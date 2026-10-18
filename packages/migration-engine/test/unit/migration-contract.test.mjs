@@ -179,6 +179,7 @@ import {
   claimCapturePlan,
   parseCaptureRequest,
   validateUiRuntimeEvidence,
+  visualAuthorityOf,
 } from "../../src/visual/index.mjs";
 import {
   createDecisionCandidate,
@@ -24079,8 +24080,11 @@ browserTest("MC2: CLI and MCP run the same capture; an authorized session is use
       params: { name: "migration_capture", arguments: { module: "auth", request } } });
     assert.ok(response.result, JSON.stringify(response));
     const fromMcp = JSON.parse(response.result.content.at(-1).text);
-    const comparable = ({ durationMs, ...rest }) => rest;
+    // Each fixture is its own git commit, so only its legacy revision may differ (a commit crossing a second).
+    const comparable = ({ durationMs, authority, ...rest }) => rest;
     assert.deepEqual(comparable(fromMcp), comparable(fromCli));
+    assert.equal(fromCli.authority.legacyRevision, (await state(cli)).legacyRevision.revision);
+    assert.equal(fromMcp.authority.legacyRevision, (await state(mcp)).legacyRevision.revision);
     for (const fixture of [cli, mcp]) {
       const files = await snapshot(fixture.migrationRoot);
       for (const relative of Object.keys(files)) {
@@ -24185,9 +24189,31 @@ browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row
     await assert.rejects(run([first, second, ...targets]), /result must be PASS/);
     const authored = [{ ...first, result: "PASS" },
       { ...second, result: "PASS", interactions: [{ ...second.interactions[0], actual: "Signed in was reported.", outcome: "PASS" }] }];
+    // Format 21, target-system: the target design system owns styling, so no legacy pixel parity,
+    // but every structural, interaction and scroll requirement still binds.
+    assert.equal(recorded.designSource, "target-system");
     const comparisons = await run([...authored, ...targets]);
-    assert.deepEqual(comparisons.map((item) => [item.appearanceClaimId, item.pixels.diffPixels, item.scroll.result]),
+    assert.deepEqual(comparisons.map((item) => [item.appearanceClaimId, item.pixels, item.authority, item.scroll.result]),
+      [["APP-1", null, "TARGET_DESIGN_SYSTEM", "PASS"], ["APP-2", null, "TARGET_DESIGN_SYSTEM", "PASS"]]);
+    await assert.rejects(run([...authored, targets[0]]), /interaction 'UIX-1' was never exercised against the target runtime/);
+    await assert.rejects(run([...authored, targets[0], { ...targets[1], interactions: [{ ...targets[1].interactions[0], outcome: "FAIL" }] }]),
+      /outcome must be PASS/);
+    await assert.rejects(run([...authored, targets[0], { ...targets[1], capture: { ...targets[1].capture, colorScheme: "dark" } }]),
+      /VISUAL_CAPTURE_MISMATCH: 'APP-2' colorScheme differs/);
+    // legacy-runtime keeps pixel parity; figma-mcp keeps its pinned Figma context binding and acceptance rows.
+    const under = (designSource, digestField, rows = targets) => {
+      const authorityState = { ...recorded, designSource, artifactHashes: { ...recorded.artifactHashes, [visualAuthorityOf({ ...recorded, designSource }).contextFile]: "sha256:context" } };
+      return (baselineExtra = {}) => validateUiRuntimeEvidence({ evidence: { uiEvidence: [...authored,
+        ...rows.map((row) => ({ ...row, boundTo: { ...row.boundTo, ...(digestField ? { [digestField]: "sha256:context" } : {}) } }))], uiEvidenceLimitations: [] },
+      implementation: { traceIds: ["BR-1", "RR-1"] }, baseline: { ...baseline, ...baselineExtra }, sliceId: "slice-a", state: authorityState,
+      roots: { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot }, root,
+      implementationDigests: async () => ({ current: "impl", legacy: "impl" }) });
+    };
+    assert.deepEqual((await under("legacy-runtime", "visualContextDigest")()).map((item) => [item.appearanceClaimId, item.pixels.diffPixels, item.scroll.result]),
       [["APP-1", 0, "PASS"], ["APP-2", 0, "PASS"]]);
+    await assert.rejects(under("figma-mcp", null)(), /boundTo\.figmaContextDigest is stale/);
+    await assert.rejects(under("figma-mcp", "figmaContextDigest")({ visualRows: [{ id: "VR-1", uiBehaviorId: uiBehavior.id, state: "default" }] }),
+      /VISUAL_COVERAGE_MISSING: acceptance row 'VR-1' has no bound TARGET capture/);
   } finally {
     await fixture.cleanup();
     await server.close();

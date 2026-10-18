@@ -221,6 +221,34 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
     }
   });
 
+test("under OS isolation a verifier in a broad directory (an ancestor of HOME) seals its script and node_modules, not HOME",
+  { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-broad-"));
+    try {
+      const broad = path.join(root, "broad"), home = path.join(broad, "home");
+      const { target, bin, verifier } = await installedCandidate(root, broad);
+      const dependency = path.join(broad, "node_modules", "driver.mjs");
+      await mkdir(path.dirname(dependency), { recursive: true });
+      await writeFile(dependency, "export default 1;\n");
+      await mkdir(home);
+      const session = path.join(home, ".local/share/opencode/session.json");
+      const attempt = (label, command) => `(${command}) 2>/dev/null && echo ${label}=WRITABLE >> observed || echo ${label}=DENIED >> observed`;
+      await writeFile(path.join(bin, "opencode"), ["#!/bin/sh",
+        attempt("session", `mkdir -p '${path.dirname(session)}' && echo '{}' > '${session}'`),
+        attempt("verifier", `echo 'process.exit(0)' > '${verifier}'`),
+        attempt("dependency", `echo 'export default 0;' > '${dependency}'`), ""].join("\n"), { mode: 0o755 });
+      assert.throws(() => execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
+        "--module", "auth", "--target", "auth", "--output", path.join(root, "reports")],
+      { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, HOME: home, PATH: bin + path.delimiter + process.env.PATH } }),
+      (error) => !/modified|Agent left/.test(String(error.stderr)));
+      assert.deepEqual((await readFile(path.join(target, "observed"), "utf8")).trim().split("\n"),
+        ["session=WRITABLE", "verifier=DENIED", "dependency=DENIED"]);
+      assert.equal(await readFile(session, "utf8"), "{}\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 test("black-box acceptance refuses an unverified installed engine before starting the agent", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-bundle-"));
   try {

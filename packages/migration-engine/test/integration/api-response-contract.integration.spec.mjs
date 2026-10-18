@@ -223,14 +223,19 @@ test("format 21 rechecks the declared roots, binds slice evidence to every trace
         scenarioIds: slice.scenarioIds, capabilityIds: slice.capabilityIds, traceIds: slice.traceIds,
         commands: [{ command: "node --test target", exitCode: 0, executedAt: new Date().toISOString(), runner,
           outputPath: path.relative(target, file).replaceAll(path.sep, "/"), outputDigest: sha(output) }],
-        scenarios: slice.acceptanceScenarios, uiEvidence: [], uiEvidenceLimitations: [], residualRisks: [] });
+        scenarios: slice.acceptanceScenarios, uiEvidence: [], uiEvidenceLimitations: [], residualRisks: [],
+        // Citations of shared source the next slice extends: not evidence VERIFY_SLICES pinned.
+        sources: await Promise.all(SHARED.map(async (file) => ({ reference: file, hash: sha(await readFile(path.join(target, file))) }))) });
     };
     const tap = (lines, failing = []) => `TAP version 13\n${lines.map((line, index) =>
       `${failing.includes(line) ? "not ok" : "ok"} ${index + 1} - Response: ${line}`).join("\n")}\n`;
+    const SHARED = ["src/routes.ts", "src/sessions.test.ts"];
     for (const [slice, owed] of [[slices[0], SIGN_IN], [slices[1], SIGN_OUT]]) {
       await writeFile(path.join(target, `src/${slice.id}.ts`), "export {};\n");
+      // Each slice adds its own route and its own test case to the same two shared files.
+      for (const file of SHARED) await writeFile(path.join(target, file), `${await readFile(path.join(target, file), "utf8").catch(() => "")}// ${slice.id}\n`);
       await author(`slices/${slice.id}.json`, { id: slice.id, implementationStatus: "COMPLETE", requirementIds: slice.requirementIds,
-        scenarioIds: slice.scenarioIds, traceIds: slice.traceIds, capabilityIds: slice.capabilityIds, changedFiles: [`src/${slice.id}.ts`],
+        scenarioIds: slice.scenarioIds, traceIds: slice.traceIds, capabilityIds: slice.capabilityIds, changedFiles: [`src/${slice.id}.ts`, ...SHARED],
         decisions: ["Implemented in the target architecture."], checks: ["typecheck"] });
       await runTo("VERIFY_SLICES");
       if (slice.id === "slice-a") {
@@ -251,7 +256,7 @@ test("format 21 rechecks the declared roots, binds slice evidence to every trace
         const pinned = path.join(record, "evidence/slice-a/result.json");
         const [output, result, before] = [await readFile(shared), await readFile(pinned), await readFile(path.join(record, "state.json"))];
         await writeFile(shared, tap(SIGN_OUT));
-        assert.match((await runTo("VERIFY_SLICES")).reason, /COMPLETED_EVIDENCE_CHANGED: .*slice-a \S*evidence\/slice-a\/commands\/test\.txt.*restore those bytes/);
+        assert.match((await runTo("VERIFY_SLICES")).reason, /COMPLETED_EVIDENCE_CHANGED: .*slice-a evidence commands\[0\]\.outputDigest does not match '\S*evidence\/slice-a\/commands\/test\.txt'.*restore those bytes/);
         await writeFile(shared, output);
         await writeFile(pinned, result.toString().replace("node --test target", "node --test target/all"));
         const refused = call("run", ["auth", "--mode", "auto", "--json"]);

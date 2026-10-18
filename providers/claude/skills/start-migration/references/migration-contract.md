@@ -2455,9 +2455,10 @@ using stale downstream evidence, and every command -- reopen and rework
 included -- refuses until the validated bytes are restored (for example from
 version control). Completed work is never rewritten to fit later work: the
 active checkpoint authors only its own artifacts, and each slice records its
-command output in its own file. A completed slice's recorded outputs are
-rechecked against their digests at every later slice advance
-(`COMPLETED_EVIDENCE_CHANGED`). To correct completed work, restore it first,
+command output in its own file. A completed slice's captured command outputs
+and UI proof and screenshot files are rechecked against their digests at every
+later slice advance (`COMPLETED_EVIDENCE_CHANGED`); shared source and test
+files it merely cites are not frozen, and a later slice may extend them. To correct completed work, restore it first,
 then use the recovery transition that fits (`--rework-slice`, `--reopen-ui`,
 `--reopen-complete`, `--reopen-discovery`). Refresh reopens from
 `DISCOVER_LEGACY`, preserves authored files, records invalidated artifacts, and

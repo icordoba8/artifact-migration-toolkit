@@ -132,39 +132,33 @@ export const assertEvidenceReference = async (entry, label, roots, options = {})
 /**
  * A completed slice's result.json is hash-pinned, but the outputs it cites live
  * in the repositories, where a later slice can overwrite them -- one shared
- * output file re-run for the next slice. Every recorded digest of every
- * completed slice is rechecked at every slice-phase advance, so that
+ * output file re-run for the next slice. At every slice-phase advance the
+ * evidence VERIFY_SLICES itself pinned -- captured command outputs and UI
+ * proof/screenshot files -- is rechecked with the same checks, so that
  * overwrite is refused at once, naming the slice it belongs to, instead of
  * surfacing at FINALIZE (which revalidates every slice in full) after more
- * evidence was built on it.
- * ponytail: a `{reference, hash}` file that no longer resolves is left to the
- * slice's own FINALIZE revalidation; only command outputs must still exist.
+ * evidence was built on it. Any other `{reference, hash}` a result cites (a
+ * route or test file the next slice may legitimately extend) is not frozen.
+ * ponytail: a UI file that no longer resolves is left to the slice's own
+ * FINALIZE revalidation; only command outputs must still exist.
  */
 export const assertCompletedEvidenceIntact = async (root, completedSlices, roots) => {
   const changed = [];
-  const walk = async (node, sliceId) => {
-    if (Array.isArray(node)) {
-      for (const item of node) await walk(item, sliceId);
-      return;
-    }
-    if (!node || typeof node !== "object") return;
-    for (const [pathKey, digestKey] of [["outputPath", "outputDigest"], ["reference", "hash"]]) {
-      const claim = typeof node[digestKey] === "string" ? evidencePathClaim(node[pathKey]) : null;
-      if (!claim) continue;
-      const resolved = (await resolveEvidencePath(claim, roots)) ??
-        ((await fileExists(path.resolve(root, claim))) ? path.resolve(root, claim) : null);
-      if (resolved ? !(await fileIdentityMatches(node[digestKey], resolved)) : pathKey === "outputPath") {
-        changed.push(`${sliceId} ${claim}`);
-      }
-    }
-    for (const value of Object.values(node)) await walk(value, sliceId);
-  };
+  const recheck = (assertion) => assertion.catch((error) => {
+    if (error.validationCode !== "EVIDENCE_REFERENCE_MISSING") changed.push(error.message);
+  });
   for (const sliceId of completedSlices) {
-    await walk(await readJson(path.join(root, "evidence", sliceId, "result.json"), `Evidence for ${sliceId}`), sliceId);
+    const evidence = await readJson(path.join(root, "evidence", sliceId, "result.json"), `Evidence for ${sliceId}`);
+    await assertCommandResults(evidence.commands, `${sliceId} evidence commands`, roots).catch((error) => changed.push(error.message));
+    for (const [index, record] of (Array.isArray(evidence.uiEvidence) ? evidence.uiEvidence : []).entries()) {
+      const label = `${sliceId} UI evidence[${index}]`;
+      if (record?.reference) await recheck(assertEvidenceReference(record, label, roots));
+      if (record?.screenshot?.reference) await recheck(assertEvidenceReference(record.screenshot, `${label}.screenshot`, roots));
+    }
   }
   if (changed.length > 0) {
     throw Object.assign(new Error(
-      `COMPLETED_EVIDENCE_CHANGED: evidence recorded by completed slices no longer matches its digest: ${changed.join(", ")}. A completed slice's evidence is immutable: restore those bytes, and record the active slice's output in its own new file. Nothing was written.`,
+      `COMPLETED_EVIDENCE_CHANGED: evidence recorded by completed slices no longer matches what VERIFY_SLICES pinned: ${changed.join(" ")} A completed slice's evidence is immutable: restore those bytes, and record the active slice's output in its own new file. Nothing was written.`,
     ), { validationCode: "COMPLETED_EVIDENCE_CHANGED" });
   }
 };

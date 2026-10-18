@@ -16,6 +16,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdir, readFile, realpath, mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { verifyBundle } from "../providers/install-support.mjs";
 
@@ -213,11 +214,19 @@ async function score(options, root, output, report) {
   const skillsBefore = await treeDigest(skills);
   // The report directory exists before the agent does, so it can be sealed too.
   await mkdir(output, { recursive: true });
-  // A verifier directory that does not hold the consumer is sealed whole, so
-  // its own dependencies (a browser driver) are as untouchable as its script.
+  // A verifier in its own directory is sealed whole, so its own dependencies (a
+  // browser driver) are as untouchable as its script. A broad directory -- one
+  // holding the consumer, HOME (the provider's session files) or the temp dir,
+  // such as HOME or / -- seals only the script and its sibling node_modules.
+  // ponytail: a broad-directory verifier's dependency resolved from anywhere
+  // else (a parent node_modules, NODE_PATH) is not sealed; give the verifier
+  // its own directory for that.
   const verifierDir = path.dirname(verifier);
-  const sealedVerifier = root.startsWith(verifierDir + path.sep) ? verifier : verifierDir;
-  const readOnly = [...new Set(await Promise.all([installed.store, sealedVerifier, receiptPath, markerPath, skills, output]
+  const writable = [root, ...(await Promise.all([os.homedir(), os.tmpdir()].map((dir) => realpath(dir).catch(() => dir))))];
+  const broad = writable.some((dir) => dir === verifierDir || dir.startsWith(path.join(verifierDir, path.sep)));
+  const verifierModules = await realpath(path.join(verifierDir, "node_modules")).catch(() => null);
+  const sealedVerifier = broad ? [verifier, verifierModules].filter(Boolean) : [verifierDir];
+  const readOnly = [...new Set(await Promise.all([installed.store, ...sealedVerifier, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],

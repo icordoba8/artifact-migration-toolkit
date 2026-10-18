@@ -28,9 +28,11 @@ import {
 import {
   appendDurably,
   appendHistory,
+  assertCompletedEvidenceIntact,
   assertUnanchoredHistoryTail,
   atomicWrite,
   digestArtifactHashes,
+  fileIdentity,
   hashHistoryEvent,
   HISTORY_FILE,
   INTEGRITY_FILE,
@@ -383,4 +385,34 @@ test("store: the semantic artifact pin ignores provider and session but nothing 
   await write([{ provider: "claude", sessionId: "2", step: "submit" }]);
   assert.notEqual(await pinDigest(root, "evidence.json#semantic"), pinned);
   await assert.rejects(pinDigest(root, "../escape.json"), /escapes its declared root/);
+});
+
+test("store: a completed slice's pinned command output and UI files are immutable; shared source it merely cites is not", async (t) => {
+  const root = await scratch(t);
+  const roots = { legacyRoot: path.join(root, "legacy"), targetRoot: path.join(root, "target") };
+  const at = (relative) => path.join(roots.targetRoot, relative);
+  const files = { "out/s1.txt": "ok 1\n", "ui/proof.json": "{}\n", "ui/shot.png": "png", "src/routes.jsx": "<Route a/>\n", "src/routes.test.jsx": "test(a)\n" };
+  for (const [relative, text] of Object.entries(files)) {
+    await mkdir(path.dirname(at(relative)), { recursive: true });
+    await writeFile(at(relative), text);
+  }
+  const cite = async (reference) => ({ reference, hash: await fileIdentity(at(reference)) });
+  await mkdir(path.join(root, "store/evidence/s1"), { recursive: true });
+  await writeFile(path.join(root, "store/evidence/s1/result.json"), JSON.stringify({
+    commands: [{ command: "node --test", exitCode: 0, executedAt: new Date().toISOString(), runner: "node", outputPath: "out/s1.txt", outputDigest: await fileIdentity(at("out/s1.txt")) }],
+    uiEvidence: [{ ...(await cite("ui/proof.json")), screenshot: await cite("ui/shot.png") }],
+    sources: [await cite("src/routes.jsx"), await cite("src/routes.test.jsx")],
+  }));
+  const check = () => assertCompletedEvidenceIntact(path.join(root, "store"), ["s1"], roots);
+  // The next slice adds its route and its test case to the same shared files.
+  await writeFile(at("src/routes.jsx"), "<Route a/>\n<Route b/>\n");
+  await writeFile(at("src/routes.test.jsx"), "test(a)\ntest(b)\n");
+  await check();
+  for (const [relative, label] of [["out/s1.txt", /s1 evidence commands\[0\]\.outputDigest/], ["ui/proof.json", /s1 UI evidence\[0\]\.hash/], ["ui/shot.png", /s1 UI evidence\[0\]\.screenshot\.hash/]]) {
+    await writeFile(at(relative), "overwritten by the next slice\n");
+    await assert.rejects(check(), (error) => error.validationCode === "COMPLETED_EVIDENCE_CHANGED" && label.test(error.message), relative);
+    await writeFile(at(relative), files[relative]);
+  }
+  await rm(at("out/s1.txt"));
+  await assert.rejects(check(), /COMPLETED_EVIDENCE_CHANGED: .*s1 evidence commands\[0\]\.outputPath 'out\/s1\.txt' does not exist/);
 });

@@ -73,9 +73,12 @@ report directory as argv[3] (for its own artifacts, such as screenshots); it
 must exit nonzero unless the migrated behavior matches an independently
 prepared legacy/reference contract. Pin the exact verifier SHA-256 and keep it
 out of agent access. The runner rejects changes to the marker or verifier.
-Keep the verifier in a directory of its own: when that directory does not
-contain the consumer, the runner seals the whole directory read-only, so the
-verifier's dependencies (a browser driver) are protected like its script.
+Keep the verifier in a directory of its own: the runner then seals the whole
+directory read-only, so the verifier's dependencies (a browser driver) are
+protected like its script. A broad directory -- one that contains the consumer,
+HOME or the temp directory, such as HOME or `/` -- is never sealed whole (the
+provider writes its session files there); only the verifier script and its
+sibling `node_modules` are.
 
 Ensure the candidate skills **and the candidate engine runtime** are already
 installed in the disposable consumer. Before launching an agent, this runner
