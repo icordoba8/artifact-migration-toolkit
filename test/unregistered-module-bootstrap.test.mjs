@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { getMigrationStatus } from "../packages/migration-engine/src/lifecycle/status.mjs";
+import { getMigrationStatus } from "../packages/migration-engine/src/lifecycle/index.mjs";
 
 const cli = fileURLToPath(new URL("../packages/migration-engine/src/cli/discover-module.mjs", import.meta.url));
 const spec = [
