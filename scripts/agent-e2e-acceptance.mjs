@@ -9,7 +9,7 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, realpath, mkdir, writeFile } from "node:fs/promises";
+import { readdir, readFile, realpath, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const fail = (message) => { throw new Error(message); };
@@ -32,8 +32,23 @@ const argsOf = (argv) => {
     target: options["--target"], goal, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
 };
 
+const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
+/** Digest of every installed skill byte: the agent must never patch the toolkit it is judged on. */
+const treeDigest = async (dir) => {
+  const hash = createHash("sha256");
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  for (const entry of entries.filter(e => e.isFile()).sort((a, b) =>
+    path.join(a.parentPath, a.name).localeCompare(path.join(b.parentPath, b.name)))) {
+    const file = path.join(entry.parentPath, entry.name);
+    hash.update(path.relative(dir, file)).update("\0").update(await readFile(file)).update("\0");
+  }
+  return hash.digest("hex");
+};
+
 const run = ({ command, argv, cwd, timeoutMs }) => new Promise((resolve, reject) => {
-  const child = spawn(command, argv, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+  // PWD too: OpenCode resolves its workspace from $PWD, and an inherited one
+  // points the agent at the toolkit checkout instead of the consumer.
+  const child = spawn(command, argv, { cwd, env: { ...process.env, PWD: cwd }, stdio: ["ignore", "pipe", "pipe"] });
   const stdout = [], stderr = [];
   let total = 0, timedOut = false, overflow = false, done = false;
   const timeout = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
@@ -102,6 +117,8 @@ async function main() {
   const invocation = '/start-migration ' + options.module + ' --target ' + options.target +
     ' --mode auto --ponytail full --design-source target-system';
   const invocationCommand = commandFor(options.provider, invocation, root);
+  const skills = path.join(root, SKILL_DIRS[options.provider]);
+  const skillsBefore = await treeDigest(skills);
   const startedAt = new Date().toISOString();
   const agent = await run({ ...invocationCommand, cwd: root, timeoutMs: options.timeoutMs });
   await mkdir(output, { recursive: true });
@@ -111,19 +128,23 @@ async function main() {
     fail("Agent modified the pinned acceptance marker (transcripts preserved)");
   if (createHash("sha256").update(await readFile(verifier)).digest("hex") !== verifierSha256)
     fail("Independent verifier changed during the agent run (transcripts preserved)");
+  if (await treeDigest(skills) !== skillsBefore)
+    fail("Agent modified the installed skills (transcripts preserved)");
   // The receipt is produced by the real skill runtime, never by this harness.
   const receipt = JSON.parse(await readFile(path.join(root, ".artifact-migration-tools",
     options.provider + ".json"), "utf8"));
   const cli = receipt.commands?.["artifact-migration-discover"];
   if (!Array.isArray(cli) || cli.length < 2 || !path.isAbsolute(cli[0]) || !path.isAbsolute(cli[1]))
     fail("Installed receipt did not provide a verified absolute discover command");
-  const statusRun = await run({ command: cli[0], argv: [...cli.slice(1), options.module, "--status"],
+  const statusRun = await run({ command: cli[0], argv: [...cli.slice(1), options.target, "--status"],
     cwd: root, timeoutMs: 120000 });
   await writeFile(path.join(output, "engine-status.stdout.log"), statusRun.stdout);
   await writeFile(path.join(output, "engine-status.stderr.log"), statusRun.stderr);
   if (statusRun.code !== 0) fail("Engine status failed after agent invocation; logs preserved");
   const status = JSON.parse(statusRun.stdout);
   const state = JSON.parse(await readFile(record, "utf8"));
+  if (state.targetModule !== options.target || status.target !== options.target)
+    fail("Migration record does not belong to the requested --target");
   const finished = state.currentStep === "COMPLETE" && status.currentStep === "COMPLETE";
   const bootstrapped = state.completedSteps?.includes("RESOLVE") &&
     status.progressChecklist?.includes("DISCOVER_LEGACY") && status.currentStep !== "RESOLVE";

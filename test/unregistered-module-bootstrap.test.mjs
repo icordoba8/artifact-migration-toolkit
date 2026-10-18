@@ -101,6 +101,11 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
     execFileSync("git", ["add", "-A"], { cwd: root });
     execFileSync("git", ["-c", "user.name=Acceptance Test", "-c",
       "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+    const hint = spawnSync(process.execPath,
+      [fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+        "partners", "--registry", registry, "--target", "partner-registry", "--mode", "auto"],
+      { cwd: target, encoding: "utf8" });
+    assert.match(hint.stdout, /artifact-migration-discover partners --target partner-registry --openspec-proposal-stdin/);
     const bootstrap = spawnSync(process.execPath, [cli, "partners", "--registry", registry,
       "--target", "partner-registry", "--mode", "auto", "--openspec-proposal-stdin"],
     { cwd: target, input: spec.replaceAll("PARTNERS-", "PARTNERREGISTRY-"), encoding: "utf8" });
@@ -110,6 +115,10 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
       "DISCOVER_LEGACY");
     await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
       /not registered\. .*recorded as 'partner-registry': use \/start-migration partner-registry/);
+    // A corrupt record might be this name's: never NOT_STARTED.
+    await writeFile(path.join(target, ".agents/knowledge/migrations/modules/partner-registry/state.json"), "{");
+    await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
+      /'partner-registry' has no readable state/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

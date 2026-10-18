@@ -337,9 +337,9 @@ export const runDiscoverCli = async (
     const { outcome } = nextOutcome({ preview, result });
     stdout.write(
       `FORMAT_UPGRADED: ${result.from} -> ${result.to} (domain ${preview.formatUpgrade.domain}) at revision ${result.state.revision}; ` +
-        `the lifecycle resumes on the next invocation. Rerun /start-migration ${options.moduleName}\n`,
+        `the lifecycle resumes on the next invocation. Rerun ${result.state.nextCommand ?? `/start-migration ${options.moduleName}`}\n`,
     );
-    stdout.write(directive(options, outcome, emitDirective));
+    stdout.write(directive(options, outcome, emitDirective, result.state.nextCommand ?? undefined));
     process.exitCode = exitCodeFor(outcome);
     return { preview, result, formatUpgraded: true };
   }

@@ -19,6 +19,7 @@ import {
 import { gitRevision } from "../shared/index.mjs";
 import { fileExists, migrationRoot, readOptionalJson, readRegistry, statePathFor } from "../store/index.mjs";
 import { visualAuthorityOf } from "../visual/index.mjs";
+import { initJournalFor } from "./initialization.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { activeArtifact, resumeGuidance } from "./checkpoints.mjs";
 import { readContext } from "./context.mjs";
@@ -52,24 +53,32 @@ const notStarted = (moduleName, target = null) => {
   };
 };
 
-// Artifacts without state are a damaged record, never a fresh module -- the
-// same refusal preview gives. An unregistered record is keyed by its module.
+// Artifacts without state, or an unfinished initialization journal, are a
+// damaged record, never a fresh module -- the same refusal preview gives.
 const refuseRecordWithoutState = async (targetRoot, recordKey) => {
   const root = migrationRoot(targetRoot, recordKey);
   if (await fileExists(root))
     throw new Error(`Migration initialization artifacts already exist without state at '${root}'. Refusing to overwrite or repair them manually.`);
+  const journal = initJournalFor(targetRoot, recordKey);
+  if (await fileExists(journal))
+    throw new Error(`Migration initialization for '${recordKey}' is unfinished (journal ${journal}); it is not NOT_STARTED. Rerun the bootstrap so the engine recovers it.`);
 };
 
 // A legacy name whose migration is recorded under another target is not a fresh
-// module: refuse, naming the record's own command. ponytail: one readdir of
-// the records directory per unregistered status; index records if it grows.
+// module: refuse, naming that record. A record whose state cannot be read might
+// be this name's, so it fails closed too. ponytail: one readdir of the records
+// directory per unregistered status; index records if it grows.
 const refuseLegacyNameOfRecord = async (targetRoot, moduleName, error) => {
   const records = path.dirname(migrationRoot(targetRoot, moduleName));
-  const keys = await readdir(records).catch((e) => { if (e.code === "ENOENT") return []; throw e; });
-  for (const key of keys) {
-    const state = await readOptionalJson(statePathFor(targetRoot, key)).catch(() => null);
-    if (state?.legacyModule === moduleName || state?.legacySources?.includes?.(moduleName))
-      throw new Error(`${error.message} Its migration is recorded as '${key}': use ${state.nextCommand ?? `/start-migration ${key}`}.`);
+  const entries = await readdir(records, { withFileTypes: true }).catch((e) => { if (e.code === "ENOENT") return []; throw e; });
+  for (const key of entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)) {
+    let state;
+    try { state = await readOptionalJson(statePathFor(targetRoot, key)); }
+    catch { state = undefined; }
+    if (!state)
+      throw new Error(`${error.message} Migration record '${key}' has no readable state, so '${moduleName}' cannot be reported as NOT_STARTED.`);
+    if (state.legacyModule === moduleName || state.legacySources?.includes?.(moduleName))
+      throw new Error(`${error.message} Its migration is recorded as '${key}': use /start-migration ${key}.`);
   }
 };
 
