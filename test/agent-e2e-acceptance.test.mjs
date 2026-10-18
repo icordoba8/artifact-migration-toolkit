@@ -118,7 +118,7 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
       } }));
     const tamperPath = path.join(release, "packages/migration-engine/package.json");
     await writeFile(path.join(bin, "opencode"),
-      "#!/bin/sh\nprintf x >> \\"$TEST_TAMPER_FILE\\"\n", { mode: 0o755 });
+      '#!/bin/sh\nprintf x >> "$TEST_TAMPER_FILE"\n', { mode: 0o755 });
     try {
       execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
         "--module", "auth", "--target", "auth", "--output", path.join(root, "tamper-reports")],
