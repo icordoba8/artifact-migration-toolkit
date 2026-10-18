@@ -83,3 +83,34 @@ test("fresh unregistered module bootstrap refuses invalid OpenSpec without write
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a bootstrap named by its legacy module continues on the target-keyed record", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "legacy-named bootstrap "));
+  const legacy = path.join(root, "legacy");
+  const target = path.join(root, "target");
+  const registry = path.join(target, ".agents/knowledge/migrations/registry.json");
+  try {
+    await mkdir(path.join(legacy, "partners"), { recursive: true });
+    await mkdir(path.dirname(registry), { recursive: true });
+    await writeFile(path.join(legacy, "partners/marker.txt"), "partner fixture\n");
+    await writeFile(path.join(target, "package.json"), '{"name":"legacy-named-consumer","private":true}\n');
+    await writeFile(registry, JSON.stringify({ version: 1, projects: {
+      legacy: { root: path.relative(path.dirname(registry), legacy) },
+      target: { root: path.relative(path.dirname(registry), target) } }, modules: {} }) + "\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["add", "-A"], { cwd: root });
+    execFileSync("git", ["-c", "user.name=Acceptance Test", "-c",
+      "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+    const bootstrap = spawnSync(process.execPath, [cli, "partners", "--registry", registry,
+      "--target", "partner-registry", "--mode", "auto", "--openspec-proposal-stdin"],
+    { cwd: target, input: spec.replaceAll("PARTNERS-", "PARTNERREGISTRY-"), encoding: "utf8" });
+    assert.equal(bootstrap.status, 0, bootstrap.stderr + bootstrap.stdout);
+    assert.match(bootstrap.stdout, /^loop: CONTINUE next=\/start-migration partner-registry$/m);
+    assert.equal((await getMigrationStatus({ registryPath: registry, moduleName: "partner-registry" })).currentStep,
+      "DISCOVER_LEGACY");
+    await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
+      /not registered\. .*recorded as 'partner-registry': use \/start-migration partner-registry/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

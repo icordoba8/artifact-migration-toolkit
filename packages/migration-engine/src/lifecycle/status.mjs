@@ -2,6 +2,7 @@
  * Lifecycle: the status projection and the resumable-record validation. Moved
  * verbatim from `resumable-migration.mjs` (Track A8).
  */
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import {
   assertDiscoveryCompletenessFormat,
@@ -59,6 +60,19 @@ const refuseRecordWithoutState = async (targetRoot, recordKey) => {
     throw new Error(`Migration initialization artifacts already exist without state at '${root}'. Refusing to overwrite or repair them manually.`);
 };
 
+// A legacy name whose migration is recorded under another target is not a fresh
+// module: refuse, naming the record's own command. ponytail: one readdir of
+// the records directory per unregistered status; index records if it grows.
+const refuseLegacyNameOfRecord = async (targetRoot, moduleName, error) => {
+  const records = path.dirname(migrationRoot(targetRoot, moduleName));
+  const keys = await readdir(records).catch((e) => { if (e.code === "ENOENT") return []; throw e; });
+  for (const key of keys) {
+    const state = await readOptionalJson(statePathFor(targetRoot, key)).catch(() => null);
+    if (state?.legacyModule === moduleName || state?.legacySources?.includes?.(moduleName))
+      throw new Error(`${error.message} Its migration is recorded as '${key}': use ${state.nextCommand ?? `/start-migration ${key}`}.`);
+  }
+};
+
 export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   let registryData;
   let resolved;
@@ -67,7 +81,9 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   } catch (error) {
     if (error.message !== `Module '${moduleName}' is not registered. Supply --target <target-module>.`)
       throw error;
-    await refuseRecordWithoutState((await readRegistry(registryPath)).targetRoot, moduleName);
+    const { targetRoot } = await readRegistry(registryPath);
+    await refuseRecordWithoutState(targetRoot, moduleName);
+    await refuseLegacyNameOfRecord(targetRoot, moduleName, error);
     return notStarted(moduleName);
   }
   let context;

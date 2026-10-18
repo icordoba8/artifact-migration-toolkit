@@ -170,12 +170,16 @@ const renderSliceAmendment = (amendment) =>
       `  preserves prior record as ${amendment.preservesAs}\n`
     : "";
 
-const directive = (options, outcome, emit) =>
+// `next` is the record's own nextCommand when one exists: a bootstrap named by
+// its legacy module persists a target-keyed record, and the legacy name is a
+// dead end for the next invocation.
+const directive = (options, outcome, emit, next) =>
   emit
     ? renderLoopDirective({
         moduleName: options.moduleName,
         mode: options.mode,
         outcome,
+        next,
       })
     : "";
 
@@ -369,7 +373,8 @@ export const runDiscoverCli = async (
   // set, and no second continuation policy: `nextOutcome` reads the record the
   // bootstrap just wrote, and `--mode step` still renders nothing.
   stdout.write(
-    directive(options, nextOutcome({ preview, result }).outcome, emitDirective),
+    directive(options, nextOutcome({ preview, result }).outcome, emitDirective,
+      result.state.nextCommand ?? undefined),
   );
   return { preview, result };
 };
