@@ -174,6 +174,33 @@ test("an agent that leaves no readable engine status still gets a fail-closed re
   }
 });
 
+test("ordinary first-time record directory creation is not a replacement event", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-first-record-"));
+  try {
+    const { target, bin } = await installedCandidate(root);
+    await writeFile(path.join(bin, "opencode"), [
+      "#!/bin/sh",
+      "mkdir -p .agents/knowledge/migrations/modules/auth",
+      "printf first > .agents/knowledge/migrations/modules/auth/marker",
+      "exit 0", "",
+    ].join("\n"), { mode: 0o755 });
+    const output = path.join(root, "reports");
+    assert.throws(() => execFileSync(process.execPath, [script.pathname,
+      "--provider", "opencode", "--cwd", target, "--module", "auth",
+      "--target", "auth", "--output", output, "--isolation", "none"],
+    { encoding: "utf8", timeout: 60000, stdio: "pipe",
+      env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+    (error) => /Engine status failed/.test(String(error.stderr)));
+    const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+    assert.equal(report.verdict, "FAIL"); // fake provider did not bootstrap a real engine record
+    assert.deepEqual(report.security.recordContinuity.violations, []);
+    assert.equal(report.security.recordContinuity.targetDirectoryRenameEvents, 1);
+    assert.equal(report.security.certified, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("record deletion and recreation is detected by a trusted observer and never certified", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-record-continuity-"));
   try {
