@@ -118,8 +118,8 @@ async function main() {
   const invocation = '/start-migration ' + options.module + ' --target ' + options.target +
     ' --mode auto --ponytail full --design-source target-system';
   const invocationCommand = commandFor(options.provider, invocation, root);
-  const skills = path.join(root, SKILL_DIRS[options.provider]);
-  const skillsBefore = await treeDigest(skills);
+  // The receipt is the installation precondition. Check it before walking
+  // provider files so a fresh consumer reports a useful error, not ENOENT.
   // The receipt is produced by the real skill runtime at install, never by this
   // harness; pin it now so the agent cannot redirect the status command below.
   const receiptPath = path.join(root, ".artifact-migration-tools", options.provider + ".json");
@@ -151,6 +151,8 @@ async function main() {
       !path.isAbsolute(installedDiscover[0]) || installedDiscover[1] !== expectedDiscover ||
       !packageJson.bin?.["artifact-migration-discover"])
     fail("ACCEPTANCE_PRECONDITION: Discover command is not the one from the verified release.");
+  const skills = path.join(root, SKILL_DIRS[options.provider]);
+  const skillsBefore = await treeDigest(skills);
   const startedAt = new Date().toISOString();
   const agent = await run({ ...invocationCommand, cwd: root, timeoutMs: options.timeoutMs });
   await mkdir(output, { recursive: true });
