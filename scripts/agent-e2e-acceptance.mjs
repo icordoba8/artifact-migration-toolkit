@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdir, readFile, realpath, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { verifyBundle } from "../providers/install-support.mjs";
 
 const fail = (message) => { throw new Error(message); };
 const argsOf = (argv) => {
@@ -122,7 +123,34 @@ async function main() {
   // The receipt is produced by the real skill runtime at install, never by this
   // harness; pin it now so the agent cannot redirect the status command below.
   const receiptPath = path.join(root, ".artifact-migration-tools", options.provider + ".json");
-  const receiptBytes = await readFile(receiptPath, "utf8");
+  const receiptBytes = await readFile(receiptPath, "utf8").catch(error => {
+    if (error.code === "ENOENT") fail(
+      "ACCEPTANCE_PRECONDITION: The installed " + options.provider +
+      " runtime receipt is missing at " + receiptPath +
+      ". Install the exact candidate toolkit into this disposable consumer before running acceptance.",
+    );
+    throw error;
+  });
+  const installed = JSON.parse(receiptBytes);
+  if (installed.provider !== options.provider ||
+      path.resolve(installed.root ?? "") !== root ||
+      typeof installed.release !== "string" || !path.isAbsolute(installed.release) ||
+      typeof installed.store !== "string" || !path.isAbsolute(installed.store) ||
+      !/^sha256:[a-f0-9]{64}$/.test(installed.pin ?? "") ||
+      installed.release !== path.join(installed.store, `${installed.toolkit?.version}-${installed.pin.slice(7)}`))
+    fail("ACCEPTANCE_PRECONDITION: The installed runtime receipt has a conflicting provider, root, release or pin.");
+  const manifest = await verifyBundle(installed.release, installed.pin);
+  if (JSON.stringify(manifest.toolkit) !== JSON.stringify(installed.toolkit))
+    fail("ACCEPTANCE_PRECONDITION: Installed receipt identity disagrees with the verified bundle.");
+  const packageJson = JSON.parse(await readFile(
+    path.join(installed.release, "packages/migration-engine/package.json"), "utf8"));
+  const expectedDiscover = path.join(installed.release, "packages/migration-engine",
+    packageJson.bin?.["artifact-migration-discover"] ?? "");
+  const installedDiscover = installed.commands?.["artifact-migration-discover"];
+  if (!Array.isArray(installedDiscover) || installedDiscover.length !== 2 ||
+      !path.isAbsolute(installedDiscover[0]) || installedDiscover[1] !== expectedDiscover ||
+      !packageJson.bin?.["artifact-migration-discover"])
+    fail("ACCEPTANCE_PRECONDITION: Discover command is not the one from the verified release.");
   const startedAt = new Date().toISOString();
   const agent = await run({ ...invocationCommand, cwd: root, timeoutMs: options.timeoutMs });
   await mkdir(output, { recursive: true });
@@ -136,7 +164,12 @@ async function main() {
     fail("Agent modified the installed skills (transcripts preserved)");
   if (await readFile(receiptPath, "utf8") !== receiptBytes)
     fail("Agent modified the installed runtime receipt (transcripts preserved)");
-  const receipt = JSON.parse(receiptBytes);
+  try {
+    await verifyBundle(installed.release, installed.pin);
+  } catch (error) {
+    fail("Agent left the installed runtime bundle modified or invalid (transcripts preserved): " + error.message);
+  }
+  const receipt = installed;
   const cli = receipt.commands?.["artifact-migration-discover"];
   if (!Array.isArray(cli) || cli.length < 2 || !path.isAbsolute(cli[0]) || !path.isAbsolute(cli[1]))
     fail("Installed receipt did not provide a verified absolute discover command");
