@@ -133,9 +133,10 @@ export const assertEvidenceReference = async (entry, label, roots, options = {})
  * A completed slice's result.json is hash-pinned, but the outputs it cites live
  * in the repositories, where a later slice can overwrite them -- one shared
  * output file re-run for the next slice. Every recorded digest of every
- * completed slice is rechecked, so that overwrite is refused at the next
- * advance, naming the slice it belongs to, instead of surfacing at FINALIZE
- * after more evidence was built on it.
+ * completed slice is rechecked at every slice-phase advance, so that
+ * overwrite is refused at once, naming the slice it belongs to, instead of
+ * surfacing at FINALIZE (which revalidates every slice in full) after more
+ * evidence was built on it.
  * ponytail: a `{reference, hash}` file that no longer resolves is left to the
  * slice's own FINALIZE revalidation; only command outputs must still exist.
  */
