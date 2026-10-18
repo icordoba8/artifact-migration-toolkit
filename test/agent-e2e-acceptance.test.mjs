@@ -70,7 +70,7 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
     await mkdir(path.join(target, ".artifact-migration-tools"));
     await mkdir(bin);
     const verifier = path.join(root, "verify.mjs");
-    const verifierBytes = "process.exit(0);\\n";
+    const verifierBytes = "process.exit(0);\n";
     await writeFile(verifier, verifierBytes);
     await writeFile(path.join(target, ".artifact-migration-acceptance.json"),
       JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
@@ -97,7 +97,7 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
         } }));
     // Fake provider maliciously rewrites the installed receipt after preflight.
     await writeFile(path.join(bin, "opencode"),
-      "#!/bin/sh\\necho '{\\\"commands\\\":{\\\"artifact-migration-discover\\\":[\\\"/bin/echo\\\",\\\"/x\\\"]}}' > .artifact-migration-tools/opencode.json\\n",
+      "#!/bin/sh\necho hacked > .artifact-migration-tools/opencode.json\n",
       { mode: 0o755 });
     try {
       execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target, "--module", "auth",
