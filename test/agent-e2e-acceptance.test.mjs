@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { buildRelease } from "../scripts/release.mjs";
+import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
 const failRun = argv => {
@@ -68,17 +70,39 @@ test("black-box acceptance refuses a runtime receipt rewritten by the agent", as
     await mkdir(path.join(target, ".artifact-migration-tools"));
     await mkdir(bin);
     const verifier = path.join(root, "verify.mjs");
-    await writeFile(verifier, "process.exit(0);\n");
+    const verifierBytes = "process.exit(0);\\n";
+    await writeFile(verifier, verifierBytes);
     await writeFile(path.join(target, ".artifact-migration-acceptance.json"),
       JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
-        verifierSha256: createHash("sha256").update("process.exit(0);\n").digest("hex") }));
-    await writeFile(path.join(target, ".artifact-migration-tools/opencode.json"), "{}");
-    // A hostile agent points the post-run status command at its own binary.
-    await writeFile(path.join(bin, "opencode"), "#!/bin/sh\necho '{\"commands\":{\"artifact-migration-discover\":[\"/bin/echo\",\"/x\"]}}' > .artifact-migration-tools/opencode.json\n", { mode: 0o755 });
+        verifierSha256: createHash("sha256").update(verifierBytes).digest("hex") }));
+
+    // A legitimate staged candidate is required: the runner verifies the
+    // installed bundle BEFORE invoking the provider. Only the agent's write
+    // after that preflight may be classified as a malicious mutation.
+    const candidate = await candidateReleaseRoot(root);
+    const staged = await buildRelease({ root: candidate, force: true });
+    const manifestBytes = await readFile(path.join(staged.stagingRoot, "release-manifest.json"));
+    const pin = "sha256:" + createHash("sha256").update(manifestBytes).digest("hex");
+    const store = path.join(root, "store");
+    const release = path.join(store, "0.0.1-" + pin.slice(7));
+    await mkdir(store);
+    await cp(staged.stagingRoot, release, { recursive: true });
+    const manifest = JSON.parse(manifestBytes.toString("utf8"));
+    const pkg = JSON.parse(await readFile(path.join(release, "packages/migration-engine/package.json"), "utf8"));
+    await writeFile(path.join(target, ".artifact-migration-tools/opencode.json"),
+      JSON.stringify({ provider: "opencode", root: target, store, release, pin,
+        toolkit: manifest.toolkit, commands: {
+          "artifact-migration-discover": [process.execPath,
+            path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-discover"])],
+        } }));
+    // Fake provider maliciously rewrites the installed receipt after preflight.
+    await writeFile(path.join(bin, "opencode"),
+      "#!/bin/sh\\necho '{\\\"commands\\\":{\\\"artifact-migration-discover\\\":[\\\"/bin/echo\\\",\\\"/x\\\"]}}' > .artifact-migration-tools/opencode.json\\n",
+      { mode: 0o755 });
     try {
       execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target, "--module", "auth",
         "--target", "auth", "--output", path.join(root, "reports")],
-        { encoding: "utf8", timeout: 10000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+        { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
       assert.fail("Acceptance should have refused the rewritten receipt");
     } catch (error) {
       if (error.code === "ERR_ASSERTION") throw error;
