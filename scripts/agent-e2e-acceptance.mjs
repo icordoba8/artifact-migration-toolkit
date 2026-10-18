@@ -14,6 +14,7 @@
  * only and its report says it is not security-certified.
  */
 import { spawn } from "node:child_process";
+import { watch } from "node:fs";
 import { createHash } from "node:crypto";
 import { readdir, readFile, realpath, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -105,6 +106,38 @@ const ISOLATE_SETUP = 'set -e; n=$1; shift; while [ "$n" -gt 0 ]; do mount --bin
   'exec setpriv --no-new-privs --inh-caps=-all --bounding-set=-all -- "$@"';
 const isolated = ({ command, argv }, readOnly) => ({ command: "unshare",
   argv: [...ISOLATE, "sh", "-c", ISOLATE_SETUP, "sh", String(readOnly.length), ...readOnly, command, ...argv] });
+
+/**
+ * Trusted, out-of-namespace witness for destructive changes to the module
+ * record directory. The engine legitimately replaces state.json atomically,
+ * but NEVER deletes and recreates modules/<target> to start its history over.
+ *
+ * This is a negative certification gate, not a durable anti-tamper ledger:
+ * filesystem notifications can coalesce or be lost. A positive result does
+ * not prove continuity against every adversarial filesystem operation.
+ */
+const observeRecordDirectory = async (root, target) => {
+  const parent = path.join(root, ".agents", "knowledge", "migrations", "modules");
+  await mkdir(parent, { recursive: true });
+  let targetRenames = 0;
+  const violations = [];
+  const watcher = watch(parent, { persistent: false }, (event, name) => {
+    if (event !== "rename") return;
+    const entry = name?.toString();
+    if (entry === target) {
+      targetRenames += 1;
+      if (targetRenames > 1) violations.push("The migration record directory was removed, replaced, or recreated after its initial creation.");
+    } else if (!entry || entry === path.basename(parent)) {
+      violations.push("The module record parent directory was removed or replaced.");
+    }
+  });
+  watcher.on("error", (error) => violations.push("Record continuity observer failed: " + error.message));
+  return {
+    close: () => watcher.close(),
+    snapshot: () => ({ targetDirectoryRenameEvents: targetRenames,
+      violations: [...new Set(violations)], assurance: "BEST_EFFORT_FILESYSTEM_EVENTS" }),
+  };
+};
 
 // Each host's headless permission model, granting only the installed
 // registration, the consumer's own Playwright MCP server (the skill's UI evidence
@@ -232,7 +265,10 @@ async function score(options, root, output, report) {
     readOnly: options.isolation === "os" ? readOnly : [],
     // Certified only when the agent could not write the trusted paths and the
     // candidate is the one pinned from outside the consumer.
-    certified: options.isolation === "os" && options.expectedPin !== null && options.expectedPin === installed.pin };
+    trustedRuntimeIsolated: options.isolation === "os" && options.expectedPin !== null && options.expectedPin === installed.pin,
+    // E2E certification is awarded only after a genuine COMPLETE, verifier PASS
+    // and the independent record-continuity refusal gate. Never pre-award it.
+    certified: false };
   if (options.isolation === "os") {
     const probe = await run({ ...isolated({ command: "true", argv: [] }, readOnly), cwd: root, timeoutMs: 30000 })
       .catch((error) => ({ code: 1, stderr: error.message }));
@@ -240,14 +276,29 @@ async function score(options, root, output, report) {
       "namespaces via unshare and setpriv): " + String(probe.stderr).trim() + ". Rerun with --isolation none for " +
       "functional evidence that is NOT security-certified.");
   }
+  // Watch the parent from THIS trusted runner, not inside the agent namespace.
+  // Creating only the empty parent is safe for an otherwise fresh consumer.
+  const observer = await observeRecordDirectory(root, options.target);
+  let agent;
   report.startedAt = new Date().toISOString();
-  const agent = await run({ ...(options.isolation === "os" ? isolated(invocationCommand, readOnly) : invocationCommand),
-    cwd: root, timeoutMs: options.timeoutMs });
+  try {
+    agent = await run({ ...(options.isolation === "os" ? isolated(invocationCommand, readOnly) : invocationCommand),
+      cwd: root, timeoutMs: options.timeoutMs });
+  } finally {
+    // Drain notifications already queued by the provider before closing watch.
+    await new Promise((resolve) => setImmediate(resolve));
+    report.security.recordContinuity = observer.snapshot();
+    observer.close();
+  }
   await writeFile(path.join(output, "agent.stdout.log"), agent.stdout);
   await writeFile(path.join(output, "agent.stderr.log"), agent.stderr);
   const combined = agent.stdout + "\n" + agent.stderr;
   report.agent = { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
     transcriptSha256: createHash("sha256").update(combined).digest("hex") };
+  if (report.security.recordContinuity.violations.length > 0) {
+    fail("ACCEPTANCE_RECORD_REPLACED: The coding agent destroyed or replaced its migration record. " +
+      report.security.recordContinuity.violations.join(" ") + " Transcripts preserved; never certify this run.");
+  }
   if (await readFile(markerPath, "utf8") !== markerBytes)
     fail("Agent modified the pinned acceptance marker (transcripts preserved)");
   if (createHash("sha256").update(await readFile(verifier)).digest("hex") !== verifierSha256)
@@ -294,6 +345,8 @@ async function score(options, root, output, report) {
       options.goal === "bootstrap" ? (bootstrapped ? "BOOTSTRAP_PASS" : "FAIL") :
       finished && verified?.code === 0 && !verified.timedOut && status.progressChecklist ?
         "E2E_COMPLETE_PASS" : "FAIL" });
+  report.security.certified = report.verdict === "E2E_COMPLETE_PASS" &&
+    report.security.trustedRuntimeIsolated && report.security.recordContinuity.violations.length === 0;
   await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
 }
 
