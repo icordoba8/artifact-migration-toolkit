@@ -57,16 +57,22 @@ const run = ({ command, argv, cwd, timeoutMs }) => new Promise((resolve, reject)
   });
 });
 
-const commandFor = (provider, invocation) => {
+// Each host's headless permission model, granting only the installed
+// registration and the consumer's own state directory -- never a sandbox bypass.
+const commandFor = (provider, invocation, root) => {
+  const ask = "Invoke the installed start-migration skill with exactly these arguments: " +
+    invocation + ". Follow its existing contract; do not repair or modify the installed toolkit.";
   if (provider === "claude") return { command: "claude",
-    argv: ["--print", invocation, "--output-format", "stream-json", "--verbose"] };
+    argv: ["--print", invocation, "--output-format", "stream-json", "--verbose",
+      "--mcp-config", ".mcp.json", "--permission-mode", "acceptEdits",
+      "--allowedTools", "Bash", "Read", "Edit", "Write", "Glob", "Grep", "mcp__start-migration"] };
+  // OpenCode has no --command flag; --standalone keeps the run off the user's service.
   if (provider === "opencode") return { command: "opencode",
-    argv: ["run", "--format", "json", "--command", "start-migration",
-      invocation.replace(/^\/start-migration /, "")] };
+    argv: ["run", "--standalone", "--format", "json", "--auto", ask] };
+  // Codex workspace-write keeps .agents read-only, and an untrusted project skips its .codex/config.toml MCP entry.
   return { command: "codex",
-    argv: ["exec", "--json", "--sandbox", "workspace-write",
-      "Invoke the installed start-migration skill with exactly these arguments: " +
-      invocation + ". Follow its existing contract; do not repair or modify the installed toolkit."] };
+    argv: ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", path.join(root, ".agents"),
+      "-c", `projects={ ${JSON.stringify(root)} = { trust_level = "trusted" } }`, ask] };
 };
 
 async function main() {
@@ -95,7 +101,7 @@ async function main() {
   if (already !== null) fail("Not a fresh consumer: migration record already exists");
   const invocation = '/start-migration ' + options.module + ' --target ' + options.target +
     ' --mode auto --ponytail full --design-source target-system';
-  const invocationCommand = commandFor(options.provider, invocation);
+  const invocationCommand = commandFor(options.provider, invocation, root);
   const startedAt = new Date().toISOString();
   const agent = await run({ ...invocationCommand, cwd: root, timeoutMs: options.timeoutMs });
   await mkdir(output, { recursive: true });

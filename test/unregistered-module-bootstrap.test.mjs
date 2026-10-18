@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -75,6 +75,10 @@ test("fresh unregistered module bootstrap refuses invalid OpenSpec without write
     assert.equal(state.currentStep, "DISCOVER_LEGACY");
     assert.ok(state.completedSteps.includes("RESOLVE"));
     assert.equal(await readFile(authority, "utf8"), spec);
+    // A record that lost its state is damaged, never reported as NOT_STARTED.
+    await rename(record, `${record}.lost`);
+    await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
+      /artifacts already exist without state/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

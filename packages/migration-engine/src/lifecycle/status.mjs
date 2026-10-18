@@ -16,7 +16,7 @@ import {
   WORKFLOW_VERSION,
 } from "../formats/index.mjs";
 import { gitRevision } from "../shared/index.mjs";
-import { readOptionalJson, readRegistry, statePathFor } from "../store/index.mjs";
+import { fileExists, migrationRoot, readOptionalJson, readRegistry, statePathFor } from "../store/index.mjs";
 import { visualAuthorityOf } from "../visual/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { activeArtifact, resumeGuidance } from "./checkpoints.mjs";
@@ -51,6 +51,14 @@ const notStarted = (moduleName, target = null) => {
   };
 };
 
+// Artifacts without state are a damaged record, never a fresh module -- the
+// same refusal preview gives. An unregistered record is keyed by its module.
+const refuseRecordWithoutState = async (targetRoot, recordKey) => {
+  const root = migrationRoot(targetRoot, recordKey);
+  if (await fileExists(root))
+    throw new Error(`Migration initialization artifacts already exist without state at '${root}'. Refusing to overwrite or repair them manually.`);
+};
+
 export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   let registryData;
   let resolved;
@@ -59,6 +67,7 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   } catch (error) {
     if (error.message !== `Module '${moduleName}' is not registered. Supply --target <target-module>.`)
       throw error;
+    await refuseRecordWithoutState((await readRegistry(registryPath)).targetRoot, moduleName);
     return notStarted(moduleName);
   }
   let context;
@@ -67,6 +76,7 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   } catch (error) {
     const missing = `Migration state does not exist: ${statePathFor(registryData.targetRoot, resolved.canonical)}`;
     if (error.message !== missing) throw error;
+    await refuseRecordWithoutState(registryData.targetRoot, resolved.canonical);
     return notStarted(moduleName, resolved.target);
   }
   await assertCurrentOpenSpecAuthority(registryData.targetRoot, context.state);
