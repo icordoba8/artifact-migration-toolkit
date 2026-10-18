@@ -18,7 +18,7 @@ const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];
-    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal"].includes(name) || !argv[i + 1] || name in options)
+    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin"].includes(name) || !argv[i + 1] || name in options)
       fail("Expected unique --provider, --cwd, --module, --target, --output and optional --timeout-minutes arguments");
     options[name] = argv[i + 1];
   }
@@ -27,10 +27,15 @@ const argsOf = (argv) => {
   for (const key of ["--module", "--target"]) if (!/^[a-z][a-z0-9-]*$/.test(options[key])) fail("Unsafe " + key);
   const goal = options["--goal"] ?? "bootstrap";
   if (!["bootstrap", "complete"].includes(goal)) fail("Goal must be bootstrap or complete");
+  const expectedPin = options["--expected-pin"] ?? null;
+  if (expectedPin !== null && !/^sha256:[a-f0-9]{64}$/.test(expectedPin))
+    fail("--expected-pin must be an exact SHA-256 release-manifest digest");
+  if (goal === "complete" && expectedPin === null)
+    fail("Complete acceptance requires --expected-pin obtained independently from the candidate bundle before agent execution.");
   const minutes = options["--timeout-minutes"] === undefined ? 50 : Number(options["--timeout-minutes"]);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 90) fail("Timeout must be between 1 and 90 minutes");
   return { provider: options["--provider"], cwd: path.resolve(options["--cwd"]), module: options["--module"],
-    target: options["--target"], goal, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
+    target: options["--target"], goal, expectedPin, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
 };
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
@@ -139,6 +144,8 @@ async function main() {
       !/^sha256:[a-f0-9]{64}$/.test(installed.pin ?? "") ||
       installed.release !== path.join(installed.store, `${installed.toolkit?.version}-${installed.pin.slice(7)}`))
     fail("ACCEPTANCE_PRECONDITION: The installed runtime receipt has a conflicting provider, root, release or pin.");
+  if (options.expectedPin && installed.pin !== options.expectedPin)
+    fail("ACCEPTANCE_PRECONDITION: Installed engine pin does not match independently supplied --expected-pin.");
   const manifest = await verifyBundle(installed.release, installed.pin);
   if (JSON.stringify(manifest.toolkit) !== JSON.stringify(installed.toolkit))
     fail("ACCEPTANCE_PRECONDITION: Installed receipt identity disagrees with the verified bundle.");
@@ -198,6 +205,8 @@ async function main() {
   const report = {
     schemaVersion: 1, provider: options.provider, module: options.module, target: options.target, goal: options.goal,
     startedAt, completedAt: new Date().toISOString(), invocation, toolkit: receipt.toolkit ?? null,
+    candidate: { expectedPin: options.expectedPin, independentPinRequiredForComplete: true,
+      matchesTrustedPin: options.expectedPin !== null && options.expectedPin === installed.pin },
     agent: { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
       transcriptSha256: createHash("sha256").update(combined).digest("hex") },
     engine: { currentStep: status.currentStep, state: status.status, revision: state.revision,
