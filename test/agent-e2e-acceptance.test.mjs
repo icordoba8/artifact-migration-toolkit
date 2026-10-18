@@ -174,6 +174,42 @@ test("an agent that leaves no readable engine status still gets a fail-closed re
   }
 });
 
+test("record deletion and recreation is detected by a trusted observer and never certified", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-record-continuity-"));
+  try {
+    const { target, bin } = await installedCandidate(root);
+    // One normal bootstrap mkdir, a destructive rm -rf, and a forged bootstrap.
+    // The real installed engine would treat the final record as new unless an
+    // external observer witnessed the previous record's destruction.
+    await writeFile(path.join(bin, "opencode"), [
+      "#!/bin/sh",
+      "mkdir -p .agents/knowledge/migrations/modules/auth",
+      "printf first > .agents/knowledge/migrations/modules/auth/old",
+      "rm -rf .agents/knowledge/migrations/modules/auth",
+      "mkdir -p .agents/knowledge/migrations/modules/auth",
+      "printf forged > .agents/knowledge/migrations/modules/auth/new",
+      "exit 0", "",
+    ].join("\n"), { mode: 0o755 });
+    const output = path.join(root, "reports");
+    assert.throws(() => execFileSync(process.execPath, [script.pathname,
+      "--provider", "opencode", "--cwd", target, "--module", "auth",
+      "--target", "auth", "--output", output, "--isolation", "none"],
+    { encoding: "utf8", timeout: 60000, stdio: "pipe",
+      env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+    (error) => /ACCEPTANCE_RECORD_REPLACED/.test(String(error.stderr)));
+    const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+    assert.equal(report.verdict, "FAIL");
+    assert.equal(report.security.certified, false);
+    assert.match(report.failure, /ACCEPTANCE_RECORD_REPLACED/);
+    assert.ok(report.security.recordContinuity.targetDirectoryRenameEvents >= 2);
+    assert.notEqual(report.security.recordContinuity.violations.length, 0);
+    assert.equal(report.agent.exitCode, 0);
+    assert.equal(report.engine, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const isolationAvailable = (() => {
   try {
     execFileSync("unshare", ["--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc", "--kill-child",
