@@ -61,7 +61,7 @@ test("black-box acceptance reports a missing installed runtime receipt", async (
     const target = path.join(root, "target");
     await mkdir(target);
     const verifier = path.join(root, "verify.mjs");
-    const data = "process.exit(0);\\n".replace("\\\\n", "\\n");
+    const data = "process.exit(0);\n";
     await writeFile(verifier, data);
     await writeFile(path.join(target, ".artifact-migration-acceptance.json"),
       JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
