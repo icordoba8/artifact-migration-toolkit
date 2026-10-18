@@ -250,6 +250,10 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "remount=DENIED"]);
       assert.equal(await readFile(receiptPath, "utf8"), receipt);
       assert.equal(await readFile(engineFile, "utf8"), engineBytes);
+      const blocked = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+      assert.equal(blocked.verdict, "FAIL");
+      assert.equal(blocked.security.trustedRuntimeIsolated, false);
+      assert.equal(blocked.security.certified, false);
       await new Promise((resolve) => setTimeout(resolve, 2000));
       await assert.rejects(readFile(canary), { code: "ENOENT" });
     } finally {
