@@ -53,8 +53,8 @@ import { externalJsxUses, frameworkAncestorEdges, frameworkEntryFor } from "./fr
  * FINALIZE recomputes with the version a migration recorded, so an in-flight
  * migration is never silently held to rules that postdate its checkpoint.
  */
-export const CENSUS_ALGORITHM_VERSION = 4;
-export const SUPPORTED_ALGORITHM_VERSIONS = new Set([1, 2, 3, 4]);
+export const CENSUS_ALGORITHM_VERSION = 5;
+export const SUPPORTED_ALGORITHM_VERSIONS = new Set([1, 2, 3, 4, 5]);
 
 export class DiscoveryScannerVersionError extends Error {
   constructor(code, message) {
@@ -2241,6 +2241,7 @@ export const runDiscoveryScan = async ({
     ...(algorithmVersion >= 4 ? { externalUi: externalUiCandidates
       .filter((use) => relevantPaths.has(use.from))
       .sort((a, b) => a.from.localeCompare(b.from) || a.spec.localeCompare(b.spec) || a.symbol.localeCompare(b.symbol)) } : {}),
+    ...(algorithmVersion >= 5 ? { apiContract: await (await import("./api.mjs")).extractApiContract({ ts, legacyRoot, census, supporting, edges: allRelevantEdges }) } : {}),
     edges: allRelevantEdges,
     findings: relevantFindings,
     unresolved: relevantUnresolved,
@@ -2248,9 +2249,7 @@ export const runDiscoveryScan = async ({
       .filter((entry) => relevantPaths.has(entry.file))
       .sort(
         (left, right) =>
-          left.file.localeCompare(right.file) ||
-          left.line - right.line ||
-          left.spec.localeCompare(right.spec),
+          left.file.localeCompare(right.file) || left.line - right.line || left.spec.localeCompare(right.spec),
       ),
     reachability: currentReachability,
     kinds: Object.fromEntries(census.map((file) => [file, kindOf(file)])),
@@ -2284,6 +2283,7 @@ export const discoveryDigest = (scan) => {
     census: scan.census,
     edges: scan.edges,
     ...(scan.algorithmVersion >= 4 ? { externalUi: scan.externalUi } : {}),
+    ...(scan.algorithmVersion >= 5 ? { apiContract: scan.apiContract } : {}),
     findings: scan.findings,
     unresolved: scan.unresolved,
     ...(scan.algorithmVersion >= 2

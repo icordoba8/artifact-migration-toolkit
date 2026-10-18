@@ -541,7 +541,8 @@ constants by a contract test — the table cannot drift from the code.
 
 | Persisted source       | Result                                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| contract 5, format 20  | active production creation default and supported ceiling; authored UI appearance and scroll coverage is required for visible UI |
+| contract 5, format 21  | active production creation default and supported ceiling; the OpenSpec and slice evidence are held to the source-derived legacy API response contract (scanner algorithm 5) |
+| contract 5, format 20  | remains readable/resumable with authored UI appearance and scroll coverage and no API response contract; never silently promoted to 21 |
 | contract 5, format 19  | remains readable/resumable with its pinned appearance semantics and direct-ledger `STANDARD_LOCAL` decisions; never silently promoted to 20 |
 | contract 5, format 18  | remains readable/resumable with historical citation decisions and frozen `requiredObservations`; explicit 18→19 upgrade only |
 | contract 5, format 17  | owes 17→18; DISCOVER_LEGACY may first validate and pin the legacy inventory, after which the upgrade freezes the lifecycle until it commits (see Format upgrades) |
@@ -557,7 +558,7 @@ constants by a contract test — the table cannot drift from the code.
 | contract 2 or 3        | refused as unsupported; files are never touched                                                                       |
 | newer than supported   | refused; update start-migration first                                                                                 |
 
-Module default/active = 20; supported = 20. Artifact default/active = 14;
+Module default/active = 21; supported = 21. Artifact default/active = 14;
 supported = 14, including delegated children. No pilot flag, signer or protected
 policy is required. Existing records never silently upgrade: module 18 uses the
 explicit pre-pin 18 -> 19 path; artifact 13 uses the explicit pristine 13 -> 14
@@ -571,6 +572,9 @@ module records. A format-19 record, including a completed one, retains its
 historical verdict and evidence; renewed format-20 validation starts a separate
 record under the ordinary initialization workflow. Do not rewrite a pinned
 legacy inventory to manufacture adoption.
+Format 21 is likewise created only for new module records: its OpenSpec is held
+at RESOLVE to a response contract the engine derives from legacy source, and a
+format-20 record never acquires one.
 
 ### Format bump policy
 
@@ -750,6 +754,28 @@ A request for an existing partner identifier returns that partner's record.
 
 A refused proposal writes nothing. Correct it from the refusal and preview
 again without asking the user; the refusal message gives the expected form.
+
+Format 21 also holds the proposal to the legacy module's **API response
+contract**, which the engine derives from source (discovery scanner algorithm
+5): every route-table endpoint, traced from the route through its handler,
+wrappers and services to the status, machine-readable error identifier, body
+keys and headers the legacy code actually returns -- including mapping tables
+and fallbacks in the route layer. Each derived response must be cited verbatim
+by a scenario, and a scenario may cite only derived responses:
+
+```markdown
+#### Scenario: PARTNERS-SCN-004 Duplicate tax id
+A second partner with an existing tax id is refused as a conflict.
+- Response: POST /partners -> 409 DUPLICATE_TAX_ID body{error,message}
+```
+
+The refusal lists each missing response (`API_RESPONSE_UNCOVERED`, with the
+route, status and raise sites), each citation the source does not establish
+(`API_RESPONSE_UNGROUNDED`) and each endpoint the engine cannot interpret
+(`API_RESPONSE_UNRESOLVED`). Copy the listed lines; never invent a status, an
+identifier or a default -- the engine does not, either. An unresolved endpoint
+blocks: report it rather than describing its behavior from framework
+conventions. DISCOVERY_COMPLETENESS repeats the check over the declared roots.
 
 The design source is a bootstrap input, collected with the others. It defaults
 to `target-system` — the target project's own design system — and a bootstrap
@@ -1181,6 +1207,8 @@ current checkpoint is missing.
   (`showToolbar: false`, `showPagination: false`, `compactMode: true`), not
   "a table exists". Discovery is not blocked when the legacy app is offline —
   author from source and record the gap.
+  Record the responses in the scan's `apiContract` exactly as derived; they are
+  already the OpenSpec's `Response:` lines.
   Trace external JSX package imports reported by scanner algorithm 4 to
   `uiBehaviors[].externalUiImports` and source-backed capability rows. Record
   every required control and state as `requiredObservations` and
@@ -1192,7 +1220,13 @@ current checkpoint is missing.
   the required control exists, the action exists, search filters, pagination
   moves, visibility and permission rules hold, navigation works, the
   dialog/menu opens, loading/empty/error render. Screenshots supplement those
-  assertions; they never replace them.
+  assertions; they never replace them. At format 21, every legacy response cited
+  by a scenario the slice traces needs a passing test named exactly
+  `Response: <identity>` (for example `Response: POST /partners -> 409
+  DUPLICATE_TAX_ID body{error,message}`) in a recorded evidence command's output;
+  a missing or failing one is `API_RESPONSE_UNVERIFIED`. FINALIZE refuses a
+  response no slice traces (`API_RESPONSE_UNPLANNED`). Assert the legacy status
+  and identifier; never adopt a target default in their place.
 
 Capture protocol, per required UI behavior:
 

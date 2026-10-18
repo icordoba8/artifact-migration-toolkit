@@ -12,7 +12,7 @@ export const historicalBootstrap = async (root, formatVersion) => {
   assert.equal(state.currentStep, "DISCOVER_LEGACY");
   const artifact = Boolean(state.artifactId);
   assert.equal(state.revision, artifact ? 0 : 1);
-  assert.ok(artifact ? formatVersion === 13 : [18, 19].includes(formatVersion));
+  assert.ok(artifact ? formatVersion === 13 : [18, 19, 20].includes(formatVersion));
   state.formatVersion = formatVersion;
   const bytes = `${JSON.stringify(state, null, 2)}\n`;
   await writeFile(file, bytes);
@@ -24,7 +24,7 @@ export const historicalBootstrap = async (root, formatVersion) => {
   } else {
     const classificationFile = path.join(root, "inventories/module-classification.json");
     const classification = JSON.parse(await readFile(classificationFile, "utf8"));
-    classification.version = formatVersion === 19 ? 2 : 1;
+    classification.version = formatVersion >= 19 ? 2 : 1;
     await writeFile(classificationFile, `${JSON.stringify(classification, null, 2)}\n`);
   }
   return state;

@@ -5,8 +5,9 @@
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { requirementsSourceFor, validateOpenSpecAuthorityShape } from "../formats/index.mjs";
-import { contentIdentity, isLexicallyWithin as isWithin } from "../shared/index.mjs";
+import { API_CONTRACT_ALGORITHM, assertApiContractCovered, implicitModuleRoots, runDiscoveryScan } from "../census/index.mjs";
+import { FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, requirementsSourceFor, validateOpenSpecAuthorityShape } from "../formats/index.mjs";
+import { contentIdentity, execFileAsync, isLexicallyWithin as isWithin, portablePath as portable } from "../shared/index.mjs";
 import { contentIdentityMatchesSource } from "../store/index.mjs";
 
 const OPEN_SPEC_REQUIREMENT =
@@ -155,4 +156,38 @@ export const assertCurrentOpenSpecAuthority = async (targetRoot, state) => {
     );
   }
   return comparable;
+};
+
+/**
+ * Format 21, at RESOLVE: before any root is declared, the response contract
+ * over each source's implicit root -- the one DISCOVERY_COMPLETENESS exempts
+ * from ROOT_DECLARATION, chosen by the same rule. Null when no tracked
+ * directory is named after a source; DISCOVERY_COMPLETENESS still checks the
+ * declared roots.
+ */
+const implicitApiContract = async (legacyRoot, legacySources) => {
+  const { stdout } = await execFileAsync("git", ["ls-files", "-z"], { cwd: legacyRoot, maxBuffer: 256 * 1024 * 1024 });
+  const directories = new Set();
+  for (const file of stdout.split("\0").filter(Boolean)) {
+    for (let dir = path.posix.dirname(portable(file)); dir !== "."; dir = path.posix.dirname(dir)) directories.add(dir);
+  }
+  const named = [...directories].filter((dir) => legacySources.includes(path.posix.basename(dir))).sort();
+  const declared = named.map((dir) => ({ path: dir, source: path.posix.basename(dir) }));
+  const roots = [...implicitModuleRoots({ legacySources, formatVersion: FORMAT_ACTIVE_FOR_NEW_MIGRATIONS }, declared, named)].sort();
+  if (roots.length === 0) return null;
+  return (await runDiscoveryScan({ legacyRoot, moduleRoots: roots, algorithmVersion: API_CONTRACT_ALGORITHM })).apiContract;
+};
+
+/**
+ * The OpenSpec a new record is about to pin must cite every response the
+ * legacy source establishes. Refused before anything is written, so the
+ * corrected proposal is a plain retry. `content` is the stdin proposal, or
+ * null for an OpenSpec file that already exists.
+ */
+export const assertNewOpenSpecCoversApiContract = async ({ legacyRoot, targetRoot, resolved, content }) => {
+  const legacySources = resolved.legacySources.length > 0 ? resolved.legacySources : [resolved.legacyModule];
+  const contract = await implicitApiContract(legacyRoot, legacySources);
+  if (!contract) return;
+  const source = requirementsSourceFor(resolved.target);
+  assertApiContractCovered(contract, content ?? (await readFile(path.resolve(targetRoot, source), "utf8")), source);
 };

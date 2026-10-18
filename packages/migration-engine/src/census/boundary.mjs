@@ -4,6 +4,7 @@ import {
   DISCOVERY_SCAN_FILE,
   MODULE_CLASSIFICATION_FILE,
   usesDiscoveryCompleteness,
+  usesApiContract,
   usesSourceAttribution,
   usesUiCoverage,
 } from "../formats/index.mjs";
@@ -87,6 +88,9 @@ export const readCanonicalModuleBoundary = async (
   );
   if (usesUiCoverage(state) && algorithmVersion < 4) {
     throw new Error("Format 20 requires discovery scanner algorithm 4 to capture framework ancestors and external UI imports.");
+  }
+  if (usesApiContract(state) && algorithmVersion < 5) {
+    throw new Error("Format 21 requires discovery scanner algorithm 5 to derive the legacy API response contract. Record algorithmVersion 5 in the module classification.");
   }
   const { runDiscoveryScan } = await import("./scan.mjs");
   const scan =

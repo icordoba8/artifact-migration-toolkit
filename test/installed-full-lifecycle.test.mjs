@@ -199,8 +199,8 @@ test("offline installed toolkit bootstraps a fresh consumer and completes migrat
     };
     await doc("DISCOVER_LEGACY");
     await author("inventories/legacy.json", legacyInventory);
-    // A fresh record is created at format 20, which requires scanner algorithm 4.
-    const classification = { ...MODULE_CLASSIFICATION, algorithmVersion: 4 };
+    // A fresh record is created at format 21, which requires scanner algorithm 5.
+    const classification = { ...MODULE_CLASSIFICATION, algorithmVersion: 5 };
     await author("inventories/module-classification.json", classification);
     await runTo("DISCOVERY_COMPLETENESS");
     await doc("DISCOVERY_COMPLETENESS");

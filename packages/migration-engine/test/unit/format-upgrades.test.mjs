@@ -23,6 +23,7 @@ import {
   NON_PROMOTING_FORMAT_VERSIONS,
   REQUIRED_OBSERVATIONS_FORMAT,
   UI_COVERAGE_FORMAT,
+  API_CONTRACT_FORMAT,
   VISUAL_ACCEPTANCE_FORMAT,
   formatIsPromoting,
   ARTIFACT_FORMAT_ACTIVE_FOR_NEW_MIGRATIONS,
@@ -91,6 +92,12 @@ test("the shipped module registry covers every increment from the floor", () => 
         id: "UI_COVERAGE_ADOPTED",
         version: 1,
       },
+      {
+        from: UI_COVERAGE_FORMAT,
+        to: API_CONTRACT_FORMAT,
+        id: "API_CONTRACT_ADOPTED",
+        version: 1,
+      },
     ],
   );
   // Coverage runs to the *supported* ceiling, not the creation default: a
@@ -103,8 +110,8 @@ test("the shipped module registry covers every increment from the floor", () => 
       runtimeFormat: MIGRATION_FORMAT_SUPPORTED,
     }),
   );
-  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, UI_COVERAGE_FORMAT);
-  assert.equal(MIGRATION_FORMAT_SUPPORTED, UI_COVERAGE_FORMAT);
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, API_CONTRACT_FORMAT);
+  assert.equal(MIGRATION_FORMAT_SUPPORTED, API_CONTRACT_FORMAT);
   assert.throws(
     coverage(FORMAT_UPGRADERS, {
       floor: FORMAT_UPGRADE_FLOOR,
@@ -190,7 +197,7 @@ test("coverage requires an explicitly declared, well-formed activation", () => {
   // waits on a pinned prerequisite, 18 -> 19 carries `null` because it is
   // never owed by the ordinary cursor at all -- it is reachable only from the
   // explicit adoption request, which raises the ceiling for that one call.
-  // 19 -> 20 is likewise `null`: no cursor ever owes it, and its plan blocks.
+  // 19 -> 20 and 20 -> 21 are likewise `null`: no cursor ever owes them, and their plans block.
   assert.doesNotThrow(coverage([{ ...row(17), activation: null }]));
   assert.doesNotThrow(coverage([{ ...row(17), activation: activation() }]));
   assert.deepEqual(
@@ -202,6 +209,7 @@ test("coverage requires an explicitly declared, well-formed activation", () => {
       [VISUAL_ACCEPTANCE_FORMAT, "function"],
       [REQUIRED_OBSERVATIONS_FORMAT, null],
       [DIRECT_LEDGER_DECISIONS_FORMAT, null],
+      [UI_COVERAGE_FORMAT, null],
     ],
   );
   assert.doesNotThrow(
@@ -475,6 +483,7 @@ test("the release gate runs for both engines and the manifest states both regist
     { from: 17, to: 18, id: "UI_OBSERVATIONS_ADOPTED", version: 1 },
     { from: 18, to: 19, id: "DIRECT_LEDGER_DECISIONS_ADOPTED", version: 1 },
     { from: 19, to: 20, id: "UI_COVERAGE_ADOPTED", version: 1 },
+    { from: 20, to: 21, id: "API_CONTRACT_ADOPTED", version: 1 },
   ]);
   // The manifest states the two controls separately. A consumer reading it to
   // decide what it will be handed wants the activation control; a consumer

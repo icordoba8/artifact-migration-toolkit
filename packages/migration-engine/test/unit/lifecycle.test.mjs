@@ -48,7 +48,7 @@ const targets = (file, sf, { dynamic = true } = {}) => {
 const load = (file) => import(pathToFileURL(path.join(src, file)).href);
 
 const LIFECYCLE_FILES = [
-  "adoption.mjs", "advance.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-record.mjs",
+  "adoption.mjs", "advance.mjs", "api-evidence.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-record.mjs",
   "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "capture.mjs", "checkpoints.mjs", "context.mjs",
   "contract-upgrade.mjs", "format-upgrade.mjs", "gates.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "prefill.mjs", "preview.mjs",
   "progress.mjs", "record.mjs", "recorder.mjs", "registry.mjs", "reopen.mjs", "status.mjs", "templates.mjs",

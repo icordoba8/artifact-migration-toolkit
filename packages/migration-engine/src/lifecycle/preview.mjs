@@ -74,6 +74,7 @@ import { initJournalFor } from "./initialization.mjs";
 import { readJournal } from "./journal.mjs";
 import {
   assertCurrentOpenSpecAuthority,
+  assertNewOpenSpecCoversApiContract,
   loadOpenSpecAuthority,
   validateOpenSpecProposal,
 } from "./openspec.mjs";
@@ -172,6 +173,7 @@ export const previewMigrationExecution = async ({
           `OpenSpec source already exists before RESOLVE: ${proposedOpenSpec.authority.source}. Do not overwrite or restore it manually.`,
         );
       }
+      await assertNewOpenSpecCoversApiContract({ legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot, resolved, content: openSpecProposal });
       requirementsAuthority = proposedOpenSpec.authority;
     } catch (error) {
       requirementsBlocker = error.message;
@@ -187,6 +189,7 @@ export const previewMigrationExecution = async ({
         registryData.targetRoot,
         resolved.target,
       );
+      if (!existingState) await assertNewOpenSpecCoversApiContract({ legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot, resolved, content: null });
     } catch (error) {
       requirementsBlocker = existingState
         ? error.message

@@ -17442,7 +17442,7 @@ test("R-W10-a: the SKILL.md compatibility table cannot drift from the exported c
   );
 });
 
-test("R-W10-c: authored formats through 20 stay non-promoting, and every supported format is executable", () => {
+test("R-W10-c: authored formats through 21 stay non-promoting, and every supported format is executable", () => {
   // Two different questions with two different answers. Conflating them is what
   // made a first attempt at deriving this set turn every format-10 record
   // unexecutable: 10 and 11 are never promoted *into*, but a record already at
@@ -17451,7 +17451,7 @@ test("R-W10-c: authored formats through 20 stay non-promoting, and every support
   // 19 joins the set for the third reason: it changes where a decision's
   // authority comes from, so an advance that promoted into it would reinterpret
   // receipts the record already recorded under citation rules.
-  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18, 19, 20]);
+  assert.deepEqual([...NON_PROMOTING_FORMAT_VERSIONS], [10, 11, 17, 18, 19, 20, 21]);
   for (const version of SUPPORTED_FORMAT_VERSIONS) {
     assert.equal(
       formatIsSupported(version),
@@ -17460,7 +17460,7 @@ test("R-W10-c: authored formats through 20 stay non-promoting, and every support
     );
     assert.equal(
       formatIsPromoting(version),
-      ![10, 11, 17, 18, 19, 20].includes(version),
+      ![10, 11, 17, 18, 19, 20, 21].includes(version),
     );
   }
   // Bumping the constant cannot orphan the format that was current a moment
@@ -17485,12 +17485,13 @@ test("R-W10-e: a format newer than supported is refused with the update message"
   }
 });
 
-test("ODA-1: format 20 is active while format 19 retains direct-ledger semantics", async () => {
-  assert.equal(MIGRATION_FORMAT_SUPPORTED, 20);
-  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 20);
+test("ODA-1: format 21 is active while format 19 retains direct-ledger semantics", async () => {
+  assert.equal(MIGRATION_FORMAT_SUPPORTED, 21);
+  assert.equal(FORMAT_ACTIVE_FOR_NEW_MIGRATIONS, 21);
   assert.equal(MIGRATION_FORMAT_SUPPORTED, FORMAT_ACTIVE_FOR_NEW_MIGRATIONS);
   assert.equal(formatIsSupported(19), true);
   assert.equal(formatIsSupported(20), true);
+  assert.equal(formatIsSupported(21), true);
   assert.equal(usesDirectLedgerDecisions({ formatVersion: 19 }), true);
   assert.equal(usesDirectLedgerDecisions({ formatVersion: 18 }), false);
 
@@ -17537,14 +17538,23 @@ test("ODA-1: format 20 is active while format 19 retains direct-ledger semantics
   assert.equal(coverageRow.to, 20);
   assert.equal((await coverageRow.plan({})).blockers.length, 1);
   await assert.rejects(coverageRow.commit({}), /cannot be applied to an existing record/);
+  // 20 -> 21 likewise: an existing OpenSpec was never held to the API contract.
+  assert.equal(
+    nextIncrement(FORMAT_UPGRADERS, 20, DIRECT_LEDGER_DECISIONS_FORMAT, FORMAT_UPGRADE_FLOOR),
+    null,
+  );
+  const apiRow = FORMAT_UPGRADERS.find((entry) => entry.from === 20);
+  assert.equal(apiRow.to, 21);
+  assert.equal((await apiRow.plan({})).blockers.length, 1);
+  await assert.rejects(apiRow.commit({}), /cannot be applied to an existing record/);
 });
 
-test("new module records start at format 20 without mutating historical records", async () => {
+test("new module records start at format 21 without mutating historical records", async () => {
   const fixture = await createFixture();
   try {
     const { result } = await initialize(fixture, { currentFormat: true });
-    assert.equal(result.state.formatVersion, 20);
-    assert.equal((await state(fixture)).formatVersion, 20);
+    assert.equal(result.state.formatVersion, 21);
+    assert.equal((await state(fixture)).formatVersion, 21);
   } finally {
     await fixture.cleanup();
   }
@@ -23809,19 +23819,19 @@ test("MC1: CLI and MCP write the same draft and the same summary; other checkpoi
   }
 });
 
-test("MC1: a format-20 record is drafted from scanner algorithm 4 and refuses an older pin", async () => {
+test("MC1: a format-21 record is drafted from scanner algorithm 5 and refuses an older pin", async () => {
   const fixture = await createFixture();
   try {
     await commitClassifiableLegacy(fixture);
     const { decisionId: _id, ...root } = MODULE_CLASSIFICATION.moduleRoots[0];
-    const classification = { version: 2, algorithmVersion: 4, moduleRoots: [root], declaredEntryPoints: [], files: [] };
+    const classification = { version: 2, algorithmVersion: 5, moduleRoots: [root], declaredEntryPoints: [], files: [] };
     // No visible UI, so DISCOVER_LEGACY needs no format-20 appearance rows.
     const legacy = { ...LEGACY_INVENTORY, hasVisibleUi: false, uiBehaviors: [] };
     await driveTo(fixture, "DISCOVER_LEGACY", advance, { bootstrap: { currentFormat: true }, classification, legacy });
-    assert.equal((await state(fixture)).formatVersion, 20);
+    assert.equal((await state(fixture)).formatVersion, 21);
     const summary = await prefill(fixture);
     const scan = await previewDiscoveryScan({ ...(await resolutionFor(fixture)), moduleName: "auth" });
-    assert.equal(summary.authority.scanner, 4);
+    assert.equal(summary.authority.scanner, 5);
     assert.equal(summary.authority.discoveryDigest, scan.discoveryDigest);
     const drafted = await readJson(path.join(fixture.migrationRoot, CLASSIFICATION_PATH));
     assert.deepEqual(drafted.files.map((row) => [row.path, row.kind, row.reachability, row.disposition]),
@@ -23830,9 +23840,9 @@ test("MC1: a format-20 record is drafted from scanner algorithm 4 and refuses an
       relation: "SUPPORTING", type: entry.type, path: entry.path, requiredBy: scan.requiredBy[entry.path],
     })));
     assert.equal(summary.derived.rows, scan.census.length + scan.supporting.length);
-    await writeClassification(fixture, { ...classification, algorithmVersion: 3 });
+    await writeClassification(fixture, { ...classification, algorithmVersion: 4 });
     const before = await snapshot(fixture.migrationRoot);
-    await assert.rejects(prefill(fixture), /Format 20 requires discovery scanner algorithm 4/);
+    await assert.rejects(prefill(fixture), /Format 21 requires discovery scanner algorithm 5/);
     assert.deepEqual(await snapshot(fixture.migrationRoot), before);
   } finally {
     await fixture.cleanup();
@@ -24100,17 +24110,17 @@ const FORMAT20_LEGACY = {
   })),
 };
 
-browserTest("MC2: a format-20 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
+browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
   const server = await startCaptureServer();
   const fixture = await createFixture();
   try {
     const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
     await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
-      classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 4, moduleRoots: [moduleRoot] } });
+      classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] } });
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
     const recorded = await state(fixture);
-    assert.deepEqual([recorded.formatVersion, recorded.currentStep, recorded.activeSlice], [20, "VERIFY_SLICES", "slice-a"]);
+    assert.deepEqual([recorded.formatVersion, recorded.currentStep, recorded.activeSlice], [21, "VERIFY_SLICES", "slice-a"]);
     const root = fixture.migrationRoot;
     const claim = (appearanceClaimId, extra = {}) => captureFrame(fixture, { origin: server.origin, route: "/auth/sign-in",
       viewport: CAPTURE_VIEWPORT, appearanceClaimId, ...extra });

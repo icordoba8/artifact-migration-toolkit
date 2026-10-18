@@ -59,6 +59,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
       "A production-reachable component, style, image, SVG, or other visual asset is BEHAVIOR_BACKED or approved for exclusion by an operator decision; agent-authored rationale alone never dismisses one.",
       "Every SUPPORTING file outside the roots records `requiredBy`, every unresolved first-party reference is resolved, and every blocking finding carries an EDGE_RESOLUTION decision.",
       "Relevant Next.js ancestor layouts and templates, plus their imported wrappers and styles, remain governing or supporting evidence outside the owned census; external JSX package imports trace to UI behaviors.",
+      "Every response in the scan's `apiContract.obligations` is cited verbatim as `- Response: <identity>` in an OpenSpec scenario, no scenario cites a response the scan does not list, and `apiContract.unresolved` is empty.",
     ],
   }),
   "steps/03-assess-target.md": renderStep({
@@ -159,6 +160,7 @@ export const stepTemplates = ({ designSource, figmaSources } = {}) => ({
       "The active `evidence/<slice-id>/result.json` is PASS and covers every requirement assigned to the slice.",
       "Independent list/detail behavior or its approved redesign is exercised, including transition and return behavior.",
       "Design-system evidence proves use of the target-required source or an approved exception.",
+      "Every legacy response cited by a scenario this slice traces is proven by a passing test named `Response: <identity>` in a recorded evidence command's output, with no failing one.",
     ],
   }),
   "steps/08-finalize.md": renderStep({

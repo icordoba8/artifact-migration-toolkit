@@ -362,6 +362,9 @@ export const sourceRequirements = (state) =>
       legacyRoot: state.source.root,
       moduleRoots: state.bindings.source.paths,
       typescript: await structuralParser(),
+      // The artifact graph reads no API response contract, so it stays on the
+      // algorithm it has always run instead of following the module default.
+      algorithmVersion: 4,
     });
     for (const key of SCANNER_REQUIREMENT_KEYS) {
       if (!Array.isArray(scan[key])) {

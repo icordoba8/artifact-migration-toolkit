@@ -96,6 +96,21 @@ the verifier and report output outside the agent's writable filesystem. When
 isolation is unavailable, report an observed functional result only; do **not**
 call the provider production-certified.
 
+The runner provides that executor by default (`--isolation os`). The agent runs
+in its own unprivileged user, mount and PID namespaces (`unshare`); the release
+store, verifier, runtime receipt, acceptance marker, installed skills and the
+report directory are bind-mounted read-only, and every capability is dropped
+(`setpriv`) before the provider starts, so it can neither write nor remount
+them. Everything the agent starts is killed when it exits, so nothing can edit
+the report afterwards. `report.json` records `security.isolation`
+(`OS_NAMESPACE` or `NONE`), the read-only paths, and `security.certified`, which
+is true only for an isolated run whose installed pin equals `--expected-pin`.
+On a host without unprivileged namespaces the runner refuses; `--isolation none`
+then yields functional evidence with `certified: false`. The agent still shares
+the network and writes the consumer record through the engine, so the engine's
+`COMPLETE` remains the agent's own run, and the SHA-pinned verifier remains the
+functional verdict.
+
 Run from the **toolkit repository under test**, giving the fresh target root:
 
 ```bash

@@ -6,6 +6,12 @@
  * This harness never edits a skill, registry, lock, or migration artifact.
  * Its single agent invocation gets no rescue prompt. The installed engine
  * decides whether the migration is complete.
+ *
+ * By default the agent runs under OS-enforced isolation (see `isolated`): the
+ * trusted runtime, verifier, receipt, skills and report directory are
+ * read-only to it, and nothing it starts outlives it. `--isolation none` is for
+ * hosts without unprivileged namespaces; such a run is functional evidence
+ * only and its report says it is not security-certified.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -18,7 +24,7 @@ const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];
-    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin"].includes(name) || !argv[i + 1] || name in options)
+    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation"].includes(name) || !argv[i + 1] || name in options)
       fail("Expected unique --provider, --cwd, --module, --target, --output and optional --timeout-minutes arguments");
     options[name] = argv[i + 1];
   }
@@ -32,10 +38,12 @@ const argsOf = (argv) => {
     fail("--expected-pin must be an exact SHA-256 release-manifest digest");
   if (goal === "complete" && expectedPin === null)
     fail("Complete acceptance requires --expected-pin obtained independently from the candidate bundle before agent execution.");
+  const isolation = options["--isolation"] ?? "os";
+  if (!["os", "none"].includes(isolation)) fail("--isolation must be os or none");
   const minutes = options["--timeout-minutes"] === undefined ? 50 : Number(options["--timeout-minutes"]);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 90) fail("Timeout must be between 1 and 90 minutes");
   return { provider: options["--provider"], cwd: path.resolve(options["--cwd"]), module: options["--module"],
-    target: options["--target"], goal, expectedPin, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
+    target: options["--target"], goal, expectedPin, isolation, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
 };
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
@@ -77,6 +85,24 @@ const run = ({ command, argv, cwd, timeoutMs }) => new Promise((resolve, reject)
       stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
   });
 });
+
+/**
+ * OS-enforced isolation: the agent gets its own user, mount and PID namespaces.
+ * Each trusted path is bind-mounted read-only, then every capability is dropped
+ * before exec, so the agent can neither write those paths nor remount them;
+ * and when it exits, every process it left behind is killed with its PID
+ * namespace -- nothing can rewrite the report afterwards.
+ * ponytail: unshare(1) + setpriv(1), no container runtime. Ceiling: the agent
+ * still shares the network and every path not listed, including the consumer
+ * record it legitimately writes through the engine.
+ */
+const ISOLATE = ["--user", "--map-root-user", "--mount", "--propagation", "private",
+  "--pid", "--fork", "--mount-proc", "--kill-child"];
+const ISOLATE_SETUP = 'set -e; n=$1; shift; while [ "$n" -gt 0 ]; do mount --bind "$1" "$1"; ' +
+  'mount -o remount,bind,ro "$1"; shift; n=$((n - 1)); done; ' +
+  'exec setpriv --no-new-privs --inh-caps=-all --bounding-set=-all -- "$@"';
+const isolated = ({ command, argv }, readOnly) => ({ command: "unshare",
+  argv: [...ISOLATE, "sh", "-c", ISOLATE_SETUP, "sh", String(readOnly.length), ...readOnly, command, ...argv] });
 
 // Each host's headless permission model, granting only the installed
 // registration and the consumer's own state directory -- never a sandbox bypass.
@@ -160,9 +186,20 @@ async function main() {
     fail("ACCEPTANCE_PRECONDITION: Discover command is not the one from the verified release.");
   const skills = path.join(root, SKILL_DIRS[options.provider]);
   const skillsBefore = await treeDigest(skills);
-  const startedAt = new Date().toISOString();
-  const agent = await run({ ...invocationCommand, cwd: root, timeoutMs: options.timeoutMs });
+  // The report directory exists before the agent does, so it can be sealed too.
   await mkdir(output, { recursive: true });
+  const readOnly = [...new Set(await Promise.all([installed.store, verifier, receiptPath, markerPath, skills, output]
+    .map((entry) => realpath(entry))))].sort();
+  if (options.isolation === "os") {
+    const probe = await run({ ...isolated({ command: "true", argv: [] }, readOnly), cwd: root, timeoutMs: 30000 })
+      .catch((error) => ({ code: 1, stderr: error.message }));
+    if (probe.code !== 0) fail("ACCEPTANCE_PRECONDITION: OS isolation is unavailable here (unprivileged user, mount and PID " +
+      "namespaces via unshare and setpriv): " + String(probe.stderr).trim() + ". Rerun with --isolation none for " +
+      "functional evidence that is NOT security-certified.");
+  }
+  const startedAt = new Date().toISOString();
+  const agent = await run({ ...(options.isolation === "os" ? isolated(invocationCommand, readOnly) : invocationCommand),
+    cwd: root, timeoutMs: options.timeoutMs });
   await writeFile(path.join(output, "agent.stdout.log"), agent.stdout);
   await writeFile(path.join(output, "agent.stderr.log"), agent.stderr);
   if (await readFile(markerPath, "utf8") !== markerBytes)
@@ -207,6 +244,11 @@ async function main() {
     startedAt, completedAt: new Date().toISOString(), invocation, toolkit: receipt.toolkit ?? null,
     candidate: { expectedPin: options.expectedPin, independentPinRequiredForComplete: true,
       matchesTrustedPin: options.expectedPin !== null && options.expectedPin === installed.pin },
+    security: { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
+      readOnly: options.isolation === "os" ? readOnly : [],
+      // Certified only when the agent could not write the trusted paths and the
+      // candidate is the one pinned from outside the consumer.
+      certified: options.isolation === "os" && options.expectedPin !== null && options.expectedPin === installed.pin },
     agent: { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
       transcriptSha256: createHash("sha256").update(combined).digest("hex") },
     engine: { currentStep: status.currentStep, state: status.status, revision: state.revision,

@@ -939,7 +939,7 @@ test("E2E-D: the built bundle states both engines' upgrade floors and registries
   assert.deepEqual(supports, toolkit.manifest.supports);
 
   assert.equal(supports.moduleFormat, MIGRATION_FORMAT_VERSION);
-  assert.equal(supports.moduleFormatSupported, 20);
+  assert.equal(supports.moduleFormatSupported, 21);
   assert.equal(supports.formatUpgradeFloor, 17);
   // 19 -> 20 is declared so the ceiling is reachable, but its plan always
   // blocks: authored appearance coverage cannot be inferred from a format-19
@@ -948,6 +948,7 @@ test("E2E-D: the built bundle states both engines' upgrade floors and registries
     { from: 17, to: 18, id: "UI_OBSERVATIONS_ADOPTED", version: 1 },
     { from: 18, to: 19, id: "DIRECT_LEDGER_DECISIONS_ADOPTED", version: 1 },
     { from: 19, to: 20, id: "UI_COVERAGE_ADOPTED", version: 1 },
+    { from: 20, to: 21, id: "API_CONTRACT_ADOPTED", version: 1 },
   ]);
 
   assert.equal(supports.artifactFormat, 14);

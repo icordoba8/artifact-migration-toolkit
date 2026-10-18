@@ -189,8 +189,8 @@ test("A5-ARCH-5: historical compatibility exports remain, as the census binding 
 const execFileAsync = promisify(execFile);
 
 test("A5-ARCH-6: the scanner's versions are pinned, and its parser loads lazily from the scanner's installed path", async () => {
-  assert.equal(census.CENSUS_ALGORITHM_VERSION, 4);
-  assert.deepEqual([...census.SUPPORTED_ALGORITHM_VERSIONS], [1, 2, 3, 4]);
+  assert.equal(census.CENSUS_ALGORITHM_VERSION, 5);
+  assert.deepEqual([...census.SUPPORTED_ALGORITHM_VERSIONS], [1, 2, 3, 4, 5]);
   // A fresh process: importing the census entry and every engine module that
   // re-exports it loads no compiler; the first parse does, and from the same
   // place the scanner always resolved it (src/discovery-scan.mjs).

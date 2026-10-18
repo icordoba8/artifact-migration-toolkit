@@ -73,6 +73,7 @@ import { activeArtifact, legacyChecklistBlocker, resumeGuidance } from "./checkp
 import { readContext } from "./context.mjs";
 import {
   assertCurrentOpenSpecAuthority,
+  assertNewOpenSpecCoversApiContract,
   loadOpenSpecAuthority,
   validateOpenSpecProposal,
 } from "./openspec.mjs";
@@ -742,6 +743,7 @@ const bootstrapUnderLock = async ({
   const requirementsAuthority = proposedOpenSpec
     ? proposedOpenSpec.authority
     : await loadOpenSpecAuthority(registryData.targetRoot, resolved.target);
+  await assertNewOpenSpecCoversApiContract({ legacyRoot: registryData.legacyRoot, targetRoot: registryData.targetRoot, resolved, content: proposedOpenSpec?.content ?? null });
   let briefRecord = null;
   let briefContent = null;
   if (brief) {

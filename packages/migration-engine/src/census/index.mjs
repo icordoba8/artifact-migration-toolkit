@@ -102,3 +102,11 @@ export {
   structuralParser,
   targetTypeScript,
 } from "./toolchain.mjs";
+export {
+  API_CONTRACT_ALGORITHM,
+  apiContractIssues,
+  assertApiContractCovered,
+  openSpecResponses,
+  unplannedResponses,
+  unprovenResponses,
+} from "./api.mjs";

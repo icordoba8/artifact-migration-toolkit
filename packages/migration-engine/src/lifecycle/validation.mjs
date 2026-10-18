@@ -26,6 +26,7 @@ import {
   validateTargetInventory,
 } from "../census/index.mjs";
 import { engineCommand } from "../engine-paths.mjs";
+import { assertApiContractPlanned, assertApiResponseEvidence } from "./api-evidence.mjs";
 import {
   CAPABILITY_OWNERSHIP_FILE,
   DISCOVERY_SCAN_FILE,
@@ -1076,11 +1077,8 @@ const validateVerifiedSlice = async (root, sliceId, state, roots) => {
     `Evidence for ${sliceId}`,
   );
   assertSlicePassed(implementation, evidence, sliceId, state, engineCommand);
-  await assertCommandResults(
-    evidence.commands,
-    `${sliceId} evidence commands`,
-    roots,
-  );
+  await assertCommandResults(evidence.commands, `${sliceId} evidence commands`, roots);
+  await assertApiResponseEvidence({ root, state, roots, sliceId, scenarioIds: implementation.scenarioIds, commands: evidence.commands });
   const baseline = await validateBaseline(root, { roots, state });
   // Format 17: a design-system gap is a visual divergence the slice itself
   // declares, so it cannot sit PENDING inside a visual PASS.
@@ -1236,6 +1234,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
     );
     await validateGates(root, state, roots);
     await assertGatesCoverSliceScenarios(root, state, slices);
+    await assertApiContractPlanned({ root, state, roots, slices });
   }
 };
 

@@ -19,6 +19,7 @@ import {
   MIGRATION_FORMAT_SUPPORTED,
   nextIncrement,
   REQUIRED_OBSERVATIONS_FORMAT,
+  UI_COVERAGE_FORMAT,
   upgradeIsActive,
   VISUAL_ACCEPTANCE_FORMAT,
 } from "../formats/index.mjs";
@@ -99,6 +100,13 @@ const FORMAT_UPGRADE_HANDLERS = {
     },
     plan: async () => ({ blockers: ["Format 20 cannot be inferred from a format-19 record."], candidateDigest: null }),
     commit: async () => { throw new Error("Format 20 cannot be applied to an existing record."); },
+  },
+  [UI_COVERAGE_FORMAT]: {
+    domain: () => {
+      throw new Error("Format 21 holds the OpenSpec, created at RESOLVE, to the source API response contract. Existing format-20 records retain their pinned contract; start a new migration record for renewed validation.");
+    },
+    plan: async () => ({ blockers: ["Format 21 cannot be inferred from a format-20 record."], candidateDigest: null }),
+    commit: async () => { throw new Error("Format 21 cannot be applied to an existing record."); },
   },
 };
 

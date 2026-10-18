@@ -99,6 +99,9 @@ controller or middleware is part of the contract even when the domain layer
 never mentions it. Each traced response becomes an OpenSpec scenario that cites
 its source paths and is checked against the target. Record a response you
 cannot trace as `UNRESOLVED`; never replace it with a framework or target default.
+At format 21 the engine derives these responses itself (the discovery scan's
+`apiContract`) and refuses an OpenSpec that does not cite each one verbatim as
+`- Response: <identity>`; an endpoint it cannot interpret is `UNRESOLVED` and blocks.
 
 ## Evidence classification
 

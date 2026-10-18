@@ -399,8 +399,8 @@ One versioned resolver computes the boundary during `DISCOVER_LEGACY` and again
 from the final editable classification during `DISCOVERY_COMPLETENESS`,
 `--scan`, pending-decision derivation, and `FINALIZE`. Every classification and
 persisted scan records an explicit supported integer `algorithmVersion` (1, 2,
-3, or 4). Format 20 requires algorithm 4; older formats retain their pinned
-algorithm. Algorithm 3 also treats a Next.js convention file inside a module root
+3, 4, or 5). Format 21 requires algorithm 5 and format 20 algorithm 4; older
+formats retain their pinned algorithm. Algorithm 3 also treats a Next.js convention file inside a module root
 (`error.tsx`, `page.tsx`, ...) as a framework entry point, so it needs no
 declaration; algorithm 2 seeded only conventions outside the roots. A missing, non-integer, or unsupported recorded version raises a typed
 scanner-version error before rescanning; it never falls through to the current
@@ -549,7 +549,8 @@ their evidence, relevant runtime URLs, the resolution rules (TypeScript
 version, tsconfig path and digest, `paths`, `baseUrl`, `moduleResolution`,
 `module`, `jsx`, probe extensions, census command), the sorted census, only
 boundary-relevant edges, stable findings, concrete module-edge targets, and
-every relevant unresolved reference. Algorithm 3 uses the same projection.
+every relevant unresolved reference. Algorithm 3 uses the same projection;
+algorithm 4 adds `externalUi`, and algorithm 5 adds `apiContract`.
 Algorithm 1 retains its original digest
 projection byte-for-byte.
 
@@ -1498,6 +1499,34 @@ require()` or a loader call whose function argument imports it (such as
 member that is not spelled out is `*`. A scroll container
 inside a claimed element is not part of that claim's scroll contract, which
 measures the claimed element and its ancestors only.
+
+Module format 21 pins the legacy **API response contract**: scanner algorithm 5
+adds `apiContract` (`version`, `obligations[]`, `unresolved[]`) to the scan and
+to its digest. Algorithm 5 interprets a route table -- an object literal keyed
+`"<METHOD> <path>"` in an owned file -- whose handlers return `{ status, body[,
+headers] }` directly or through wrappers. It follows calls through every
+first-party file the scan resolved, collects `throw new <Class>("<CODE>", ...)`
+sites, reads the error's fields from the class's own constructor chain, and runs
+each catch clause once per traced error and once for a runtime fault, evaluating
+lookup tables, `??`/`||` fallbacks, conditionals and `instanceof` guards. Each
+obligation has `id` (`<METHOD> <path> -> <status>[ <CODE>][ body{keys}][
+headers{names}]`), its fields, `route`, `statusAt` and `origins` (raise sites).
+An Express-style registration, a Next.js route handler, a status, identifier or
+thrown value it cannot establish, an error escaping the route handler, or a
+handler with no established response is recorded in `unresolved[]` with its
+location; nothing falls back to a framework or target default.
+
+At RESOLVE the proposal is checked against the contract over each source's
+implicit root; at DISCOVERY_COMPLETENESS against the declared roots. Every
+obligation must be cited by an OpenSpec scenario line `- Response: <id>`,
+verbatim; a cited line that is not an obligation, or one outside a scenario,
+is refused; and `unresolved[]` must be empty. At VERIFY_SLICES the contract is
+read from the pinned scan only while it still hashes to its recorded digest,
+and every obligation cited by a scenario the slice traces needs a line `ok N -
+Response: <id>`, `PASS Response: <id>` or `✔ Response: <id>` -- and no failing
+one -- in a hash-verified evidence command output. FINALIZE requires every
+obligation to be cited by a scenario some slice traces. The evidence is the
+agent's executed run; the engine binds and checks it but does not re-execute it.
 
 At `VERIFY_SLICES`, format-20 `uiEvidence` has a LEGACY and TARGET row for each
 `appearanceClaimId`, each with a hash-verified structured proof, PNG, and

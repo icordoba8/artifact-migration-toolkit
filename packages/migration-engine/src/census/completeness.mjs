@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   createDecisionCandidate,
@@ -6,9 +7,10 @@ import {
   readRecordedDecisions,
   requireModuleDecision,
 } from "../decisions/index.mjs";
-import { initialArtifacts, usesDirectLedgerDecisions, usesUiCoverage } from "../formats/index.mjs";
+import { initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage } from "../formats/index.mjs";
 import { assertArray, assertNonEmpty, assertPlainObject, isPlainObject } from "../shared/index.mjs";
 import { readJson } from "../store/index.mjs";
+import { assertApiContractCovered } from "./api.mjs";
 import {
   assertLegacyEvidenceWithinBoundary,
   implicitModuleRoots,
@@ -96,6 +98,12 @@ export const validateDiscoveryCompleteness = async (
     await readCanonicalModuleBoundary(root, state, roots, {
       scan: precomputed,
     });
+  // Format 21: the pinned OpenSpec is held to the response contract the scan
+  // just derived from the declared roots, before either becomes authority.
+  if (usesApiContract(state)) {
+    const source = requirementsSourceFor(state.targetModule);
+    assertApiContractCovered(scan.apiContract, await readFile(path.join(roots.targetRoot, source), "utf8"), source);
+  }
   const { byId, decisions: ledger } = await readRecordedDecisions(root);
   // The canonical migration identity, not `state.legacyModule`: the recorder
   // binds every approval to `migrationId`, so validation has to recompute the

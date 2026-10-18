@@ -11,7 +11,7 @@ import { nextIncrement, upgradeIsActive } from "./upgrade.mjs";
 
 export const RESUMABLE_CONTRACT_VERSION = 5;
 
-export const MIGRATION_FORMAT_VERSION = 20;
+export const MIGRATION_FORMAT_VERSION = 21;
 
 export const WORKFLOW_VERSION = "5.0";
 
@@ -168,6 +168,15 @@ export const usesUiCoverage = (state) =>
   (state?.formatVersion ?? 1) >= UI_COVERAGE_FORMAT;
 
 /**
+ * Format 21 pins the legacy API response contract (discovery scanner algorithm
+ * 5) and holds the OpenSpec and every slice's evidence to it.
+ */
+export const API_CONTRACT_FORMAT = 21;
+
+export const usesApiContract = (state) =>
+  (state?.formatVersion ?? 1) >= API_CONTRACT_FORMAT;
+
+/**
  * The two independent controls, never inferred from one constant.
  *
  * `MIGRATION_FORMAT_SUPPORTED` is the highest format this engine can read,
@@ -175,7 +184,7 @@ export const usesUiCoverage = (state) =>
  * `FORMAT_ACTIVE_FOR_NEW_MIGRATIONS` is the format ordinary creation stamps.
  * Creation and compatibility are independent of the historical upgrade cursor.
  */
-export const MIGRATION_FORMAT_SUPPORTED = UI_COVERAGE_FORMAT;
+export const MIGRATION_FORMAT_SUPPORTED = API_CONTRACT_FORMAT;
 
 export const FORMAT_ACTIVE_FOR_NEW_MIGRATIONS = MIGRATION_FORMAT_VERSION;
 
@@ -364,7 +373,7 @@ export const SELF_HEALING_FORMAT_VERSIONS = new Set(
  * BUILD_BASELINE close without the matrix and then have PLAN demand it, since
  * the format is read before the stamp is written.
  *
- * Other listed bumps are additive and derivable. Formats 17–20 have separate
+ * Other listed bumps are additive and derivable. Formats 17–21 have separate
  * explicit adoption rules because they add authored evidence or authority.
  */
 export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
@@ -377,6 +386,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
   // rules. It is reached only by the explicit, journalled pre-pin adoption.
   DIRECT_LEDGER_DECISIONS_FORMAT,
   UI_COVERAGE_FORMAT,
+  API_CONTRACT_FORMAT,
 ]);
 
 /**
@@ -387,6 +397,7 @@ export const NON_PROMOTING_FORMAT_VERSIONS = Object.freeze([
  * no third place, which is what the negation chain kept growing.
  */
 export const FORMAT_FEATURES = [
+  [API_CONTRACT_FORMAT, usesApiContract],
   [UI_COVERAGE_FORMAT, usesUiCoverage],
   [DIRECT_LEDGER_DECISIONS_FORMAT, usesDirectLedgerDecisions],
   [REQUIRED_OBSERVATIONS_FORMAT, usesRequiredObservations],
@@ -763,6 +774,16 @@ export const FORMAT_INCREMENTS = Object.freeze([
     from: DIRECT_LEDGER_DECISIONS_FORMAT,
     to: UI_COVERAGE_FORMAT,
     id: "UI_COVERAGE_ADOPTED",
+    version: 1,
+    requiredInput: null,
+    activation: null,
+  }),
+  // A completed format-20 OpenSpec was never held to the source API contract,
+  // and its slices never proved it. Existing records keep format-20 semantics.
+  Object.freeze({
+    from: UI_COVERAGE_FORMAT,
+    to: API_CONTRACT_FORMAT,
+    id: "API_CONTRACT_ADOPTED",
     version: 1,
     requiredInput: null,
     activation: null,
