@@ -252,7 +252,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
     const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-isolated-"));
     try {
       // A verifier in its own directory is sealed whole, dependencies included.
-      const { target, bin, verifier, release, receiptPath, receipt } = await installedCandidate(root, path.join(root, "verifier"));
+      const { target, bin, verifier, release, receiptPath, receipt, pin } = await installedCandidate(root, path.join(root, "verifier"));
       const dependency = path.join(root, "verifier", "driver.mjs");
       await writeFile(dependency, "export default 1;\n");
       const output = path.join(root, "reports");
@@ -269,7 +269,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         attempt("remount", `mount -o remount,bind,rw '${release}'`),
         `(sleep 1; echo late > '${canary}') &`, ""].join("\n"), { mode: 0o755 });
       assert.throws(() => execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
-        "--module", "auth", "--target", "auth", "--output", output],
+        "--module", "auth", "--target", "auth", "--output", output, "--goal", "complete", "--expected-pin", pin],
       { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
       // The fake agent creates no record, so the run fails afterwards -- but not on a tamper check.
       (error) => !/modified|Agent left/.test(String(error.stderr)));
@@ -279,7 +279,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
       assert.equal(await readFile(engineFile, "utf8"), engineBytes);
       const blocked = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
       assert.equal(blocked.verdict, "FAIL");
-      assert.equal(blocked.security.trustedRuntimeIsolated, false);
+      assert.equal(blocked.security.trustedRuntimeIsolated, true);
       assert.equal(blocked.security.certified, false);
       await new Promise((resolve) => setTimeout(resolve, 2000));
       await assert.rejects(readFile(canary), { code: "ENOENT" });
