@@ -1139,6 +1139,26 @@ const CLAIM_BEHAVIOR = {
   scrollContracts: [{ state: "DEFAULT", owner: "ELEMENT", documentScrollable: false, ancestorClipped: false }],
 };
 
+test("MC2: a claim reached by navigation is observed after the click, not checked against the source page", { skip: CAPTURE_BROWSER_SKIP ?? false }, async () => {
+  const server = await startCaptureServer();
+  try {
+    const claim = { id: "APP-N", state: "DEFAULT", afterInteractionId: "UIX-N", role: "heading", name: "Work orders", locator: "h1" };
+    const captured = await captureInBrowser(claimCapturePlan(parseCaptureRequest({ origin: server.origin, route: "/work-orders/new",
+      viewport: CLAIM_VIEWPORT, appearanceClaimId: claim.id, interaction: { type: "click", target: "a:has-text('Cancel')" } }), CLAIM_BEHAVIOR, claim));
+    // The source page's own h1 is recorded as not being the claim; the destination shows it.
+    assert.deepEqual(captured.snapshot.observation.controls.map(({ name, present }) => [name, present]), [["Work orders", false]]);
+    const [after] = captured.snapshot.interactions;
+    assert.equal(new URL(after.postAction.url).pathname, "/work-orders/list");
+    assert.deepEqual(after.postAction.controls.map(({ name, present, visible }) => [name, present, visible]), [["Work orders", true, true]]);
+    // The destination still must show the claimed identity.
+    await assert.rejects(captureInBrowser(claimCapturePlan(parseCaptureRequest({ origin: server.origin, route: "/work-orders/new",
+      viewport: CLAIM_VIEWPORT, appearanceClaimId: claim.id, interaction: { type: "click", target: "a:has-text('Cancel')" } }),
+    CLAIM_BEHAVIOR, { ...claim, name: "Inventory" })), /CAPTURE_OBSERVATION_FAILED: control at 'h1' does not expose role 'heading' with accessible name 'Inventory'/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("MC2: format-20 LEGACY claim captures satisfy the claim, scroll and pixel validators; the verdict stays authored", { skip: CAPTURE_BROWSER_SKIP ?? false }, async () => {
   const server = await startCaptureServer();
   const root = await mkdtemp(path.join(os.tmpdir(), "mc2-claim-"));

@@ -382,7 +382,11 @@ export const captureInBrowser = async (plan) => {
       onOrigin(label);
     };
     for (const [index, step] of plan.setup.entries()) await act(step, `setup[${index}]`);
-    const observe = async (root) => {
+    // Before an interaction the page is the source state, not the claimed one:
+    // a control the action reveals may be absent there, or its locator may match
+    // the source page's own element (a navigation's `h1`). Only the post-action
+    // observation must show the claimed identity.
+    const observe = async (root, strict = true) => {
       const controls = [];
       const issues = [];
       for (const control of plan.controls) {
@@ -390,14 +394,15 @@ export const captureInBrowser = async (plan) => {
         operations.locatorQueries += 1;
         const count = await located.count();
         const base = { role: control.role, name: control.name, locator: control.locator, state: plan.state };
-        if (count > 1) issues.push(`control ${control.role} '${control.name}' locator '${control.locator}' matches ${count} elements`);
+        if (count > 1 && strict) issues.push(`control ${control.role} '${control.name}' locator '${control.locator}' matches ${count} elements`);
         if (count !== 1) {
           if (count === 0) controls.push({ ...base, present: false, visible: false, count: 0 });
           continue;
         }
         // The browser's own accessibility computation, not the request, says what the element is.
         if (await located.and(page.getByRole(control.role, { name: control.name, exact: true, includeHidden: true })).count() !== 1) {
-          issues.push(`control at '${control.locator}' does not expose role '${control.role}' with accessible name '${control.name}'`);
+          if (strict) issues.push(`control at '${control.locator}' does not expose role '${control.role}' with accessible name '${control.name}'`);
+          else controls.push({ ...base, present: false, visible: false, count });
           continue;
         }
         const visible = await located.isVisible();
@@ -421,7 +426,7 @@ export const captureInBrowser = async (plan) => {
     const issues = [];
     let before;
     if (plan.interaction) {
-      before = await observe(null);
+      before = await observe(null, false);
       issues.push(...before.issues);
       await act(plan.interaction.action, `interaction '${plan.interaction.id}'`);
     }

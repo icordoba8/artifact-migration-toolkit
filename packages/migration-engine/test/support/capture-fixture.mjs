@@ -50,6 +50,9 @@ const PAGES = {
   "/landing": page({ extra: '<a id="done" href="/auth/sign-in">Done</a>' }),
   // Visible text whose <p> has no accessible name: role=paragraph[name=...] never matches it.
   "/work-orders": page({ extra: "<p>6 work orders</p>" }),
+  // A navigation whose source page has its own `h1`: the claimed heading exists only after the click.
+  "/work-orders/new": '<!doctype html><title>New</title><h1>New work order</h1><a href="/work-orders/list">Cancel</a>',
+  "/work-orders/list": "<!doctype html><title>List</title><h1>Work orders</h1>",
 };
 
 /** The session the private page needs, as a Playwright storageState names it. */
