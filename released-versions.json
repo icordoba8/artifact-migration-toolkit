@@ -90,5 +90,9 @@
   {
     "version": "1.5.0",
     "contentHash": "sha256:7b916a84b4a9aa980f13f69ac014ce6289293bf4b15e3d597fc705b474d7443b"
+  },
+  {
+    "version": "1.6.0",
+    "contentHash": "sha256:2f969c17538e08597c6f03b4e5b2c70116087d3482506252ab29fc47f8e94edb"
   }
 ]
