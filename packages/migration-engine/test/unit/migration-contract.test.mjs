@@ -24187,6 +24187,67 @@ browserTest("late --reopen-discovery corrects an unresolvable pinned claim locat
   }
 });
 
+// A valid claim captured before the bad one fails: the reopen preserves that
+// capture and clears its paths, so the corrected inventory recaptures it.
+browserTest("late --reopen-discovery preserves and clears a valid claim captured before the failure, so it recaptures", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+    const classification = { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] };
+    const broken = { ...FORMAT20_LEGACY, uiBehaviors: FORMAT20_LEGACY.uiBehaviors.map((uiBehavior) => ({ ...uiBehavior,
+      requiredAppearance: [...uiBehavior.requiredAppearance,
+        { id: "APP-3", state: "DEFAULT", role: "paragraph", name: "6 work orders", locator: 'role=paragraph[name="6 work orders"]' }] })) };
+    const toVerify = async (legacy, bootstrap = { currentFormat: true }) => {
+      await driveTo(fixture, "PLAN", advance, { bootstrap, legacy, classification });
+      await authorSlice(fixture, "slice-a");
+      await advance(fixture, { slice: "slice-a" });
+    };
+    await toVerify(broken);
+    const root = fixture.migrationRoot;
+    const claim = (appearanceClaimId) => captureFrame(fixture, { origin: server.origin, route: "/work-orders", viewport: CAPTURE_VIEWPORT, appearanceClaimId });
+    await claim("APP-1");
+    await assert.rejects(claim("APP-3"), /CAPTURE_ELEMENT_MISSING/);
+    const captured = ["evidence/slice-a/result.json", "evidence/slice-a/ui/legacy/APP-1.proof.json", "evidence/slice-a/ui/legacy/APP-1.png"];
+    const originals = Object.fromEntries(await Promise.all(captured.map(async (relative) => [relative, await readFile(path.join(root, relative))])));
+    const reopen = async () => {
+      const resolution = await resolutionFor(fixture);
+      const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", reopenDiscovery: true });
+      assert.deepEqual(preview.blockers, []);
+      return bootstrapMigration({ ...resolution, moduleName: "auth", reopenDiscovery: true,
+        boundInputs: preview.boundInputs, registryBinding: preview.registryBinding });
+    };
+    // A capture the engine cannot attribute to itself is ambiguous: refused, nothing changed.
+    const png = path.join(root, captured[2]);
+    await writeFile(png, "edited");
+    const before = await snapshot(root);
+    await assert.rejects(reopen(), /cannot clear the LEGACY captures of slice 'slice-a'.*APP-1.*Nothing was changed/);
+    assert.deepEqual(await snapshot(root), before);
+    await writeFile(png, originals[captured[2]]);
+
+    const revision = (await state(fixture)).revision + 1;
+    await reopen();
+    const directory = `reopen/discovery-${revision}`;
+    const after = await state(fixture);
+    const reopened = (await historyEvents(fixture)).at(-1);
+    assert.deepEqual(reopened.cleared, captured);
+    for (const relative of captured) {
+      // Preserved byte for byte and pinned; the original path is free again.
+      assert.deepEqual(await readFile(path.join(root, directory, relative)), originals[relative]);
+      assert.ok(after.artifactHashes[`${directory}/${relative}`], relative);
+      assert.ok(reopened.preserved.includes(`${directory}/${relative}`), relative);
+      assert.equal(await entryExists(path.join(root, relative)), false, relative);
+    }
+
+    await toVerify(FORMAT20_LEGACY, { currentFormat: true, openSpecProposal: undefined });
+    assert.equal((await claim("APP-1")).captured.uiBehaviorId, "UIB-1");
+    assert.equal((await state(fixture)).currentStep, "VERIFY_SLICES");
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
 browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
   const server = await startCaptureServer();
   const fixture = await createFixture();

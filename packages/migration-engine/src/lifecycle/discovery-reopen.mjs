@@ -2,11 +2,21 @@
  * Lifecycle: --reopen-discovery, the agent's own way back to DISCOVER_LEGACY.
  * Split from `reopen.mjs` by ownership; the operator transitions stay there.
  */
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { INTEGRITY_FILE, stampedFormatVersion, stepsFor } from "../formats/index.mjs";
 import { now, portablePath, sha256Hex as hashContent } from "../shared/index.mjs";
-import { assertHistoryAppendable, atomicWrite, fileExists, renderState, REOPEN_ROOT } from "../store/index.mjs";
+import {
+  assertHistoryAppendable,
+  atomicWrite,
+  contentIdentityMatchesSource,
+  fileExists,
+  readOptionalJson,
+  removeDurably,
+  removeEmptyParents,
+  renderState,
+  REOPEN_ROOT,
+} from "../store/index.mjs";
 import { removeJournal, writeJournalAtomic } from "./journal.mjs";
 import { activeArtifact } from "./checkpoints.mjs";
 import {
@@ -39,6 +49,10 @@ import {
  * reopen releases every pin after RESOLVE, exactly like --refresh, but keeps
  * the legacy revision (drift still needs the operator) and first preserves the
  * released bytes under `reopen/discovery-<revision>/`, pinned for good.
+ * The active slice's LEGACY claim captures are preserved the same way and then
+ * cleared, or recapturing the same claim on the corrected inventory would meet
+ * CAPTURE_EXISTS; anything there the engine cannot attribute to its own
+ * capture refuses the reopen.
  */
 export const reopenDiscoveryBlocker = (state) =>
   state.currentStep === "DISCOVERY_COMPLETENESS" ||
@@ -119,19 +133,54 @@ export const reopenDiscoveryUnderLock = async ({
   };
 };
 
+/**
+ * The unverified active slice's engine-written LEGACY captures: its result.json
+ * and every proof and screenshot a LEGACY row cites, unchanged. Anything else
+ * under ui/legacy, or a row whose file moved or changed, is ambiguous: refused.
+ */
+const abandonedCaptures = async (root, targetRoot, slice) => {
+  if (!slice) return [];
+  const resultFile = `evidence/${slice}/result.json`;
+  const directory = `evidence/${slice}/ui/legacy`;
+  const onDisk = (await readdir(path.join(root, directory)).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  })).map((name) => `${directory}/${name}`);
+  const result = await readOptionalJson(path.join(root, resultFile), `Evidence for ${slice}`);
+  const rows = (Array.isArray(result?.uiEvidence) ? result.uiEvidence : []).filter((row) => row?.origin === "LEGACY");
+  const ambiguous = (detail) => {
+    throw new Error(`--reopen-discovery cannot clear the LEGACY captures of slice '${slice}': ${detail}. Only an unchanged engine capture is cleared. Nothing was changed.`);
+  };
+  const cited = [];
+  for (const row of rows) {
+    for (const [file, suffix] of [[row, "proof.json"], [row.screenshot ?? {}, "png"]]) {
+      const expected = `${directory}/${row.appearanceClaimId}.${suffix}`;
+      if (file.reference !== portablePath(path.relative(targetRoot, path.join(root, expected))) ||
+          !(await contentIdentityMatchesSource(file.hash, targetRoot, file.reference))) {
+        ambiguous(`the LEGACY row of claim '${row.appearanceClaimId}' does not cite an unchanged ${expected}`);
+      }
+      cited.push(expected);
+    }
+  }
+  const uncited = onDisk.filter((relative) => !cited.includes(relative));
+  if (uncited.length > 0) ambiguous(`'${uncited[0]}' is not cited by a LEGACY row of ${resultFile}`);
+  return rows.length > 0 ? [resultFile, ...cited] : [];
+};
+
 const reopenDiscoveryLate = async ({ registryData, resolved, root, statePath, state }) => {
   const revision = state.revision + 1;
   const directory = `${REOPEN_ROOT}/discovery-${revision}`;
   if (await fileExists(path.join(root, directory))) {
     throw new Error(`${directory} already exists; a preserved reopen is never overwritten. Nothing was changed.`);
   }
+  const cleared = await abandonedCaptures(root, registryData.targetRoot, state.activeSlice);
   const kept = new Set(resolveStepPins(state));
   const released = Object.keys(state.artifactHashes).filter(
     (relative) => !kept.has(relative) && !isBytePinned(relative),
   );
   // Raw bytes of what each released pin was derived from, never re-serialized.
   const writes = [];
-  for (const source of new Set(released.map((relative) => portablePath(path.relative(root, pinnedSourcePath(root, relative)))))) {
+  for (const source of new Set([...released.map((relative) => portablePath(path.relative(root, pinnedSourcePath(root, relative)))), ...cleared])) {
     writes.push([`${directory}/${source}`, await readFile(path.join(root, source))]);
   }
   const preserved = {};
@@ -165,6 +214,7 @@ const reopenDiscoveryLate = async ({ registryData, resolved, root, statePath, st
     step: "DISCOVER_LEGACY",
     invalidated: released,
     preserved: Object.keys(preserved).sort(),
+    cleared,
     revision,
   };
   const integrityPath = path.join(root, INTEGRITY_FILE);
@@ -187,6 +237,11 @@ const reopenDiscoveryLate = async ({ registryData, resolved, root, statePath, st
   await atomicWrite(registryData.targetRoot, integrityPath, nextIntegrity);
   await atomicWrite(registryData.targetRoot, statePath, renderState(reopened));
   await appendHistoryOnce(registryData.targetRoot, root, event);
+  // ponytail: cleared only after the commit, so a crash can never lose the
+  // originals; a crash right here leaves them in place (preserved copy pinned)
+  // and the recapture still meets CAPTURE_EXISTS. Fold into recovery if seen.
+  for (const relative of cleared) await removeDurably(registryData.targetRoot, path.join(root, relative));
+  if (cleared.length > 0) await removeEmptyParents(path.join(root, path.dirname(cleared.at(-1))), root);
   await removeJournal(journalFile);
   return { changed: true, reopened: true, statePath, migrationRoot: root, state: reopened, nextArtifact: activeArtifact(reopened), resolved };
 };
