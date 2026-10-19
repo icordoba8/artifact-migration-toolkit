@@ -97,8 +97,12 @@ verification prove the engine and its distribution; they do **not** prove that a
 real Claude Code, OpenCode or Codex session can bootstrap and execute the skill
 without prompt repair. A stable release advertised as ready for autonomous
 migration **MUST** also satisfy [black-box real-agent acceptance](agent-e2e-acceptance.md)
-on the exact immutable release candidate and every provider/platform declared
-supported. Preserve all evidence and state the model/provider versions.
+on the exact immutable release candidate for every provider, workflow and
+platform it declares production-certified. A packaged adapter may remain
+available without that claim; label it experimental or NOT_TESTED in the
+release notes. Each later provider certification requires its own release
+candidate, exact-SHA CI and live acceptance before its separate publication.
+Preserve all evidence and state the model/provider versions.
 
 Do not treat missing agent credentials, a synthetic/OpenSpec-prefilled fixture,
 an LLM-free rehearsal, or an unrecorded native progress UI as a waiver. Mark any

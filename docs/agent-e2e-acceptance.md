@@ -43,8 +43,10 @@ will execute the skill autonomously in a real provider host.
    the engine's persisted `progressChecklist`; record the actual UI. A
    headless transcript alone does not certify native task UI liveness.
 
-Run each supported provider (Claude Code, OpenCode and Codex) **separately**
+Run each provider declared production-certified by this release **separately**
 on fresh consumers and on each OS/platform for which compatibility is claimed.
+An adapter packaged for another provider is not thereby certified; label its
+status NOT_TESTED or experimental until a later exact-SHA release qualifies it.
 The reference tests must be prepared independently of the migrating model.
 Do not assume a successful Linux test certifies Windows/WSL.
 

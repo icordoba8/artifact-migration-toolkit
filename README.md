@@ -6,7 +6,7 @@ skills and the one migration engine that implements them.
 See the [migration command reference](docs/command-reference.md) for every
 supported client, skill selection, invocation syntax, and Ponytail behavior.
 
-## Supported targets
+## Available provider adapters
 
 | Target | migrate-artifact | start-migration |
 | --- | --- | --- |
@@ -18,6 +18,10 @@ supported client, skill selection, invocation syntax, and Ponytail behavior.
 `migrate-artifact` migrates one artifact into an existing target application.
 `start-migration` starts a complete feature/module migration workflow.
 GitHub Copilot slash prompts run in a supported IDE's agent chat.
+Adapter availability is distinct from production certification. Each release
+states the provider, workflow and platform scope that passed independent live
+acceptance on its exact candidate SHA. Other adapters remain available for
+evaluation and must not be described as certified by that release.
 
 `migrate-artifact` supports `--ponytail full` (Review evidence before `COMPLETE`)
 and `--ponytail full-audit` (Review and Audit evidence in Review → Audit →
