@@ -36,9 +36,18 @@ export const syncDirectory = async (directory) => {
 export const mkdirDurably = async (directory) => {
   const first = await mkdir(directory, { recursive: true });
   if (first === undefined) return;
+  // Node on Windows reports `first` in its `\\?\` namespaced spelling, so both
+  // sides are compared in that spelling (a no-op on POSIX). A walk that still
+  // reaches the root without meeting it refuses instead of spinning there.
+  const stop = path.toNamespacedPath(path.resolve(first));
   for (let created = path.resolve(directory); ; created = path.dirname(created)) {
     await syncDirectory(path.dirname(created));
-    if (created === path.resolve(first)) return;
+    if (path.toNamespacedPath(created) === stop) return;
+    if (path.dirname(created) === created) {
+      throw new Error(
+        `mkdir reported '${first}' as the first directory it created for '${directory}', which is not one of its ancestors; refusing instead of walking past the filesystem root (Node ${process.version}, ${process.platform}).`,
+      );
+    }
   }
 };
 

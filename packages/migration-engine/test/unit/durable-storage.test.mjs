@@ -7,6 +7,7 @@
 // the right file, before the operation that depends on it.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import {
   chmod,
@@ -245,6 +246,34 @@ test("DR7: a write into new directories makes each new directory entry durable b
   log = await traceFs(t);
   await appendDurably(root, ledger, "x\n");
   assertSyncedBetween(log, [root, path.join(root, "record")], at(log, "mkdir", path.dirname(ledger)), at(log, "open", ledger), "appendDurably");
+});
+
+// Each case runs in a child process under a timeout: on Windows the old walk
+// never yielded to the event loop, so no in-process timeout could stop it.
+test("DR7: mkdirDurably returns once a new chain exists on every platform, and refuses rather than spins on a first directory outside it", async (t) => {
+  const root = await scratch(t);
+  const files = new URL("../../src/store/files.mjs", import.meta.url).href;
+  const child = (script) =>
+    spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20_000 });
+
+  // Node on Windows reports the first new directory as `\\?\C:\...`.
+  const nested = path.join(root, "a", "b", "c");
+  const created = child(`import { mkdirDurably } from ${JSON.stringify(files)}; await mkdirDurably(${JSON.stringify(nested)});`);
+  assert.equal(created.signal, null, "mkdirDurably spun on a new chain until the timeout");
+  assert.equal(created.status, 0, created.stderr);
+  assert.ok((await stat(nested)).isDirectory());
+
+  const foreign = child(`
+    import fsp from "node:fs/promises";
+    import { syncBuiltinESMExports } from "node:module";
+    const mkdir = fsp.mkdir;
+    fsp.mkdir = async (...args) => { await mkdir(...args); return ${JSON.stringify(path.join(root, "elsewhere"))}; };
+    syncBuiltinESMExports();
+    const { mkdirDurably } = await import(${JSON.stringify(files)});
+    await mkdirDurably(${JSON.stringify(path.join(root, "x", "y"))});`);
+  assert.equal(foreign.signal, null, "mkdirDurably spun on a foreign first directory until the timeout");
+  assert.notEqual(foreign.status, 0);
+  assert.match(foreign.stderr, /mkdir reported '.*elsewhere' as the first directory it created/);
 });
 
 test("DR7: renameDurably fsyncs both directories, and copyTree flushes the copy and the entry naming it", { skip: !POSIX }, async (t) => {
