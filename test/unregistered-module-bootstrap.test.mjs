@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -119,6 +120,56 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
     await writeFile(path.join(target, ".agents/knowledge/migrations/modules/partner-registry/state.json"), "{");
     await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
       /'partner-registry' has no readable state/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an interrupted first bootstrap of an unregistered module is recovered by rerunning it with --target", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "interrupted bootstrap "));
+  const legacy = path.join(root, "legacy");
+  const target = path.join(root, "target");
+  const migrations = path.join(target, ".agents/knowledge/migrations");
+  const registry = path.join(migrations, "registry.json");
+  try {
+    await mkdir(path.join(legacy, "partners"), { recursive: true });
+    await mkdir(path.dirname(registry), { recursive: true });
+    await writeFile(path.join(legacy, "partners/marker.txt"), "partner fixture\n");
+    await writeFile(path.join(target, "package.json"), '{"name":"interrupted-consumer","private":true}\n');
+    await writeFile(registry, JSON.stringify({ version: 1, projects: {
+      legacy: { root: path.relative(path.dirname(registry), legacy) },
+      target: { root: path.relative(path.dirname(registry), target) } }, modules: {} }) + "\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["add", "-A"], { cwd: root });
+    execFileSync("git", ["-c", "user.name=Acceptance Test", "-c",
+      "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+    // What a first bootstrap killed while staging its record leaves (the
+    // Windows mkdirDurably hang): the journal of a dead writer and an empty
+    // staged root, and no registry entry or state.json for the module yet.
+    const transactionId = randomUUID();
+    const recordRoot = path.join(migrations, "modules/partners");
+    const openSpecPath = path.join(target, "openspec/specs/partners/spec.md");
+    const staged = (file) => path.join(path.dirname(file), `.${path.basename(file)}.${transactionId}.init`);
+    const journal = path.join(migrations, "init/partners.journal");
+    await mkdir(path.join(staged(recordRoot), "steps"), { recursive: true });
+    await mkdir(path.dirname(journal), { recursive: true });
+    await writeFile(journal, JSON.stringify({
+      file: journal, transactionId, module: "partners", pid: spawnSync(process.execPath, ["-e", ""]).pid,
+      startedAt: new Date().toISOString(), root: recordRoot, rootOwner: path.join(recordRoot, ".init-owner"),
+      openSpecPath, projectRoot: target, configPath: null,
+      configBefore: await readFile(path.join(target, "package.json"), "utf8"),
+      stagedRoot: staged(recordRoot), stagedOpenSpec: staged(openSpecPath), stagedProjectConfig: null,
+    }, null, 2));
+
+    const rerun = spawnSync(process.execPath, [cli, "partners", "--registry", registry,
+      "--target", "partners", "--mode", "auto", "--openspec-proposal-stdin"],
+    { cwd: target, input: spec, encoding: "utf8" });
+    assert.equal(rerun.status, 0, rerun.stderr + rerun.stdout);
+    assert.equal((await getMigrationStatus({ registryPath: registry, moduleName: "partners" })).currentStep,
+      "DISCOVER_LEGACY");
+    assert.equal(await readFile(openSpecPath, "utf8"), spec);
+    await assert.rejects(readFile(journal, "utf8"), { code: "ENOENT" });
+    await assert.rejects(readdir(staged(recordRoot)), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

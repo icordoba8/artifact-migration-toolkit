@@ -27,12 +27,16 @@ import { readState, recoverPendingAdvance } from "./record.mjs";
  * integrity anchor is one revision ahead of its state could be *diagnosed* by a
  * read but never repaired by one. DR13: an interrupted initialization is the
  * same case for a record without state -- the preview reports it as pending
- * and this recovers it first, under the same lock.
+ * and this recovers it first, under the same lock. A first bootstrap
+ * interrupted before it registered its module is only reachable through the
+ * operator's `--target`/`--legacy`, so they resolve it exactly as the preview did.
  */
-export const recoverMigrationRecord = async ({ registryPath, moduleName }) => {
+export const recoverMigrationRecord = async ({ registryPath, moduleName, targetOverride, legacy }) => {
   const { registryData, resolved } = await readContext({
     registryPath,
     moduleName,
+    targetOverride,
+    legacy,
   });
   const { targetRoot } = registryData;
   const root = migrationRoot(targetRoot, resolved.canonical);
