@@ -253,3 +253,159 @@ work-orders certification was **not** rerun.
 - Packaging note, unrelated to the fix: `release:build` from Git Bash fails, because GNU `tar` reads `C:` as a remote host. It works from PowerShell (`System32\tar.exe`).
 - The skill could tell agents not to pipe engine output through `tail`/`head`, which hid where the run actually was.
 - Evidence: `~/artifact-migration-acceptance/resolve-bootstrap-stall-fd812b0-20261019/` (WSL).
+
+## Completion: gates, sweep, Windows tests, review (2026-10-19)
+
+### Phase 1: base-vs-branch gates (Linux WSL2, Node 26.8.2)
+
+`tests/gates.sh` ran to completion on both trees, one stage at a time, with
+logs per stage (evidence: `tests/gates-complete-20261019/`). The earlier run
+that stopped for host memory is kept beside it. `providers:test` runs at
+`--test-concurrency=1` by its own script. `engine:test`'s identified pass has
+no concurrency flag (Node refuses `--test-concurrency` in `NODE_OPTIONS`), so it
+ran at its default. No OS or WSL memory setting was changed.
+
+| Stage | Base `4ab6f2adbcb86b188225adcf0108dcaac7f6ba9d` | Branch `e4ec398d212460cb4b972ec2bbe9dd6b6b980809` | New failures |
+| --- | --- | --- | --- |
+| `engine:test`, unidentified pass | 35 pass / 0 fail / 0 skip | 35 / 0 / 0 | 0 |
+| `engine:test`, identified pass | 1136 pass / 1 fail / 0 skip of 1137 | 1137 / 1 / 0 of 1138 (+1: the mkdirDurably test) | 0 |
+| `engine:test:ts` (vitest) | 69/69 pass, 2 files | 69/69 pass, 2 files | 0 |
+| `providers:test` | 197 pass / 0 fail / 1 skip of 198 | 198 / 0 / 1 of 199 (+1: the interrupted-bootstrap test) | 0 |
+| `providers:check` | synchronized (62 files) | synchronized (62 files) | n/a |
+| `architecture:check` | ok (130 engine files, 693 edges) | ok (130 engine files, 693 edges) | n/a |
+
+The one failure on both sides is pre-existing and unchanged:
+`artifact-migration.test.mjs:3249` "a no-op package script cannot claim
+validator coverage" (`'pnpm run typecheck' exited 127` instead of the expected
+`trusted validator evidence` message). The one skip on both sides is the
+win32-only "Windows: ensure succeeds with Git GNU tar first on PATH".
+**Gate met: the branch introduces zero new failures.** `1772fb2` (below) only
+changes `durable-storage.test.mjs`: on Linux it still passes 17/17.
+
+### Phase 2: path-comparison sweep (`packages/migration-engine/src`)
+
+What each fs API returns on native Windows (Node 26.10.0), measured by
+`windows/fs-spellings.mjs`: only `mkdir(…, { recursive: true })` returns the
+`\\?\` namespaced spelling, and it keeps the input's case and 8.3 short names.
+`realpath` returns the plain long-name spelling with the on-disk case.
+`readdir({ recursive })`'s `parentPath`, `opendir().path` and `process.cwd()`
+echo the caller's spelling. `path.win32.relative` compares case-insensitively.
+
+| Site | Comparison | Verdict |
+| --- | --- | --- |
+| `store/files.mjs:37-50` `mkdirDurably` | `mkdir` result vs `path.resolve` walk | **affected → fixed in `fd812b0`**. Both sides go through `path.toNamespacedPath`, and the walk is bounded at the root. Verified on Windows for drive, forward-slash, lower-case, 8.3 short-name and `\\wsl.localhost` UNC inputs. Every `mkdirDurably` caller (lock, journals, staged roots, `writeTree`, `copyTree`, appends) routes through this one helper. |
+| `lifecycle/capture.mjs:160-162` | `realpath(storageState)` vs `realpath(root)` via `path.relative` | safe: both sides are realpaths |
+| `engine-paths.mjs:42-45` `isMainModule` | `path.resolve(argv[1])`, then `realpathSync(argv[1])`, vs the loader's realpath'd `import.meta.url` | safe: the fallback compares realpath to realpath |
+| `lifecycle/prefill.mjs:311,336-339` | `cited` realpaths vs `path.join(realpath(root), git-relative path)` | safe: both bases are realpaths. A git index whose case differs from disk only counts an evidence file's mtime, so it fails closed. |
+| `slices/claims.mjs:343-345` `isTargetFile` | lexical `isWithin`, then realpath vs realpath | safe |
+| `slices/claims.mjs:356-359` `isLinkFree` | `realpath(resolved)` vs `path.join(realpath(targetRoot), relative(targetRoot, resolved))` | safe (fail-closed): a claim whose spelling differs from disk on Windows reads as "reached through a link" and is refused, never accepted. Not RESOLVE/bootstrap. |
+| `slices/amendment.mjs:170-190` | realpath vs realpath, and lexical `isWithin` vs lexical | safe |
+| `store/registry.mjs:145,194-195` | `canonical()` (realpath) of the git top level vs `canonical(project)` | safe |
+| `shared/git.mjs:83,94` `dirtyManifest` | `realpath(root)` vs `realpath(git top level)` | safe (the earlier 8.3 fix) |
+| `lifecycle/gates.mjs:261,276` | `realpath(resolved)` vs `repositoryRealpaths` | safe |
+| `store/tree.mjs:35,89` | `readdir` `parentPath` vs `root` via `path.relative` | safe: `parentPath` echoes `root`'s spelling |
+| `lifecycle/lock.mjs:85` | `readlinkSync("/proc/self/ns/pid")` | safe: Linux only, an identity string, not a path comparison |
+| `lifecycle/lock.mjs:215`, `lifecycle/bootstrap.mjs:284` | non-recursive `mkdir`, result unused | safe |
+| `process.cwd()` defaults (`migration-utils.mjs:113`, `store/registry.mjs:319`, `lifecycle/artifact-record.mjs:259`, `census/artifact.mjs:378-379`, `transport/run.mjs:196-199`, `lifecycle/artifact-checkpoints.mjs:1088,1136`, `transport/mcp.mjs:591`) | used as a root or restored, never compared with an fs-returned spelling | safe |
+
+Out of the sweep's class, but noted: persisted lexical paths compared with a
+fresh `path.resolve` (`lifecycle/journal.mjs:194,198`, `recorder.mjs:464`,
+`operator-signer.mjs:232-301`, `decisions/policy.mjs:90`). Neither side comes
+from fs. A rerun from a different spelling of the same directory is refused
+with a message, never hung or accepted. No change.
+
+**No affected site remains.** No new shared helper was needed: the one affected
+comparison already lives in the one helper every caller uses.
+
+### Phase 2: Windows tests
+
+`1772fb2aaae7fddf9fc62826565102d237404139` (test only):
+
+- "DR7: a write into new directories makes each new directory entry durable
+  before it returns" now runs on every platform. Each write (`atomicWrite` into
+  `a/b/c`, the module lock and first journal on a fresh target, `appendDurably`
+  into `record/decisions`) must land and return. The fsync order stays asserted
+  on POSIX only, because `syncDirectory` is a no-op on win32. On Windows
+  (Node 26.10.0) with `4ab6f2ad`'s `files.mjs` it **times out at 60 s, and the
+  runner is killed**. With the fix it **passes in 0.7 s** (`windows/win-newdir.log`).
+- The four EPERM failures are classified as a **test-only limitation**:
+
+  | Test (`durable-storage.test.mjs` at `e4ec398`) | Syscall | Call site |
+  | --- | --- | --- |
+  | DR7: atomicWrite refuses symlinks, traversal and a directory destination without mutation (`:133`) | `symlink` (`CreateSymbolicLinkW`), EPERM | `:140` |
+  | DR7: writeJournalAtomic checks the whole path from the target root and refuses any symlink in it (`:190`) | `symlink`, EPERM | `:200` |
+  | DR7: writeTree stages a flushed tree … stays inside its root (`:304`) | `symlink`, EPERM | `:335` |
+  | DR8: appendDurably refuses symlinks, traversal and a directory ledger without mutation (`:448`) | `symlink`, EPERM | `:455` |
+
+  Every EPERM comes from the test's own setup `fs.symlink`, which Windows
+  refuses to an account without `SeCreateSymbolicLinkPrivilege` or Developer
+  Mode. `src/` contains no `symlink` call. The product guard still holds on
+  Windows: against a junction, the reparse point such an account *can* create,
+  `atomicWrite`, `appendDurably` and `writeTree` all refuse with `Refusing
+  symlink output path` and leave the outside file untouched
+  (`windows/junction.log`). Not a product defect. Only those four tests are
+  skipped on win32, each with the reason as its skip message.
+- `durable-storage.test.mjs` on Windows at `1772fb2`: 10 pass, 0 fail, 7 skip
+  (4 symlink setup, 3 pre-existing POSIX-only). Linux: 17/17.
+
+**Full engine suite on native Windows: INCOMPLETE (memory stop).** It ran at
+`1772fb2` in the Windows clone, through `windows/engine-test-lowpar.mjs`. That
+is `scripts/engine-test.mjs`'s two passes, with the same file list, scratch
+root and fixture identity, at `--test-concurrency=2`. The runner takes no flags,
+Node refuses the flag in `NODE_OPTIONS`, and its default here would be 21
+workers. Claude Code's memory guard stopped it during the identified pass: the
+host had about 3 GB free of 31.4 GB while the WSL2 VM held most of the rest. No
+OS or WSL memory setting was changed. Up to the stop:
+
+- unidentified pass (`toolkit-identity`, `format-17-acceptance`): **35/35 pass**;
+- identified pass, partial: **172 ✔, 42 ✖**. The ✖ cluster in the
+  operator-decision suites: the per-provider relay matrix, the
+  conversational APPROVE/REJECT relay over MCP and CLI (each about 20 s, a
+  timeout path), terminal APPROVE/REJECT, and canonical/protected policy. The
+  runner prints failure details only in its final summary, which the stop
+  preempted, so these are **unclassified**. They cannot be compared with base on
+  Windows, because base hangs at the first new directory chain.
+- **No hang**: the suite progressed for its whole run, and no test process was
+  left behind.
+
+Log: `windows/win-engine-test-partial.log`.
+
+### Phase 3: review
+
+Frozen SHAs:
+
+- base `4ab6f2adbcb86b188225adcf0108dcaac7f6ba9d`
+- reviewed HEAD `1772fb2aaae7fddf9fc62826565102d237404139` (code and tests); this
+  document's commit on top is docs only.
+
+`/ponytail-review` over the full range covers `fd812b0`, `40122de` (recovery
+honors `--target`/`--legacy`), `e4ec398` and `1772fb2`: **no findings, "Lean
+already. Ship."** (`tests/ponytail-review-1772fb2.txt`). It is an AI review by
+Claude Opus 5.5, the same model family that authored the change. It is
+therefore not the independent reviewer that `docs/release.md`'s
+owner-maintained rule asks for where a sign-off row applies. No sign-off row
+names this change class (engine store/lifecycle code outside the format and
+approval boundaries), and the owner's own acceptance is still recorded at merge.
+
+### Status reached
+
+**BLOCKED_WINDOWS_SUITE_INCOMPLETE** (still `IMPLEMENTED_NOT_CERTIFIED`).
+
+| Phase | Result |
+| --- | --- |
+| 1. Gates (Linux) | **PASS**: zero new failures |
+| 2. Sweep | **PASS**: one affected site, fixed in `fd812b0`; no other |
+| 2. Windows new-directory test | **PASS**: active on Windows, times out before the fix, passes after it (`1772fb2`) |
+| 2. EPERM classification | **test-only**: 4 tests skipped on win32, with the reason |
+| 2. Full Windows engine suite | **INCOMPLETE**: memory stop; 42 unclassified ✖ so far; no hang |
+| 3. Review | **no findings** on `1772fb2aaae7fddf9fc62826565102d237404139` |
+| 4. CI and live certification | not started: the branch is not pushed, and no PR or CI run exists |
+| 5. Release | not started; v1.6.0 is unchanged |
+
+Blocker: the full Windows run hit the memory stop, and Claude Code's guard does
+not restart it unattended. To resume, free host memory (for example
+`wsl --shutdown` after saving WSL work, which is not a settings change) and
+rerun `node windows/engine-test-lowpar.mjs <clone> 1 180`. Then classify the
+operator-decision failures. Any that is a product defect reachable in a real
+Windows migration is outside RESOLVE/bootstrap/store path handling and becomes
+a separate task.
