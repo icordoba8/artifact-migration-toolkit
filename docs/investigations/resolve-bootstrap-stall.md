@@ -516,3 +516,156 @@ unchanged.
 To resume, free host memory (stop the WSL Docker stack and other sessions, then
 `wsl --shutdown`), and run the remaining 8 files plus the baseline:
 `node windows/engine-test-perfile.mjs <clone> 30 <outDir> [file suffix ...]`.
+
+## Resume 2: Windows classification under the memory rule (2026-10-20)
+
+Frozen: base `4ab6f2adbcb86b188225adcf0108dcaac7f6ba9d`, reviewed
+`1772fb2aaae7fddf9fc62826565102d237404139`, HEAD
+`f39e8bb4a40db1e795918ea0bd36cdc2ee58271a`. `da3a024..f39e8bb` is docs only,
+so the 30 files run at `da3a024` ran the HEAD code.
+
+**Memory rule.** Before each Windows file the runner reads `os.freemem()`. Below
+4 GiB (`4 × 2^30` bytes) the file is not started and is recorded
+`NOT_RUN_WINDOWS (memory)` with the measured value; a skipped or killed file is
+never retried. `migration-contract` runs last. Docker, the VS Code server, the
+other Claude Code session and WSL were left running. The gate is in
+`windows/engine-test-perfile.mjs`.
+
+### Phase A: the 38-file HEAD table (native Windows, Node 26.10.0)
+
+Clone `%TEMP%\rbs\thead`, checked out at `f39e8bb`, clean. Logs:
+`windows/perfile-head-da3a024/` (the first 30 files) and
+`windows/perfile-head-f39e8bb{,.summary.log}` (the last 8).
+
+| # | File | Result | tests / pass / fail / skip |
+| --- | --- | --- | --- |
+| 1 | external/format-17-acceptance | PASS | 16 / 16 / 0 / 0 |
+| 2 | unit/toolkit-identity | PASS | 19 / 19 / 0 / 0 |
+| 3 | integration/direct-ledger-defaults | **FAIL 13** | 13 / 0 / 13 / 0 |
+| 4 | external/bin-mappings | PASS | 3 / 2 / 0 / 1 |
+| 5 | external/visual-authority-proof | PASS | 2 / 2 / 0 / 0 |
+| 6 | external/engine-paths | PASS | 35 / 35 / 0 / 0 |
+| 7 | integration/artifact-delegation | PASS | 18 / 18 / 0 / 0 |
+| 8 | integration/inline-approval | **FAIL 1** | 4 / 3 / 1 / 0 |
+| 9 | integration/operator-approval-authority | **FAIL 2** | 16 / 14 / 2 / 0 |
+| 10 | unit/artifact-migration | **FAIL 10** | 127 / 116 / 10 / 1 |
+| 11 | unit/auto-authority | PASS | 8 / 8 / 0 / 0 |
+| 12 | unit/v5-contract-parity | PASS | 1 / 1 / 0 / 0 |
+| 13 | unit/discovery-scan | PASS | 55 / 55 / 0 / 0 |
+| 14 | unit/api-contract | PASS | 6 / 6 / 0 / 0 |
+| 15 | integration/api-response-contract | PASS | 3 / 3 / 0 / 0 |
+| 16 | unit/evidence-provenance | PASS | 3 / 3 / 0 / 0 |
+| 17 | unit/format-upgrades | PASS | 14 / 14 / 0 / 0 |
+| 18 | unit/mcp-server | **FAIL 1** | 39 / 38 / 1 / 0 |
+| 19 | unit/content-identity | PASS | 6 / 6 / 0 / 0 |
+| 20 | unit/store-shared | **FAIL 5** | 15 / 10 / 5 / 0 |
+| 21 | unit/durable-storage | PASS | 17 / 10 / 0 / 7 |
+| 22 | unit/formats | PASS | 10 / 10 / 0 / 0 |
+| 23 | unit/decisions | PASS | 12 / 12 / 0 / 0 |
+| 24 | unit/slices | **FAIL 2** | 12 / 9 / 2 / 1 |
+| 25 | unit/census | PASS | 10 / 10 / 0 / 0 |
+| 26 | unit/visual | PASS | 11 / 11 / 0 / 0 |
+| 27 | unit/transport | PASS | 9 / 8 / 0 / 1 |
+| 28 | unit/lifecycle | PASS | 9 / 9 / 0 / 0 |
+| 29 | unit/legacy-runtime-authority | PASS | 11 / 11 / 0 / 0 |
+| 30 | unit/live-history-replay | PASS | 2 / 2 / 0 / 0 |
+| 31 | unit/migration-policy | NOT_RUN_WINDOWS (memory), 2.0 GiB (2112016384 B) | |
+| 32 | unit/record-decision | NOT_RUN_WINDOWS (memory), 2.0 GiB (2112008192 B) | |
+| 33 | unit/registry-resolution | NOT_RUN_WINDOWS (memory), 2.0 GiB (2111807488 B) | |
+| 34 | unit/visual-evidence | NOT_RUN_WINDOWS (memory), 2.0 GiB (2111950848 B) | |
+| 35 | unit/run-migration | NOT_RUN_WINDOWS (memory), 2.0 GiB (2111950848 B) | |
+| 36 | unit/operator-webauthn | NOT_RUN_WINDOWS (memory), 2.0 GiB (2111954944 B) | |
+| 37 | integration/operator-signer.integration | NOT_RUN_WINDOWS (memory), 2.0 GiB (2111954944 B) | |
+| 38 | unit/migration-contract | NOT_RUN_WINDOWS (memory), 2.0 GiB (2111959040 B); killed mid-run at `da3a024`, not retried | |
+
+Totals: 22 files PASS, 7 FAIL (34 failing tests), 8 NOT_RUN_WINDOWS (memory),
+one of which (`migration-contract`) had been killed earlier. No file hung or
+timed out. The first reading's "27 fsync" was a miscount: the logs show 25.
+
+### Phase B: baseline comparison
+
+Baseline `%TEMP%\rbs\tbaseline`: base plus `git cherry-pick -n fd812b0`
+(`store/files.mjs` and its test, staged), since plain base hangs at the first new
+directory chain. Logs: `windows/perfile-baseline-4ab6f2a+fd812b0{,.summary.log}`.
+
+| File | Baseline result |
+| --- | --- |
+| integration/direct-ledger-defaults | **FAIL 13/13**: the same 13 tests, the same `EPERM ... fsync` at the same frames (`files.mjs:25` ← `files.mjs:44` ← `lock.mjs:202`, inside `withDecisionPolicy`); 4.2 GiB free before |
+| integration/inline-approval, integration/operator-approval-authority, unit/artifact-migration, unit/mcp-server, unit/store-shared, unit/slices | NOT_RUN_WINDOWS (memory), 3.8 GiB (4131635200 / 4131508224 B) < 4 GiB |
+
+The branch changes only two `src` files against base: `store/files.mjs`
+(`fd812b0`, also in the baseline) and `lifecycle/context.mjs` (`40122de`,
+`recoverMigrationRecord`). No failing stack passes through `context.mjs`, and the
+branch changes none of the failing tests or fixtures.
+
+### Classification of the 34 HEAD failures
+
+| Tests | file:line (test) | Error | Cause | Category | Baseline |
+| --- | --- | --- | --- | --- | --- |
+| 13 direct-ledger-defaults | `direct-ledger-defaults.integration.spec.mjs:41,153,215,259,318,353` | `EPERM: operation not permitted, fsync` (MCP cases surface it as JSON-RPC `-32603`) | `withDecisionPolicy` (`test/support/decision-policy-fixture.mjs:31`) sets `process.platform = "linux"` to fake `/etc/artifact-migration-tools`. That defeats `syncDirectory`'s win32 skip (`store/files.mjs:22`), so a directory fsync is attempted on Windows (`files.mjs:25` ← `mkdirDurably` `:44` ← `acquireModuleLock` `lock.mjs:202`). At plain base the walk also calls `syncDirectory` first (`files.mjs:40` at base), so it throws the same EPERM before it could spin | 1 test-environment | **verified**: identical 13/13 |
+| 1 inline-approval | `inline-approval.integration.spec.mjs:342` | same EPERM fsync | same fixture | 1 | unverified (memory) |
+| 2 operator-approval-authority | `operator-approval-authority.integration.spec.mjs:421,526` | same | same fixture | 1 | unverified (memory) |
+| 8 artifact-migration | `artifact-migration.test.mjs:1718,1764,1965,2079`, `:2195` ×4 providers | same (×4 as JSON-RPC `-32603`) | every one runs inside `withDecisionPolicy` (`:1720,1765,1969,2082,2199`) | 1 | unverified (memory) |
+| 1 mcp-server | `mcp-server.test.mjs:1417` | same | same fixture | 1 | unverified (memory) |
+| 4 store-shared | `store-shared.test.mjs:241,258,276,369` | `EPERM ... symlink` | the test's own `fs.symlink` setup (`:244,265,292,374`); this account has no `SeCreateSymbolicLinkPrivilege`. `src/` has no `symlink` call, and the product guard holds against junctions (`windows/junction.log`) | 1 | unverified (memory) |
+| 2 slices | `slices.test.mjs:186,242` | `EPERM ... symlink` | test setup `fs.symlink` (`:197,255`) | 1 | unverified (memory) |
+| 1 store-shared | `store-shared.test.mjs:210` "DR1 one containment rule" | `Error: cwd gone`, thrown at `:238` | the test mocks `process.cwd` to throw (`:236`), then expects `isLexicallyWithin("/a", "/a/b")` to need no cwd. On win32 `"/a"` is drive-relative, so `path.resolve` (`shared/paths.mjs:25`) reads the cwd for the drive. This is a POSIX path assumption, and the product fails closed (throws) | 1 | unverified (memory) |
+| 2 artifact-migration signer | `artifact-migration.test.mjs:5895,5943` | `UNPROTECTED_SIGNER_STORE: ... must be a non-symlink owned by the service user with mode 0700/0600` | `openSignerStore` → `assertOwnerOnly` (`src/operator-signer.mjs:64-69`, `:52-55`) requires `(mode & 0o077) === 0`. Windows reports group/other mode bits on every directory, whatever `chmod(0o700)` asked (`test/support/signer-fixture.mjs:13`), so a Windows store can never pass. The branch does not change `operator-signer.mjs` | 2 pre-existing Windows product limitation | unverified (memory); established from code |
+
+**Category 3 (branch regression): 0.** **Category 2 on the RESOLVE →
+DISCOVER_LEGACY path: 0.** No skip was added, and nothing in categories 1 or 2 was fixed.
+
+### Signer reachability on native Windows
+
+- **Production entry.** `operator-signer-service.mjs:19` → `runSignerService`
+  (`operator-signer-host.mjs:31`) → `readRootOwnedJson(SERVICE_CONFIG_FILE)`
+  (`:32` → `operator-signer.mjs:361-362`) throws `UNSUPPORTED_HOST` on any
+  non-Linux platform. That happens before `openSignerStore` (`host.mjs:37`), so
+  on Windows the service stops at its first line. Only tests reach the store
+  check that fails here, by opening the store directly
+  (`signer-fixture.mjs:12-18`). `PRODUCTION_ATTESTED_WRITES = false`
+  (`operator-signer.mjs:36`, checked at `host.mjs:51-54`) also keeps attested
+  writes off on every platform in this build.
+- **Migration steps.** The migration CLI and MCP never open the signer
+  (`operator-signer.mjs:5`). A step needs it only when a decision candidate's
+  required principal is `HUMAN_ATTESTED`. New candidates resolve through
+  `createNewFormatDecisionCandidate` (`decisions/candidate.mjs:97`) →
+  `resolveRequiredPrincipal` (`decisions/policy.mjs:162-174`) →
+  `trustedPolicyFor`, which returns `null` off Linux (`policy.mjs:130`). The
+  policy is then `STANDARD_LOCAL`, where every judgment kind is `AGENT_RELAYED`
+  (`policy.mjs:54-57`). On Windows, `HUMAN_ATTESTED` can only come from a
+  historical pin. Either a ledger line sits under the legacy `engine/judgment/v1`
+  policy (`policy.mjs:184-185`, via `decisions/authority.mjs:782`), or under a
+  Linux protected policy, which resolves to `null` and is refused
+  (`authority.mjs:792`). Such a candidate is blocked as `SIGNER_UNAVAILABLE`
+  (`decisions/record.mjs:152-156`).
+- **Earliest step it would block on Windows:** the operator decisions at
+  **DISCOVER_LEGACY**. For modules these are the judgment kinds
+  `ROOT_DECLARATION`, `EXCLUSION`, `EDGE_RESOLUTION` and `DEAD_CONFIRMATION`,
+  read by its DISCOVERY_COMPLETENESS gate. For artifact records it is
+  `ARTIFACT_DECISION` (`authority.mjs:799`). It blocks only a record carried
+  over with a legacy or protected policy pin. The RESOLVE bootstrap that
+  *reaches* DISCOVER_LEGACY is unaffected, and so is a fresh Windows record,
+  which is pinned to `STANDARD_LOCAL`.
+- **Follow-up (P0, separate task):** the protected signer and its owner-only
+  store check are POSIX-only by construction, so a Windows host can never
+  attest. Decide between a supported Windows signer (an ACL-based owner-only
+  check and no `/etc` config) and documenting that records needing
+  `HUMAN_ATTESTED` must be decided on managed Linux. Not fixed here.
+
+### Known Windows issues (out of scope)
+
+| Issue | Category | Where | Effect on a real Windows migration |
+| --- | --- | --- | --- |
+| `withDecisionPolicy` fakes `process.platform = "linux"` on Windows | 1 (test) | `test/support/decision-policy-fixture.mjs:31` | none; 25 tests fail on Windows only |
+| Symlink-setup tests need `SeCreateSymbolicLinkPrivilege` | 1 (test) | `store-shared.test.mjs`, `slices.test.mjs`; 4 skipped in `durable-storage.test.mjs` | none; the guard holds against junctions |
+| DR1 containment test assumes `"/a"` needs no cwd | 1 (test) | `store-shared.test.mjs:238` | none |
+| **Protected signer cannot run or open its store on Windows** | 2 (product) | `operator-signer.mjs:52-55,361-362` | blocks `HUMAN_ATTESTED` decisions at DISCOVER_LEGACY or later, only for legacy- or protected-pinned records. **P0 follow-up** |
+| 8 engine files never ran on Windows | not run | Phase A rows 31–38 | unknown |
+| Windows CI | not run | CI is Ubuntu-only | n/a |
+
+### Cleanup
+
+`%TEMP%\migration-tests-E9tS1b` no longer exists; its 30 logs are in
+`windows/perfile-head-da3a024/`. The runner removes each invocation's
+`withTestRoot` scratch. `tbaseline` is removed after these logs are committed.
