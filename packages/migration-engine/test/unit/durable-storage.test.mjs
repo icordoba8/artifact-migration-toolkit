@@ -52,6 +52,11 @@ const TEMP = /^\..+\.[0-9a-f-]{36}\.tmp$/;
 const MIGRATIONS = ".agents/knowledge/migrations";
 const POSIX = process.platform !== "win32";
 const ROOT_USER = POSIX && process.getuid() === 0;
+// Test setup, not the engine: these tests plant symlinks, and Windows refuses
+// fs.symlink (EPERM, CreateSymbolicLinkW) to an account without
+// SeCreateSymbolicLinkPrivilege or Developer Mode. src/ creates no symlinks, and
+// its lstat guard refuses the junction such an account can create.
+const NO_SYMLINK_SETUP = !POSIX && "Windows: fs.symlink in setup needs SeCreateSymbolicLinkPrivilege (EPERM)";
 
 const scratch = async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "dr7-dr8-"));
@@ -130,7 +135,7 @@ test("DR7: an interrupted replace-write leaves the previous bytes and no temp fi
   }
 });
 
-test("DR7: atomicWrite refuses symlinks, traversal and a directory destination without mutation", async (t) => {
+test("DR7: atomicWrite refuses symlinks, traversal and a directory destination without mutation", { skip: NO_SYMLINK_SETUP }, async (t) => {
   const root = await scratch(t);
   const repo = path.join(root, "repo");
   const outside = path.join(root, "outside");
@@ -187,7 +192,7 @@ test("DR7: writeJournalAtomic is the store replace-write, byte for byte", async 
   }
 });
 
-test("DR7: writeJournalAtomic checks the whole path from the target root and refuses any symlink in it", async (t) => {
+test("DR7: writeJournalAtomic checks the whole path from the target root and refuses any symlink in it", { skip: NO_SYMLINK_SETUP }, async (t) => {
   const root = await scratch(t);
   const outside = path.join(root, "outside");
   await mkdir(path.join(outside, "knowledge/migrations/init"), { recursive: true });
@@ -221,14 +226,18 @@ const assertSyncedBetween = (log, parents, from, until, label) => {
   }
 };
 
-test("DR7: a write into new directories makes each new directory entry durable before it returns", { skip: !POSIX }, async (t) => {
+// On every platform each write lands and returns: on Windows the old
+// mkdirDurably walk never did. The fsync order is POSIX-only, because Windows
+// has no directory fsync (syncDirectory is a no-op there).
+test("DR7: a write into new directories makes each new directory entry durable before it returns", async (t) => {
   const root = await scratch(t);
   const destination = path.join(root, "a/b/c/state.json");
   let log = await traceFs(t);
   await atomicWrite(root, destination, "{}\n");
+  assert.equal(await readFile(destination, "utf8"), "{}\n");
   const created = at(log, "mkdir", path.join(root, "a/b/c"));
   const renamed = log.findIndex(([op, file]) => op === "rename" && file === destination);
-  assertSyncedBetween(log, [root, path.join(root, "a"), path.join(root, "a/b")], created, renamed, "atomicWrite");
+  if (POSIX) assertSyncedBetween(log, [root, path.join(root, "a"), path.join(root, "a/b")], created, renamed, "atomicWrite");
 
   // On a fresh target the module lock creates .agents/knowledge/migrations/,
   // and the first journal creates its own directory: both chains are durable.
@@ -238,14 +247,18 @@ test("DR7: a write into new directories makes each new directory entry durable b
   log = await traceFs(t);
   const journal = path.join(fresh, MIGRATIONS, "init/auth.journal");
   await withModuleLock(fresh, "auth", () => writeJournalAtomic(journal, { state: "PREPARED" }));
+  assert.deepEqual(JSON.parse(await readFile(journal, "utf8")), { state: "PREPARED" });
   const journaled = log.findIndex(([op, file]) => op === "rename" && file === journal);
-  assertSyncedBetween(log, chain, at(log, "mkdir", path.join(fresh, MIGRATIONS, "locks")), journaled, "the lock directory chain");
-  assertSyncedBetween(log, [path.join(fresh, MIGRATIONS)], at(log, "mkdir", path.dirname(journal)), journaled, "writeJournalAtomic");
+  if (POSIX) {
+    assertSyncedBetween(log, chain, at(log, "mkdir", path.join(fresh, MIGRATIONS, "locks")), journaled, "the lock directory chain");
+    assertSyncedBetween(log, [path.join(fresh, MIGRATIONS)], at(log, "mkdir", path.dirname(journal)), journaled, "writeJournalAtomic");
+  }
 
   const ledger = path.join(root, "record/decisions/ledger.ndjson");
   log = await traceFs(t);
   await appendDurably(root, ledger, "x\n");
-  assertSyncedBetween(log, [root, path.join(root, "record")], at(log, "mkdir", path.dirname(ledger)), at(log, "open", ledger), "appendDurably");
+  assert.equal(await readFile(ledger, "utf8"), "x\n");
+  if (POSIX) assertSyncedBetween(log, [root, path.join(root, "record")], at(log, "mkdir", path.dirname(ledger)), at(log, "open", ledger), "appendDurably");
 });
 
 // Each case runs in a child process under a timeout: on Windows the old walk
@@ -301,7 +314,7 @@ test("DR7: renameDurably fsyncs both directories, and copyTree flushes the copy 
   assert.deepEqual(await readTree(path.join(root, "elsewhere/moved")), await readTree(path.join(root, "from")));
 });
 
-test("DR7: writeTree stages a flushed tree with the same bytes and modes, and stays inside its root", async (t) => {
+test("DR7: writeTree stages a flushed tree with the same bytes and modes, and stays inside its root", { skip: NO_SYMLINK_SETUP }, async (t) => {
   const root = await scratch(t);
   const staging = path.join(root, "transaction/staging");
   const files = { "state.json": "{}\n", "history/history.ndjson": "{\"a\":1}\n", "a/b/c.md": "é\n" };
@@ -445,7 +458,7 @@ test("DR7/DR8: a directory fsync failure is never reported as a durable write", 
   }
 });
 
-test("DR8: appendDurably refuses symlinks, traversal and a directory ledger without mutation", async (t) => {
+test("DR8: appendDurably refuses symlinks, traversal and a directory ledger without mutation", { skip: NO_SYMLINK_SETUP }, async (t) => {
   const root = await scratch(t);
   const outside = path.join(root, "outside");
   const repo = path.join(root, "repo");
