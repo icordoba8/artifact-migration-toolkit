@@ -409,3 +409,110 @@ rerun `node windows/engine-test-lowpar.mjs <clone> 1 180`. Then classify the
 operator-decision failures. Any that is a product defect reachable in a real
 Windows migration is outside RESOLVE/bootstrap/store path handling and becomes
 a separate task.
+
+## Resume: Windows suite, file by file (2026-10-20)
+
+Frozen: base `4ab6f2adbcb86b188225adcf0108dcaac7f6ba9d`, reviewed
+`1772fb2aaae7fddf9fc62826565102d237404139`, HEAD
+`da3a024e87c462159c5987efa120f63d05cda9d6` (docs only on top of reviewed).
+
+### Phase 1 gates at HEAD (Linux WSL2, Node 26.8.2)
+
+The reused gate logs (`tests/gates-complete-20261019/`) name no SHA of their
+own. Only their README says `e4ec398`, so they cannot prove the tree they ran.
+`pnpm engine:test` was rerun at HEAD with a clean tree before and after
+(`tests/head-da3a024/linux-engine-test.{sh,meta,log,failures}`). It took 969 s:
+unidentified pass 35/35, identified pass 1137/1138. The one failure is the
+pre-existing `artifact-migration.test.mjs:3249` "a no-op package script cannot
+claim validator coverage", the same as on base. **No new failures.**
+
+### Native Windows per file (Node 26.10.0): INCOMPLETE, 30 of 38 files
+
+Clone: `%TEMP%\rbs\thead` at `da3a024`, clean, `pnpm install --frozen-lockfile --offline`.
+Runner: `windows/engine-test-perfile.mjs`. It keeps `scripts/engine-test.mjs`'s
+file list, scratch root (`withTestRoot`), pass order, fixture identity, cwd and
+env. Each file runs alone as `node --test --test-concurrency=1 <file>`.
+Logs: `windows/perfile-head-da3a024/` (`results.json`, one log per file) and
+`windows/perfile-head-da3a024.summary.log`.
+
+| File | Result | tests / pass / fail / skip |
+| --- | --- | --- |
+| external/format-17-acceptance | pass | 16 / 16 / 0 / 0 |
+| unit/toolkit-identity | pass | 19 / 19 / 0 / 0 |
+| integration/direct-ledger-defaults | **fail** | 13 / 0 / 13 / 0 |
+| external/bin-mappings | pass | 3 / 2 / 0 / 1 |
+| external/visual-authority-proof | pass | 2 / 2 / 0 / 0 |
+| external/engine-paths | pass | 35 / 35 / 0 / 0 |
+| integration/artifact-delegation | pass | 18 / 18 / 0 / 0 |
+| integration/inline-approval | **fail** | 4 / 3 / 1 / 0 |
+| integration/operator-approval-authority | **fail** | 16 / 14 / 2 / 0 |
+| unit/artifact-migration | **fail** | 127 / 116 / 10 / 1 |
+| unit/auto-authority | pass | 8 / 8 / 0 / 0 |
+| unit/v5-contract-parity | pass | 1 / 1 / 0 / 0 |
+| unit/discovery-scan | pass | 55 / 55 / 0 / 0 |
+| unit/api-contract | pass | 6 / 6 / 0 / 0 |
+| integration/api-response-contract | pass | 3 / 3 / 0 / 0 |
+| unit/evidence-provenance | pass | 3 / 3 / 0 / 0 |
+| unit/format-upgrades | pass | 14 / 14 / 0 / 0 |
+| unit/mcp-server | **fail** | 39 / 38 / 1 / 0 |
+| unit/content-identity | pass | 6 / 6 / 0 / 0 |
+| unit/store-shared | **fail** | 15 / 10 / 5 / 0 |
+| unit/durable-storage | pass | 17 / 10 / 0 / 7 |
+| unit/formats | pass | 10 / 10 / 0 / 0 |
+| unit/decisions | pass | 12 / 12 / 0 / 0 |
+| unit/slices | **fail** | 12 / 9 / 2 / 1 |
+| unit/census | pass | 10 / 10 / 0 / 0 |
+| unit/visual | pass | 11 / 11 / 0 / 0 |
+| unit/transport | pass | 9 / 8 / 0 / 1 |
+| unit/lifecycle | pass | 9 / 9 / 0 / 0 |
+| unit/legacy-runtime-authority | pass | 11 / 11 / 0 / 0 |
+| unit/live-history-replay | pass | 2 / 2 / 0 / 0 |
+| unit/migration-contract | **killed** (memory) | partial |
+| migration-policy, record-decision, registry-resolution, visual-evidence, run-migration, operator-webauthn, operator-signer.integration | not run | |
+
+No file hung, and none timed out (30 min per file).
+
+**Memory stop.** Host free memory was 3.1 GB at the start and fell to 0.6 GB
+during the run. Claude Code then killed the run for low system memory during
+`migration-contract`. Free memory was 0.7 GB afterwards, with the runner gone.
+The WSL2 VM held about 12 GB. `wsl --shutdown` was **not** run, because WSL has
+active work: Docker containers (Keycloak, Quarkus services, MongoDB), the VS Code
+server, and a second Claude Code session on the host. No setting was changed.
+
+**First reading of the 34 HEAD failures (tentative, not yet compared with the baseline):**
+
+- 27 fail with `EPERM: operation not permitted, fsync` at `store/files.mjs:25`
+  (`syncDirectory` ← `mkdirDurably` ← `acquireModuleLock`). Every one runs
+  inside the test fixture `withDecisionPolicy`
+  (`test/support/decision-policy-fixture.mjs:31`). That fixture overrides
+  `process.platform` with `"linux"` to fake the protected policy directory
+  `/etc/artifact-migration-tools`, which defeats `syncDirectory`'s win32 skip
+  (`files.mjs:22`). The fsync of a directory is then attempted on Windows.
+  Candidate category 1 (test-environment assumption). Outside that fixture, the
+  same path passes on Windows (`durable-storage`, `lifecycle`,
+  `unregistered-module-bootstrap`, the live bootstrap runs above).
+- 6 fail with `EPERM ... symlink` in test setup (`store-shared` ×4, `slices` ×2):
+  candidate category 1, the same class as the four `durable-storage` symlink tests.
+- 2 `artifact-migration` signer tests fail with `UNPROTECTED_SIGNER_STORE ...
+  mode 0700/0600`: the operator-signer store check is POSIX owner/mode,
+  fail-closed. Unclassified. The signer is not on the RESOLVE → OpenSpec →
+  DISCOVER_LEGACY path.
+- 1 `store-shared` "DR1 one containment rule ... posix and win32" fails with
+  `Error: cwd gone`. Unclassified.
+
+### Phase B baseline: prepared, not run
+
+`%TEMP%\rbs\tbaseline` is a worktree of the Windows clone at base with
+`git cherry-pick -n fd812b0`, staged and uncommitted, with deps installed. It
+has not run yet: Phase B needs the same memory.
+
+### Status reached
+
+**BLOCKED_WINDOWS_SUITE_INCOMPLETE** (still `IMPLEMENTED_NOT_CERTIFIED`).
+The memory stop recurred at concurrency 1, and WSL has active work that rules out
+`wsl --shutdown`. Phases B–D are not started. Nothing was pushed. v1.6.0 is
+unchanged.
+
+To resume, free host memory (stop the WSL Docker stack and other sessions, then
+`wsl --shutdown`), and run the remaining 8 files plus the baseline:
+`node windows/engine-test-perfile.mjs <clone> 30 <outDir> [file suffix ...]`.
