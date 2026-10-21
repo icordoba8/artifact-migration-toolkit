@@ -669,3 +669,91 @@ DISCOVER_LEGACY path: 0.** No skip was added, and nothing in categories 1 or 2 w
 `%TEMP%\migration-tests-E9tS1b` no longer exists; its 30 logs are in
 `windows/perfile-head-da3a024/`. The runner removes each invocation's
 `withTestRoot` scratch. `tbaseline` is removed after these logs are committed.
+
+### Phase C: CI and live certification (Claude only)
+
+Candidate `8f0998718cae8299515d0840d84c718eeef83469`: the Phase A/B docs commit
+on top of `f39e8bb`. No non-doc file changed after `1772fb2`, so no new review
+was needed. Branch pushed without force; PR
+[#8](https://github.com/icordoba8/artifact-migration-toolkit/pull/8).
+
+**Exact-SHA Ubuntu CI: SUCCESS.** Push run
+[39438914947](https://github.com/icordoba8/artifact-migration-toolkit/actions/runs/39438914947)
+(head `8f09987`): provenance, shards 1–3 and `toolkit (ubuntu-latest)` all
+green. The PR run 39438967954 is also green. WINDOWS CI: NOT_RUN.
+
+**Candidate bundle** (clean worktree at `8f09987`; evidence
+`~/artifact-migration-acceptance/v1.6.1-8f09987-claude-20261020/`):
+`release:check` no blockers, `release:build` + `release:verify` `verified: true`.
+Version 1.6.1, unchanged from `4ab6f2ad`. Content hash
+`sha256:2a1edad6490d419e42af8f6294ef354981dae61e18d7446814963553e9159e3e`,
+identical to the reviewed code's bundle. Archive
+`sha256:72abeca2b6bb550a14791b54a31d8eab89272c8355599cefb5967a2e31602614`.
+The manifest pin `sha256:065f31776393bf8067d8283377d813a4f462053fcc3a0c63d5ea2e6238a008c8`
+was taken independently from the staged `release-manifest.json`, and both
+consumers' installed receipts carry the same pin. The verifier is
+`4a096044…`, the same as v1.6.0. Claude Code is 2.1.304 on both hosts.
+
+| Run | Procedure | Memory before | Result |
+| --- | --- | --- | --- |
+| a) Linux WSL2 work-orders, attempt 1 | v1.6.0 procedure: `make-consumer.mjs` fresh consumer `runs-v1.6.1-8f09987/c-claude1`, `agent-e2e-acceptance.mjs --goal complete --isolation os --expected-pin …` (`launch-linux.sh`) | 4.77 GiB | **FAIL (precondition, not product)**. The agent ended after 1 turn: `Failed to authenticate: OAuth session expired and could not be refreshed` (exit 1, 0 tokens). No record was created. `claude auth status` in WSL reports `loggedIn: false`. |
+| b) Native Windows, attempt 1 | The same runner with `--goal bootstrap --isolation none` (no `unshare` on Windows, so `certified: false` by design). Fresh consumer `%TEMP%\rbs-cert\cw1` from `make-consumer-win.mjs`, which is `make-consumer.mjs` minus the Linux `node_modules` (symlinked `.bin`) and with a win32 harness path. Fresh install through the installed skill's `ensureRuntime`; 60 min timeout (`launch-win.mjs`) | 4.54 GiB | **FAIL (runner verdict)**: `agent.timedOut: true` at 60 min, so the verdict is FAIL whatever the record reached. The bootstrap criteria were met **without a manual step**: the engine wrote `openspec/specs/work-orders/spec.md` and `state.json` (history `CREATED`, then `STEP_COMPLETED`), with toolkit identity `8f09987` / `2a1edad6…`. `--mode auto` then carried on through `DISCOVER_LEGACY, DISCOVERY_COMPLETENESS, ASSESS_TARGET, BUILD_BASELINE, PLAN` (a `REOPENED` event on the way) and was still in `VERIFY_SLICES` (rev 9, ACTIVE) at the timeout. Its vite dev server and esbuild leftovers were stopped afterwards. Evidence: `out-win1/`, `win-record-work-orders/`, `win-spec.md`. |
+
+Attempt b's FAIL is not relabelled. Its timeout came from the harness
+configuration chosen here: a 60 min bound on a `--mode auto` run, which goes
+on past the bootstrap goal. It did not come from an engine error: the record
+kept advancing and no engine refusal appears.
+
+### Status reached
+
+**BLOCKED_LIVE_CERTIFICATION** (still `IMPLEMENTED_NOT_CERTIFIED`). Phases A
+and B are complete: 0 category 3, and 0 category 2 on the bootstrap path. CI
+is green on `8f09987`. Phase D was not started: `main` is unchanged
+(`594f2cf`), there is no tag or release, and v1.6.0 is unchanged.
+
+Blockers:
+
+1. The Linux WSL Claude Code CLI is logged out. The operator must log in
+   (`claude /login` in WSL); this cannot be done unattended.
+2. The native Windows attempt failed on the runner's timeout. A rerun on a
+   fresh consumer needs a timeout that covers an auto run (the v1.6.0 run
+   used 100 min), or the operator's decision that the record evidence above
+   is enough for the bootstrap criterion.
+
+### Phase D: Linux live certification and release (Claude only)
+
+This section supersedes the blockers above. The operator logged Claude Code in
+under WSL. The operator also accepted the native Windows attempt b as the
+bootstrap PASS: it reached `DISCOVER_LEGACY` without a manual step, as recorded
+in `out-win1/`, `win-record-work-orders/` and `win-spec.md`. The runner's FAIL
+verdict for b stands as recorded and is not relabelled.
+
+| Run | Procedure | Memory before | Result |
+| --- | --- | --- | --- |
+| c) Linux WSL2 work-orders, attempt 2 | Same procedure as a): fresh consumer `runs-v1.6.1-8f09987/c-claude2` (port 5944), `--goal complete --isolation os --expected-pin …`, 120 min (`make-linux2.sh`, `launch-linux2.sh`). Claude Code 2.1.305, `claude-opus-5-5` | 5.18 GiB (3.39 GiB at first; the 5-min re-check passed after 25 min) | **PASS**: `E2E_COMPLETE_PASS`, engine `COMPLETE` (revision 15), independent verifier 25/25 (`4a096044…`), `security.certified: true`. Installed pin = expected pin `065f3177…`. 01:16:42Z–01:41:18Z, no timeout, watchdog killed nothing. No retry was needed. Evidence: `linux2/`, `runs-v1.6.1-8f09987/out-claude2/`. |
+
+**Release.** The asset was rebuilt in a fresh detached worktree at `8f09987`
+(not the earlier cert worktree). `pnpm install` set the executable bit on 10
+engine sources, a mode-only change that was restored with `git checkout`
+before building. `release:check` reported no blockers, and `release:build` and
+`release:verify` both returned `verified: true`. Content hash `2a1edad6…`
+and manifest pin `065f3177…` match the certified candidate. Archive
+`sha256:de3ed0d1f418294b1e20b1e2db9491debec54d1a7369f98d8e4f307dd666903d`.
+`main` was fast-forwarded `594f2cf..8f09987` without force. Annotated tag
+`v1.6.1` points at `8f09987`, and the immutable
+[v1.6.1 release](https://github.com/icordoba8/artifact-migration-toolkit/releases/tag/v1.6.1)
+is published with that asset. v1.6.0 is unchanged. `released-versions.json` was
+updated by `pnpm release:record 1.6.1`.
+
+Release scope: Claude only, covering the Linux WSL2 work-orders E2E and the
+native Windows bootstrap to `DISCOVER_LEGACY`. Windows E2E is NOT_CERTIFIED and
+Windows CI is NOT_RUN. The Windows engine suite is PARTIAL (22 pass, 7 fail in
+categories 1 and 2 only, 8 NOT_RUN for memory). The signer `UNSUPPORTED_HOST`
+P0 follow-up stays open. Codex and OpenCode are NOT_CERTIFIED, and no general
+Windows compatibility claim is made.
+
+### Final status
+
+**CERTIFIED_RELEASED**:
+[v1.6.1](https://github.com/icordoba8/artifact-migration-toolkit/releases/tag/v1.6.1)
+at `8f0998718cae8299515d0840d84c718eeef83469`.
