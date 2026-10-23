@@ -1095,8 +1095,23 @@ test("M9-R1 D2: FINALIZE declares and pins the matrices whose terminal status it
     await assert.rejects(runArtifact(fixture.options), /Completed artifact changed: inventories\/target\.json/);
     await writeFile(inventory, inventoryBytes);
 
+    // An interrupted FINALIZE -> COMPLETE commit is recovered with the same
+    // pins: the record is put back at FINALIZE with the committed transaction
+    // pending, as a crash between the two writes leaves it.
+    const engineFiles = ["state.json", "integrity.json", "history/history.ndjson"];
+    const beforeCommit = await Promise.all(engineFiles.map((relative) => readFile(path.join(fixture.artifactRoot, relative))));
+    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    const committed = await stateOf(fixture);
+    const event = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+    await Promise.all(engineFiles.map((relative, index) => writeFile(path.join(fixture.artifactRoot, relative), beforeCommit[index])));
+    await writeJson(fixture.artifactRoot, "transaction.json", { version: 1, state: committed, event });
+    const pending = await getArtifactStatus(fixture.options);
+    assert.equal(pending.status, "ACTIVE");
+    assert.match(pending.reason, /recovered automatically/);
     const complete = await runArtifact(fixture.options);
     assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
+    assert.deepEqual(await stateOf(fixture), committed);
     const pins = (await stateOf(fixture)).artifactHashes;
     for (const relative of [...matrices, "gates.json"]) assert.ok(pins[relative], relative);
 

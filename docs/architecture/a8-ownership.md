@@ -65,7 +65,7 @@ BASE `0a87bbc`. Plan: `docs/phase0-architecture-baseline.md` §4 option (b), §8
 | `lifecycle/approval.mjs` | The offer loop and the terminal and AUTO recorders | `operator-approval.mjs` (whole) |
 | `lifecycle/artifact-record.mjs` | Artifact command rendering, history and integrity reads, initial state, invocation binding, the identity gate | AM |
 | `lifecycle/artifact-execution.mjs` | Capability-gated execution of target validators | AM |
-| `lifecycle/artifact-gates.mjs` | Artifact FINALIZE gate evidence: scope and binding, typed Ponytail evidence and the review binding line | AM |
+| `lifecycle/artifact-gates.mjs` | Artifact FINALIZE gate evidence: scope and binding, typed, agent-asserted Ponytail evidence | AM |
 | `lifecycle/artifact-checkpoints.mjs` | Artifact checkpoint validation and dispatch, `checkpointArtifacts`, the artifact `previewAdvance`, `nextState` | AM |
 | `lifecycle/artifact-transaction.mjs` | The artifact transaction: input validation, replay proofs, recovery phases, finish, recovery, `buildAdvanceTransaction` | AM |
 | `lifecycle/artifact-status.mjs` | Metrics, `previewArtifact`, `getArtifactStatus`, `progressState`, and the readers the recorder and the module side call (`artifactOperatorDecisions`, `validateArtifactComplete`) | AM |
