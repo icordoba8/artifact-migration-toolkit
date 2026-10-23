@@ -189,6 +189,15 @@ migrations; see `start-migration/references/migration-contract.md`.
 
 ## Finalize
 
+The FINALIZE request declares the four baseline matrices and `gates.json`.
+Finalization requires every matrix row terminal: parity `VERIFIED`, target-native
+`PRESERVED` or `VERIFIED`, design-system `COMPLIANT` or `EXCEPTION_RECORDED`, and
+global-contract `VERIFIED`, each with evidence on the final target bytes. Author
+those rows here, after the last slice is verified, by moving only `status` and
+the row's evidence; every other field is pinned since `BUILD_BASELINE`, and
+changing one is refused as a changed completed artifact. FINALIZE pins the
+matrices and `gates.json` it consumed, so after `COMPLETE` they are immutable.
+
 `gates.json` is `{version, gates, uiEvidence, requirementEvidence}` and contains
 exactly the canonical seven migration gates, each
 `{name,status:"PASS",evidence}`. Gate evidence is a target-root
@@ -209,6 +218,24 @@ verification; the engine requires Review before Audit and Audit before
 `reviewedAt`.
 The engine checks each evidence file's current hash and source/target binding
 before allowing `COMPLETE`. No Ponytail flag adds no Ponytail requirement.
+
+`ponytail-review.md` is the output of the provider's Ponytail Review skill
+(`ponytail-review`), run over this migration's changed files after the last
+slice is verified. Its first line binds it to this record and to the exact
+bytes reviewed; the review output follows:
+
+```text
+<!-- ponytail-review {"artifactId":"<state.artifactId>","createdAt":"<state.createdAt>","files":[{"path":"src/x.ts","sha256":"..."}]} -->
+```
+
+`files` is every file this migration's slices changed (the bound target when
+none changed) at its current hash. A review naming another record, an outdated
+or incomplete file set, or carrying no output is refused. This is a content
+binding, not provenance: the engine cannot tell which process wrote the file,
+so the record's Ponytail evidence is agent-asserted. When no Ponytail Review
+skill is available, report `PONYTAIL_NOT_EXECUTED` and stop; never author the
+review yourself. Records completed before this binding keep their completed
+evidence, which stays pinned through `gates.json`.
 
 Two gates carry the mandatory architecture rules they are named after, asserted
 against this migration's changed files only:

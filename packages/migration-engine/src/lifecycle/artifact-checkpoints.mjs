@@ -74,7 +74,6 @@ import {
   pinDigest,
   readJsonAt,
   secureHash,
-  STATE_ROOT,
 } from "../store/index.mjs";
 import {
   diffEntries,
@@ -87,6 +86,7 @@ import {
   EXECUTION_CAPABILITY,
   hasCodeValidationCheck,
 } from "./artifact-execution.mjs";
+import { ponytailTime, validateGateEvidence, validatePonytailEvidence } from "./artifact-gates.mjs";
 import { consumedAtCheckpoint, RESOLUTION_KIND } from "./artifact-record.mjs";
 import { FINAL_GATES } from "./checkpoints.mjs";
 
@@ -826,44 +826,6 @@ const validateVerification = async (root, state, capability) => {
   return { relative, document, implementation, semanticDigest: artifactEvidenceDigest(document), visualComparison };
 };
 
-// Gate evidence is a claim about *this* migration. A bare hash of any file that
-// happens to exist proved nothing: the cited path must be one this migration
-// changed or declared as a target file, or the seven canonical gates are
-// satisfiable by an unrelated pre-existing file.
-const validateGateEvidence = async (state, item, label, scope, extra = []) => {
-  exactObject(item, label, ["path", "sha256", "boundTo", ...extra]);
-  const relative = normalizeRelative(item.path, `${label}.path`);
-  if (scope && !scope.has(relative)) {
-    throw new Error(
-      `${label} cites '${relative}', which is not one of this migration's changed or declared target files.`,
-    );
-  }
-  if ((await secureHash(state.target.root, relative, `${label}.path`)) !== item.sha256) throw new Error(`${label}.sha256 does not match ${relative}.`);
-  exactObject(item.boundTo, `${label}.boundTo`, ["sourceDigest", "targetDigest"]);
-  if (item.boundTo.sourceDigest !== state.bindings.source.digest || item.boundTo.targetDigest !== state.bindings.target.digest) {
-    throw new Error(`${label} is stale.`);
-  }
-};
-
-const ponytailTime = (value, label) => {
-  const time = Date.parse(value);
-  if (typeof value !== "string" || !Number.isFinite(time) || new Date(time).toISOString() !== value) {
-    throw new Error(`${label} must be an ISO timestamp.`);
-  }
-  return time;
-};
-
-const validatePonytailEvidence = async (state, gate, kind) => {
-  const label = `final gate '${gate.name}' ponytailEvidence`;
-  const item = gate.ponytailEvidence;
-  if (!item) throw new Error(`Ponytail target '${state.ponytail}' requires ${gate.name} ${kind} evidence.`);
-  const expectedPath = `${STATE_ROOT}/${state.artifactId}/evidence/ponytail-${kind}.md`;
-  if (item.path !== expectedPath) throw new Error(`${label}.path must be '${expectedPath}'.`);
-  await validateGateEvidence(state, item, label, null, ["kind", "producedAt"]);
-  if (item.kind !== kind) throw new Error(`${label}.kind must be '${kind}'.`);
-  return ponytailTime(item.producedAt, `${label}.producedAt`);
-};
-
 export const validateFinal = async (root, state) => {
   const baseline = await validateBaseline(root, state, { final: true });
   const plan = await validatePlan(root, state);
@@ -885,6 +847,7 @@ export const validateFinal = async (root, state) => {
     ARCHITECTURE_IMPLEMENTATION_GATE: architecture.implementation,
     PRECOMMIT_GATE: architecture.precommit,
   };
+  const reviewedFiles = changedFiles.size > 0 ? changedFiles : new Set([normalizeRelative(state.target.path, "bound target")]);
   const names = [];
   let ponytailReviewAt;
   let ponytailAuditAt;
@@ -903,7 +866,7 @@ export const validateFinal = async (root, state) => {
       throw new Error(`final gate '${gate.name}' cannot PASS: ${failures.join(" ")}`);
     }
     if (state.ponytail && gate.name === "SIMPLIFY_ONCE") {
-      ponytailReviewAt = await validatePonytailEvidence(state, gate, "review");
+      ponytailReviewAt = await validatePonytailEvidence(state, gate, "review", reviewedFiles);
     }
     if (state.ponytail === "full-audit" && gate.name === "PRECOMMIT_GATE") {
       ponytailAuditAt = await validatePonytailEvidence(state, gate, "audit");
@@ -1012,6 +975,8 @@ export const validateFinal = async (root, state) => {
   return { relative, document };
 };
 
+const BASELINE_MATRICES = ["matrices/parity.json", "matrices/target-native.json", "matrices/design-system.json", "matrices/global-contract.json"];
+
 export const checkpointArtifacts = (state) => {
   switch (state.currentStep) {
     case "RESOLVE": return ["state.json"];
@@ -1023,17 +988,14 @@ export const checkpointArtifacts = (state) => {
         ? [artifactVisualAuthority(state).contextFile]
         : []),
     ];
-    case "BUILD_BASELINE": return [
-      "matrices/parity.json",
-      "matrices/target-native.json",
-      "matrices/design-system.json",
-      "matrices/global-contract.json",
-      ...(artifactVisualAuthority(state) ? [VISUAL_ACCEPTANCE_FILE] : []),
-    ];
+    case "BUILD_BASELINE": return [...BASELINE_MATRICES, ...(artifactVisualAuthority(state) ? [VISUAL_ACCEPTANCE_FILE] : [])];
     case "PLAN": return ["slices/index.json"];
     case "IMPLEMENT_SLICES": return [`slices/${state.activeSlice}.json`];
     case "VERIFY_SLICES": return [`evidence/${state.activeSlice}/result.json`];
-    case "FINALIZE": return ["gates.json"];
+    // M9-R1 D2: FINALIZE requires every matrix row terminal (validateBaseline
+    // `final`), so it declares them; only status/evidence may move -- the
+    // BUILD_BASELINE `#immutable` pin still holds every other field.
+    case "FINALIZE": return [...BASELINE_MATRICES, "gates.json"];
     default: return [];
   }
 };
@@ -1212,7 +1174,7 @@ const pinsFor = async (root, state, validation) => {
     case "PLAN": await add("slices/index.json"); break;
     case "IMPLEMENT_SLICES": await add(validation.result.relative); break;
     case "VERIFY_SLICES": await add(`${validation.result.relative}#semantic`); break;
-    case "FINALIZE": await add("gates.json"); break;
+    case "FINALIZE": for (const relative of checkpointArtifacts(state)) await add(relative); break;
   }
   return pins;
 };

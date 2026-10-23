@@ -93,8 +93,14 @@ persists the selected mode and checks the evidence described under
    options). The engine uses the same explicit review/elicitation path on every
    provider; a tool argument never supplies a decision.
 3. Author only the paths named by `request.artifacts`, using
-   `references/artifact-contract.md`. With Ponytail enabled, also author its
-   review and audit evidence under the artifact record before `FINALIZE`.
+   `references/artifact-contract.md`. At `FINALIZE` those include the four
+   matrices, whose rows become terminal there. With `--ponytail full`, invoke
+   the provider's Ponytail Review skill (`ponytail-review`) on the migration's
+   changed files before writing `gates.json`, and record its output, opened by
+   the binding line in `references/artifact-contract.md#finalize`, as
+   `evidence/ponytail-review.md`. Never write the review yourself; if the skill
+   is unavailable, stop and report `PONYTAIL_NOT_EXECUTED`. Audit evidence for
+   `full-audit` follows the same contract section.
 4. Repeat only on `CONTINUE`. Stop on `AWAITING_CONFIRMATION`, `COMPLETE`,
    `OPERATOR_DECISION`, `BLOCKED`, or `FAILED`. `CONTINUE` means the next
    artifact is not authored yet; an engine fault is `BLOCKED`, and `--status`
