@@ -63,7 +63,7 @@ export const exactObject = (value, label, required, optional = []) => {
   const allowed = new Set([...required, ...optional]);
   const unknown = Object.keys(value).filter((key) => !allowed.has(key));
   if (unknown.length > 0) {
-    throw new Error(`${label} contains unknown key(s): ${unknown.join(", ")}.`);
+    throw new Error(`${label} contains unknown key(s): ${unknown.join(", ")}. Allowed: ${[...allowed].join(", ")}.`);
   }
   const missing = required.filter((key) => !Object.hasOwn(value, key));
   if (missing.length > 0) {

@@ -45,7 +45,8 @@ depend on whether any global contract was declared. The universe is every unit
 of every `sourceFiles` entry plus every `globalContracts[].sourcePath`. A script
 file's units key as `<file>#<binding>` (a binding name is unique only inside its
 own file); any other file is one unit keyed by its path. Every censused unit
-must appear exactly once.
+must appear exactly once, as `{path, disposition, ref?, rationale?}` where
+`path` is that key.
 
 `requirements` is the **source requirement graph**: every element the artifact
 requires from outside its own bound path, plus every reference the scanner could
@@ -92,7 +93,8 @@ and per-behavior target `evidence`. `TARGET_REUSE` requires verified evidence
 for every behavior. `TARGET_EXTEND` requires verified target-native rows.
 `MIGRATE_NEW` requires the bound target artifact to be absent unless it is a
 bound in-place source path, and has no
-target-native rows. For `TARGET_REUSE`/`TARGET_EXTEND`, `targetFiles` must
+target-native rows. `targetFiles` names existing target files only, so a
+`MIGRATE_NEW` record whose target does not exist yet declares none. For `TARGET_REUSE`/`TARGET_EXTEND`, `targetFiles` must
 include the bound target path, and every `targetNative[].path` and every
 `evidence[].path` must be one of the declared `targetFiles`: reuse is proven
 against the bound artifact, never laundered through an unrelated file.
