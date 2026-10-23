@@ -232,8 +232,9 @@ all written by the agent. Before `COMPLETE` the engine verifies only what it
 can: the cited path, a non-empty file whose current hash matches, the current
 source/target binding, and the order above. A `COMPLETE` result and `--status`
 report each entry as `ponytailEvidence: [{kind,path,sha256,producedAt,assurance:"AGENT_ASSERTED",execution}]`.
-Records completed before `assurance` and `execution` existed keep their pinned
-evidence and report `execution: "UNRECORDED"`.
+Both fields are optional only so evidence written before they existed stays
+valid: always state them. Evidence without `execution` reports
+`execution: "UNRECORDED"`, never a guess.
 
 Two gates carry the mandatory architecture rules they are named after, asserted
 against this migration's changed files only:

@@ -54,11 +54,9 @@ export const validatePonytailEvidence = async (state, gate, kind) => {
   if (!item) throw new Error(`Ponytail target '${state.ponytail}' requires ${gate.name} ${kind} evidence.`);
   const expectedPath = `${STATE_ROOT}/${state.artifactId}/evidence/ponytail-${kind}.md`;
   if (item.path !== expectedPath) throw new Error(`${label}.path must be '${expectedPath}'.`);
-  // A record completed before M10 carries neither field; its evidence bytes
-  // stay pinned through gates.json and are reported as UNRECORDED.
-  const declared = ["assurance", "execution"];
-  const completed = state.status === "COMPLETE";
-  await validateGateEvidence(state, item, label, null, ["kind", "producedAt", ...(completed ? [] : declared)], completed ? declared : []);
+  // Optional so evidence written before M10 stays valid; an unstated
+  // execution is reported UNRECORDED, never inferred.
+  await validateGateEvidence(state, item, label, null, ["kind", "producedAt"], ["assurance", "execution"]);
   if (item.kind !== kind) throw new Error(`${label}.kind must be '${kind}'.`);
   if (Object.hasOwn(item, "assurance") && item.assurance !== PONYTAIL_ASSURANCE) {
     throw new Error(`${label}.assurance must be '${PONYTAIL_ASSURANCE}': the engine cannot verify that a Ponytail skill ran, and no authority attests it.`);
@@ -66,7 +64,8 @@ export const validatePonytailEvidence = async (state, gate, kind) => {
   if (Object.hasOwn(item, "execution") && !PONYTAIL_EXECUTION.includes(item.execution)) {
     throw new Error(`${label}.execution must be one of ${PONYTAIL_EXECUTION.join(", ")}.`);
   }
-  if (!completed && item.sha256 === EMPTY_SHA256) throw new Error(`${label} cites an empty file.`);
+  // Completed records keep the evidence they were pinned with.
+  if (state.status !== "COMPLETE" && item.sha256 === EMPTY_SHA256) throw new Error(`${label} cites an empty file.`);
   return {
     at: ponytailTime(item.producedAt, `${label}.producedAt`),
     report: { kind, path: item.path, sha256: item.sha256, producedAt: item.producedAt, assurance: PONYTAIL_ASSURANCE, execution: item.execution ?? "UNRECORDED" },

@@ -53,7 +53,6 @@ import {
   upgradeArtifactFormat,
   validateArtifactComplete,
   reconcileArtifactDecisions,
-  validatePonytailEvidence,
 } from "../../src/lifecycle/index.mjs";
 import {
   candidateDigestOf,
@@ -935,10 +934,15 @@ test("artifact Ponytail full requires Review evidence before COMPLETE", async ()
     assert.match((await runArtifact(fixture.options)).reason, /requires SIMPLIFY_ONCE review evidence/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
     const reviewAt = new Date(Date.parse(state.updatedAt) + 1000).toISOString();
-    gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE").ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
+    // M10 D1: evidence in its pre-M10 shape (no assurance, no execution) stays
+    // valid, and is still reported AGENT_ASSERTED with its execution UNRECORDED.
+    const { assurance: _assurance, execution: _execution, ...preM10 } = await ponytailEvidence(fixture, "review", reviewAt);
+    gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE").ponytailEvidence = preM10;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
     assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+    const reported = (await getArtifactStatus(fixture.options)).ponytailEvidence;
+    assert.deepEqual(reported.map(({ assurance, execution }) => [assurance, execution]), [["AGENT_ASSERTED", "UNRECORDED"]]);
     await rm(path.join(fixture.artifactRoot, "evidence/ponytail-review.md"));
     assert.equal((await getArtifactStatus(fixture.options)).outcome, "BLOCKED");
     assert.equal((await runArtifact(fixture.options)).outcome, "BLOCKED");
@@ -1008,14 +1012,11 @@ test("M10 D1: Ponytail evidence is AGENT_ASSERTED, never reported or accepted as
       assert.match(result.reason, pattern);
       assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
     };
-    // A review text cannot be promoted: any other assurance is refused, and so
-    // is evidence that leaves its assurance or execution unstated.
+    // A review text cannot be promoted: any other assurance is refused.
     for (const assurance of ["ATTESTED", "HUMAN_ATTESTED", "VERIFIED", "INDEPENDENT"]) {
       await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { assurance }), /assurance must be 'AGENT_ASSERTED'/);
     }
     await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { execution: "ATTESTED" }), /execution must be one of SKILL_INVOKED, SKILL_UNAVAILABLE/);
-    const { assurance: _assurance, execution: _execution, ...unstated } = await ponytailEvidence(fixture, "review", reviewAt);
-    await refusedWith(unstated, /missing key\(s\): assurance, execution/);
     await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { content: "" }), /cites an empty file/);
 
     // The checks the engine can make still hold: tampered after it was cited,
@@ -1048,14 +1049,6 @@ test("M10 D1: Ponytail evidence is AGENT_ASSERTED, never reported or accepted as
     assert.equal((await stateOf(fixture)).revision, completed.revision);
     assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
     assert.doesNotMatch(JSON.stringify(complete), /ATTESTED"|"VERIFIED_REVIEW|PROVENANCE_VERIFIED/);
-
-    // A record completed before M10 carries neither field; it stays complete
-    // and its execution is reported UNRECORDED, never inferred. An active
-    // record gets no such allowance.
-    const legacy = { name: "SIMPLIFY_ONCE", ponytailEvidence: unstated };
-    unstated.sha256 = simplify.ponytailEvidence.sha256;
-    assert.deepEqual((await validatePonytailEvidence(completed, legacy, "review")).report, { ...reported[0], execution: "UNRECORDED" });
-    await assert.rejects(validatePonytailEvidence({ ...completed, status: "ACTIVE" }, legacy, "review"), /missing key\(s\): assurance, execution/);
   } finally {
     await fixture.cleanup();
   }
