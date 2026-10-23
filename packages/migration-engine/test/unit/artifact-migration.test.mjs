@@ -1105,6 +1105,28 @@ test("M9-R1 D2: FINALIZE declares and pins the matrices whose terminal status it
     assert.equal(complete.outcome, "COMPLETE", complete.reason);
     assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
     assert.deepEqual(await stateOf(fixture), committed);
+
+    // The current (version 2) journal recovers the same commit from every
+    // crash window between journal publication and journal removal.
+    const afterCommit = await Promise.all(engineFiles.map((relative) => readFile(path.join(fixture.artifactRoot, relative))));
+    const [previousState, previousIntegrity] = beforeCommit.slice(0, 2).map((bytes) => JSON.parse(bytes));
+    const v2 = {
+      version: 2, previousState, previousIntegrity, input: { kind: "ADVANCE", selectedSlice: null },
+      ...(event.consumedDecisions ? { consumedDecisions: event.consumedDecisions, decisionLedgerPrefixes: event.decisionLedgerPrefixes } : {}),
+      state: committed, event
+    };
+    // [state, integrity, history] already replaced at each boundary.
+    for (const replaced of [[false, false, false], [false, false, true], [true, false, true], [true, true, true]]) {
+      await Promise.all(engineFiles.map((relative, index) => writeFile(path.join(fixture.artifactRoot, relative), (replaced[index] ? afterCommit : beforeCommit)[index])));
+      await writeJson(fixture.artifactRoot, "transaction.json", v2);
+      assert.match((await getArtifactStatus(fixture.options)).reason, /recovered automatically/, String(replaced));
+      const recovered = await runArtifact(fixture.options);
+      assert.equal(recovered.outcome, "COMPLETE", `${replaced}: ${recovered.reason}`);
+      assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
+      assert.deepEqual(await stateOf(fixture), committed);
+      const history = await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"));
+      assert.deepEqual(history, afterCommit[2], `${replaced}: one COMPLETE event`);
+    }
     const pins = (await stateOf(fixture)).artifactHashes;
     for (const relative of [...matrices, "gates.json"]) assert.ok(pins[relative], relative);
 
