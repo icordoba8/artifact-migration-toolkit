@@ -16,7 +16,7 @@ source root, target root, or artifact record root as stated below. Every
 | <a id="plan"></a>`PLAN` | `slices/index.json` | [Matrices And Slices](#matrices-and-slices) |
 | <a id="implement-slices"></a>`IMPLEMENT_SLICES` | `slices/<slice>.json` | [Matrices And Slices](#matrices-and-slices) |
 | <a id="verify-slices"></a>`VERIFY_SLICES` | `evidence/<slice>/result.json` plus its `ui/` files | [Runtime Evidence](#runtime-evidence) |
-| `FINALIZE` | `gates.json` | [Finalize](#finalize) |
+| `FINALIZE` | the four matrices (row `status` and evidence only) and `gates.json` | [Finalize](#finalize) |
 
 ## Inventories
 
@@ -208,34 +208,30 @@ refused.
 
 For a record created with `--ponytail full`, the `SIMPLIFY_ONCE` gate also
 requires `ponytailEvidence` of the form
-`{kind:"review",path,sha256,boundTo:{sourceDigest,targetDigest},producedAt}`.
+`{kind:"review",path,sha256,boundTo:{sourceDigest,targetDigest},producedAt,assurance:"AGENT_ASSERTED",execution}`.
 The path must be `.agents/knowledge/migrations/artifacts/<artifact-id>/evidence/ponytail-review.md`
 under the target root. `--ponytail full-audit` additionally requires the same
 shape with `kind:"audit"` on `PRECOMMIT_GATE`, pointing to
 `evidence/ponytail-audit.md` in that artifact record. That gate must also carry
 `reviewedAt`. Both timestamps are canonical ISO timestamps. Run the Audit after
 verification; the engine requires Review before Audit and Audit before
-`reviewedAt`.
-The engine checks each evidence file's current hash and source/target binding
-before allowing `COMPLETE`. No Ponytail flag adds no Ponytail requirement.
+`reviewedAt`. No Ponytail flag adds no Ponytail requirement.
 
-`ponytail-review.md` is the output of the provider's Ponytail Review skill
-(`ponytail-review`), run over this migration's changed files after the last
-slice is verified. Its first line binds it to this record and to the exact
-bytes reviewed; the review output follows:
+`execution` is the agent's own account: `SKILL_INVOKED` when the provider's
+Ponytail skill (`ponytail-review`, `ponytail-audit`) ran over this migration's
+changed files after the last slice was verified and the file holds its output;
+`SKILL_UNAVAILABLE` when no such skill was available and the file says so. Never
+imitate a Ponytail run, and say in the final report which one happened.
 
-```text
-<!-- ponytail-review {"artifactId":"<state.artifactId>","createdAt":"<state.createdAt>","files":[{"path":"src/x.ts","sha256":"..."}]} -->
-```
-
-`files` is every file this migration's slices changed (the bound target when
-none changed) at its current hash. A review naming another record, an outdated
-or incomplete file set, or carrying no output is refused. This is a content
-binding, not provenance: the engine cannot tell which process wrote the file,
-so the record's Ponytail evidence is agent-asserted. When no Ponytail Review
-skill is available, report `PONYTAIL_NOT_EXECUTED` and stop; never author the
-review yourself. Records completed before this binding keep their completed
-evidence, which stays pinned through `gates.json`.
+Ponytail evidence is `AGENT_ASSERTED`, and `assurance` accepts no other value.
+The Ponytail skills are prompts with no receipt issuer, and this toolkit has no
+authority that attests a review, so the file, its hash and its timestamp are
+all written by the agent. Before `COMPLETE` the engine verifies only what it
+can: the cited path, a non-empty file whose current hash matches, the current
+source/target binding, and the order above. A `COMPLETE` result and `--status`
+report each entry as `ponytailEvidence: [{kind,path,sha256,producedAt,assurance:"AGENT_ASSERTED",execution}]`.
+Records completed before `assurance` and `execution` existed keep their pinned
+evidence and report `execution: "UNRECORDED"`.
 
 Two gates carry the mandatory architecture rules they are named after, asserted
 against this migration's changed files only:

@@ -847,10 +847,8 @@ export const validateFinal = async (root, state) => {
     ARCHITECTURE_IMPLEMENTATION_GATE: architecture.implementation,
     PRECOMMIT_GATE: architecture.precommit,
   };
-  const reviewedFiles = changedFiles.size > 0 ? changedFiles : new Set([normalizeRelative(state.target.path, "bound target")]);
   const names = [];
-  let ponytailReviewAt;
-  let ponytailAuditAt;
+  const ponytail = [];
   let precommitReviewedAt;
   for (const [index, gate] of arrayOf(document.gates, "final gates.gates").entries()) {
     exactObject(gate, `final gates.gates[${index}]`, ["name", "status", "evidence"], ["ponytailEvidence", "reviewedAt"]);
@@ -866,16 +864,16 @@ export const validateFinal = async (root, state) => {
       throw new Error(`final gate '${gate.name}' cannot PASS: ${failures.join(" ")}`);
     }
     if (state.ponytail && gate.name === "SIMPLIFY_ONCE") {
-      ponytailReviewAt = await validatePonytailEvidence(state, gate, "review", reviewedFiles);
+      ponytail[0] = await validatePonytailEvidence(state, gate, "review");
     }
     if (state.ponytail === "full-audit" && gate.name === "PRECOMMIT_GATE") {
-      ponytailAuditAt = await validatePonytailEvidence(state, gate, "audit");
+      ponytail[1] = await validatePonytailEvidence(state, gate, "audit");
       precommitReviewedAt = ponytailTime(gate.reviewedAt, "PRECOMMIT_GATE.reviewedAt");
     }
   }
   sameMembers(names, FINAL_GATES, "final gate names");
   if (state.ponytail === "full-audit" &&
-      (ponytailReviewAt >= ponytailAuditAt || ponytailAuditAt >= precommitReviewedAt)) {
+      (ponytail[0]?.at >= ponytail[1]?.at || ponytail[1]?.at >= precommitReviewedAt)) {
     throw new Error("Ponytail Review and Audit must precede the artifact pre-commit review in order.");
   }
   const uiRows = arrayOf(document.uiEvidence, "final gates.uiEvidence");
@@ -972,7 +970,7 @@ export const validateFinal = async (root, state) => {
         .join(", ")}.`,
     );
   }
-  return { relative, document };
+  return { relative, document, ponytail: ponytail.map(({ report }) => report) };
 };
 
 const BASELINE_MATRICES = ["matrices/parity.json", "matrices/target-native.json", "matrices/design-system.json", "matrices/global-contract.json"];
@@ -1290,14 +1288,15 @@ export const previewAdvance = async (root, state, options) => {
     };
   }
   if (state.status === "COMPLETE") {
+    let ponytailEvidence;
     if (state.ponytail) {
       try {
-        await validateFinal(root, state);
+        ponytailEvidence = (await validateFinal(root, state)).ponytail;
       } catch (error) {
         return { state, outcome: "BLOCKED", reason: error.message };
       }
     }
-    return { state, outcome: "COMPLETE", reason: "Artifact migration is complete." };
+    return { state, outcome: "COMPLETE", reason: "Artifact migration is complete.", ponytailEvidence };
   }
   const snapshot = {
     artifactId: state.artifactId,

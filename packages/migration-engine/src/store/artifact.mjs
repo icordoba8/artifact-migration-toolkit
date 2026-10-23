@@ -96,7 +96,12 @@ export const integrityFor = (state, historyContent) => ({
 
 export const revalidatePins = async (root, state) => {
   for (const [key, digest] of Object.entries(state.artifactHashes)) {
-    if ((await pinDigest(root, key)) !== digest) throw new Error(`Completed artifact changed: ${key}.`);
+    if ((await pinDigest(root, key)) !== digest) {
+      // M10: an agent that edited a pinned field can repair its own file; say how.
+      throw new Error(`Completed artifact changed: ${key}.${key.endsWith("#immutable")
+        ? " Only row status and evidence may change after BUILD_BASELINE: restore every other field to its pinned value and rerun."
+        : " Restore the validated bytes (for example from version control) and rerun; completed work is never rewritten."}`);
+    }
   }
 };
 

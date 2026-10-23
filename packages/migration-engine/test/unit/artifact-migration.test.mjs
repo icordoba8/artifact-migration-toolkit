@@ -53,6 +53,7 @@ import {
   upgradeArtifactFormat,
   validateArtifactComplete,
   reconcileArtifactDecisions,
+  validatePonytailEvidence,
 } from "../../src/lifecycle/index.mjs";
 import {
   candidateDigestOf,
@@ -902,28 +903,12 @@ const drivePonytailToFinal = async (fixture) => {
   await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
 };
 
-// The binding line a Ponytail Review opens with: this record, and every file
-// the migration changed at its current hash.
-const reviewBinding = async (fixture, overrides = {}) => {
-  const state = await stateOf(fixture);
-  const file = fixture.options.target;
-  return {
-    artifactId: state.artifactId,
-    createdAt: state.createdAt,
-    files: [{ path: file, sha256: await digest(path.join(fixture.targetRoot, file)) }],
-    ...overrides,
-  };
-};
-const boundReview = async (fixture, overrides) =>
-  `<!-- ponytail-review ${JSON.stringify(await reviewBinding(fixture, overrides))} -->\n# Ponytail Review\n\nNo findings.\n`;
-
-const ponytailEvidence = async (fixture, kind, producedAt, content) => {
+// M10 D1: every new Ponytail evidence entry states its assurance and the
+// agent's own account of whether the Ponytail skill ran.
+const ponytailEvidence = async (fixture, kind, producedAt, { content, ...fields } = {}) => {
   const relative = `.agents/knowledge/migrations/artifacts/${fixture.id}/evidence/ponytail-${kind}.md`;
   await mkdir(path.join(fixture.artifactRoot, "evidence"), { recursive: true });
-  await writeFile(
-    path.join(fixture.targetRoot, relative),
-    content ?? (kind === "review" ? await boundReview(fixture) : `${kind} completed for ${fixture.id}\n`),
-  );
+  await writeFile(path.join(fixture.targetRoot, relative), content ?? `# Ponytail ${kind}\n\nNo findings for ${fixture.id}.\n`);
   const state = await stateOf(fixture);
   return {
     kind,
@@ -931,6 +916,9 @@ const ponytailEvidence = async (fixture, kind, producedAt, content) => {
     sha256: await digest(path.join(fixture.targetRoot, relative)),
     boundTo: { sourceDigest: state.bindings.source.digest, targetDigest: state.bindings.target.digest },
     producedAt,
+    assurance: "AGENT_ASSERTED",
+    execution: "SKILL_INVOKED",
+    ...fields,
   };
 };
 
@@ -983,20 +971,27 @@ test("artifact Ponytail full-audit requires Review then Audit before PRECOMMIT_G
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     assert.match((await runArtifact(fixture.options)).reason, /precede the artifact pre-commit review/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
-    precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", auditAt);
+    // M10 D1: an unavailable skill is stated, not hidden, and does not
+    // deadlock the record; the report carries the statement as written.
+    precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", auditAt, {
+      execution: "SKILL_UNAVAILABLE", content: "Ponytail Audit was not available to this agent; no audit ran.\n",
+    });
     precommit.reviewedAt = auditAt;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     assert.match((await runArtifact(fixture.options)).reason, /precede the artifact pre-commit review/);
     precommit.reviewedAt = precommitAt;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
-    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    assert.deepEqual(complete.ponytailEvidence.map(({ kind, assurance, execution }) => [kind, assurance, execution]),
+      [["review", "AGENT_ASSERTED", "SKILL_INVOKED"], ["audit", "AGENT_ASSERTED", "SKILL_UNAVAILABLE"]]);
     assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("M9-R1 D1: a Ponytail Review must be bound to this record and the exact files it reviewed", async () => {
+test("M10 D1: Ponytail evidence is AGENT_ASSERTED, never reported or accepted as attested", async () => {
   const fixture = await createFixture();
   fixture.options.ponytail = "full";
   try {
@@ -1005,28 +1000,26 @@ test("M9-R1 D1: a Ponytail Review must be bound to this record and the exact fil
     const reviewAt = new Date(Date.parse(state.updatedAt) + 1000).toISOString();
     const gates = await gatesDocument(fixture);
     const simplify = gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE");
-    const refusedWith = async (content, pattern) => {
-      simplify.ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt, content);
+    const refusedWith = async (evidence, pattern) => {
+      simplify.ponytailEvidence = evidence;
       await writeJson(fixture.artifactRoot, "gates.json", gates);
       const result = await runArtifact(fixture.options);
       assert.equal(result.outcome, "CONTINUE", result.reason);
       assert.match(result.reason, pattern);
       assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
     };
-    // M9: a hand-written note with a valid path, hash, binding and timestamp.
-    await refusedWith(`review completed for ${fixture.id}\n`, /must open with its '<!-- ponytail-review/);
-    await refusedWith("<!-- ponytail-review {not json} -->\nok\n", /binding line is not JSON/);
-    await refusedWith(await boundReview(fixture, { artifactId: "other-artifact" }), /belongs to another migration record/);
-    await refusedWith(await boundReview(fixture, { createdAt: "2000-01-01T00:00:00.000Z" }), /belongs to another migration record/);
-    const outdated = createHash("sha256").update("export const widget = 'before';\n").digest("hex");
-    await refusedWith(
-      await boundReview(fixture, { files: [{ path: fixture.options.target, sha256: outdated }] }),
-      /reviewed an outdated version of/,
-    );
-    await refusedWith(await boundReview(fixture, { files: [] }), /reviewed files/);
-    await refusedWith((await boundReview(fixture)).split("\n")[0] + "\n", /carries no review output/);
+    // A review text cannot be promoted: any other assurance is refused, and so
+    // is evidence that leaves its assurance or execution unstated.
+    for (const assurance of ["ATTESTED", "HUMAN_ATTESTED", "VERIFIED", "INDEPENDENT"]) {
+      await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { assurance }), /assurance must be 'AGENT_ASSERTED'/);
+    }
+    await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { execution: "ATTESTED" }), /execution must be one of SKILL_INVOKED, SKILL_UNAVAILABLE/);
+    const { assurance: _assurance, execution: _execution, ...unstated } = await ponytailEvidence(fixture, "review", reviewAt);
+    await refusedWith(unstated, /missing key\(s\): assurance, execution/);
+    await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { content: "" }), /cites an empty file/);
 
-    // Tampered after it was cited, and missing altogether.
+    // The checks the engine can make still hold: tampered after it was cited,
+    // and missing altogether.
     simplify.ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     const reviewFile = path.join(fixture.artifactRoot, "evidence/ponytail-review.md");
@@ -1036,19 +1029,33 @@ test("M9-R1 D1: a Ponytail Review must be bound to this record and the exact fil
     assert.match((await runArtifact(fixture.options)).reason, /ponytail-review\.md/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
 
-    // A bound review completes, and resuming the completed record re-proves it
-    // without a second review or a second transition.
+    // Completion reports the evidence as AGENT_ASSERTED with the agent's own
+    // execution statement, and resuming re-proves it without a transition.
     simplify.ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
     await writeJson(fixture.artifactRoot, "gates.json", gates);
-    assert.equal((await getArtifactStatus(fixture.options)).status, "ACTIVE");
     const complete = await runArtifact(fixture.options);
     assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    const reported = [{
+      kind: "review", path: simplify.ponytailEvidence.path, sha256: simplify.ponytailEvidence.sha256,
+      producedAt: reviewAt, assurance: "AGENT_ASSERTED", execution: "SKILL_INVOKED",
+    }];
+    assert.deepEqual(complete.ponytailEvidence, reported);
     const completed = await stateOf(fixture);
     for (const resumed of [await getArtifactStatus(fixture.options), await runArtifact(fixture.options)]) {
       assert.equal(resumed.outcome, "COMPLETE", resumed.reason);
+      assert.deepEqual(resumed.ponytailEvidence, reported);
     }
     assert.equal((await stateOf(fixture)).revision, completed.revision);
     assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+    assert.doesNotMatch(JSON.stringify(complete), /ATTESTED"|"VERIFIED_REVIEW|PROVENANCE_VERIFIED/);
+
+    // A record completed before M10 carries neither field; it stays complete
+    // and its execution is reported UNRECORDED, never inferred. An active
+    // record gets no such allowance.
+    const legacy = { name: "SIMPLIFY_ONCE", ponytailEvidence: unstated };
+    unstated.sha256 = simplify.ponytailEvidence.sha256;
+    assert.deepEqual((await validatePonytailEvidence(completed, legacy, "review")).report, { ...reported[0], execution: "UNRECORDED" });
+    await assert.rejects(validatePonytailEvidence({ ...completed, status: "ACTIVE" }, legacy, "review"), /missing key\(s\): assurance, execution/);
   } finally {
     await fixture.cleanup();
   }

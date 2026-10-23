@@ -68,12 +68,15 @@ and no remapping, the target binding starts with the same path set. The source
 binding remains frozen as legacy provenance while target files change in place.
 
 Ponytail is opt-in for this artifact record. `--ponytail full` applies Ponytail
-Full during implementation and requires one Ponytail Review before completion.
-`--ponytail full-audit` also requires Ponytail Audit after verification and
-before the artifact pre-commit review. Omit the flag to leave Ponytail disabled;
-session-level `/ponytail` mode does not set the record option. The engine
-persists the selected mode and checks the evidence described under
-`references/artifact-contract.md#finalize`. A bare `--ponytail` is invalid.
+Full during implementation and requires Ponytail Review evidence before
+completion. `--ponytail full-audit` also requires Ponytail Audit evidence after
+verification and before the artifact pre-commit review. Omit the flag to leave
+Ponytail disabled; session-level `/ponytail` mode does not set the record
+option. The engine persists the selected mode and checks the evidence described
+under `references/artifact-contract.md#finalize`. A bare `--ponytail` is
+invalid. Ponytail evidence is `AGENT_ASSERTED`: the engine verifies the cited
+file, its hash, binding and order, never that a Ponytail skill ran, and reports
+it that way.
 
 ## Protocol
 
@@ -94,15 +97,22 @@ persists the selected mode and checks the evidence described under
    `references/artifact-contract.md`. At `FINALIZE` those include the four
    matrices, whose rows become terminal there. With `--ponytail full`, invoke
    the provider's Ponytail Review skill (`ponytail-review`) on the migration's
-   changed files before writing `gates.json`, and record its output, opened by
-   the binding line in `references/artifact-contract.md#finalize`, as
-   `evidence/ponytail-review.md`. Never write the review yourself; if the skill
-   is unavailable, stop and report `PONYTAIL_NOT_EXECUTED`. Audit evidence for
-   `full-audit` follows the same contract section.
+   changed files before writing `gates.json`, save its output as
+   `evidence/ponytail-review.md`, and cite it with `execution: "SKILL_INVOKED"`.
+   If no Ponytail skill is available, do not imitate one: write that it was
+   unavailable and cite it with `execution: "SKILL_UNAVAILABLE"`. Either way the
+   citation's `assurance` is `AGENT_ASSERTED`, and the final report says
+   whether Ponytail ran. Audit evidence for `full-audit` follows the same
+   contract section with `ponytail-audit`.
 4. Repeat only on `CONTINUE`. Stop on `AWAITING_CONFIRMATION`, `COMPLETE`,
    `OPERATOR_DECISION`, `BLOCKED`, or `FAILED`. `CONTINUE` means the next
    artifact is not authored yet; an engine fault is `BLOCKED`, and `--status`
-   and the bare command always agree on that.
+   and the bare command always agree on that. On `OPERATOR_DECISION`, show the
+   pending decisions and the engine's command, wait for the operator, then
+   resume this loop at step 2; never decide for them. A `Completed artifact
+   changed: <file>#immutable` refusal while the record is `ACTIVE` is your own
+   edit of a pinned matrix field: restore that field and rerun, no operator
+   needed.
 
 `DISCOVERY_COMPLETENESS` is where completeness is actually proven. The engine
 runs the reference discovery scan scoped to the bound artifact and keeps every

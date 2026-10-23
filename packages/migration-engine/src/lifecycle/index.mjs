@@ -159,6 +159,7 @@ export {
   checkpointArtifacts as artifactCheckpointArtifacts,
   reconcileArtifactDecisions,
 } from "./artifact-checkpoints.mjs";
+export { validatePonytailEvidence } from "./artifact-gates.mjs";
 export {
   artifactMetrics,
   artifactOperatorDecisions,
