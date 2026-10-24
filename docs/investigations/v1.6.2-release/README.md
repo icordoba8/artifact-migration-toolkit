@@ -40,6 +40,7 @@ clean before any release command ran.
 | Installed smoke (offline, staged archive, Claude, project scope; `smoke.mjs`) | 17/17 PASS |
 | Tag + `gh release create --verify-tag` | asset `artifact-migration-tools-v1.6.2.tar.gz`, GitHub digest `sha256:451002370969660361d56c4c97c0a1434b48088bef164f771a041bd5fceab300` = local archive |
 | `release:record 1.6.2` | contentHash `sha256:67c9f36a…8f82` read from the published manifest; commit `0ed58b8` |
+| Main CI on record commit `0ed58b8` (run 40107217451) | toolkit (ubuntu-latest) + shards 1/2/3 + provenance: success |
 
 **The archive digest differs from the cloud build (`19fe13a0…`).**
 `buildReleaseArchive` normalizes owner and group but not mtimes or gzip headers,
