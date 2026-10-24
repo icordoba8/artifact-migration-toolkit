@@ -1,0 +1,14 @@
+{
+  "artifactId": "x-6b9f07d641d9",
+  "exists": false,
+  "status": "NOT_STARTED",
+  "outcome": "CONTINUE",
+  "root": "/tmp/claude-0/-home-user/f99d3cb7-e283-44af-9200-f4a9146c499e/scratchpad/smoke consumer/.agents/knowledge/migrations/artifacts/x-6b9f07d641d9",
+  "metrics": {
+    "durationMs": 11,
+    "discoveryScans": 0,
+    "filesParsed": 0,
+    "validatorRuns": 0,
+    "previewAdvanceCalls": 0
+  }
+}
