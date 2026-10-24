@@ -1,0 +1,100 @@
+{
+  "contractVersion": 1,
+  "formatVersion": 14,
+  "workflowVersion": "1.0",
+  "artifactId": "slugify-64048cadb324",
+  "artifactType": "artifact",
+  "source": {
+    "root": "/home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consumer",
+    "path": "src/utils/slugify.js"
+  },
+  "target": {
+    "root": "/home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consumer",
+    "path": "src/utils/slugify.js"
+  },
+  "designSource": "target-system",
+  "figmaSources": [],
+  "resolution": "TARGET_REUSE",
+  "hasVisibleUi": false,
+  "status": "COMPLETE",
+  "currentStep": "COMPLETE",
+  "activeSlice": null,
+  "completedSteps": [
+    "RESOLVE",
+    "DISCOVER_LEGACY",
+    "DISCOVERY_COMPLETENESS",
+    "ASSESS_TARGET",
+    "BUILD_BASELINE",
+    "PLAN",
+    "IMPLEMENT_SLICES",
+    "VERIFY_SLICES",
+    "FINALIZE"
+  ],
+  "pendingSteps": [],
+  "completedSlices": [
+    "reuse-slugify"
+  ],
+  "pendingSlices": [],
+  "bindings": {
+    "source": {
+      "revision": "5cc7a60791625a284e5bb06a2581a951b1f567b1",
+      "pathScoped": true,
+      "dirtyDigest": "3e77b4f0c1028d87c71d51ec96f698d69ac6ceb44c2e861c12489f72f319683a",
+      "paths": [
+        "src/utils/slugify.js"
+      ],
+      "entries": [
+        {
+          "path": "src/utils/slugify.js",
+          "kind": "FILE",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314"
+        }
+      ],
+      "digest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+    },
+    "target": {
+      "revision": "5cc7a60791625a284e5bb06a2581a951b1f567b1",
+      "pathScoped": true,
+      "dirtyDigest": "3e77b4f0c1028d87c71d51ec96f698d69ac6ceb44c2e861c12489f72f319683a",
+      "paths": [
+        "src/utils/slugify.js"
+      ],
+      "entries": [
+        {
+          "path": "src/utils/slugify.js",
+          "kind": "FILE",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314"
+        }
+      ],
+      "digest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+    }
+  },
+  "artifactHashes": {
+    "inventories/source.json": "ca72c29fb71b90a9bb86d3d2fca45bad019e570f861e23709c1b50286ba832aa",
+    "inventories/completeness.json": "5ee09c83c223f3db71a68ff229fb93e1557c4964ce47e94707fd5c74f2911a4c",
+    "inventories/target.json": "a8169f6861e4954c14f764a45846113bc366927c1407c1532be160056d10324e",
+    "matrices/parity.json#immutable": "febf60ccdf86347984313d2d5dbeb2945371785d2260911b1cdb51b0f5d56db6",
+    "matrices/target-native.json#immutable": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "matrices/design-system.json#immutable": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "matrices/global-contract.json#immutable": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "slices/index.json": "dcf3b62fc3c8d4c7219bc51301f9d178222b5a942c4eda4ad619f62d9a6861d7",
+    "slices/reuse-slugify.json": "565a00afbbca9149ca307c18eff86d5d89252359984a54492fc1dde9113419c0",
+    "evidence/reuse-slugify/result.json#semantic": "fa64b8ece872f18cbf9331190330788e45f5fb8f4453967a0a79e194d7a9f7b5",
+    "matrices/parity.json": "1a5e6bcec2393b9fd38b58f6502620a4742d06499c39b4c1b35ea190567e69bf",
+    "matrices/target-native.json": "e4dd91440397c613126d4c083297feff7fb5815c7231e225ee6f9c849180c55a",
+    "matrices/design-system.json": "e4dd91440397c613126d4c083297feff7fb5815c7231e225ee6f9c849180c55a",
+    "matrices/global-contract.json": "e4dd91440397c613126d4c083297feff7fb5815c7231e225ee6f9c849180c55a",
+    "gates.json": "fc51da905b8ec51da98d853c767e417ff4c81003faff9e056d4dd8ba5742861a"
+  },
+  "toolkitIdentity": {
+    "name": "artifact-migration-tools",
+    "version": "1.6.2",
+    "commit": "336531c4b5a23814f6e35699bedb5315003c3542",
+    "contentHash": "sha256:67c9f36afc8d9e3887686048c4e653e726b1aea0fba04509822aec20b3748f82"
+  },
+  "revision": 8,
+  "nextAction": "Artifact migration is complete.",
+  "nextCommand": "/migrate-artifact \"src/utils/slugify.js\" \"--type\" \"artifact\" \"--target\" \"src/utils/slugify.js\" \"--source-root\" \"/home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consumer\" \"--target-root\" \"/home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consumer\"",
+  "createdAt": "2026-10-24T15:34:10.060Z",
+  "updatedAt": "2026-10-24T15:36:51.103Z"
+}

@@ -1,0 +1,54 @@
+.../mvmk4yrx-2z19                        | Progress: resolved 0, reused 1, downloaded 0, added 0
+Packages are hard linked from the content-addressable store to the virtual store.
+  Content-addressable store is at: /home/utmwac/.local/share/pnpm/store/v11
+  Virtual store is at:             ../../../.cache/pnpm/dlx/307238dc68e42371573aa792b6447cfb/mvmk4yrx-2z19/node_modules/.pacquet
+.../mvmk4yrx-2z19                        | Progress: resolved 8, reused 7, downloaded 1, added 8, done
+
+dependencies:
++ skills 1.7.4
+
+
+│
+●   claude-code_2-1-310_agent  Agent detected — installing non-interactively
+│
+◇  Source: https://github.com/icordoba8/artifact-migration-toolkit.git
+│
+◒  Cloning repository…◐  Cloning repository…◓  Cloning repository…◑  Cloning repository…◒  Cloning repository…◐  Cloning repository…◓  Cloning repository…◑  Cloning repository…◒  Cloning repository….◐  Cloning repository….◓  Cloning repository….◑  Cloning repository….◒  Cloning repository….◐  Cloning repository….◓  Cloning repository….◑  Cloning repository….◒  Cloning repository…..◐  Cloning repository…..◓  Cloning repository…..◑  Cloning repository…..◒  Cloning repository…..◐  Cloning repository…..◓  Cloning repository…..◑  Cloning repository…..◒  Cloning repository…...◐  Cloning repository…...◓  Cloning repository…...◑  Cloning repository…...◒  Cloning repository…...◐  Cloning repository…...◓  Cloning repository…...◑  Cloning repository…...◒  Cloning repository…...◐  Cloning repository…◓  Cloning repository…◑  Cloning repository…◒  Cloning repository…◐  Cloning repository…◓  Cloning repository…◑  Cloning repository…◒  Cloning repository…◐  Cloning repository….◓  Cloning repository….◑  Cloning repository….◒  Cloning repository….◐  Cloning repository….◓  Cloning repository….◑  Cloning repository….◒  Cloning repository….◐  Cloning repository…..◓  Cloning repository…..◑  Cloning repository…..◒  Cloning repository…..◐  Cloning repository…..◓  Cloning repository…..◑  Cloning repository…..◒  Cloning repository…..◐  Cloning repository…...◓  Cloning repository…...◑  Cloning repository…...◇  Repository cloned
+│
+◇  Found 2 skills
+│
+●  Selected 1 skill: migrate-artifact
+
+│
+◇  Installation Summary ───────────────────────────────────────────────────────╮
+│                                                                              │
+│  ~/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consumer/.a  │
+│  gents/skills/migrate-artifact                                               │
+│    copy → Claude Code                                                        │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Security Risk Assessments ───────────────────────────────────────╮
+│                                                                   │
+│                    Gen               Socket            Snyk       │
+│  migrate-artifact  Med Risk          0 alerts          Med Risk   │
+│                                                                   │
+│  Details: https://skills.sh/icordoba8/artifact-migration-toolkit  │
+│                                                                   │
+├───────────────────────────────────────────────────────────────────╯
+│
+◇  Installation complete
+
+│
+◇  Installed 1 skill ──────────────────────────────────────────────────────────╮
+│                                                                              │
+│  ✓ migrate-artifact (copied)                                                 │
+│    → ~/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consume  │
+│  r/.claude/skills/migrate-artifact                                           │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────╯
+
+│
+└  Done!  Review skills before use; they run with full agent permissions.
+
+Done in 7.6s using pnpm v12.5.1

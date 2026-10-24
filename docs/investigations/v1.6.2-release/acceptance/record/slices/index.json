@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "slices": [
+    { "id": "reuse-slugify", "behaviorIds": ["B-1", "B-2", "B-3", "B-4", "B-5", "B-6"], "dependsOn": [], "kind": "REUSE" }
+  ]
+}

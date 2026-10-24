@@ -1,0 +1,19 @@
+PASS both skills install — offline
+PASS installed stamps name the release version — both 1.6.2
+PASS first preflight resolves and verifies the release (start-migration) — commit 336531c4b5a2 contentHash sha256:67c9f36afc8d…
+PASS migrate-artifact preflight reuses the verified runtime — network false
+PASS repeated invocation reuses without network
+PASS installed release manifest matches both skill identities — migrate-artifact, start-migration
+PASS CLI commands resolve from the installed toolkit — 10 commands under the store
+PASS installed engine resolves playwright-core for capture from its own tree — playwright-core 1.62.1
+PASS MCP starts and lists the toolkit tools — 10 tools
+PASS discover creates a stamped record — format 21, step DISCOVER_LEGACY
+PASS engine CLI reports the record's identity as the installed one — {
+PASS module status through MCP names the active identity — DISCOVER_LEGACY
+PASS run continues at the authored checkpoint — outcome CONTINUE, step DISCOVER_LEGACY
+PASS evidence validation refuses an unauthored checkpoint — steps/02-discover-legacy.md must record Status COMPLETE.
+PASS resume is idempotent — revision 1 unchanged
+PASS migrate-artifact status on a disposable artifact — NOT_STARTED
+PASS no unintended consumer mutation — legacy and target source byte-identical
+
+17/17 PASS (offline) scratch: /tmp/claude-1000/-home-utmwac-artifact-migration-toolkit/a3d9c0ce-d50a-45d9-bee8-60247b280df8/scratchpad/smoke/smoke offline P7kC6U

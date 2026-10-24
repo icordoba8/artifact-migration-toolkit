@@ -1,0 +1,5 @@
+$ node scripts/release.mjs --record 1.6.2
+{
+  "version": "1.6.2",
+  "contentHash": "sha256:67c9f36afc8d9e3887686048c4e653e726b1aea0fba04509822aec20b3748f82"
+}

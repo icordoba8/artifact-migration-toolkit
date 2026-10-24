@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "artifactId": "slugify-64048cadb324",
+  "resolution": "TARGET_REUSE",
+  "targetFiles": [
+    "src/utils/slugify.js"
+  ],
+  "targetNative": [],
+  "evidence": [
+    {
+      "behaviorId": "B-1",
+      "path": "src/utils/slugify.js",
+      "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+      "status": "VERIFIED"
+    },
+    {
+      "behaviorId": "B-2",
+      "path": "src/utils/slugify.js",
+      "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+      "status": "VERIFIED"
+    },
+    {
+      "behaviorId": "B-3",
+      "path": "src/utils/slugify.js",
+      "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+      "status": "VERIFIED"
+    },
+    {
+      "behaviorId": "B-4",
+      "path": "src/utils/slugify.js",
+      "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+      "status": "VERIFIED"
+    },
+    {
+      "behaviorId": "B-5",
+      "path": "src/utils/slugify.js",
+      "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+      "status": "VERIFIED"
+    },
+    {
+      "behaviorId": "B-6",
+      "path": "src/utils/slugify.js",
+      "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+      "status": "VERIFIED"
+    }
+  ]
+}

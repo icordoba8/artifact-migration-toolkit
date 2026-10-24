@@ -1,0 +1,5 @@
+Verifier proof (before the scored run, 2026-10-24):
+- legacy fixture: 27/27 PASS
+- correct ESM rewrite (export default + named, type:module): 27/27 PASS
+- mutants, each must FAIL: no-amp, no-trim, default-sep, no-accents, no-apos, no-normalize, no-filter -> all exit=1
+- buggy ESM (no lowercasing): 14/27 FAIL

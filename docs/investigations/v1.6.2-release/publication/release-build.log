@@ -1,0 +1,15 @@
+$ node scripts/release.mjs --build
+{
+  "toolkit": {
+    "name": "artifact-migration-tools",
+    "version": "1.6.2",
+    "commit": "336531c4b5a23814f6e35699bedb5315003c3542",
+    "contentHash": "sha256:67c9f36afc8d9e3887686048c4e653e726b1aea0fba04509822aec20b3748f82"
+  },
+  "stagingRoot": "/home/utmwac/artifact-migration-toolkit-v1.6.2-release/dist/artifact-migration-tools-1.6.2",
+  "asset": {
+    "archive": "/home/utmwac/artifact-migration-toolkit-v1.6.2-release/dist/artifact-migration-tools-v1.6.2.tar.gz",
+    "digest": "sha256:451002370969660361d56c4c97c0a1434b48088bef164f771a041bd5fceab300"
+  },
+  "blockers": []
+}

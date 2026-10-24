@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "gates": [
+    {
+      "name": "ARCHITECTURE_PLAN_GATE",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "TARGETED_VERIFY",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "FUNCTIONAL_PARITY_GATE",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "SIMPLIFY_ONCE",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ARCHITECTURE_IMPLEMENTATION_GATE",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "PRECOMMIT_GATE",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "FINAL_VERIFY",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "boundTo": {
+            "sourceDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6",
+            "targetDigest": "de7785535f49c21801e0a76e5ad4c72e6cc5fdbdebf2ed6c86798fd4ee590ae6"
+          }
+        }
+      ]
+    }
+  ],
+  "uiEvidence": [],
+  "requirementEvidence": []
+}

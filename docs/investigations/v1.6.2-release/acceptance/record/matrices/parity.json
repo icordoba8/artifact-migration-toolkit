@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "rows": [
+    {
+      "id": "P-1",
+      "behaviorId": "B-1",
+      "resolution": "TARGET_REUSE",
+      "status": "VERIFIED",
+      "targetEvidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "P-2",
+      "behaviorId": "B-2",
+      "resolution": "TARGET_REUSE",
+      "status": "VERIFIED",
+      "targetEvidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "P-3",
+      "behaviorId": "B-3",
+      "resolution": "TARGET_REUSE",
+      "status": "VERIFIED",
+      "targetEvidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "P-4",
+      "behaviorId": "B-4",
+      "resolution": "TARGET_REUSE",
+      "status": "VERIFIED",
+      "targetEvidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "P-5",
+      "behaviorId": "B-5",
+      "resolution": "TARGET_REUSE",
+      "status": "VERIFIED",
+      "targetEvidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "P-6",
+      "behaviorId": "B-6",
+      "resolution": "TARGET_REUSE",
+      "status": "VERIFIED",
+      "targetEvidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    }
+  ]
+}

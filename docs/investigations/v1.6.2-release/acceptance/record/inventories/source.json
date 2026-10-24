@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "artifactId": "slugify-64048cadb324",
+  "hasVisibleUi": false,
+  "sourceFiles": [
+    "src/utils/slugify.js"
+  ],
+  "behaviors": [
+    {
+      "id": "B-1",
+      "description": "null/undefined input yields an empty slug; any other input is coerced with String().",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-2",
+      "description": "Text is NFKD-normalized and combining diacritics (U+0300-U+036F) are stripped, so accented letters fold to ASCII.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-3",
+      "description": "Text is lowercased, \"&\" becomes the word \"and\", and straight/curly apostrophes are removed without splitting the word.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-4",
+      "description": "Runs of characters outside [a-z0-9] split words; empty words are dropped; words join with options.separator (default \"-\", coerced with String(), empty string allowed).",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-5",
+      "description": "When options.maxLength is a number >= 0 and the slug is longer, it is cut to maxLength and any trailing separator(s) are removed.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-6",
+      "description": "CommonJS export: module.exports is slugify and module.exports.slugify is the same function.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    }
+  ],
+  "globalContracts": [],
+  "featureLocalVisuals": [],
+  "operatorDecisions": []
+}

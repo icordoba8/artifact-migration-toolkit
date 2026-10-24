@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "sourceFiles": ["src/utils/slugify.js"],
+  "units": [],
+  "requirements": []
+}

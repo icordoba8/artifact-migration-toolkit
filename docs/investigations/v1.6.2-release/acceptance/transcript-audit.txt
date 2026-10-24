@@ -1,0 +1,5 @@
+entries 267 sessions [ '9eb6e601-a61f-48a0-93eb-a9afa255aea8' ]
+models [ 'claude-opus-5-5' ]
+toolUses 29
+USER "<command-message>migrate-artifact</command-message>\n<command-name>/migrate-artifact</command-name>\n<command-args>src/utils/slugify.js</command-args>"
+META "Base directory for this skill: /home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-20261024/consumer/.claude/skills/migrate-artifact\n\n# Migrate Art"

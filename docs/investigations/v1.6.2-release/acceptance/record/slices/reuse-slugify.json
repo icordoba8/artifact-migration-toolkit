@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "sliceId": "reuse-slugify",
+  "status": "COMPLETE",
+  "changedFiles": [],
+  "checks": [
+    { "validator": { "kind": "NODE_CHECK", "file": "src/utils/slugify.js" }, "status": "PASS" }
+  ],
+  "preservedTargetNativeIds": []
+}
