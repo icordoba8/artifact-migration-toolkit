@@ -46,6 +46,7 @@ import {
   revalidatePins,
 } from "../store/index.mjs";
 import { nextState, previewAdvance } from "./artifact-checkpoints.mjs";
+import { validationEvidenceFor } from "./artifact-execution.mjs";
 import { recoverJournal, removeJournal } from "./journal.mjs";
 import {
   bootstrapEventInput,
@@ -396,6 +397,9 @@ const proveAdvanceTransaction = async (root, transaction) => {
   }
   const proposed = await nextState(root, previousState, preview.validation, preview.fresh, input.selectedSlice);
   const expectedState = { ...proposed, updatedAt: transaction.state.updatedAt };
+  // Re-executed, not trusted: the receipt the journal carries must be the one
+  // this recovery's own validator run reproduces.
+  const validationEvidence = await validationEvidenceFor(root, previousState, preview.validation, preview.fresh);
   if (canonical(expectedState) !== canonical(transaction.state)) {
     throw new Error("Recovered transaction does not reproduce the persisted proposal.");
   }
@@ -407,6 +411,10 @@ const proveAdvanceTransaction = async (root, transaction) => {
     ...(usesArtifactDirectLedger(previousState.formatVersion) && preview.validation.consumedDecisions?.length
       ? { consumedDecisions: preview.validation.consumedDecisions, decisionLedgerPrefixes: transaction.decisionLedgerPrefixes }
       : {}),
+    ...(previousState.currentStep === "VERIFY_SLICES" && preview.validation.result.visualComparison?.length
+      ? { visualComparison: preview.validation.result.visualComparison }
+      : {}),
+    ...(validationEvidence ? { validationEvidence } : {}),
   });
   if (canonical(expectedEvent) !== canonical(transaction.event)) {
     throw new Error("Recovered transaction event does not reproduce the persisted proposal.");
@@ -617,6 +625,7 @@ export const buildAdvanceTransaction = async (root, previousState, preview, sele
   const state = { ...proposed, updatedAt: new Date().toISOString() };
   const consumedDecisions = usesArtifactDirectLedger(previousState.formatVersion) ? preview.validation.consumedDecisions ?? [] : [];
   const decisionLedgerPrefixes = consumedDecisions.length ? await ledgerPrefixesFor(root) : null;
+  const validationEvidence = await validationEvidenceFor(root, previousState, preview.validation, preview.fresh);
   const event = eventFor(history, state, {
     event: state.status === "COMPLETE" ? "COMPLETED" : "ADVANCED",
     from: previousState.currentStep,
@@ -626,6 +635,7 @@ export const buildAdvanceTransaction = async (root, previousState, preview, sele
     ...(previousState.currentStep === "VERIFY_SLICES" && preview.validation.result.visualComparison?.length
       ? { visualComparison: preview.validation.result.visualComparison }
       : {}),
+    ...(validationEvidence ? { validationEvidence } : {}),
   });
   return {
     version: TRANSACTION_VERSION,

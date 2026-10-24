@@ -13,9 +13,11 @@ import { createRequire } from "node:module";
 import path from "node:path";
 
 import {
+  assertNonEmpty,
   isLexicallyWithin as isWithin,
   normalizeRelative,
   portablePath as portable,
+  sameMembers,
   samePath,
 } from "../shared/index.mjs";
 import { fileExists as exists } from "../store/index.mjs";
@@ -27,11 +29,12 @@ import {
   moduleSpecifiersIn,
   resolveCompilerBinary,
   SCANNER_REQUIREMENT_KEYS,
+  STRUCTURAL_SCRIPT_EXTENSIONS,
   TARGET_COMPILER_SPECIFIERS,
   targetCodeFiles,
   TEST_UNDER_SRC,
 } from "./artifact.mjs";
-import { parserResolutionError, runDiscoveryScan } from "./scan.mjs";
+import { parserResolutionError, runDiscoveryScan, structuralUnits } from "./scan.mjs";
 
 // The parser still resolves from the artifact engine's installed location,
 // `src/artifact/artifact-migration.mjs`, and its refusal names that file,
@@ -382,3 +385,51 @@ export const sourceRequirements = (state) =>
       ].sort(),
     };
   });
+
+// The machine structural census over the completeness universe's files. It is
+// derived from the source bytes every time it is needed -- at
+// DISCOVERY_COMPLETENESS and again at FINALIZE -- so a scanner that has since
+// learned to see more (M13: CommonJS exports) cannot be outrun by a
+// completeness document authored against the blind one.
+export const structuralCensus = async (state, sourceDocument, skip = new Set()) => {
+  const parser = await structuralParser();
+  const census = new Map();
+  const censusFiles = [
+    ...sourceDocument.sourceFiles,
+    ...sourceDocument.globalContracts.map((contract) => contract.sourcePath),
+  ];
+  for (const file of [...new Set(censusFiles)].sort().filter((name) => !skip.has(name))) {
+    const script = STRUCTURAL_SCRIPT_EXTENSIONS.has(path.extname(file).toLowerCase());
+    // A censused file that resolves but cannot be read is a resource failure,
+    // not "author the next artifact": it must stop the loop, loudly.
+    const text = script
+      ? await asEngineFault(`Cannot read source file '${file}'`, () =>
+          readFile(path.join(state.source.root, file), "utf8"),
+        )
+      : "";
+    metrics.filesParsed += 1;
+    const units = await asEngineFault(`Cannot census source file '${file}'`, () =>
+      structuralUnits(parser, file, text),
+    );
+    // A structural unit path is a binding name, unique only within its file, so
+    // the census key qualifies it. A whole-file unit keys as the file itself.
+    for (const unit of units) {
+      census.set(unit.path === file ? file : `${file}#${unit.path}`, unit);
+    }
+  }
+  return census;
+};
+
+// Every authored unit must be exactly the census (nothing omitted, renamed or
+// invented). A CommonJS unit the census could not resolve must also say how it
+// was decided: `resolved: false` there is never satisfied by a bare
+// disposition. ESM/TypeScript unresolved units keep their pre-M13 contract so
+// existing completeness documents stay valid.
+export const assertStructuralCoverage = (units, census, label) => {
+  sameMembers(units.map((unit) => unit.path), [...census.keys()], label);
+  for (const unit of units) {
+    if (census.get(unit.path)?.resolved === false && unit.path.includes("#module.exports")) {
+      assertNonEmpty(unit.rationale, `${label} unresolved unit '${unit.path}' rationale`);
+    }
+  }
+};

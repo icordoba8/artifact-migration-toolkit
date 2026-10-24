@@ -92,7 +92,8 @@ export const artifactCommandFor = (binding) =>
 
 /**
  * The only events allowed to carry anything beyond the fixed nine keys, and the
- * only extra keys they may carry. ADVANCED may record a verified visualComparison;
+ * only extra keys they may carry. ADVANCED may record a verified visualComparison
+ * and, out of a slice checkpoint, the engine's validator evidence (M13);
  * any other unknown key is still rejected.
  *
  * `BOOTSTRAPPED` carries the creating toolkit's identity when there was one, so
@@ -103,7 +104,7 @@ const historyEventExtraKeys = (event) =>
   event === "BOOTSTRAPPED"
     ? ["toolkitIdentity"]
     : event === "ADVANCED"
-      ? ["visualComparison", "consumedDecisions", "decisionLedgerPrefixes"]
+      ? ["visualComparison", "consumedDecisions", "decisionLedgerPrefixes", "validationEvidence"]
     : event === "COMPLETED"
       ? ["consumedDecisions", "decisionLedgerPrefixes"]
     : TOOLKIT_IDENTITY_EVENTS.includes(event)

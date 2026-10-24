@@ -57,7 +57,7 @@ const CASES = [
   ["A10-SRC-1", "a new filesystem writer outside store/", prepend(`${SRC}/transport/run.mjs`, 'import { writeFile } from "node:fs/promises";\n'), "transport/run.mjs", /fs writeFile/],
   ["A10-SRC-1", "a namespace fs import in a domain module", prepend(`${SRC}/visual/proof.mjs`, 'import * as fs from "node:fs";\n'), "visual/proof.mjs", /fs \*/],
   ["A10-SRC-2", "a second process-entry check", append(`${SRC}/lifecycle/policy.mjs`, "if (isMainModule(import.meta.url)) process.exit(0);\n"), "lifecycle/policy.mjs", /isMainModule/],
-  ["A10-SIZE-1", "an oversized file that grows", append(`${SRC}/census/scan.mjs`, "\n"), "census/scan.mjs", /2297 lines/],
+  ["A10-SIZE-1", "an oversized file that grows", append(`${SRC}/census/scan.mjs`, "\n"), "census/scan.mjs", /2290 lines/],
   ["A10-TEST-1", "a test that imports a module internal", prepend(`${ENGINE}/test/unit/slices.test.mjs`, 'import "../../src/slices/drift.mjs";\n'), `${ENGINE}/test/unit/slices.test.mjs:1`, /slices\/drift\.mjs/],
   ["A10-TEST-1", "a domain test that goes back to a historical facade", prepend(`${ENGINE}/test/unit/slices.test.mjs`, 'import { readState } from "../../src/resumable-migration.mjs";\n'), `${ENGINE}/test/unit/slices.test.mjs:1`, /resumable-migration\.mjs/],
   ["A10-TEST-1", "a computed import in an ordinary test", append(`${ENGINE}/test/unit/content-identity.test.mjs`, "const any = (name) => import(name);\n"), `${ENGINE}/test/unit/content-identity.test.mjs`, /computed/],

@@ -73,6 +73,8 @@ import {
 import {
   artifactEvidenceDigest,
   artifactRoot,
+  integrityFor,
+  pinDigest,
 } from "../../src/store/index.mjs";
 import {
   artifactIdFor,
@@ -82,6 +84,7 @@ import {
   targetTypeScript,
 } from "../../src/census/index.mjs";
 import { artifactDirective, parseArtifactArguments, runArtifactCli } from "../../src/artifact/run-artifact.mjs";
+import { canonicalJson } from "../../src/shared/index.mjs";
 import { parseRunArguments } from "../../src/cli/run-migration.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -6144,5 +6147,392 @@ test("pilot 14 signer: signed VISUAL_UNBACKED uses the same protocol; artifact 1
     await signed.cleanup();
     await fixture.cleanup();
     await legacy.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M13: CommonJS structural census and persistent validator evidence.
+// ---------------------------------------------------------------------------
+const m13Parser = () => requireFrom(import.meta.url)("ts-discovery-compiler");
+const unitsOf = (file, text) =>
+  structuralUnits(m13Parser(), file, text).map((unit) => `${unit.path}:${unit.resolved ? "R" : "U"}`);
+
+test("M13 census: CommonJS exports are structural units", () => {
+  assert.deepEqual(
+    unitsOf("slugify.cjs", "'use strict';\nfunction slugify(){}\nmodule.exports = slugify;\nmodule.exports.slugify = slugify;\n"),
+    ["module.exports:R", "module.exports.slugify:R"],
+  );
+  assert.deepEqual(
+    unitsOf("api.js", "exports.a = 1;\nexports.cfg = { x: 1, y: { z: 2 } };\nmodule.exports['lit'] = 2;\n"),
+    ["module.exports:R", "module.exports.a:R", "module.exports.cfg:R", "module.exports.cfg.x:R", "module.exports.cfg.y:R", "module.exports.lit:R"],
+  );
+  // Through a local binding, statically resolvable members, and the transpiler idiom.
+  assert.deepEqual(
+    unitsOf("local.cjs", "const put = 1;\nconst api = { put, nested: { one: 1 } };\nmodule.exports = api;\n"),
+    // A shorthand naming a primitive is unresolved as a structure, exactly as in ESM.
+    ["module.exports:R", "module.exports.nested:R", "module.exports.nested.one:R", "module.exports.put:R", "module.exports.put.<unresolved>:U"],
+  );
+  assert.deepEqual(
+    unitsOf("esm-interop.cjs", "Object.defineProperty(exports, '__esModule', { value: true });\nexports.default = 1;\n"),
+    ["module.exports:R", "module.exports.__esModule:R", "module.exports.default:R"],
+  );
+  // A legitimate side-effect module exports no contract and owes no unit.
+  assert.deepEqual(unitsOf("boot.cjs", "require('./side');\nconsole.log('ready');\n"), []);
+});
+
+test("M13 census: undecidable CommonJS exports stay visible as unresolved units", () => {
+  assert.deepEqual(unitsOf("reexport.cjs", "module.exports = require('./impl');\n"), ["module.exports:U"]);
+  assert.deepEqual(
+    unitsOf("alias.cjs", "const impl = require('./impl');\nmodule.exports = impl;\n"),
+    ["module.exports:U", "module.exports.<unresolved>:U"],
+  );
+  assert.deepEqual(unitsOf("computed.cjs", "module.exports[key] = 1;\n"), ["module.exports:R", "module.exports.<computed>:U"]);
+  assert.deepEqual(
+    unitsOf("dynamic.cjs", "Object.assign(module.exports, mixin);\nif (flag) exports.late = 1;\n"),
+    ["module.exports:R", "module.exports.<dynamic>:U", "module.exports.late:U"],
+  );
+  assert.deepEqual(unitsOf("twice.cjs", "module.exports = 1;\nmodule.exports = 2;\n"), ["module.exports:U"]);
+  assert.deepEqual(unitsOf("rebind.cjs", "exports = { a: 1 };\n"), ["module.exports:U", "module.exports.a:R"]);
+});
+
+test("M13 census: ESM and TypeScript units are unchanged", () => {
+  assert.deepEqual(unitsOf("theme.ts", "export const theme = { a: 1 };\n"), ["theme:R", "theme.a:R"]);
+  assert.deepEqual(unitsOf("fn.js", "function slugify(){}\nexport default slugify;\n"), ["slugify:U"]);
+  assert.deepEqual(unitsOf("re.ts", "export { x } from './x';\n"), ["x:U"]);
+  // `.mjs`/`.mts` are ESM by definition; a stray `module.exports` there exports nothing.
+  assert.deepEqual(unitsOf("esm.mjs", "export const a = 1;\nmodule.exports = { b: 2 };\n"), ["a:R"]);
+  assert.deepEqual(unitsOf("esm.mts", "export const a = 1;\nexports.b = 2;\n"), ["a:R"]);
+  assert.deepEqual(unitsOf("styles.css", ".a{}"), ["styles.css:R"]);
+});
+
+const CJS_SOURCE = "widget/slug.cjs";
+const addCommonJsSource = async (fixture, text) => {
+  await writeFile(path.join(fixture.sourceRoot, CJS_SOURCE), text);
+  await execFileAsync("git", ["add", "-A"], { cwd: fixture.root });
+  await execFileAsync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "cjs"], { cwd: fixture.root });
+};
+const cjsUnits = (paths, extra = {}) => [
+  ...censusUnits(),
+  ...paths.map((unit) => ({ path: `${CJS_SOURCE}#${unit}`, disposition: "MIGRATED_BEHAVIOR", ref: "B-1", ...extra[unit] })),
+];
+const tryCompleteness = async (fixture, units) => {
+  const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+  await writeJson(fixture.artifactRoot, "inventories/completeness.json", { version: 1, sourceFiles: source.sourceFiles, units, requirements: [] });
+  return runArtifact(fixture.options);
+};
+
+test("M13 completeness: omitted, altered and undisposed CommonJS units cannot pass", async () => {
+  const fixture = await createFixture();
+  try {
+    await addCommonJsSource(fixture, "function slugify(){}\nmodule.exports = slugify;\nmodule.exports.slugify = slugify;\nmodule.exports[k] = 1;\n");
+    await bootstrap(fixture);
+    await authorSource(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    // The M12 shape: the CommonJS file contributes nothing.
+    let result = await tryCompleteness(fixture, censusUnits());
+    assert.match(result.reason, /discovery completeness\.units must be exactly/);
+    // An altered export name is not the census.
+    result = await tryCompleteness(fixture, cjsUnits(["module.exports", "module.exports.slug", "module.exports.<computed>"]));
+    assert.match(result.reason, /discovery completeness\.units must be exactly/);
+    // The unresolved unit is present but carries no account of how it was decided.
+    result = await tryCompleteness(fixture, cjsUnits(["module.exports", "module.exports.slugify", "module.exports.<computed>"]));
+    assert.match(result.reason, /unresolved unit 'widget\/slug\.cjs#module\.exports\.<computed>' rationale/);
+    assert.equal((await stateOf(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+    result = await tryCompleteness(fixture, cjsUnits(["module.exports", "module.exports.slugify", "module.exports.<computed>"], {
+      "module.exports.<computed>": { rationale: "k is always 'default'; covered by B-1" },
+    }));
+    assert.equal(result.outcome, "CONTINUE", result.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// Rewrites a record the way a pre-M13 engine could have left it: the state's
+// pins and the integrity anchor are recomputed, so only the M13 checks differ.
+const rewriteRecord = async (fixture, { completeness, events }) => {
+  const root = fixture.artifactRoot;
+  const state = JSON.parse(await readFile(path.join(root, "state.json"), "utf8"));
+  if (completeness) {
+    await writeJson(root, "inventories/completeness.json", completeness);
+    state.artifactHashes["inventories/completeness.json"] = await pinDigest(root, "inventories/completeness.json");
+  }
+  let content = await readFile(path.join(root, "history/history.ndjson"), "utf8");
+  if (events) {
+    let prevDigest = null;
+    const rewritten = events(content.split("\n").filter(Boolean).map((line) => JSON.parse(line))).map((event) => {
+      const { digest: _, ...body } = { ...event, prevDigest };
+      const next = { ...body, digest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+      prevDigest = next.digest;
+      return next;
+    });
+    content = rewritten.map((event) => `${JSON.stringify(event)}\n`).join("");
+    await writeFile(path.join(root, "history/history.ndjson"), content);
+  }
+  await writeFile(path.join(root, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
+  await writeFile(path.join(root, "integrity.json"), `${JSON.stringify(integrityFor(state, content), null, 2)}\n`);
+};
+
+const driveToFinalGates = async (fixture, options = {}) => {
+  await driveToBuild(fixture, "TARGET_EXTEND", options);
+  await advanceBaseline(fixture, "TARGET_EXTEND");
+  await advancePlan(fixture, "TARGET_EXTEND");
+  await advanceImplementation(fixture, "TARGET_EXTEND");
+  await advanceVerification(fixture, { ui: false });
+  await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+  await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+};
+
+const historyEvents = async (fixture) => (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8"))
+  .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+test("M13 FINALIZE: a completeness document blind to CommonJS exports cannot complete", async () => {
+  const fixture = await createFixture();
+  try {
+    await addCommonJsSource(fixture, "module.exports = function slugify() {};\n");
+    await driveToFinalGates(fixture, { units: cjsUnits(["module.exports"]) });
+    const source = JSON.parse(await readFile(path.join(fixture.artifactRoot, "inventories/source.json"), "utf8"));
+    await rewriteRecord(fixture, { completeness: { version: 1, sourceFiles: source.sourceFiles, units: censusUnits(), requirements: [] } });
+    const refused = await runArtifact(fixture.options);
+    assert.equal(refused.outcome, "CONTINUE");
+    assert.match(refused.reason, /final structural coverage must be exactly/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+const sealed = (value) => {
+  const { digest: _, ...body } = value;
+  return { ...body, digest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+};
+const RECORD_FILES = ["state.json", "integrity.json", "history/history.ndjson"];
+const snapshotRecord = async (fixture) => Object.fromEntries(await Promise.all(
+  RECORD_FILES.map(async (file) => [file, await readFile(path.join(fixture.artifactRoot, file), "utf8")]),
+));
+const restoreRecord = (fixture, snapshot) => Promise.all(
+  Object.entries(snapshot).map(([file, content]) => writeFile(path.join(fixture.artifactRoot, file), content)),
+);
+const authorSlice = async (fixture, body = "export const widget = 'm13';\n", checks = [typescriptCheck()]) => {
+  await driveToBuild(fixture, "TARGET_EXTEND");
+  await advanceBaseline(fixture, "TARGET_EXTEND");
+  await advancePlan(fixture, "TARGET_EXTEND");
+  await writeFile(path.join(fixture.targetRoot, fixture.options.target), body);
+  await writeJson(fixture.artifactRoot, "slices/slice-1.json", {
+    version: 1, sliceId: "slice-1", status: "COMPLETE",
+    changedFiles: [{ path: fixture.options.target, sha256: await digest(path.join(fixture.targetRoot, fixture.options.target)) }],
+    checks, preservedTargetNativeIds: ["TN-1"],
+  });
+};
+
+test("M13 evidence: executed validators persist an integrity-bound receipt through COMPLETE", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveToComplete(fixture);
+    const events = await historyEvents(fixture);
+    const carrying = events.filter((event) => event.validationEvidence);
+    assert.deepEqual(carrying.map((event) => event.from), ["IMPLEMENT_SLICES", "VERIFY_SLICES"]);
+    for (const event of carrying) {
+      assert.deepEqual(sealed(event.validationEvidence), event.validationEvidence);
+      const body = event.validationEvidence;
+      assert.equal(body.artifactId, fixture.id);
+      assert.equal(body.slice, "slice-1");
+      assert.equal(body.checkpoint, event.from);
+      assert.equal(body.fromRevision, event.revision - 1);
+      assert.deepEqual(body.changedFiles.map((file) => file.path), [fixture.options.target]);
+      assert.match(body.sliceDocument.sha256, /^[a-f0-9]{64}$/);
+      const [receipt] = body.receipts;
+      assert.equal(receipt.execution, "EXECUTED");
+      assert.equal(receipt.authority, "ENGINE");
+      assert.equal(receipt.kind, "TYPESCRIPT");
+      assert.equal(receipt.exitCode, 0);
+      assert.deepEqual(receipt.coveredFiles, [fixture.options.target]);
+      assert.match(receipt.validator.name, /^(typescript|ts-discovery-compiler)$/);
+      assert.match(receipt.validator.origin, /^(TARGET|PINNED_FALLBACK)$/);
+      assert.match(receipt.inputSha256, /^[a-f0-9]{64}$/);
+      // Nothing private: no absolute path, no captured output.
+      assert.ok(!JSON.stringify(body).includes(fixture.root), "evidence must not carry an absolute path");
+      assert.ok(!/stdout|stderr|output|env/i.test(Object.keys(receipt).join(",")));
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13 evidence: a failing validator advances nothing and persists no receipt", async () => {
+  const fixture = await createFixture();
+  try {
+    await authorSlice(fixture, "export const widget: number = 'not a number';\n");
+    const result = await runArtifact(fixture.options);
+    assert.equal(result.outcome, "CONTINUE");
+    assert.match(result.reason, /trusted validator evidence does not cover every changed file/);
+    assert.equal((await stateOf(fixture)).currentStep, "IMPLEMENT_SLICES");
+    assert.equal((await historyEvents(fixture)).filter((event) => event.validationEvidence).length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13 evidence: declared, unsupported and not-required checks are recorded as exactly that", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveToBuild(fixture, "TARGET_EXTEND");
+    await advanceBaseline(fixture, "TARGET_EXTEND");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await writeJson(fixture.targetRoot, "package.json", { name: "t", private: true, scripts: { check: "node -e \"process.exit(0)\"" } });
+    const secretish = "curl -H 'Authorization: Bearer do-not-store' https://example.invalid";
+    // Only a non-code file changes, so the declared TypeScript validator is not required.
+    await writeFile(path.join(fixture.targetRoot, "src/notes.md"), "# notes\n");
+    await writeJson(fixture.artifactRoot, "slices/slice-1.json", {
+      version: 1, sliceId: "slice-1", status: "COMPLETE",
+      changedFiles: [{ path: "src/notes.md", sha256: await digest(path.join(fixture.targetRoot, "src/notes.md")) }],
+      checks: [typescriptCheck(), { command: "npm run check", status: "PASS" }, { command: secretish, status: "PASS" }],
+      preservedTargetNativeIds: ["TN-1"],
+    });
+    const result = await runArtifact(fixture.options);
+    assert.equal(result.outcome, "CONTINUE", result.reason);
+    const event = (await historyEvents(fixture)).at(-1);
+    const receipts = event.validationEvidence.receipts;
+    assert.deepEqual(receipts.map((receipt) => [receipt.kind, receipt.execution, receipt.authority, receipt.exitCode]), [
+      ["TYPESCRIPT", "NOT_REQUIRED", "ENGINE", null],
+      ["PACKAGE_SCRIPT", "EXECUTED", "ENGINE", 0],
+      ["COMMAND", "UNSUPPORTED", "AGENT_DECLARATION", null],
+    ]);
+    assert.equal(receipts[1].declared.script, "check");
+    assert.equal(receipts[2].declared.commandSha256, createHash("sha256").update(secretish).digest("hex"));
+    assert.ok(!JSON.stringify(event).includes("do-not-store"), "a declared command is persisted only as its digest");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13 evidence: status and preview never execute validators or write evidence", async () => {
+  const fixture = await createFixture();
+  try {
+    await authorSlice(fixture);
+    const before = await snapshotRecord(fixture);
+    const status = await getArtifactStatus(fixture.options);
+    assert.equal(status.metrics.validatorRuns, 0);
+    await previewArtifact(fixture.options).catch(() => null);
+    assert.deepEqual(await snapshotRecord(fixture), before);
+    // Only the executing run produces (and persists) the receipt.
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    assert.equal((await historyEvents(fixture)).at(-1).validationEvidence.receipts[0].execution, "EXECUTED");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13 evidence: FINALIZE refuses tampered, rebound or stripped evidence and a target changed after validation", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveToFinalGates(fixture);
+    const pristine = await snapshotRecord(fixture);
+    const refuse = async (events, pattern) => {
+      await restoreRecord(fixture, pristine);
+      await rewriteRecord(fixture, { events });
+      const refused = await runArtifact(fixture.options);
+      assert.equal(refused.outcome, "CONTINUE");
+      assert.match(refused.reason, pattern);
+      assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    };
+    // Content changed without re-sealing: its own digest no longer holds.
+    await refuse((events) => events.map((event) => event.validationEvidence
+      ? { ...event, validationEvidence: { ...event.validationEvidence, receipts: [{ ...event.validationEvidence.receipts[0], exitCode: 3 }] } }
+      : event), /digest does not match/);
+    // Re-sealed, but bound to another record.
+    await refuse((events) => events.map((event) => event.validationEvidence
+      ? { ...event, validationEvidence: sealed({ ...event.validationEvidence, artifactId: "other-artifact" }) }
+      : event), /bound to a different migration state/);
+    // Re-sealed, but carrying another transition's revision (replayed evidence).
+    await refuse((events) => events.map((event) => event.validationEvidence
+      ? { ...event, validationEvidence: sealed({ ...event.validationEvidence, fromRevision: 0 }) }
+      : event), /bound to a different migration state/);
+    // Stripped from the later slice transition of a record that persists it.
+    await refuse((events) => events.map((event) => {
+      if (event.from !== "VERIFY_SLICES") return event;
+      const { validationEvidence: _v, ...rest } = event;
+      return rest;
+    }), /missing from 1 slice transition/);
+    // A receipt rewritten to claim an agent-declared check was executed.
+    await refuse((events) => events.map((event) => event.validationEvidence
+      ? { ...event, validationEvidence: sealed({ ...event.validationEvidence, receipts: [{ ...event.validationEvidence.receipts[0], authority: "AGENT_DECLARATION" }] }) }
+      : event), /claims execution without engine authority/);
+    // Evidence for bytes other than the ones on disk (as if validated, then edited).
+    await refuse((events) => events.map((event) => event.validationEvidence
+      ? { ...event, validationEvidence: sealed({ ...event.validationEvidence, changedFiles: event.validationEvidence.changedFiles.map((file) => ({ ...file, sha256: "0".repeat(64) })) }) }
+      : event), /changed after its validator evidence was recorded/);
+    // End to end, a real edit after validation is refused (the parity and gate
+    // hashes and binding freshness see it too; the evidence check is behind them).
+    await restoreRecord(fixture, pristine);
+    await writeFile(path.join(fixture.targetRoot, fixture.options.target), "export const widget = 'edited after validation';\n");
+    const refused = await runArtifact(fixture.options);
+    assert.notEqual(refused.outcome, "COMPLETE");
+    assert.match(refused.reason, /changed after its validator evidence was recorded|drift|does not match/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13 evidence: crash recovery re-executes and reproves the persisted receipt", async () => {
+  const fixture = await createFixture();
+  try {
+    await authorSlice(fixture);
+    const before = await snapshotRecord(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    const committed = await snapshotRecord(fixture);
+    const event = (await historyEvents(fixture)).at(-1);
+    assert.equal(event.from, "IMPLEMENT_SLICES");
+    // The crash: the journal landed, nothing after it did.
+    const journal = {
+      version: 2,
+      previousState: JSON.parse(before["state.json"]),
+      previousIntegrity: JSON.parse(before["integrity.json"]),
+      input: { kind: "ADVANCE", selectedSlice: null },
+      state: JSON.parse(committed["state.json"]),
+      event,
+    };
+    // A journal whose receipt was forged (re-sealed so every digest holds) is refused.
+    await restoreRecord(fixture, before);
+    const forgedEvidence = sealed({ ...event.validationEvidence, receipts: [{ ...event.validationEvidence.receipts[0], exitCode: 7 }] });
+    await writeJson(fixture.artifactRoot, "transaction.json", { ...journal, event: sealed({ ...event, validationEvidence: forgedEvidence }) });
+    const refused = await runArtifact(fixture.options).catch((error) => ({ outcome: "THROWN", reason: error.message }));
+    assert.notEqual(refused.outcome, "CONTINUE");
+    assert.match(refused.reason, /does not reproduce/);
+    assert.ok(await exists(path.join(fixture.artifactRoot, "transaction.json")));
+    // The genuine journal is reproved by re-executing the validator, then finished.
+    await restoreRecord(fixture, before);
+    await writeJson(fixture.artifactRoot, "transaction.json", journal);
+    await runArtifact(fixture.options);
+    assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
+    const persisted = (await historyEvents(fixture)).find((entry) => entry.from === "IMPLEMENT_SLICES");
+    assert.deepEqual(persisted.validationEvidence, event.validationEvidence);
+    assert.equal((await stateOf(fixture)).currentStep, "VERIFY_SLICES");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13 compatibility: pre-M13 records without validator evidence still complete", async () => {
+  for (const strip of [() => true, (event) => event.from === "IMPLEMENT_SLICES"]) {
+    const fixture = await createFixture();
+    try {
+      await driveToFinalGates(fixture);
+      // Either no transition carries evidence, or the record was upgraded
+      // mid-slices and only the earlier transition predates M13.
+      await rewriteRecord(fixture, {
+        events: (events) => events.map((event) => {
+          if (!strip(event)) return event;
+          const { validationEvidence: _v, ...rest } = event;
+          return rest;
+        }),
+      });
+      const result = await runArtifact(fixture.options);
+      assert.equal(result.outcome, "COMPLETE", result.reason);
+      assert.equal((await stateOf(fixture)).status, "COMPLETE");
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });

@@ -13,8 +13,8 @@ import {
   pathKey,
   targetTypeScript,
 } from "../census/index.mjs";
-import { assertSecurePath, execFileAsync, normalizeRelative } from "../shared/index.mjs";
-import { fileExists as exists } from "../store/index.mjs";
+import { assertSecurePath, canonicalJson, execFileAsync, normalizeRelative, sha256Hex } from "../shared/index.mjs";
+import { fileExists as exists, fileHash, secureHash } from "../store/index.mjs";
 
 const JS_FILE_EXTENSIONS = new Set([".js", ".jsx", ".mjs"]);
 
@@ -100,6 +100,7 @@ const executeTypeScriptValidation = async (validator, changedFiles, targetRoot, 
   });
   return {
     validatorKind: "TYPESCRIPT",
+    inputSha256: await fileHash(projectFile),
     // Which compiler produced this verdict is part of the verdict. A FINALIZE
     // gate that consumed a pinned-fallback result on a project that uses a
     // different compiler has to be readable as such after the fact.
@@ -121,6 +122,8 @@ const executeNodeCheckValidation = async (validator, changedFiles, targetRoot, c
   const result = await execute(process.execPath, args, targetRoot, { capability });
   return {
     validatorKind: "NODE_CHECK",
+    compiler: { specifier: "node", version: process.version, origin: "ENGINE_RUNTIME" },
+    inputSha256: (await exists(absolute)) ? await fileHash(absolute) : null,
     command: { file: process.execPath, args },
     exitCode: result.exitCode,
     coveredFiles: changedFiles.includes(file) && JS_FILE_EXTENSIONS.has(path.extname(file).toLowerCase()) ? [file] : [],
@@ -232,5 +235,176 @@ export const executeGenericCheck = async (command, targetRoot, label, capability
       `${label} declares PASS but '${invocation.manager} run ${invocation.script}' exited ${result.exitCode} in the target root.`,
     );
   }
-  return { command, ...invocation, exitCode: result.exitCode };
+  return {
+    command,
+    ...invocation,
+    exitCode: result.exitCode,
+    // What actually ran: the manifest's script body at execution time, as a
+    // digest -- never the body, which is the target's to keep.
+    inputSha256: await fileHash(path.join(targetRoot, "package.json")),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// M13 persistent validator evidence. A receipt is what one declared check
+// actually amounted to, recorded from the engine's own execution result. It
+// never carries stdout, an environment, an absolute path or an author's free
+// text (a declared command is kept only as its digest), and it is
+// deterministic -- no clock, no duration -- so crash recovery re-executes the
+// checks and reproves the exact receipt rather than trusting a stored one.
+// ---------------------------------------------------------------------------
+export const VALIDATION_EVIDENCE_VERSION = 1;
+export const RECEIPT_EXECUTIONS = Object.freeze(["EXECUTED", "NOT_REQUIRED", "UNSUPPORTED", "DEFERRED"]);
+const DIAGNOSTIC_LIMIT = 20;
+
+const bounded = (values) => {
+  const all = [...new Set(values.filter((value) => value !== null))].sort();
+  return { values: all.slice(0, DIAGNOSTIC_LIMIT), truncated: all.length > DIAGNOSTIC_LIMIT };
+};
+
+const validatorIdentity = (identity) => identity
+  ? { name: identity.specifier ?? null, version: identity.version ?? null, origin: identity.origin ?? null }
+  : null;
+
+export const validatorReceipt = (index, check, result) => {
+  const receipt = {
+    check: index,
+    kind: check.validator.kind,
+    declared: check.validator,
+    authority: "ENGINE",
+  };
+  if (!result) return { ...receipt, execution: "NOT_REQUIRED", exitCode: null };
+  const files = bounded(result.diagnostics.map((diagnostic) => diagnostic.file));
+  const codes = bounded(result.diagnostics.map((diagnostic) => diagnostic.code));
+  return {
+    ...receipt,
+    execution: "EXECUTED",
+    exitCode: result.exitCode,
+    coveredFiles: [...result.coveredFiles].sort(),
+    validator: validatorIdentity(result.compiler),
+    inputSha256: result.inputSha256,
+    diagnostics: {
+      count: result.diagnostics.length,
+      codes: codes.values,
+      files: files.values,
+      truncated: codes.truncated || files.truncated,
+      affectsChangedFile: result.diagnostics.some((diagnostic) => diagnostic.affectsChangedFile),
+    },
+  };
+};
+
+export const commandReceipt = (index, check, run) => {
+  const receipt = { check: index, declared: { commandSha256: sha256Hex(check.command) } };
+  if (run === undefined) return { ...receipt, kind: "COMMAND", authority: "AGENT_DECLARATION", execution: "DEFERRED", exitCode: null };
+  // Not one of the target's own package scripts: the engine has no safe way to
+  // run it, so its PASS stays exactly what it is -- the agent's word.
+  if (run === null) return { ...receipt, kind: "COMMAND", authority: "AGENT_DECLARATION", execution: "UNSUPPORTED", exitCode: null };
+  return {
+    ...receipt,
+    kind: "PACKAGE_SCRIPT",
+    declared: { ...receipt.declared, manager: run.manager, script: run.script },
+    authority: "ENGINE",
+    execution: "EXECUTED",
+    exitCode: run.exitCode,
+    coveredFiles: [],
+    validator: { name: run.manager, version: null, origin: "TARGET_MANIFEST" },
+    inputSha256: run.inputSha256,
+  };
+};
+
+const EVIDENCE_STEPS = new Set(["IMPLEMENT_SLICES", "VERIFY_SLICES"]);
+
+const evidenceDigest = (body) => sha256Hex(canonicalJson(body));
+
+/**
+ * The durable validation-evidence envelope an ADVANCED event out of
+ * IMPLEMENT_SLICES or VERIFY_SLICES carries. It lives inside the hash-chained
+ * history body, and is additionally bound to the exact migration state it was
+ * produced under (record, slice, checkpoint, revision, source/target binding
+ * digests, the slice document and every changed file's bytes), so it cannot
+ * be replayed against changed target files or another record. Returns null for
+ * any other transition, and for a validation that did not execute: evidence is
+ * only ever what an execution actually produced.
+ */
+export const validationEvidenceFor = async (root, previousState, validation, fresh) => {
+  if (!EVIDENCE_STEPS.has(previousState.currentStep) || validation?.executed !== true) return null;
+  const implementation = validation.result.implementation ?? validation.result;
+  const body = {
+    version: VALIDATION_EVIDENCE_VERSION,
+    artifactId: previousState.artifactId,
+    slice: previousState.activeSlice,
+    checkpoint: previousState.currentStep,
+    fromRevision: previousState.revision,
+    sourceDigest: fresh.source.digest,
+    targetDigest: fresh.target.digest,
+    sliceDocument: { path: implementation.relative, sha256: await fileHash(path.join(root, implementation.relative)) },
+    changedFiles: implementation.document.changedFiles
+      .map((file) => ({ path: normalizeRelative(file.path, "changed file"), sha256: file.sha256 }))
+      .sort((left, right) => left.path.localeCompare(right.path)),
+    receipts: implementation.checkReceipts,
+  };
+  return { ...body, digest: evidenceDigest(body) };
+};
+
+/**
+ * FINALIZE's read of the persisted evidence. Pure reading: it never executes a
+ * validator (status and preview share it). Compatibility is explicit: slice
+ * transitions committed before the first one that carries an envelope predate
+ * M13 and are reported as legacy (LEGACY_UNRECORDED when none carries one,
+ * PARTIAL_LEGACY for a record upgraded mid-slices); from that first envelope on,
+ * every slice transition must carry one, so evidence can be neither stripped
+ * from a later slice nor invented for another.
+ */
+export const verifyValidationEvidence = async (state, events, completedSlices = state.completedSlices) => {
+  const transitions = events.filter((event) => event.event === "ADVANCED" && EVIDENCE_STEPS.has(event.from));
+  const first = transitions.findIndex((event) => Object.hasOwn(event, "validationEvidence"));
+  if (first === -1) return { status: "LEGACY_UNRECORDED", slices: [] };
+  const carrying = transitions.slice(first);
+  const gaps = carrying.filter((event) => !Object.hasOwn(event, "validationEvidence")).length;
+  if (gaps > 0) {
+    throw new Error(`Validator evidence is missing from ${gaps} slice transition(s) of a record that persists it.`);
+  }
+  const legacySlices = new Set(transitions.slice(0, first).map((event) => event.slice));
+  const latest = new Map();
+  for (const event of carrying) {
+    const { digest, ...body } = event.validationEvidence;
+    const label = `history seq ${event.seq} validationEvidence`;
+    if (body.version !== VALIDATION_EVIDENCE_VERSION) throw new Error(`${label} has unsupported version ${body.version}.`);
+    if (digest !== evidenceDigest(body)) throw new Error(`${label} digest does not match its content.`);
+    if (body.artifactId !== state.artifactId || body.slice !== event.slice ||
+        body.checkpoint !== event.from || body.fromRevision !== event.revision - 1) {
+      throw new Error(`${label} is bound to a different migration state.`);
+    }
+    for (const receipt of body.receipts) {
+      if (!RECEIPT_EXECUTIONS.includes(receipt.execution) || receipt.execution === "DEFERRED") {
+        throw new Error(`${label} check ${receipt.check} was never executed (${receipt.execution}).`);
+      }
+      if (receipt.execution === "EXECUTED" && receipt.authority !== "ENGINE") {
+        throw new Error(`${label} check ${receipt.check} claims execution without engine authority.`);
+      }
+    }
+    latest.set(body.slice, body);
+  }
+  const missing = completedSlices.filter((slice) =>
+    latest.get(slice)?.checkpoint !== "VERIFY_SLICES" && !(legacySlices.has(slice) && !latest.has(slice)));
+  if (missing.length > 0) throw new Error(`Validator evidence does not cover verified slice(s): ${missing.join(", ")}.`);
+  // Each changed file is judged by the newest evidence that covered it: a later
+  // slice may legitimately rewrite an earlier slice's file, but nothing may
+  // rewrite it after its last validation.
+  const owner = new Map();
+  for (const body of latest.values()) for (const file of body.changedFiles) owner.set(file.path, file.sha256);
+  for (const [file, expected] of owner) {
+    const actual = await secureHash(state.target.root, file, "validated target file").catch(() => null);
+    if (actual !== expected) throw new Error(`Target file '${file}' changed after its validator evidence was recorded.`);
+  }
+  return {
+    status: legacySlices.size > 0 ? "PARTIAL_LEGACY" : "RECORDED",
+    slices: [...latest.values()].map((body) => ({
+      slice: body.slice,
+      digest: evidenceDigest(body),
+      executed: body.receipts.filter((receipt) => receipt.execution === "EXECUTED").length,
+      unsupported: body.receipts.filter((receipt) => receipt.execution === "UNSUPPORTED").length,
+      notRequired: body.receipts.filter((receipt) => receipt.execution === "NOT_REQUIRED").length,
+    })),
+  };
 };

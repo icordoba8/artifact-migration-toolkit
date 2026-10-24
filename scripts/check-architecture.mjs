@@ -183,7 +183,7 @@ const PROVIDER_EXECUTABLE = /^providers\/(install-support\.mjs|(claude|codex|cop
 /** A10-SIZE-1: the 1,000-line ceiling, and the files above it at BASE (no growth allowed). */
 export const SOURCE_LINE_CEILING = 1000;
 export const OVERSIZED_SOURCES = {
-  "census/scan.mjs": 2296,
+  "census/scan.mjs": 2289,
   "decisions/record.mjs": 1642,
   "lifecycle/validation.mjs": 1354,
   "lifecycle/artifact-checkpoints.mjs": 1358,

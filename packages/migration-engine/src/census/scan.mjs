@@ -46,6 +46,7 @@ import {
   isLexicallyWithin as isWithin,
   portablePath as portable,
 } from "../shared/index.mjs";
+import { commonJsUnits } from "./commonjs.mjs";
 import { externalJsxUses, frameworkAncestorEdges, frameworkEntryFor } from "./framework.mjs";
 
 /**
@@ -891,16 +892,7 @@ const scriptEdges = (ts, fileName, text, algorithmVersion) => {
   return edges;
 };
 
-const SCRIPT_UNIT_EXTENSIONS = new Set([
-  ".ts",
-  ".tsx",
-  ".mts",
-  ".cts",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-]);
+const SCRIPT_UNIT_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
 
 // Bounded structural granularity: exported root -> contract domain -> named
 // registry entry, then STOP. Depth 3 is exactly theme.components.MuiDrawer; it
@@ -1096,6 +1088,7 @@ export const structuralUnits = (ts, fileName, text) => {
       add(statement.name.text, "BINDING", true);
     }
   }
+  if (extension !== ".mjs" && extension !== ".mts") commonJsUnits(ts, source, locals, { add, descend });
   return [...units.values()].sort((left, right) =>
     left.path.localeCompare(right.path),
   );
