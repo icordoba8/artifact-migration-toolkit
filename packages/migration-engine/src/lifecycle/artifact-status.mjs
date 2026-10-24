@@ -150,6 +150,10 @@ export const outcomeResult = (state, outcome, reason, mode, extra = {}, status =
   };
 };
 
+// M10 D1: every Ponytail evidence entry a COMPLETE result reports carries its
+// assurance, AGENT_ASSERTED, so no reader mistakes it for an attested review.
+export const ponytailReport = (ponytailEvidence) => (ponytailEvidence?.length ? { ponytailEvidence } : {});
+
 export const blockedArtifactResult = (state, reason, mode, nextCommand) =>
   outcomeResult(
     { ...state, nextAction: reason, nextCommand: nextCommand === undefined ? state.nextCommand : nextCommand },
@@ -257,9 +261,10 @@ const readArtifactStatus = async (options = {}) => {
       status: "STALE",
     };
   }
+  let ponytailEvidence;
   if (state.status === "COMPLETE" && state.ponytail) {
     try {
-      await validateFinal(location.root, state);
+      ponytailEvidence = (await validateFinal(location.root, state)).ponytail;
     } catch (error) {
       return { ...blockedArtifactResult(state, error.message, null, artifactCommandFor(state)), exists: true, root: location.root };
     }
@@ -279,6 +284,7 @@ const readArtifactStatus = async (options = {}) => {
     ...(validation?.decisionProjection ? { decisionProjection: validation.decisionProjection } : {}),
     progress,
     progressChecklist: renderProgress(progress),
+    ...ponytailReport(ponytailEvidence),
     // Same protocol as a module migration's `formatUpgrade`, and read-only like
     // the rest of this function: projected from the record's own cursor, never
     // committed here. `null` whenever the record is at the runtime format, which

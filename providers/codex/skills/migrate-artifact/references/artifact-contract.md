@@ -16,7 +16,7 @@ source root, target root, or artifact record root as stated below. Every
 | <a id="plan"></a>`PLAN` | `slices/index.json` | [Matrices And Slices](#matrices-and-slices) |
 | <a id="implement-slices"></a>`IMPLEMENT_SLICES` | `slices/<slice>.json` | [Matrices And Slices](#matrices-and-slices) |
 | <a id="verify-slices"></a>`VERIFY_SLICES` | `evidence/<slice>/result.json` plus its `ui/` files | [Runtime Evidence](#runtime-evidence) |
-| `FINALIZE` | `gates.json` | [Finalize](#finalize) |
+| `FINALIZE` | the four matrices (row `status` and evidence only) and `gates.json` | [Finalize](#finalize) |
 
 ## Inventories
 
@@ -45,7 +45,8 @@ depend on whether any global contract was declared. The universe is every unit
 of every `sourceFiles` entry plus every `globalContracts[].sourcePath`. A script
 file's units key as `<file>#<binding>` (a binding name is unique only inside its
 own file); any other file is one unit keyed by its path. Every censused unit
-must appear exactly once.
+must appear exactly once, as `{path, disposition, ref?, rationale?}` where
+`path` is that key.
 
 `requirements` is the **source requirement graph**: every element the artifact
 requires from outside its own bound path, plus every reference the scanner could
@@ -92,7 +93,8 @@ and per-behavior target `evidence`. `TARGET_REUSE` requires verified evidence
 for every behavior. `TARGET_EXTEND` requires verified target-native rows.
 `MIGRATE_NEW` requires the bound target artifact to be absent unless it is a
 bound in-place source path, and has no
-target-native rows. For `TARGET_REUSE`/`TARGET_EXTEND`, `targetFiles` must
+target-native rows. `targetFiles` names existing target files only, so a
+`MIGRATE_NEW` record whose target does not exist yet declares none. For `TARGET_REUSE`/`TARGET_EXTEND`, `targetFiles` must
 include the bound target path, and every `targetNative[].path` and every
 `evidence[].path` must be one of the declared `targetFiles`: reuse is proven
 against the bound artifact, never laundered through an unrelated file.
@@ -189,6 +191,15 @@ migrations; see `start-migration/references/migration-contract.md`.
 
 ## Finalize
 
+The FINALIZE request declares the four baseline matrices and `gates.json`.
+Finalization requires every matrix row terminal: parity `VERIFIED`, target-native
+`PRESERVED` or `VERIFIED`, design-system `COMPLIANT` or `EXCEPTION_RECORDED`, and
+global-contract `VERIFIED`, each with evidence on the final target bytes. Author
+those rows here, after the last slice is verified, by moving only `status` and
+the row's evidence; every other field is pinned since `BUILD_BASELINE`, and
+changing one is refused as a changed completed artifact. FINALIZE pins the
+matrices and `gates.json` it consumed, so after `COMPLETE` they are immutable.
+
 `gates.json` is `{version, gates, uiEvidence, requirementEvidence}` and contains
 exactly the canonical seven migration gates, each
 `{name,status:"PASS",evidence}`. Gate evidence is a target-root
@@ -199,16 +210,31 @@ refused.
 
 For a record created with `--ponytail full`, the `SIMPLIFY_ONCE` gate also
 requires `ponytailEvidence` of the form
-`{kind:"review",path,sha256,boundTo:{sourceDigest,targetDigest},producedAt}`.
+`{kind:"review",path,sha256,boundTo:{sourceDigest,targetDigest},producedAt,assurance:"AGENT_ASSERTED",execution}`.
 The path must be `.agents/knowledge/migrations/artifacts/<artifact-id>/evidence/ponytail-review.md`
 under the target root. `--ponytail full-audit` additionally requires the same
 shape with `kind:"audit"` on `PRECOMMIT_GATE`, pointing to
 `evidence/ponytail-audit.md` in that artifact record. That gate must also carry
 `reviewedAt`. Both timestamps are canonical ISO timestamps. Run the Audit after
 verification; the engine requires Review before Audit and Audit before
-`reviewedAt`.
-The engine checks each evidence file's current hash and source/target binding
-before allowing `COMPLETE`. No Ponytail flag adds no Ponytail requirement.
+`reviewedAt`. No Ponytail flag adds no Ponytail requirement.
+
+`execution` is the agent's own account: `SKILL_INVOKED` when the provider's
+Ponytail skill (`ponytail-review`, `ponytail-audit`) ran over this migration's
+changed files after the last slice was verified and the file holds its output;
+`SKILL_UNAVAILABLE` when no such skill was available and the file says so. Never
+imitate a Ponytail run, and say in the final report which one happened.
+
+Ponytail evidence is `AGENT_ASSERTED`, and `assurance` accepts no other value.
+The Ponytail skills are prompts with no receipt issuer, and this toolkit has no
+authority that attests a review, so the file, its hash and its timestamp are
+all written by the agent. Before `COMPLETE` the engine verifies only what it
+can: the cited path, a non-empty file whose current hash matches, the current
+source/target binding, and the order above. A `COMPLETE` result and `--status`
+report each entry as `ponytailEvidence: [{kind,path,sha256,producedAt,assurance:"AGENT_ASSERTED",execution}]`.
+Both fields are optional only so evidence written before they existed stays
+valid: always state them. Evidence without `execution` reports
+`execution: "UNRECORDED"`, never a guess.
 
 Two gates carry the mandatory architecture rules they are named after, asserted
 against this migration's changed files only:

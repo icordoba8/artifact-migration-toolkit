@@ -37,6 +37,7 @@ import {
 import {
   blockedArtifactResult,
   outcomeResult,
+  ponytailReport,
   previewArtifact,
   startMetrics,
   stateFileExists,
@@ -245,7 +246,7 @@ const runArtifactIteration = async (options = {}) => {
       return blockedArtifactResult(state, `${error.message}${nextCommand ? ` Next action: ${nextCommand}` : ""}`, mode, nextCommand);
     }
     const preview = await previewAdvance(location.root, state, options);
-    if (preview.outcome === "COMPLETE") return outcomeResult(state, "COMPLETE", preview.reason, mode);
+    if (preview.outcome === "COMPLETE") return outcomeResult(state, "COMPLETE", preview.reason, mode, ponytailReport(preview.ponytailEvidence));
     if (preview.outcome === "OPERATOR_DECISION") {
       return outcomeResult(state, "OPERATOR_DECISION", preview.reason, mode, {
         pendingDecisions: preview.validation.pendingDecisions,
@@ -283,6 +284,7 @@ const runArtifactIteration = async (options = {}) => {
       persisted.status === "COMPLETE" ? "COMPLETE" : "CONTINUE",
       persisted.status === "COMPLETE" ? "Artifact migration reached COMPLETE." : null,
       mode,
+      ponytailReport(preview.validation.result?.ponytail),
     );
   });
 };

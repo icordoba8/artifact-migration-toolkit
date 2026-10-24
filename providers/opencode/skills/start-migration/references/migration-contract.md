@@ -2296,7 +2296,9 @@ Ponytail evidence uses the same structured shape with `kind: "review"` or
 `kind: "audit"`. `full` requires that shape on `SIMPLIFY_ONCE`; `full-audit`
 also requires it on `PRECOMMIT_GATE`. The type/binding check runs first;
 Ponytail's `kind` requirement is layered on top of it, never a substitute for
-it.
+it. Like every gate evidence entry, Ponytail evidence is agent-asserted: the
+engine checks its reference, binding and freshness, never that a Ponytail skill
+ran.
 
 `FUNCTIONAL_PARITY_GATE` cannot be omitted or made not applicable.
 

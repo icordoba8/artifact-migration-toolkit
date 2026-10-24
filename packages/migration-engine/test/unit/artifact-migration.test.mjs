@@ -902,10 +902,12 @@ const drivePonytailToFinal = async (fixture) => {
   await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
 };
 
-const ponytailEvidence = async (fixture, kind, producedAt) => {
+// M10 D1: every new Ponytail evidence entry states its assurance and the
+// agent's own account of whether the Ponytail skill ran.
+const ponytailEvidence = async (fixture, kind, producedAt, { content, ...fields } = {}) => {
   const relative = `.agents/knowledge/migrations/artifacts/${fixture.id}/evidence/ponytail-${kind}.md`;
   await mkdir(path.join(fixture.artifactRoot, "evidence"), { recursive: true });
-  await writeFile(path.join(fixture.targetRoot, relative), `${kind} completed for ${fixture.id}\n`);
+  await writeFile(path.join(fixture.targetRoot, relative), content ?? `# Ponytail ${kind}\n\nNo findings for ${fixture.id}.\n`);
   const state = await stateOf(fixture);
   return {
     kind,
@@ -913,6 +915,9 @@ const ponytailEvidence = async (fixture, kind, producedAt) => {
     sha256: await digest(path.join(fixture.targetRoot, relative)),
     boundTo: { sourceDigest: state.bindings.source.digest, targetDigest: state.bindings.target.digest },
     producedAt,
+    assurance: "AGENT_ASSERTED",
+    execution: "SKILL_INVOKED",
+    ...fields,
   };
 };
 
@@ -929,10 +934,15 @@ test("artifact Ponytail full requires Review evidence before COMPLETE", async ()
     assert.match((await runArtifact(fixture.options)).reason, /requires SIMPLIFY_ONCE review evidence/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
     const reviewAt = new Date(Date.parse(state.updatedAt) + 1000).toISOString();
-    gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE").ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
+    // M10 D1: evidence in its pre-M10 shape (no assurance, no execution) stays
+    // valid, and is still reported AGENT_ASSERTED with its execution UNRECORDED.
+    const { assurance: _assurance, execution: _execution, ...preM10 } = await ponytailEvidence(fixture, "review", reviewAt);
+    gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE").ponytailEvidence = preM10;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
     assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+    const reported = (await getArtifactStatus(fixture.options)).ponytailEvidence;
+    assert.deepEqual(reported.map(({ assurance, execution }) => [assurance, execution]), [["AGENT_ASSERTED", "UNRECORDED"]]);
     await rm(path.join(fixture.artifactRoot, "evidence/ponytail-review.md"));
     assert.equal((await getArtifactStatus(fixture.options)).outcome, "BLOCKED");
     assert.equal((await runArtifact(fixture.options)).outcome, "BLOCKED");
@@ -965,14 +975,171 @@ test("artifact Ponytail full-audit requires Review then Audit before PRECOMMIT_G
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     assert.match((await runArtifact(fixture.options)).reason, /precede the artifact pre-commit review/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
-    precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", auditAt);
+    // M10 D1: an unavailable skill is stated, not hidden, and does not
+    // deadlock the record; the report carries the statement as written.
+    precommit.ponytailEvidence = await ponytailEvidence(fixture, "audit", auditAt, {
+      execution: "SKILL_UNAVAILABLE", content: "Ponytail Audit was not available to this agent; no audit ran.\n",
+    });
     precommit.reviewedAt = auditAt;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
     assert.match((await runArtifact(fixture.options)).reason, /precede the artifact pre-commit review/);
     precommit.reviewedAt = precommitAt;
     await writeJson(fixture.artifactRoot, "gates.json", gates);
-    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    assert.deepEqual(complete.ponytailEvidence.map(({ kind, assurance, execution }) => [kind, assurance, execution]),
+      [["review", "AGENT_ASSERTED", "SKILL_INVOKED"], ["audit", "AGENT_ASSERTED", "SKILL_UNAVAILABLE"]]);
     assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M10 D1: Ponytail evidence is AGENT_ASSERTED, never reported or accepted as attested", async () => {
+  const fixture = await createFixture();
+  fixture.options.ponytail = "full";
+  try {
+    await drivePonytailToFinal(fixture);
+    const state = await stateOf(fixture);
+    const reviewAt = new Date(Date.parse(state.updatedAt) + 1000).toISOString();
+    const gates = await gatesDocument(fixture);
+    const simplify = gates.gates.find((gate) => gate.name === "SIMPLIFY_ONCE");
+    const refusedWith = async (evidence, pattern) => {
+      simplify.ponytailEvidence = evidence;
+      await writeJson(fixture.artifactRoot, "gates.json", gates);
+      const result = await runArtifact(fixture.options);
+      assert.equal(result.outcome, "CONTINUE", result.reason);
+      assert.match(result.reason, pattern);
+      assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    };
+    // A review text cannot be promoted: any other assurance is refused.
+    for (const assurance of ["ATTESTED", "HUMAN_ATTESTED", "VERIFIED", "INDEPENDENT"]) {
+      await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { assurance }), /assurance must be 'AGENT_ASSERTED'/);
+    }
+    await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { execution: "ATTESTED" }), /execution must be one of SKILL_INVOKED, SKILL_UNAVAILABLE/);
+    await refusedWith(await ponytailEvidence(fixture, "review", reviewAt, { content: "" }), /cites an empty file/);
+
+    // The checks the engine can make still hold: tampered after it was cited,
+    // and missing altogether.
+    simplify.ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    const reviewFile = path.join(fixture.artifactRoot, "evidence/ponytail-review.md");
+    await writeFile(reviewFile, `${await readFile(reviewFile, "utf8")}Edited afterwards.\n`);
+    assert.match((await runArtifact(fixture.options)).reason, /ponytailEvidence\.sha256 does not match/);
+    await rm(reviewFile);
+    assert.match((await runArtifact(fixture.options)).reason, /ponytail-review\.md/);
+    assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+
+    // Completion reports the evidence as AGENT_ASSERTED with the agent's own
+    // execution statement, and resuming re-proves it without a transition.
+    simplify.ponytailEvidence = await ponytailEvidence(fixture, "review", reviewAt);
+    await writeJson(fixture.artifactRoot, "gates.json", gates);
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    const reported = [{
+      kind: "review", path: simplify.ponytailEvidence.path, sha256: simplify.ponytailEvidence.sha256,
+      producedAt: reviewAt, assurance: "AGENT_ASSERTED", execution: "SKILL_INVOKED",
+    }];
+    assert.deepEqual(complete.ponytailEvidence, reported);
+    const completed = await stateOf(fixture);
+    for (const resumed of [await getArtifactStatus(fixture.options), await runArtifact(fixture.options)]) {
+      assert.equal(resumed.outcome, "COMPLETE", resumed.reason);
+      assert.deepEqual(resumed.ponytailEvidence, reported);
+    }
+    assert.equal((await stateOf(fixture)).revision, completed.revision);
+    assert.equal((await validateArtifactComplete(fixture.options)).valid, true);
+    assert.doesNotMatch(JSON.stringify(complete), /ATTESTED"|"VERIFIED_REVIEW|PROVENANCE_VERIFIED/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M9-R1 D2: FINALIZE declares and pins the matrices whose terminal status it requires", async () => {
+  const fixture = await createFixture();
+  try {
+    await driveToBuild(fixture, "TARGET_EXTEND");
+    await advanceBaseline(fixture, "TARGET_EXTEND");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await advanceImplementation(fixture, "TARGET_EXTEND");
+    await advanceVerification(fixture, { ui: false });
+    const state = await stateOf(fixture);
+    const matrices = ["matrices/parity.json", "matrices/target-native.json", "matrices/design-system.json", "matrices/global-contract.json"];
+    assert.deepEqual(checkpointArtifacts(state), [...matrices, "gates.json"]);
+
+    // Planned rows still block FINALIZE.
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+    const planned = await runArtifact(fixture.options);
+    assert.equal(planned.outcome, "CONTINUE");
+    assert.match(planned.reason, /parity row 'P-1' must be VERIFIED/);
+    assert.deepEqual(planned.request.artifacts, [...matrices, "gates.json"]);
+
+    // The declared update may move status and evidence only: a changed
+    // immutable field is still an unauthorized mutation of BUILD_BASELINE.
+    const documents = await baselineDocuments(fixture, "TARGET_EXTEND", { final: true });
+    await writeJson(fixture.artifactRoot, "matrices/parity.json", {
+      ...documents.parity, rows: documents.parity.rows.map((row) => ({ ...row, behaviorId: "B-other" })),
+    });
+    await assert.rejects(runArtifact(fixture.options), /Completed artifact changed: matrices\/parity\.json#immutable/);
+    await writeJson(fixture.artifactRoot, "matrices/parity.json", documents.parity);
+    await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+    const inventory = path.join(fixture.artifactRoot, "inventories/target.json");
+    const inventoryBytes = await readFile(inventory);
+    await writeFile(inventory, `${inventoryBytes}\n`);
+    await assert.rejects(runArtifact(fixture.options), /Completed artifact changed: inventories\/target\.json/);
+    await writeFile(inventory, inventoryBytes);
+
+    // An interrupted FINALIZE -> COMPLETE commit is recovered with the same
+    // pins: the record is put back at FINALIZE with the committed transaction
+    // pending, as a crash between the two writes leaves it.
+    const engineFiles = ["state.json", "integrity.json", "history/history.ndjson"];
+    const beforeCommit = await Promise.all(engineFiles.map((relative) => readFile(path.join(fixture.artifactRoot, relative))));
+    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    const committed = await stateOf(fixture);
+    const event = (await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+    await Promise.all(engineFiles.map((relative, index) => writeFile(path.join(fixture.artifactRoot, relative), beforeCommit[index])));
+    await writeJson(fixture.artifactRoot, "transaction.json", { version: 1, state: committed, event });
+    const pending = await getArtifactStatus(fixture.options);
+    assert.equal(pending.status, "ACTIVE");
+    assert.match(pending.reason, /recovered automatically/);
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
+    assert.deepEqual(await stateOf(fixture), committed);
+
+    // The current (version 2) journal recovers the same commit from every
+    // crash window between journal publication and journal removal.
+    const afterCommit = await Promise.all(engineFiles.map((relative) => readFile(path.join(fixture.artifactRoot, relative))));
+    const [previousState, previousIntegrity] = beforeCommit.slice(0, 2).map((bytes) => JSON.parse(bytes));
+    const v2 = {
+      version: 2, previousState, previousIntegrity, input: { kind: "ADVANCE", selectedSlice: null },
+      ...(event.consumedDecisions ? { consumedDecisions: event.consumedDecisions, decisionLedgerPrefixes: event.decisionLedgerPrefixes } : {}),
+      state: committed, event
+    };
+    // [state, integrity, history] already replaced at each boundary.
+    for (const replaced of [[false, false, false], [false, false, true], [true, false, true], [true, true, true]]) {
+      await Promise.all(engineFiles.map((relative, index) => writeFile(path.join(fixture.artifactRoot, relative), (replaced[index] ? afterCommit : beforeCommit)[index])));
+      await writeJson(fixture.artifactRoot, "transaction.json", v2);
+      assert.match((await getArtifactStatus(fixture.options)).reason, /recovered automatically/, String(replaced));
+      const recovered = await runArtifact(fixture.options);
+      assert.equal(recovered.outcome, "COMPLETE", `${replaced}: ${recovered.reason}`);
+      assert.equal(await exists(path.join(fixture.artifactRoot, "transaction.json")), false);
+      assert.deepEqual(await stateOf(fixture), committed);
+      const history = await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"));
+      assert.deepEqual(history, afterCommit[2], `${replaced}: one COMPLETE event`);
+    }
+    const pins = (await stateOf(fixture)).artifactHashes;
+    for (const relative of [...matrices, "gates.json"]) assert.ok(pins[relative], relative);
+
+    // After COMPLETE the verified parity a resumed session reads is the one
+    // FINALIZE consumed: reverting a row is a changed completed artifact.
+    const verified = await Promise.all(matrices.map(async (relative) => [relative, await readFile(path.join(fixture.artifactRoot, relative))]));
+    await writeBaseline(fixture, "TARGET_EXTEND");
+    const reverted = await getArtifactStatus(fixture.options);
+    assert.equal(reverted.outcome, "BLOCKED");
+    assert.match(reverted.reason, /Completed artifact changed: matrices\/parity\.json\./);
+    await assert.rejects(runArtifact(fixture.options), /Completed artifact changed: matrices\/parity\.json\./);
+    for (const [relative, bytes] of verified) await writeFile(path.join(fixture.artifactRoot, relative), bytes);
+    assert.equal((await getArtifactStatus(fixture.options)).outcome, "COMPLETE");
   } finally {
     await fixture.cleanup();
   }
@@ -5156,7 +5323,7 @@ test("R-W7-d: the artifact front ends carry no second copy of a shared rule", as
   // The engine's source is lifecycle's since Track A8; artifact-migration.mjs is its facade.
   const sources = await Promise.all(
     ["../transport/artifact.mjs", "../lifecycle/artifact-record.mjs", "../lifecycle/artifact-execution.mjs",
-      "../lifecycle/artifact-checkpoints.mjs", "../lifecycle/artifact-transaction.mjs",
+      "../lifecycle/artifact-checkpoints.mjs", "../lifecycle/artifact-gates.mjs", "../lifecycle/artifact-transaction.mjs",
       "../lifecycle/artifact-status.mjs", "../lifecycle/artifact-run.mjs"].map(async (file) => [
       file,
       await readFile(path.join(scriptsRoot, file), "utf8"),
