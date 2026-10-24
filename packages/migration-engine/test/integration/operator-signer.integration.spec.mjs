@@ -66,9 +66,33 @@ const withRecord = async (classification, run, { group = false } = {}) => {
   }
 };
 
-const attest = async ({ signer, auth, target }, candidateId, result = "APPROVED", extra = {}) => {
+const attest = async ({ signer, auth, target }, candidateId, result = "APPROVED", extra = {}, assertion = (options) => auth.assert(options)) => {
   const begun = await beginAttestedDecision({ signer, target, candidateId, result });
-  return completeAttestedDecision({ signer, target, candidateId, nonce: begun.nonce, response: auth.assert(begun.options), ...extra });
+  return completeAttestedDecision({ signer, target, candidateId, nonce: begun.nonce, response: assertion(begun.options), ...extra });
+};
+
+/** Flips one decoded signature byte, so the forged proof always differs from the genuine one. */
+const flippedSignature = (signature) => {
+  const bytes = Buffer.from(signature, "base64url");
+  bytes[10] ^= 1;
+  return bytes.toString("base64url");
+};
+
+const forgeries = (decision) => [
+  ["stored verified:true", { ...decision, verified: true }, /line digest/],
+  ["result flipped", { ...decision, result: "REJECTED" }, /line digest/],
+  ["proof swapped", { ...decision, webauthn: { ...decision.webauthn, signature: flippedSignature(decision.webauthn.signature) } }, /line digest|proof/],
+  ["no proof", { ...decision, webauthn: undefined }, /without a webauthn proof/],
+  ["unknown verifier version", { ...decision, webauthn: { ...decision.webauthn, verificationVersion: 2 } }, /line digest|verificationVersion/],
+];
+
+const refusesForgeries = async (ledger, genuine, decision, read) => {
+  for (const [label, forged, pattern] of forgeries(decision)) {
+    // A forgery identical to the genuine line would "pass" by not being a forgery at all.
+    assert.notEqual(`${JSON.stringify(forged)}\n`, genuine, `${label} must change the line`);
+    await writeFile(ledger, `${JSON.stringify(forged)}\n`);
+    await assert.rejects(read(), pattern, label);
+  }
 };
 
 test("module 19: signed APPROVED appends one replay-verified line and the shared projection updates", async () => {
@@ -143,16 +167,7 @@ test("module 19: forged, edited, unclaimed and duplicated attested lines are ref
     const ledger = path.join(fixture.migrationRoot, "decisions/operator-decisions.ndjson");
     const genuine = await readFile(ledger, "utf8");
     const read = () => inScope(signer, () => pendingDecisionCandidates(target));
-    for (const [label, forged, pattern] of [
-      ["stored verified:true", { ...done.decision, verified: true }, /line digest/],
-      ["result flipped", { ...done.decision, result: "REJECTED" }, /line digest/],
-      ["proof swapped", { ...done.decision, webauthn: { ...done.decision.webauthn, signature: done.decision.webauthn.signature.slice(0, -2) + "AA" } }, /line digest|proof/],
-      ["no proof", { ...done.decision, webauthn: undefined }, /without a webauthn proof/],
-      ["unknown verifier version", { ...done.decision, webauthn: { ...done.decision.webauthn, verificationVersion: 2 } }, /line digest|verificationVersion/],
-    ]) {
-      await writeFile(ledger, `${JSON.stringify(forged)}\n`);
-      await assert.rejects(read(), pattern, label);
-    }
+    await refusesForgeries(ledger, genuine, done.decision, read);
     // A second protected store has no claim for this proof.
     await writeFile(ledger, genuine);
     const other = await enrolledSigner();
@@ -162,6 +177,39 @@ test("module 19: forged, edited, unclaimed and duplicated attested lines are ref
     // The same line appended twice is a chain break and a duplicate.
     await appendFile(ledger, genuine);
     await assert.rejects(read(), /chains to|seq/);
+    await writeFile(ledger, genuine);
+    assert.equal((await read()).decisions.candidates[0].state, "APPROVED_APPLICABLE");
+  });
+});
+
+test("module 19: a swapped proof is refused even when the genuine signature already ends in AA", async () => {
+  // Regression: the old forgery replaced the last two signature characters with
+  // "AA", a no-op for about 1 in 670 ECDSA signatures (seen in CI at 86d66a9).
+  await withRecord(EXCLUDED_CLASSIFICATION, async ({ fixture, target, signer, auth }) => {
+    const [candidate] = (await pendingDecisionCandidates(target)).candidates;
+    const endingInAA = (options) => {
+      for (;;) {
+        // Each retry is a fresh signature with a higher counter; skipped counters are valid.
+        const response = auth.assert(options);
+        if (response.response.signature.endsWith("AA")) return response;
+      }
+    };
+    const done = await attest({ signer, auth, target }, candidate.id, "APPROVED", {}, endingInAA);
+    const { signature } = done.decision.webauthn;
+    assert.ok(signature.endsWith("AA"));
+    assert.equal(signature.slice(0, -2) + "AA", signature, "the old mutation is a no-op here");
+    const ledger = path.join(fixture.migrationRoot, "decisions/operator-decisions.ndjson");
+    const genuine = await readFile(ledger, "utf8");
+    const read = () => inScope(signer, () => pendingDecisionCandidates(target));
+    await refusesForgeries(ledger, genuine, done.decision, read);
+    // Every single-character change to the signature is refused, not only one.
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for (let index = 0; index < signature.length; index += 1) {
+      const replacement = alphabet[(alphabet.indexOf(signature[index]) + 1) % alphabet.length];
+      const forged = { ...done.decision, webauthn: { ...done.decision.webauthn, signature: signature.slice(0, index) + replacement + signature.slice(index + 1) } };
+      await writeFile(ledger, `${JSON.stringify(forged)}\n`);
+      await assert.rejects(read(), /line digest|proof|signature/, `signature character ${index}`);
+    }
     await writeFile(ledger, genuine);
     assert.equal((await read()).decisions.candidates[0].state, "APPROVED_APPLICABLE");
   });
