@@ -1,0 +1,6 @@
+e3c088d397b6cf9f9b2dec3a0600351cd1fcdedfe65934c4492c519387a82f72  .claude/skills/migrate-artifact/SKILL.md
+ad6db399727654f4ddc1a16f62763d6fff01d60621b3355302bfc02f924c3e39  .claude/skills/migrate-artifact/references/artifact-contract.md
+fce011dbf7e322bab6d95f39e02dd5a4e92e6d8087715518c5bc49699d382cd2  .claude/skills/migrate-artifact/release-identity.json
+d81228db9e4e393a215f4276c219b529f942e4cabb97bd3f77dc2f19fb46ef51  .claude/skills/migrate-artifact/scripts/runtime.mjs
+9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314  legacy/slugify.cjs
+a6df1384d0407a1f37c14fa71cb7a593a3cec1813c00e53215737d4eb9ed9812  src/index.js

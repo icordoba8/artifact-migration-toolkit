@@ -1,0 +1,18 @@
+The migration reached **COMPLETE** (record `slugify-0a4f9b12a9b9`, all 9 checkpoints). One problem: the engine's completeness check passed without examining anything in the legacy file (details below).
+
+**What changed**
+- `src/utils/slugify.js`: an ES module port of `legacy/slugify.cjs` with the same behavior. It exports `slugify` by name, which `src/index.js` already re-exports, and also as the default export, matching the legacy `module.exports = slugify`.
+- `test/slugify.test.js`: 5 `node:test` cases with fixed expected values. It sits outside `src/` and doesn't import the legacy file, so it keeps working once that file is deleted.
+- `package.json`: added `"test": "node --test test/*.test.js"`. The engine ran it as a real check.
+
+**How I checked it**
+- `npm test` passes, 5/5.
+- I compared the new and legacy functions on 288 inputs and option combinations, including null options, odd separators, negative, NaN and string `maxLength`, and Unicode. All matched. That comparison was a throwaway script in `/tmp`, not kept in the repo.
+- Two problems turned up while writing the port and are fixed: a `null` options argument would have thrown, and the file had picked up invisible combining characters inside a regex. Both regexes now use plain `\u` escapes.
+
+**Engine gap to look at:** the completeness check is supposed to account for every top-level definition in the legacy file. It only recognizes ES `export` syntax, so for a CommonJS file using `module.exports = …` it found nothing. The checkpoint passed with nothing to account for, and the plain `--status` command had reported it as "ready". The migration itself is still complete: my six recorded behaviors cover both definitions in the file (`slugify` and `DEFAULT_SEPARATOR`), and the file imports nothing from outside. But for any `.cjs` source this check currently proves nothing, which seems worth raising with the toolkit's maintainers.
+
+**Not done**
+- Ponytail was off for this record because `--ponytail` wasn't passed. No Ponytail review ran and none was required.
+- `legacy/slugify.cjs` is still there, since the record keeps it as the frozen legacy source. Delete it when you're ready to retire it.
+- Nothing is committed. You're on `master`, so I'd branch before committing. Should I do that?

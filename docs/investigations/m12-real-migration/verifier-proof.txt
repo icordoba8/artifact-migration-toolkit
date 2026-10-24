@@ -1,0 +1,10 @@
+== legacy/slugify.cjs (expect PASS)
+27/27 PASS
+== CJS copied to target under type:module (expect FAIL)
+0/27 FAIL
+== correct ESM rewrite (expect PASS)
+27/27 PASS
+== ESM mutant: no & handling (expect FAIL)
+26/27 FAIL
+== ESM mutant: maxLength trailing separator kept (expect FAIL)
+25/27 FAIL

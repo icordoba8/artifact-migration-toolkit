@@ -1,0 +1,45 @@
+
+│
+●   claude-code_2-1-310_agent  Agent detected — installing non-interactively
+[?25l│
+◇  Source: https://github.com/icordoba8/artifact-migration-toolkit.git
+[?25h[?25l│
+◒  Cloning repository…[1G[J◐  Cloning repository…[1G[J◓  Cloning repository…[1G[J◑  Cloning repository…[1G[J◒  Cloning repository…[1G[J◐  Cloning repository…[1G[J◓  Cloning repository…[1G[J◑  Cloning repository…[1G[J◒  Cloning repository….[1G[J◐  Cloning repository….[1G[J◓  Cloning repository….[1G[J◑  Cloning repository….[1G[J◒  Cloning repository….[1G[J◐  Cloning repository….[1G[J◓  Cloning repository….[1G[J◑  Cloning repository….[1G[J◒  Cloning repository…..[1G[J◐  Cloning repository…..[1G[J◓  Cloning repository…..[1G[J◑  Cloning repository…..[1G[J◒  Cloning repository…..[1G[J◐  Cloning repository…..[1G[J◓  Cloning repository…..[1G[J◑  Cloning repository…..[1G[J◒  Cloning repository…...[1G[J◐  Cloning repository…...[1G[J◓  Cloning repository…...[1G[J◑  Cloning repository…...[1G[J◒  Cloning repository…...[1G[J◐  Cloning repository…...[1G[J◓  Cloning repository…...[1G[J◑  Cloning repository…...[1G[J◒  Cloning repository…...[1G[J◐  Cloning repository…[1G[J◓  Cloning repository…[1G[J◑  Cloning repository…[1G[J◒  Cloning repository…[1G[J◇  Repository cloned
+[?25h[?25l│
+[1G[J◇  Found 2 skills
+[?25h│
+●  Selected 1 skill: migrate-artifact
+
+│
+◇  Installation Summary ───────────────────────────────────────────────────────╮
+│                                                                              │
+│  ~/artifact-migration-acceptance/v1.6.2-336531c-claude-m12-20261024T174608/  │
+│  consumer/.agents/skills/migrate-artifact                                    │
+│    copy → Claude Code                                                        │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────╯
+│
+◇  Security Risk Assessments ───────────────────────────────────────╮
+│                                                                   │
+│                    Gen               Socket            Snyk       │
+│  migrate-artifact  High Risk         0 alerts          Low Risk   │
+│                                                                   │
+│  Details: https://skills.sh/icordoba8/artifact-migration-toolkit  │
+│                                                                   │
+├───────────────────────────────────────────────────────────────────╯
+[?25l│
+[1G[J◇  Installation complete
+[?25h
+│
+◇  Installed 1 skill ──────────────────────────────────────────────────────────╮
+│                                                                              │
+│  ✓ migrate-artifact (copied)                                                 │
+│    → ~/artifact-migration-acceptance/v1.6.2-336531c-claude-m12-20261024T174  │
+│  608/consumer/.claude/skills/migrate-artifact                                │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────╯
+
+│
+└  Done!  Review skills before use; they run with full agent permissions.
+
+Done in 4.8s using pnpm v12.5.1

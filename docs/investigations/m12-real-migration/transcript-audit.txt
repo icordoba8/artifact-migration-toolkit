@@ -1,0 +1,1 @@
+{"sessions":1,"stringUserTurns":["<command-message>migrate-artifact</command-message>\n<command-name>/migrate-artifact</command-name>\n<command-args>legacy/"],"toolCalls":36,"byTool":{"Bash":31,"Read":4,"Write":1}}

@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "sliceId": "slugify-esm",
+  "status": "PASS",
+  "checks": [
+    {
+      "behaviorId": "B-1",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "51ed1e86ff0e530ccd7b2442e80eda1a6587c62f5e81e3a32a7e6132ee014b75",
+          "status": "VERIFIED"
+        },
+        {
+          "path": "test/slugify.test.js",
+          "sha256": "a53ad76e398e48bc81f129a66dd4c856e20103ebdabdaad8e3dbe70a618ef9dd",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "behaviorId": "B-2",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "51ed1e86ff0e530ccd7b2442e80eda1a6587c62f5e81e3a32a7e6132ee014b75",
+          "status": "VERIFIED"
+        },
+        {
+          "path": "test/slugify.test.js",
+          "sha256": "a53ad76e398e48bc81f129a66dd4c856e20103ebdabdaad8e3dbe70a618ef9dd",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "behaviorId": "B-3",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "51ed1e86ff0e530ccd7b2442e80eda1a6587c62f5e81e3a32a7e6132ee014b75",
+          "status": "VERIFIED"
+        },
+        {
+          "path": "test/slugify.test.js",
+          "sha256": "a53ad76e398e48bc81f129a66dd4c856e20103ebdabdaad8e3dbe70a618ef9dd",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "behaviorId": "B-4",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "51ed1e86ff0e530ccd7b2442e80eda1a6587c62f5e81e3a32a7e6132ee014b75",
+          "status": "VERIFIED"
+        },
+        {
+          "path": "test/slugify.test.js",
+          "sha256": "a53ad76e398e48bc81f129a66dd4c856e20103ebdabdaad8e3dbe70a618ef9dd",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "behaviorId": "B-5",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "51ed1e86ff0e530ccd7b2442e80eda1a6587c62f5e81e3a32a7e6132ee014b75",
+          "status": "VERIFIED"
+        },
+        {
+          "path": "test/slugify.test.js",
+          "sha256": "a53ad76e398e48bc81f129a66dd4c856e20103ebdabdaad8e3dbe70a618ef9dd",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "behaviorId": "B-6",
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "src/utils/slugify.js",
+          "sha256": "51ed1e86ff0e530ccd7b2442e80eda1a6587c62f5e81e3a32a7e6132ee014b75",
+          "status": "VERIFIED"
+        },
+        {
+          "path": "test/slugify.test.js",
+          "sha256": "a53ad76e398e48bc81f129a66dd4c856e20103ebdabdaad8e3dbe70a618ef9dd",
+          "status": "VERIFIED"
+        }
+      ]
+    }
+  ],
+  "runtimeEvidence": []
+}

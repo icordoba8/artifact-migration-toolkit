@@ -1,0 +1,96 @@
+{
+  "provider": "claude",
+  "scope": "project",
+  "mode": "runtime",
+  "root": "/home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-m12-20261024T174608/consumer",
+  "store": "/home/utmwac/.local/share/artifact-migration-tools",
+  "toolkit": {
+    "name": "artifact-migration-tools",
+    "version": "1.6.2",
+    "commit": "336531c4b5a23814f6e35699bedb5315003c3542",
+    "contentHash": "sha256:67c9f36afc8d9e3887686048c4e653e726b1aea0fba04509822aec20b3748f82"
+  },
+  "skills": {
+    "version": 1,
+    "skills": {
+      "migrate-artifact": {
+        "skillPath": "skills/migrate-artifact",
+        "computedHash": "3d538b45b7dcb713168199b94749a27db805783b410328a6f8a447850663f0ab"
+      },
+      "start-migration": {
+        "skillPath": "skills/start-migration",
+        "computedHash": "a88cc8ce617967ffe2351297931c69c03298e6a447b08d3421059fd8ab3c706f"
+      }
+    }
+  },
+  "release": "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9",
+  "pin": "sha256:f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9",
+  "commands": {
+    "artifact-migration-discover": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/cli/discover-module.mjs"
+    ],
+    "artifact-migration-run": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/cli/run-migration.mjs"
+    ],
+    "artifact-migration-advance": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/cli/advance-migration.mjs"
+    ],
+    "artifact-migration-validate": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/cli/validate-migration.mjs"
+    ],
+    "artifact-migration-registry": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/cli/update-migration-registry.mjs"
+    ],
+    "artifact-migration-decision": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/record-decision.mjs"
+    ],
+    "artifact-migration-upgrade": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/upgrades/upgrade-migration.mjs"
+    ],
+    "artifact-migrate": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/artifact/run-artifact.mjs"
+    ],
+    "artifact-migration-mcp": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/mcp-server.mjs"
+    ],
+    "artifact-migration-toolkit": [
+      "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/cli/toolkit-identity.mjs"
+    ]
+  },
+  "mcp": {
+    "command": "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+    "args": [
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/mcp-server.mjs"
+    ]
+  },
+  "files": {},
+  "releases": [
+    {
+      "release": "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9",
+      "pin": "sha256:f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9"
+    }
+  ],
+  "requiredBy": {
+    "migrate-artifact": {
+      "skill": "migrate-artifact",
+      "version": "1.6.2",
+      "computedHash": "3d538b45b7dcb713168199b94749a27db805783b410328a6f8a447850663f0ab"
+    }
+  },
+  "configOwned": {
+    "command": "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node",
+    "args": [
+      "/home/utmwac/.local/share/artifact-migration-tools/1.6.2-f574cd822400071c7b4dd5ede1d60360b288650f26488e8209336c1bf04951f9/packages/migration-engine/src/mcp-server.mjs"
+    ]
+  }
+}

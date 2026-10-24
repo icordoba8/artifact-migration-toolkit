@@ -1,0 +1,11 @@
+d223ec5 install migrate-artifact
+131469d fixture
+100644 81a532deeda7167f742bf853c0b205a6635f9e97 0	.claude/skills/migrate-artifact/SKILL.md
+100644 dd4d3508a9079ab3df1f1642087f8cdfbe39ee75 0	.claude/skills/migrate-artifact/references/artifact-contract.md
+100644 96a2ebd3a78812133e0a3704af9d4b5afaded4f8 0	.claude/skills/migrate-artifact/release-identity.json
+100644 5158e92ab6619f0a390da45a037343d82da5db3b 0	.claude/skills/migrate-artifact/scripts/runtime.mjs
+100644 5e4f22f58a0247f1882a8adeff1b6df68607d2de 0	README.md
+100644 7055419284bd53a7859f633a9694a2b183a678a6 0	legacy/slugify.cjs
+100644 dfb0080eacfd32077170828c5c728c098aafa5f1 0	package.json
+100644 d392e2954300089eb48692b7afb50bc175393dad 0	skills-lock.json
+100644 921186832e3e904ea88ec02a02257b004045ba84 0	src/index.js

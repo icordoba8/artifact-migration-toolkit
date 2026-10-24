@@ -1,0 +1,252 @@
+{
+  "file": "/home/utmwac/artifact-migration-acceptance/v1.6.2-336531c-claude-m12-20261024T174608/consumer/src/utils/slugify.js",
+  "passed": 27,
+  "total": 27,
+  "results": [
+    {
+      "input": "Hello World",
+      "expected": "hello-world",
+      "actual": {
+        "ok": "hello-world"
+      },
+      "pass": true
+    },
+    {
+      "input": "  Hello,   World!  ",
+      "expected": "hello-world",
+      "actual": {
+        "ok": "hello-world"
+      },
+      "pass": true
+    },
+    {
+      "input": "Crème Brûlée",
+      "expected": "creme-brulee",
+      "actual": {
+        "ok": "creme-brulee"
+      },
+      "pass": true
+    },
+    {
+      "input": "Ünïcödé Ståff",
+      "expected": "unicode-staff",
+      "actual": {
+        "ok": "unicode-staff"
+      },
+      "pass": true
+    },
+    {
+      "input": "ﬁne print",
+      "expected": "fine-print",
+      "actual": {
+        "ok": "fine-print"
+      },
+      "pass": true
+    },
+    {
+      "input": "Rock & Roll",
+      "expected": "rock-and-roll",
+      "actual": {
+        "ok": "rock-and-roll"
+      },
+      "pass": true
+    },
+    {
+      "input": "Don't Stop",
+      "expected": "dont-stop",
+      "actual": {
+        "ok": "dont-stop"
+      },
+      "pass": true
+    },
+    {
+      "input": "It’s here",
+      "expected": "its-here",
+      "actual": {
+        "ok": "its-here"
+      },
+      "pass": true
+    },
+    {
+      "input": "émoji 🎉 party",
+      "expected": "emoji-party",
+      "actual": {
+        "ok": "emoji-party"
+      },
+      "pass": true
+    },
+    {
+      "input": "line\none\ttwo",
+      "expected": "line-one-two",
+      "actual": {
+        "ok": "line-one-two"
+      },
+      "pass": true
+    },
+    {
+      "input": "UPPER lower 123",
+      "expected": "upper-lower-123",
+      "actual": {
+        "ok": "upper-lower-123"
+      },
+      "pass": true
+    },
+    {
+      "input": "already-slugged",
+      "expected": "already-slugged",
+      "actual": {
+        "ok": "already-slugged"
+      },
+      "pass": true
+    },
+    {
+      "input": "---",
+      "expected": "",
+      "actual": {
+        "ok": ""
+      },
+      "pass": true
+    },
+    {
+      "input": "",
+      "expected": "",
+      "actual": {
+        "ok": ""
+      },
+      "pass": true
+    },
+    {
+      "input": "null",
+      "expected": "",
+      "actual": {
+        "ok": ""
+      },
+      "pass": true
+    },
+    {
+      "input": "undefined",
+      "expected": "",
+      "actual": {
+        "ok": ""
+      },
+      "pass": true
+    },
+    {
+      "input": "12345",
+      "expected": "12345",
+      "actual": {
+        "ok": "12345"
+      },
+      "pass": true
+    },
+    {
+      "input": "A B",
+      "options": null,
+      "expected": "a-b",
+      "actual": {
+        "ok": "a-b"
+      },
+      "pass": true
+    },
+    {
+      "input": "Hello World",
+      "options": {
+        "separator": "_"
+      },
+      "expected": "hello_world",
+      "actual": {
+        "ok": "hello_world"
+      },
+      "pass": true
+    },
+    {
+      "input": "a b c",
+      "options": {
+        "separator": ""
+      },
+      "expected": "abc",
+      "actual": {
+        "ok": "abc"
+      },
+      "pass": true
+    },
+    {
+      "input": "The quick brown fox",
+      "options": {
+        "maxLength": 10
+      },
+      "expected": "the-quick",
+      "actual": {
+        "ok": "the-quick"
+      },
+      "pass": true
+    },
+    {
+      "input": "The quick brown fox",
+      "options": {
+        "maxLength": 12
+      },
+      "expected": "the-quick-br",
+      "actual": {
+        "ok": "the-quick-br"
+      },
+      "pass": true
+    },
+    {
+      "input": "The quick brown fox",
+      "options": {
+        "maxLength": 100
+      },
+      "expected": "the-quick-brown-fox",
+      "actual": {
+        "ok": "the-quick-brown-fox"
+      },
+      "pass": true
+    },
+    {
+      "input": "abc",
+      "options": {
+        "maxLength": 0
+      },
+      "expected": "",
+      "actual": {
+        "ok": ""
+      },
+      "pass": true
+    },
+    {
+      "input": "abc",
+      "options": {
+        "maxLength": -1
+      },
+      "expected": "abc",
+      "actual": {
+        "ok": "abc"
+      },
+      "pass": true
+    },
+    {
+      "input": "abcdefgh",
+      "options": {
+        "maxLength": "3"
+      },
+      "expected": "abcdefgh",
+      "actual": {
+        "ok": "abcdefgh"
+      },
+      "pass": true
+    },
+    {
+      "input": "foo bar",
+      "options": {
+        "separator": "--",
+        "maxLength": 5
+      },
+      "expected": "foo",
+      "actual": {
+        "ok": "foo"
+      },
+      "pass": true
+    }
+  ]
+}

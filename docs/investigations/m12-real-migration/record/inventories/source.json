@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "artifactId": "slugify-0a4f9b12a9b9",
+  "hasVisibleUi": false,
+  "sourceFiles": [
+    "legacy/slugify.cjs"
+  ],
+  "behaviors": [
+    {
+      "id": "B-1",
+      "description": "Input coercion: null/undefined input yields an empty slug; any other input is coerced with String().",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "legacy/slugify.cjs",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-2",
+      "description": "Unicode folding: NFKD-normalizes the text and strips combining diacritical marks (U+0300-U+036F).",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "legacy/slugify.cjs",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-3",
+      "description": "Text rewriting: lowercases, replaces & with \" and \", and deletes straight (') and curly (’) apostrophes.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "legacy/slugify.cjs",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-4",
+      "description": "Word joining: splits on runs of non [a-z0-9] characters, drops empty words, joins with options.separator (default \"-\"; a defined separator is coerced with String()).",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "legacy/slugify.cjs",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-5",
+      "description": "maxLength: when options.maxLength is a number >= 0 and the slug is longer, slices to maxLength then strips any trailing separator(s); non-empty separator only.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "legacy/slugify.cjs",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "B-6",
+      "description": "Export surface: slugify(input, options) is exposed as the module export and as the named export slugify.",
+      "visible": false,
+      "evidence": [
+        {
+          "path": "legacy/slugify.cjs",
+          "sha256": "9032d438e5ef0bdfc2085e3a3deeeb1c32730c0c7d2325a5413982d5ca77d314",
+          "status": "VERIFIED"
+        }
+      ]
+    }
+  ],
+  "globalContracts": [],
+  "featureLocalVisuals": [],
+  "operatorDecisions": []
+}
