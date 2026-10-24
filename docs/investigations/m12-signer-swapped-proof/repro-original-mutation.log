@@ -1,0 +1,48 @@
+✔ module 19: signed APPROVED appends one replay-verified line and the shared projection updates (1007.91437ms)
+✔ module 19: signed REJECTED blocks only that candidate digest and a stale review writes nothing (1157.846921ms)
+✔ module 19: forged, edited, unclaimed and duplicated attested lines are refused on read (948.525089ms)
+✖ module 19: a swapped proof is refused even when the genuine signature already ends in AA (786.456538ms)
+✔ module 19: one signed group act is one line; members cannot be attested alone (918.301267ms)
+✔ module 19: changed group membership invalidates an issued group challenge (628.955822ms)
+✔ crash at before-verify: one committed line or an explicit blocked state, never two (753.182658ms)
+✔ crash at after-verify: one committed line or an explicit blocked state, never two (754.22098ms)
+✔ crash at before-claim: one committed line or an explicit blocked state, never two (880.634875ms)
+✔ crash at after-claim: one committed line or an explicit blocked state, never two (705.933002ms)
+✔ crash at during-append: one committed line or an explicit blocked state, never two (628.170386ms)
+✔ crash at after-append: one committed line or an explicit blocked state, never two (644.788292ms)
+✔ crash at after-fsync: one committed line or an explicit blocked state, never two (789.123072ms)
+✔ crash at before-commit: one committed line or an explicit blocked state, never two (936.886667ms)
+✔ crash at after-commit: one committed line or an explicit blocked state, never two (691.505575ms)
+✔ crash at before-response: one committed line or an explicit blocked state, never two (645.323905ms)
+✔ companion: HTTPS-only, session-bound, CSRF-checked, inert, stale-aware; approve/reject/cancel/timeout (1439.270489ms)
+✔ provider, TTY and MCP surfaces cannot attest, even beside an active protected verifier (601.759164ms)
+✔ companion: enrollment is a separate admin-launched mode; review mode exposes no enrollment (77.258146ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 18
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15337.223856
+
+✖ failing tests:
+
+test at packages/migration-engine/test/integration/operator-signer.integration.spec.mjs:182:1
+✖ module 19: a swapped proof is refused even when the genuine signature already ends in AA (786.456538ms)
+  AssertionError [ERR_ASSERTION]: Missing expected rejection: proof swapped
+      at async refusesForgeries (file:///tmp/migration-tests-J9ffr3/packages/migration-engine/test/integration/operator-signer.integration.spec.mjs:91:5)
+      at async file:///tmp/migration-tests-J9ffr3/packages/migration-engine/test/integration/operator-signer.integration.spec.mjs:201:5
+      at async withDecisionPolicy (file:///tmp/migration-tests-J9ffr3/packages/migration-engine/test/support/decision-policy-fixture.mjs:33:16)
+      at async withRecord (file:///tmp/migration-tests-J9ffr3/packages/migration-engine/test/integration/operator-signer.integration.spec.mjs:60:12)
+      at async TestContext.<anonymous> (file:///tmp/migration-tests-J9ffr3/packages/migration-engine/test/integration/operator-signer.integration.spec.mjs:185:3)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: /line digest|proof/,
+    operator: 'rejects',
+    diff: 'simple'
+  }
+engine:test failed (unidentified 0, identified 1).
