@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "sourceFiles": ["legacy/strings.cjs"],
+  "units": [
+    {
+      "path": "legacy/strings.cjs#module.exports",
+      "disposition": "MIGRATED_BEHAVIOR",
+      "ref": "B-CASE-CONVERTERS",
+      "rationale": "Root assigned from createApi(), which the census cannot decide; decided by reading createApi: it returns { slugify, truncate, titleCase } plus one generated converter per SEPARATORS key (kebabCase '-', snakeCase '_'), all built on the internal words() splitter. slugify/truncate/titleCase/words are carried by B-SLUGIFY/B-TRUNCATE/B-TITLECASE/B-WORDS; the generated keys by B-CASE-CONVERTERS. The ESM target exports each as a static named export."
+    },
+    {
+      "path": "legacy/strings.cjs#module.exports.VERSION",
+      "disposition": "MIGRATED_BEHAVIOR",
+      "ref": "B-VERSION",
+      "rationale": "Static top-level string assignment '2.1.0' after the root export; becomes the named export VERSION."
+    }
+  ],
+  "requirements": []
+}

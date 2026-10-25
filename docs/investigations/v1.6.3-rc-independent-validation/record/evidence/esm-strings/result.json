@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sliceId": "esm-strings",
+  "status": "PASS",
+  "checks": [
+    { "behaviorId": "B-WORDS", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "behaviorId": "B-SLUGIFY", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "behaviorId": "B-TRUNCATE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "behaviorId": "B-TITLECASE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "behaviorId": "B-CASE-CONVERTERS", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "behaviorId": "B-VERSION", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] }
+  ],
+  "runtimeEvidence": []
+}

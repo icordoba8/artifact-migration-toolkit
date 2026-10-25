@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "gates": [
+    { "name": "ARCHITECTURE_PLAN_GATE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] },
+    { "name": "TARGETED_VERIFY", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] },
+    { "name": "FUNCTIONAL_PARITY_GATE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] },
+    { "name": "SIMPLIFY_ONCE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] },
+    { "name": "ARCHITECTURE_IMPLEMENTATION_GATE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] },
+    { "name": "PRECOMMIT_GATE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] },
+    { "name": "FINAL_VERIFY", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "boundTo": { "sourceDigest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1", "targetDigest": "a0ca80667d9bb7683095583ba7c2995d192cf2a90ff002f72e0193d2ce0d7ab2" } }] }
+  ],
+  "uiEvidence": [],
+  "requirementEvidence": []
+}

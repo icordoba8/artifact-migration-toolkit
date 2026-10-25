@@ -1,0 +1,25 @@
+{
+ "sessions": 1,
+ "model": "claude-opus-5-5",
+ "cli": "2.1.310",
+ "permissionMode": "default",
+ "promptTurnsFromUser": 0,
+ "toolCalls": 4,
+ "toolErrors": 3,
+ "byTool": {
+  "Bash": 3,
+  "Grep": 1
+ },
+ "permissionDenials": [
+  "Bash:{\"command\":\"ls .claude/skills/migrate-artifact/ && cat .claude/skills/migrate-artifact/release-identity.json; node .clau",
+  "Bash:{\"command\":\"ls -la <scratch>/r"
+ ],
+ "result": "success",
+ "isError": false,
+ "numTurns": 5,
+ "durationMs": 25437,
+ "costUsd": 0.15830119999999998,
+ "modelUsage": [
+  "claude-opus-5-5"
+ ]
+}

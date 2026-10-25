@@ -1,0 +1,1 @@
+post == pre for all 12 entries (legacy source, entry, package.json, .mcp.json, receipt, 4 installed skill files, verifier script, verifier contract, whole store tree)

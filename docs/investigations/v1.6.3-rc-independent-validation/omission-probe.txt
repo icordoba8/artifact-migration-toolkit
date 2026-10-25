@@ -1,0 +1,11 @@
+== 1-omit-unresolved-root.json ::  3/9 DISCOVERY_COMPLETENESS | CONTINUE
+Validation: discovery completeness.units must be exactly [legacy/strings.cjs#module.exports, legacy/strings.cjs#module.exports.VERSION].
+== 2-root-without-rationale.json ::  3/9 DISCOVERY_COMPLETENESS | CONTINUE
+Validation: discovery completeness.units unresolved unit 'legacy/strings.cjs#module.exports' rationale must be a non-empty string.
+== 3-root-blank-rationale.json ::  3/9 DISCOVERY_COMPLETENESS | CONTINUE
+Validation: discovery completeness.units unresolved unit 'legacy/strings.cjs#module.exports' rationale must be a non-empty string.
+== 4-extra-non-export-unit.json ::  3/9 DISCOVERY_COMPLETENESS | CONTINUE
+Validation: discovery completeness.units must be exactly [legacy/strings.cjs#module.exports, legacy/strings.cjs#module.exports.VERSION].
+== 5-unknown-disposition.json ::  3/9 DISCOVERY_COMPLETENESS | CONTINUE
+Validation: completeness unit 'legacy/strings.cjs#module.exports' has unknown disposition 'IGNORED'.
+== 6-agent-document.json ::  4/9 ASSESS_TARGET | CONTINUE

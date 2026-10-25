@@ -1,0 +1,23 @@
+{
+ "sessions": 1,
+ "model": "claude-opus-5-5",
+ "cli": "2.1.310",
+ "permissionMode": "default",
+ "promptTurnsFromUser": 0,
+ "toolCalls": 2,
+ "toolErrors": 2,
+ "byTool": {
+  "Bash": 2
+ },
+ "permissionDenials": [
+  "Bash:{\"command\":\"node .claude/skills/migrate-artifact/scripts/runtime.mjs ensure --provider claude --root \\\"$PWD\\\"; echo \\\"ex"
+ ],
+ "result": "success",
+ "isError": false,
+ "numTurns": 3,
+ "durationMs": 13866,
+ "costUsd": 0.1269104,
+ "modelUsage": [
+  "claude-opus-5-5"
+ ]
+}

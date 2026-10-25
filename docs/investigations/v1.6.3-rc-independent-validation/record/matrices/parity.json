@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rows": [
+    { "id": "P-WORDS", "behaviorId": "B-WORDS", "resolution": "MIGRATE_NEW", "status": "VERIFIED", "targetEvidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "id": "P-SLUGIFY", "behaviorId": "B-SLUGIFY", "resolution": "MIGRATE_NEW", "status": "VERIFIED", "targetEvidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "id": "P-TRUNCATE", "behaviorId": "B-TRUNCATE", "resolution": "MIGRATE_NEW", "status": "VERIFIED", "targetEvidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "id": "P-TITLECASE", "behaviorId": "B-TITLECASE", "resolution": "MIGRATE_NEW", "status": "VERIFIED", "targetEvidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "id": "P-CASE-CONVERTERS", "behaviorId": "B-CASE-CONVERTERS", "resolution": "MIGRATE_NEW", "status": "VERIFIED", "targetEvidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] },
+    { "id": "P-VERSION", "behaviorId": "B-VERSION", "resolution": "MIGRATE_NEW", "status": "VERIFIED", "targetEvidence": [{ "path": "src/utils/strings.js", "sha256": "593d4b5ec66f2a57507f428c6cd06c5fd9428e73f360cd703e299f29c7f1d486", "status": "VERIFIED" }] }
+  ]
+}

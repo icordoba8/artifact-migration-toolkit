@@ -1,0 +1,13 @@
+in-memory unsealed exitCode=1: refused: history seq 8 validationEvidence digest does not match its content.
+resealed receipt dropped: refused: history seq 8 validationEvidence does not carry exactly one receipt per declared check.
+resealed NOT_REQUIRED downgrade: refused: history seq 8 validationEvidence has no engine-executed validator covering src/utils/strings.js.
+resealed authority AGENT: refused: history seq 8 validationEvidence check 0 claims execution without engine authority.
+resealed declared file: refused: history seq 8 validationEvidence check 0 does not match its declared validator.
+resealed slice doc hash: refused: history seq 8 validationEvidence does not match the pinned slice document.
+resealed changed files: refused: history seq 8 validationEvidence changed files do not match the slice document.
+resealed target digest: ACCEPTED {"status":"RECORDED","slices":[{"slice":"esm-strings","digest":"6a6b3c58d194479b240a1d045094e0026157d0f77ae310dd0d0c54f0492f776a","executed":1,"unsupported":0,"notRequired":0}]}
+resealed artifact id: refused: history seq 8 validationEvidence is bound to a different migration state.
+evidence stripped from seq 8: refused: Validator evidence is missing from 1 slice transition(s) of a record that persists it.
+on-disk resealed edit: refused: History integrity breaks at line 8.
+finalize-view genuine: {"status":"RECORDED","slices":[{"slice":"esm-strings","digest":"7ea4b93a82666c3adebc10eee1b15760a1523772f3362ccf9b5e7bdff38f2804","executed":1,"unsupported":0,"notRequired":0}]}
+finalize-view resealed target digest: refused: history seq 8 validationEvidence is bound to a different target binding.

@@ -1,0 +1,11 @@
+good exit=0 36/36 
+legacy-copy exit=1 0/2 target imports as ESM | entry imports
+m1-ellipsis exit=1 34/36 truncate("hello world",5) | truncate("hello world",2)
+m2-snake-sep exit=1 33/36 snakeCase("Foo-Bar") | snakeCase("userID value") | snakeCase("already_snake")
+m3-version exit=1 35/36 VERSION
+m4-no-typeerror exit=1 34/36 slugify(42) throws TypeError | slugify(null) throws TypeError
+m5-no-nfkd exit=1 33/36 slugify("  Héllo,  Wörld!  ") | slugify("Ünïcödé Çafé 2024") | kebabCase("  Ça va?  ")
+m6-trailing-sep exit=1 35/36 slugify("Hello Big World",{"maxLength":6})
+m7-drop-kebab exit=1 0/1 entry imports
+m8-titlecase exit=1 33/36 titleCase("hello world") | titleCase("XMLHttpRequest handler") | titleCase("snake_case-and kebab")
+m9-truncate-boundary exit=1 35/36 truncate("hello",5)

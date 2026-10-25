@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "artifactId": "strings-2eb849682dc8",
+  "hasVisibleUi": false,
+  "sourceFiles": ["legacy/strings.cjs"],
+  "behaviors": [
+    {
+      "id": "B-WORDS",
+      "description": "Internal word splitter: NFKD-normalize, strip combining diacritics (U+0300-U+036F), split camelCase boundaries, split on non-alphanumerics, drop empties, lowercase each word.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-SLUGIFY",
+      "description": "slugify(input, options): throws TypeError('slugify expects a string') for non-strings; joins words with options.separator (default '-'); when options.maxLength is an integer and exceeded, slices to maxLength and strips trailing separators.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-TRUNCATE",
+      "description": "truncate(text, max, ellipsis): ellipsis defaults to '...' only when undefined; throws RangeError('max must be a non-negative integer') for non-integer or negative max; returns text unchanged if length <= max; returns tail.slice(0, max) when max <= tail length; otherwise text.slice(0, max - tail.length) + tail.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-TITLECASE",
+      "description": "titleCase(input): words(input) with first character uppercased, joined by a single space.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-CASE-CONVERTERS",
+      "description": "Generated case converters, one per SEPARATORS entry: kebabCase(input) joins words with '-', snakeCase(input) joins words with '_'.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-VERSION",
+      "description": "Exported VERSION constant equal to '2.1.0'.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    }
+  ],
+  "globalContracts": [],
+  "featureLocalVisuals": [],
+  "operatorDecisions": []
+}

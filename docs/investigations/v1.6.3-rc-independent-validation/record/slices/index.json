@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "slices": [
+    {
+      "id": "esm-strings",
+      "behaviorIds": ["B-WORDS", "B-SLUGIFY", "B-TRUNCATE", "B-TITLECASE", "B-CASE-CONVERTERS", "B-VERSION"],
+      "dependsOn": [],
+      "kind": "NEW"
+    }
+  ]
+}
