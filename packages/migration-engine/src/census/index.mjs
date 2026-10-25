@@ -94,11 +94,13 @@ export {
 } from "./artifact.mjs";
 export {
   architectureFindings,
+  assertStructuralCoverage,
   asEngineFault,
   engineFault,
   legacyDependencies,
   pathKey,
   sourceRequirements,
+  structuralCensus,
   structuralParser,
   targetTypeScript,
 } from "./toolchain.mjs";

@@ -1,0 +1,6 @@
+good exit=0 36/36 
+copied exit=1 0/2 target imports as ESM | entry imports
+m1 exit=1 33/36 truncate("hello world",5) | truncate("hello world",8,"~") | truncate("hello world",3,"")
+m2 exit=1 33/36 snakeCase("Foo-Bar") | snakeCase("userID value") | snakeCase("already_snake")
+m3 exit=1 35/36 VERSION
+m4 exit=1 34/36 slugify(42) throws TypeError | slugify(null) throws TypeError

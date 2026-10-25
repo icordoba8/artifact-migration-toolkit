@@ -1,0 +1,4 @@
+omit unresolved module.exports => CONTINUE | Validation: discovery completeness.units must be exactly [legacy/strings.cjs#module.exports, legacy/strings.cjs#module.exports.VERSION].
+module.exports without rationale => CONTINUE | Validation: discovery completeness.units unresolved unit 'legacy/strings.cjs#module.exports' rationale must be a non-empty string.
+module.exports blank rationale => CONTINUE | Validation: discovery completeness.units unresolved unit 'legacy/strings.cjs#module.exports' rationale must be a non-empty string.
+agent's justified document => CONTINUE | 

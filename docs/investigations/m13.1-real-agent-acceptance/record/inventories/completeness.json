@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "sourceFiles": ["legacy/strings.cjs"],
+  "units": [
+    {
+      "path": "legacy/strings.cjs#module.exports",
+      "disposition": "MIGRATED_BEHAVIOR",
+      "ref": "B-EXPORTS",
+      "rationale": "Root is set to the call result createApi(). Decided by reading createApi: it returns {slugify, truncate, titleCase} plus one `${style}Case` key per Object.keys(SEPARATORS) = ['kebab','snake'], i.e. kebabCase and snakeCase. SEPARATORS is a module-local literal never mutated, so the export set is exactly {slugify, truncate, titleCase, kebabCase, snakeCase}, which matches the names src/index.js re-exports. The internal helpers words/SEPARATORS/createApi are carried as B-WORDS and B-CASE-CONVERTERS."
+    },
+    {
+      "path": "legacy/strings.cjs#module.exports.VERSION",
+      "disposition": "MIGRATED_BEHAVIOR",
+      "ref": "B-EXPORTS",
+      "rationale": "Static top-level assignment of the string literal '2.1.0'; carried as the named ESM export VERSION."
+    }
+  ],
+  "requirements": []
+}

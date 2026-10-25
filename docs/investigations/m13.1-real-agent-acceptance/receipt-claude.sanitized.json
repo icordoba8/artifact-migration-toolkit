@@ -1,0 +1,12 @@
+{
+  "provider": "claude",
+  "pin": "sha256:b6ce76e9a1885f3e2608088637ac69ef42122bd8705f947ed431ebcfeaefce1b",
+  "toolkit": {
+    "name": "artifact-migration-tools",
+    "version": "0.0.1",
+    "commit": "0a791e718b7e76927a9e50c2f82d2bd611d3730b",
+    "contentHash": "sha256:c2d52e56b13dc7b1e9b08b124ba1ebbf9d3b97db0d2539b5dcdf81d48beb0c3e"
+  },
+  "release": "<disposable>/store/0.0.1-b6ce76e9a1885f3e2608088637ac69ef42122bd8705f947ed431ebcfeaefce1b",
+  "mode": "runtime"
+}

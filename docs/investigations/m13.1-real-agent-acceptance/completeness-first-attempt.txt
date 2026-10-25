@@ -1,0 +1,2 @@
+FIRST COMPLETENESS units: legacy/strings.cjs#SEPARATORS, legacy/strings.cjs#words, legacy/strings.cjs#slugify, legacy/strings.cjs#truncate, legacy/strings.cjs#titleCase, legacy/strings.cjs#createApi, legacy/strings.cjs#module.exports [rationale], legacy/strings.cjs#module.exports.VERSION [rationale]
+ENGINE: Validation: discovery completeness.units must be exactly [legacy/strings.cjs#module.exports, legacy/strings.cjs#module.exports.VERSION].

@@ -1,0 +1,9 @@
+legacy/strings.cjs: OK
+src/index.js: OK
+package.json: OK
+.claude/skills/migrate-artifact/SKILL.md: OK
+.claude/skills/migrate-artifact/release-identity.json: OK
+.claude/skills/migrate-artifact/scripts/runtime.mjs: OK
+.claude/skills/migrate-artifact/references/artifact-contract.md: OK
+<disposable>/verifier/verify.mjs: OK
+<disposable>/verifier/contract.json: OK

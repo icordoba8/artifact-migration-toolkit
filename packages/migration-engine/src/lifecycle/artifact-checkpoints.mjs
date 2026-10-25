@@ -34,6 +34,7 @@ import {
 } from "../visual/index.mjs";
 import {
   architectureFindings,
+  assertStructuralCoverage,
   asEngineFault,
   captureBinding,
   dispositionValidator,
@@ -44,9 +45,7 @@ import {
   legacyDependencies,
   metrics,
   sourceRequirements,
-  STRUCTURAL_SCRIPT_EXTENSIONS,
-  structuralParser,
-  structuralUnits as structuralUnitsRaw,
+  structuralCensus,
   UI_RUNTIME_STATES,
   validateEvidenceFile,
   validateSourceInventoryDocument,
@@ -82,12 +81,15 @@ import {
 } from "../slices/index.mjs";
 import {
   assertTargetProvides,
+  commandReceipt,
   executeGenericCheck,
   EXECUTION_CAPABILITY,
   hasCodeValidationCheck,
+  validatorReceipt,
+  verifyValidationEvidence,
 } from "./artifact-execution.mjs";
 import { ponytailTime, validateGateEvidence, validatePonytailEvidence } from "./artifact-gates.mjs";
-import { consumedAtCheckpoint, RESOLUTION_KIND } from "./artifact-record.mjs";
+import { consumedAtCheckpoint, readHistory, RESOLUTION_KIND } from "./artifact-record.mjs";
 import { FINAL_GATES } from "./checkpoints.mjs";
 
 // A requirement disposed with one of these claims the element is carried into
@@ -193,31 +195,7 @@ const validateCompleteness = async (root, state) => {
   // bounds it. It runs unconditionally and censuses the artifact's own files --
   // not only the global contracts the authoring agent chose to volunteer, which
   // made an empty `globalContracts` disable the whole gate.
-  const parser = await structuralParser();
-  const census = new Map();
-  const censusFiles = [
-    ...source.document.sourceFiles,
-    ...source.document.globalContracts.map((contract) => contract.sourcePath),
-  ];
-  for (const file of [...new Set(censusFiles)].sort()) {
-    const script = STRUCTURAL_SCRIPT_EXTENSIONS.has(path.extname(file).toLowerCase());
-    // A censused file that resolves but cannot be read is a resource failure,
-    // not "author the next artifact": it must stop the loop, loudly.
-    const text = script
-      ? await asEngineFault(`Cannot read source file '${file}'`, () =>
-          readFile(path.join(state.source.root, file), "utf8"),
-        )
-      : "";
-    metrics.filesParsed += 1;
-    const units = await asEngineFault(`Cannot census source file '${file}'`, () =>
-      structuralUnitsRaw(parser, file, text),
-    );
-    // A structural unit path is a binding name, unique only within its file, so
-    // the census key qualifies it. A whole-file unit keys as the file itself.
-    for (const unit of units) {
-      census.set(unit.path === file ? file : `${file}#${unit.path}`, unit);
-    }
-  }
+  const census = await structuralCensus(state, source.document);
   const documented = [];
   for (const [index, unit] of arrayOf(document.units, "discovery completeness.units").entries()) {
     exactObject(unit, `completeness.units[${index}]`, ["path", "disposition"], ["ref", "rationale"]);
@@ -226,7 +204,7 @@ const validateCompleteness = async (root, state) => {
     disposed(unit, unitPath, "completeness unit");
   }
   unique(documented, "discovery completeness.units paths");
-  sameMembers(documented, [...census.keys()], "discovery completeness.units");
+  assertStructuralCoverage(document.units, census, "discovery completeness.units");
 
   // Nothing the artifact requires from outside itself may be silently dropped:
   // every out-of-boundary element and every undecidable reference carries a
@@ -639,6 +617,7 @@ const validateImplementation = async (root, state, capability) => {
   const checks = arrayOf(document.checks, "slice implementation.checks");
   if (checks.length === 0) throw new Error("slice implementation requires at least one check.");
   const deferredExecution = [];
+  const commandRuns = new Map();
   for (const [index, check] of checks.entries()) {
     const label = `slice implementation.checks[${index}]`;
     if (Object.hasOwn(check, "validator")) {
@@ -661,7 +640,7 @@ const validateImplementation = async (root, state, capability) => {
     // An applicable generic check is executed, not believed -- but only when
     // the caller was granted execution. A read-only caller defers it (P1 #6).
     if (check.command) {
-      if (capability.execution) await executeGenericCheck(check.command, state.target.root, label, capability);
+      if (capability.execution) commandRuns.set(index, await executeGenericCheck(check.command, state.target.root, label, capability));
       else deferredExecution.push(check.command);
     }
   }
@@ -681,11 +660,23 @@ const validateImplementation = async (root, state, capability) => {
       "IMPLEMENT_SLICES changed executable code (.ts/.tsx/.js/.jsx/.mts/.mjs) but trusted validator evidence does not cover every changed file.",
     );
   }
+  // One receipt per declared check, in declaration order, from what the engine
+  // actually did with it. Only an executing caller can produce one that is
+  // persisted; a read-only caller's receipts say DEFERRED and never reach a
+  // transition (validateCheckpoint stamps `executed: false`).
+  const validatorResults = validation.evidence[Symbol.iterator]();
+  const checkReceipts = checks.map((check, index) => {
+    if (check.command) return commandReceipt(index, check, capability.execution ? commandRuns.get(index) : undefined);
+    if (!capability.execution && needsValidatorEvidence) {
+      return { check: index, kind: check.validator.kind, declared: check.validator, authority: "ENGINE", execution: "DEFERRED", exitCode: null };
+    }
+    return validatorReceipt(index, check, needsValidatorEvidence ? validatorResults.next().value : null);
+  });
   const preserved = arrayOf(document.preservedTargetNativeIds, "slice implementation.preservedTargetNativeIds");
   if (state.resolution === "TARGET_EXTEND") {
     sameMembers(preserved, plan.baseline.native.rows.map((row) => row.id), "TARGET_EXTEND preservedTargetNativeIds");
   }
-  return { relative, document, changedFiles, validationEvidence: validation.evidence, deferredExecution, plan };
+  return { relative, document, changedFiles, validationEvidence: validation.evidence, checkReceipts, deferredExecution, plan };
 };
 
 const validateBoundTo = (boundTo, state, label, sliceDigest, origin) => {
@@ -919,6 +910,25 @@ export const validateFinal = async (root, state) => {
   }
   const completeness = await readJsonAt(root, "inventories/completeness.json", "discovery completeness");
   const requirements = Array.isArray(completeness?.requirements) ? completeness.requirements : [];
+  // M13: completion re-derives what the record claims. The structural census is
+  // recomputed over the completeness universe (a document authored against a
+  // census that could not see CommonJS exports cannot complete), and the
+  // persisted validator evidence is re-read and rebound to the current target
+  // bytes. Both are pure reads. A COMPLETE record is not re-judged here.
+  let validatorEvidence = null;
+  if (state.currentStep === "FINALIZE") {
+    // In one root a migrated source file is rewritten by the migration itself;
+    // its legacy census was proved at DISCOVERY_COMPLETENESS and its current
+    // bytes are target code, so only untouched source files are re-censused.
+    const rewritten = samePath(state.source.root, state.target.root) ? changedFiles : new Set();
+    const ownedBy = (unitPath) => rewritten.has(unitPath.split("#")[0]);
+    assertStructuralCoverage(
+      arrayOf(completeness?.units, "discovery completeness.units").filter((unit) => !ownedBy(String(unit?.path))),
+      await structuralCensus(state, baseline.target.source.document, rewritten),
+      "final structural coverage",
+    );
+    validatorEvidence = await verifyValidationEvidence(root, state, (await readHistory(root)).events);
+  }
 
   // A requirement disposed as carried into the target owes a target file that
   // actually carries it. Discovering a stylesheet, an asset, an i18n namespace
@@ -970,7 +980,7 @@ export const validateFinal = async (root, state) => {
         .join(", ")}.`,
     );
   }
-  return { relative, document, ponytail: ponytail.map(({ report }) => report) };
+  return { relative, document, validatorEvidence, ponytail: ponytail.map(({ report }) => report) };
 };
 
 const BASELINE_MATRICES = ["matrices/parity.json", "matrices/target-native.json", "matrices/design-system.json", "matrices/global-contract.json"];
