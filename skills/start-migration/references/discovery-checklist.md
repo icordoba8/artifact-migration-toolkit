@@ -60,6 +60,7 @@ Every category must be `CONFIRMED`, `N/A`, or `BLOCKED`:
 - Actions and mutations
 - Authentication, permissions and scope
 - HTTP, gRPC, websocket APIs and DTOs
+- Exported functions, classes and their call contracts
 - Realtime events, ordering and teardown
 - Errors, retries, cancellation and recovery
 - Edge cases and boundary conditions
@@ -187,6 +188,26 @@ target window is not an automatic routing adaptation. Record
 `NAVIGATION_FLOW_GAP` unless the baseline includes `REDESIGNED_APPROVED`,
 explicit approval, and an acceptance scenario covering entry, selection,
 detail, back/close, URL/history, permissions, state, and accessibility.
+
+## Exported call-contract traceability
+
+A module without routes, pages or endpoints still has an observable surface:
+the functions, classes and constants its consumers import. For every export a
+legacy consumer or entry point reaches, record a behavior that cites the export
+and at least one consumer call site, and map:
+
+- export name and kind (function, class, constant), sync or async;
+- positional parameters, their order, and which are optional;
+- every key the code reads from an options or config argument, with its default;
+- return shape;
+- thrown or rejected error identifiers and the order in which they are checked.
+
+Trace each to a stable OpenSpec scenario that calls the export the way the
+legacy consumer calls it. Target conventions decide file layout, naming of
+private helpers and error classes, never a consumer-visible parameter shape:
+changing one (for example an options object into a positional value) is a
+`REDESIGN` with explicit approval and acceptance coverage, not an adaptation.
+Tests written only against the target's own signature do not prove parity.
 
 ## Runtime discovery
 

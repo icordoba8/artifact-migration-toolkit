@@ -755,6 +755,14 @@ A request for an existing partner identifier returns that partner's record.
 A refused proposal writes nothing. Correct it from the refusal and preview
 again without asking the user; the refusal message gives the expected form.
 
+A module consumed through its exports rather than routes or endpoints has an
+**exported call contract**, and the proposal states it: for each export a
+legacy consumer reaches, its parameters in order, every options key the code
+reads and its default, the return shape and the error identifiers. Give each a
+scenario that calls the export the way the legacy consumer does. Changing a
+consumer-visible parameter shape is a redesign, never a target adaptation
+(`references/discovery-checklist.md`, *Exported call-contract traceability*).
+
 Format 21 also holds the proposal to the legacy module's **API response
 contract**, which the engine derives from source (discovery scanner algorithm
 5): every route-table endpoint, traced from the route through its handler,

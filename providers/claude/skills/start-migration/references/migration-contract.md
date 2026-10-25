@@ -1197,6 +1197,12 @@ authority when non-empty:
 }
 ```
 
+An exported function or class that a legacy consumer imports is observable
+behavior: give it a behavior that records its call contract (parameters,
+options keys and defaults, return shape, error identifiers) and cites a
+consumer call site, as the discovery checklist's *Exported call-contract
+traceability* describes.
+
 For format 10, the same checkpoint also runs the recorded canonical scanner and
 requires every legacy-side evidence location to belong to one of its four
 relations. A path merely existing under the legacy root is insufficient, and
