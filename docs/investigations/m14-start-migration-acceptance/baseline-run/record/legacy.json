@@ -1,0 +1,229 @@
+{
+  "version": 1,
+  "hasVisibleUi": false,
+  "uiBehaviors": [],
+  "behaviors": [
+    {
+      "id": "BEH-001",
+      "description": "quote() rejects a cart before pricing: missing or empty items -> EMPTY_CART; an item whose qty is not an integer >= 1 -> INVALID_QTY; an item whose unitPrice is not an integer >= 0 -> INVALID_PRICE. Items are checked in order and this runs before the tier and coupon checks.",
+      "evidence": [
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:11-23",
+          "requirementIds": ["DISCOUNTS-REQ-001"],
+          "scenarioIds": ["DISCOUNTS-SCN-001", "DISCOUNTS-SCN-002", "DISCOUNTS-SCN-003"]
+        },
+        {
+          "category": "RUNTIME_OBSERVATION",
+          "kind": "OBSERVATION",
+          "status": "NOT_APPLICABLE",
+          "reason": "Legacy discounts is a library module with no UI, HTTP route or runnable entry; behavior is established from source.",
+          "requirementIds": [],
+          "scenarioIds": []
+        },
+        {
+          "category": "REQUIREMENT_TRACE",
+          "kind": "DOCS",
+          "status": "PRESENT",
+          "location": "openspec/specs/discounts/spec.md",
+          "requirementIds": ["DISCOUNTS-REQ-001"],
+          "scenarioIds": ["DISCOUNTS-SCN-001", "DISCOUNTS-SCN-002", "DISCOUNTS-SCN-003"]
+        }
+      ]
+    },
+    {
+      "id": "BEH-002",
+      "description": "Volume discount on the subtotal by total quantity: >= 50 items 10%, >= 10 items 5%, otherwise 0. Rounded half-up to cents; a VOLUME discount line is pushed only when the amount is > 0.",
+      "evidence": [
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/tiers.js:3-8",
+          "requirementIds": ["DISCOUNTS-REQ-002"],
+          "scenarioIds": ["DISCOUNTS-SCN-004", "DISCOUNTS-SCN-005", "DISCOUNTS-SCN-006"]
+        },
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:35-41",
+          "requirementIds": ["DISCOUNTS-REQ-002"],
+          "scenarioIds": ["DISCOUNTS-SCN-004"]
+        },
+        {
+          "category": "RUNTIME_OBSERVATION",
+          "kind": "OBSERVATION",
+          "status": "NOT_APPLICABLE",
+          "reason": "Legacy discounts is a library module with no UI, HTTP route or runnable entry; behavior is established from source.",
+          "requirementIds": [],
+          "scenarioIds": []
+        },
+        {
+          "category": "REQUIREMENT_TRACE",
+          "kind": "DOCS",
+          "status": "PRESENT",
+          "location": "openspec/specs/discounts/spec.md",
+          "requirementIds": ["DISCOUNTS-REQ-002"],
+          "scenarioIds": ["DISCOUNTS-SCN-004", "DISCOUNTS-SCN-005", "DISCOUNTS-SCN-006"]
+        }
+      ]
+    },
+    {
+      "id": "BEH-003",
+      "description": "Loyalty discount after volume, on the remaining amount: standard 0, gold 2%, platinum 4%; undefined/null tier (or no customer) is 0; any other tier throws UNKNOWN_TIER (after item validation, before coupon). Rounded half-up; LOYALTY line only when > 0.",
+      "evidence": [
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/tiers.js:10-17",
+          "requirementIds": ["DISCOUNTS-REQ-003"],
+          "scenarioIds": ["DISCOUNTS-SCN-007", "DISCOUNTS-SCN-008", "DISCOUNTS-SCN-009"]
+        },
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:29-44",
+          "requirementIds": ["DISCOUNTS-REQ-003"],
+          "scenarioIds": ["DISCOUNTS-SCN-007", "DISCOUNTS-SCN-009"]
+        },
+        {
+          "category": "RUNTIME_OBSERVATION",
+          "kind": "OBSERVATION",
+          "status": "NOT_APPLICABLE",
+          "reason": "Legacy discounts is a library module with no UI, HTTP route or runnable entry; behavior is established from source.",
+          "requirementIds": [],
+          "scenarioIds": []
+        },
+        {
+          "category": "REQUIREMENT_TRACE",
+          "kind": "DOCS",
+          "status": "PRESENT",
+          "location": "openspec/specs/discounts/spec.md",
+          "requirementIds": ["DISCOUNTS-REQ-003"],
+          "scenarioIds": ["DISCOUNTS-SCN-007", "DISCOUNTS-SCN-008", "DISCOUNTS-SCN-009"]
+        }
+      ]
+    },
+    {
+      "id": "BEH-004",
+      "description": "Coupon validation: code is String()-ified, trimmed and upper-cased; unknown -> UNKNOWN_COUPON; today (UTC ISO day of `now`, default current date) after the inclusive `expires` day -> COUPON_EXPIRED; pre-discount subtotal < minSubtotal -> COUPON_MINIMUM_NOT_MET; checked in that order. Catalogue: SAVE10 percent 10% min 5000, FLAT500 fixed 500 min 2000, FREESHIP shipping min 0, SUMMER23 percent 15% min 0 expires 2023-09-30. Public validateCoupon(code, subtotal, now) returns {valid:true, code} or {valid:false, code, reason}.",
+      "evidence": [
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/coupons.js:3-28",
+          "requirementIds": ["DISCOUNTS-REQ-004"],
+          "scenarioIds": ["DISCOUNTS-SCN-010", "DISCOUNTS-SCN-011", "DISCOUNTS-SCN-012", "DISCOUNTS-SCN-013"]
+        },
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:62-65",
+          "requirementIds": ["DISCOUNTS-REQ-004"],
+          "scenarioIds": ["DISCOUNTS-SCN-010", "DISCOUNTS-SCN-011"]
+        },
+        {
+          "category": "RUNTIME_OBSERVATION",
+          "kind": "OBSERVATION",
+          "status": "NOT_APPLICABLE",
+          "reason": "Legacy discounts is a library module with no UI, HTTP route or runnable entry; behavior is established from source.",
+          "requirementIds": [],
+          "scenarioIds": []
+        },
+        {
+          "category": "REQUIREMENT_TRACE",
+          "kind": "DOCS",
+          "status": "PRESENT",
+          "location": "openspec/specs/discounts/spec.md",
+          "requirementIds": ["DISCOUNTS-REQ-004"],
+          "scenarioIds": ["DISCOUNTS-SCN-010", "DISCOUNTS-SCN-011", "DISCOUNTS-SCN-012", "DISCOUNTS-SCN-013"]
+        }
+      ]
+    },
+    {
+      "id": "BEH-005",
+      "description": "Coupon application in quote(): a coupon that is not undefined/null/'' is validated against the pre-discount subtotal; invalid throws with the reason as code. Applied after loyalty: percent = half-up of remaining * rate; fixed = min(amount, remaining); shipping sets free shipping and pushes no line. The line uses the normalised code and is pushed only when > 0.",
+      "evidence": [
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:46-56",
+          "requirementIds": ["DISCOUNTS-REQ-005"],
+          "scenarioIds": ["DISCOUNTS-SCN-014", "DISCOUNTS-SCN-015", "DISCOUNTS-SCN-016", "DISCOUNTS-SCN-017"]
+        },
+        {
+          "category": "RUNTIME_OBSERVATION",
+          "kind": "OBSERVATION",
+          "status": "NOT_APPLICABLE",
+          "reason": "Legacy discounts is a library module with no UI, HTTP route or runnable entry; behavior is established from source.",
+          "requirementIds": [],
+          "scenarioIds": []
+        },
+        {
+          "category": "REQUIREMENT_TRACE",
+          "kind": "DOCS",
+          "status": "PRESENT",
+          "location": "openspec/specs/discounts/spec.md",
+          "requirementIds": ["DISCOUNTS-REQ-005"],
+          "scenarioIds": ["DISCOUNTS-SCN-014", "DISCOUNTS-SCN-015", "DISCOUNTS-SCN-016", "DISCOUNTS-SCN-017"]
+        }
+      ]
+    },
+    {
+      "id": "BEH-006",
+      "description": "Shipping and result: shipping is 0 when a shipping coupon applied or the remaining amount after all discounts is >= 5000, otherwise 799. quote() returns {currency:'USD', subtotal, discounts (ordered VOLUME, LOYALTY, coupon), shipping, total: remaining + shipping}. Consumed by orders/checkout summarize().",
+      "evidence": [
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:8-9",
+          "requirementIds": ["DISCOUNTS-REQ-006"],
+          "scenarioIds": ["DISCOUNTS-SCN-018", "DISCOUNTS-SCN-019"]
+        },
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/discounts/index.js:58-59",
+          "requirementIds": ["DISCOUNTS-REQ-006"],
+          "scenarioIds": ["DISCOUNTS-SCN-018", "DISCOUNTS-SCN-019"]
+        },
+        {
+          "category": "SOURCE",
+          "kind": "CODE",
+          "status": "PRESENT",
+          "location": "src/features/orders/checkout.js:7-13",
+          "requirementIds": ["DISCOUNTS-REQ-006"],
+          "scenarioIds": []
+        },
+        {
+          "category": "RUNTIME_OBSERVATION",
+          "kind": "OBSERVATION",
+          "status": "NOT_APPLICABLE",
+          "reason": "Legacy discounts is a library module with no UI, HTTP route or runnable entry; behavior is established from source.",
+          "requirementIds": [],
+          "scenarioIds": []
+        },
+        {
+          "category": "REQUIREMENT_TRACE",
+          "kind": "DOCS",
+          "status": "PRESENT",
+          "location": "openspec/specs/discounts/spec.md",
+          "requirementIds": ["DISCOUNTS-REQ-006"],
+          "scenarioIds": ["DISCOUNTS-SCN-018", "DISCOUNTS-SCN-019"]
+        }
+      ]
+    }
+  ],
+  "routeFlows": [],
+  "explicitNoRouteFlows": true
+}

@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "gates": [
+    {
+      "gate": "ARCHITECTURE_PLAN_GATE",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "review",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/architecture-review.md",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:8f8d2adfceab6f48c28478c22b91d6005203681944a26a35c485789b4ae03f72"
+        }
+      ]
+    },
+    {
+      "gate": "TARGETED_VERIFY",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "test",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/commands/full-suite.txt",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:464d609177da07d3623d3e608432323bf357b2208b6a8b759d2520dfd4309bb7"
+        }
+      ]
+    },
+    {
+      "gate": "FUNCTIONAL_PARITY_GATE",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "report",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/functional-parity.md",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:a6b1e0133ac6d48c7230e8a44f4330875b37bb632118ed731dfe3e571a8e9e99"
+        },
+        {
+          "kind": "test",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/commands/full-suite.txt",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:464d609177da07d3623d3e608432323bf357b2208b6a8b759d2520dfd4309bb7"
+        }
+      ]
+    },
+    {
+      "gate": "SIMPLIFY_ONCE",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "review",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/simplify-review.md",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:129df003813ebbcbeda3e4a5ee6bb1d184caa5446f842084abd87ee4d038b8dc"
+        }
+      ]
+    },
+    {
+      "gate": "ARCHITECTURE_IMPLEMENTATION_GATE",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "review",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/architecture-review.md",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:8f8d2adfceab6f48c28478c22b91d6005203681944a26a35c485789b4ae03f72"
+        }
+      ]
+    },
+    {
+      "gate": "PRECOMMIT_GATE",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "test",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/commands/full-suite.txt",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:464d609177da07d3623d3e608432323bf357b2208b6a8b759d2520dfd4309bb7"
+        }
+      ]
+    },
+    {
+      "gate": "FINAL_VERIFY",
+      "result": "PASS",
+      "attempts": 1,
+      "evidence": [
+        {
+          "kind": "test",
+          "reference": ".agents/knowledge/migrations/modules/discounts/evidence/final/commands/full-suite.txt",
+          "producedAt": "2026-10-25T18:33:53.000Z",
+          "producer": "claude-code claude-opus-5-5 session",
+          "environment": "local node v22.22.0",
+          "boundTo": {
+            "target": "discounts",
+            "legacyRevision": "924bc10e116baa91aa856c4d5d5e73a1cf524f19",
+            "targetRevision": "124d2033c5f54638b8ccb6d8a47dc35e199eb438",
+            "requirementsDigest": "sha256:text-lf-v1:e03e4d31e770be8e989ef02915b3b706470c12539e295dfdd5f25dd1112fb1a4",
+            "dataSourceMode": "standard",
+            "legacyDirtyDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "targetDirtyDigest": "04c7f84998cd68cb78a7414b944c72085235c23a31ec99e30082336a666ec3e1"
+          },
+          "hash": "sha256:text-lf-v1:464d609177da07d3623d3e608432323bf357b2208b6a8b759d2520dfd4309bb7"
+        }
+      ]
+    }
+  ]
+}

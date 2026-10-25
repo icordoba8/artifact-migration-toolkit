@@ -1,0 +1,6 @@
+a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7  verifier/verify.mjs
+c3dd9d5c92dbc5e6fc69979f7112a0aab514c0819c25c226e9da4315cb3f1482  verifier/legacy-ref/src/features/discounts/coupons.js
+67c0e1ba5fb0e95d45943818ed35619a5a28d658bfc4308cc8dc8c8f76cc295f  verifier/legacy-ref/src/features/discounts/errors.js
+74a8ce97da6dc21342399f3b05cc25db1592217180b9de845e2620e00ec7d991  verifier/legacy-ref/src/features/discounts/index.js
+9ef73d418f23a9f150b41e19794e550d5df12c4c6f83bc9a0de36657e358b6d2  verifier/legacy-ref/src/features/discounts/tiers.js
+ced18e383aad652d8aa305e94dc20ddc1549eabdeaa91e944f642c8fcfb40009  verifier/legacy-ref/src/shared/money.js

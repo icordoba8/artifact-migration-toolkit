@@ -1,0 +1,15 @@
+legacy (adapter): "passed":37,"total":37,
+reference: exit=0
+target-before-migration (module absent): exit=1
+legacy CJS copied unchanged into target path: exit=1
+mutant bankers-rounding: 35/37 killed by Q-003,DIFF-001
+mutant case-sensitive: 31/37 killed by Q-008,Q-010,V-001,V-002,V-004,DIFF-002
+mutant expiry-exclusive: 35/37 killed by Q-012,V-005
+mutant fixed-not-capped: 37/37 SURVIVED
+mutant loyalty-on-subtotal: 35/37 killed by Q-006,Q-008
+mutant min-on-remaining: 36/37 killed by Q-016
+mutant no-unknown-tier: 35/37 killed by E-007,E-011
+mutant price-before-qty: 36/37 killed by E-006
+mutant shipping-strict: 36/37 killed by Q-002
+mutant zero-rows: 25/37 killed by Q-001,Q-002,Q-005,Q-007,Q-009,Q-010,Q-011,Q-012,Q-013,Q-014,Q-015,DIFF-001
+fixed-not-capped is an equivalent mutant: FLAT500 requires subtotal>=2000, so remaining >= 2000*0.90*0.96 = 1728 > 500 and the cap is unreachable.

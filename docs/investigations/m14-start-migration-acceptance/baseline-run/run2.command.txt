@@ -1,0 +1,3 @@
+start=2026-10-25T18:24:43Z claude=2.1.310 (Claude Code)
+claude -p "/start-migration discounts" --model claude-opus-5-5 --output-format stream-json --verbose --mcp-config .mcp.json --strict-mcp-config --allowedTools <scoped list>
+end=2026-10-25T18:34:31Z exit=0

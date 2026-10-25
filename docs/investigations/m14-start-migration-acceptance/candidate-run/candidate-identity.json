@@ -1,0 +1,10 @@
+{
+  "identity": {
+    "name": "artifact-migration-tools",
+    "version": "0.0.1",
+    "commit": "cd737013b264e37c75527f4e95ea94e937eb1e20",
+    "contentHash": "sha256:21a1e89667db48a0a3a5007f074ce8a64248ed601f93bfecc8fba82df3475420"
+  },
+  "archiveDigest": "sha256:8a4e90f8e1b058f40afa5e38d2e586d275450515ed7ef61883ed97f6893933b9",
+  "pin": "sha256:591538618a15a8c695f6ac967c63302097b1a293070076b0f3dd3e25a9a669d4"
+}
