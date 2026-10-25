@@ -1,6 +1,6 @@
 {
   "name": "artifact-migration-tools",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "skill": "migrate-artifact",
   "computedHash": "b39c1650ce0cdd6485aff02582d27b74ccecabb25e266be4d7244aa442a23510",
   "source": "repository"
