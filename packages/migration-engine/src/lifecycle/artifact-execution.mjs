@@ -13,7 +13,7 @@ import {
   pathKey,
   targetTypeScript,
 } from "../census/index.mjs";
-import { assertSecurePath, canonicalJson, execFileAsync, normalizeRelative, sha256Hex } from "../shared/index.mjs";
+import { assertSecurePath, canonicalJson, execFileAsync, normalizeRelative, samePath, sha256Hex } from "../shared/index.mjs";
 import { fileExists as exists, fileHash, secureHash } from "../store/index.mjs";
 
 const JS_FILE_EXTENSIONS = new Set([".js", ".jsx", ".mjs"]);
@@ -206,15 +206,22 @@ const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn"]);
 
 const SCRIPT_NAME = /^[A-Za-z0-9_.:-]+$/;
 
-const packageScriptOf = async (command, targetRoot) => {
+// The syntactic half: which package script a command names, if any.
+const scriptInvocation = (command) => {
   const [manager, ...rest] = command.trim().split(/\s+/);
   if (!PACKAGE_MANAGERS.has(manager)) return null;
   const args = rest[0] === "run" ? rest.slice(1) : rest;
   if (args.length !== 1 || !SCRIPT_NAME.test(args[0])) return null;
+  return { manager, script: args[0] };
+};
+
+const packageScriptOf = async (command, targetRoot) => {
+  const invocation = scriptInvocation(command);
+  if (!invocation) return null;
   const manifest = await targetManifest(targetRoot);
   const scripts = manifest?.scripts;
-  if (!scripts || typeof scripts !== "object" || !Object.hasOwn(scripts, args[0])) return null;
-  return { manager, script: args[0] };
+  if (!scripts || typeof scripts !== "object" || !Object.hasOwn(scripts, invocation.script)) return null;
+  return invocation;
 };
 
 export const executeGenericCheck = async (command, targetRoot, label, capability) => {
@@ -346,6 +353,67 @@ export const validationEvidenceFor = async (root, previousState, validation, fre
   return { ...body, digest: evidenceDigest(body) };
 };
 
+const sameJson = (left, right) => canonicalJson(left ?? null) === canonicalJson(right ?? null);
+
+/**
+ * The newest evidence of a slice must describe the slice document the record
+ * pinned for it: the same bytes, the same changed-file manifest, one receipt
+ * per declared check in declaration order with that check's declaration, and an
+ * authority that matches what the engine can actually execute. Executable code
+ * must be covered by an engine-executed validator, exactly as the live gate
+ * demanded when the receipt was written.
+ */
+const assertEvidenceMatchesSlice = async (root, state, body, label) => {
+  const relative = `slices/${body.slice}.json`;
+  if (body.sliceDocument?.path !== relative || state.artifactHashes?.[relative] !== body.sliceDocument.sha256) {
+    throw new Error(`${label} does not match the pinned slice document.`);
+  }
+  const file = path.join(root, relative);
+  await assertSecurePath(root, file);
+  const bytes = await readFile(file);
+  if (sha256Hex(bytes) !== body.sliceDocument.sha256) throw new Error(`${label} does not match the pinned slice document.`);
+  const document = JSON.parse(bytes.toString("utf8"));
+  const manifest = document.changedFiles
+    .map((entry) => ({ path: normalizeRelative(entry.path, "changed file"), sha256: entry.sha256 }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (!sameJson(body.changedFiles, manifest)) throw new Error(`${label} changed files do not match the slice document.`);
+  if (!Array.isArray(body.receipts) || body.receipts.length !== document.checks.length) {
+    throw new Error(`${label} does not carry exactly one receipt per declared check.`);
+  }
+  const covered = new Set();
+  for (const [index, check] of document.checks.entries()) {
+    const receipt = body.receipts[index];
+    const fail = (why) => { throw new Error(`${label} check ${index} ${why}.`); };
+    if (receipt?.check !== index) fail("is out of declaration order");
+    if (check.validator) {
+      if (receipt.kind !== check.validator.kind || !sameJson(receipt.declared, check.validator)) fail("does not match its declared validator");
+      if (receipt.authority !== "ENGINE" || !["EXECUTED", "NOT_REQUIRED"].includes(receipt.execution)) fail("has an impossible validator authority");
+    } else {
+      if (receipt.declared?.commandSha256 !== sha256Hex(check.command)) fail("does not match its declared command");
+      // Only a command that names a package script can have been engine-executed,
+      // and only as that script. (Whether the script was in the manifest then
+      // is not re-decidable: the manifest may legitimately change later.)
+      const invocation = scriptInvocation(check.command);
+      const engine = invocation !== null && receipt.kind === "PACKAGE_SCRIPT" && receipt.authority === "ENGINE" &&
+        receipt.execution === "EXECUTED" && receipt.exitCode === 0 &&
+        receipt.declared.manager === invocation.manager && receipt.declared.script === invocation.script;
+      const declaration = receipt.kind === "COMMAND" && receipt.authority === "AGENT_DECLARATION" && receipt.execution === "UNSUPPORTED";
+      if (!engine && !declaration) fail("has an impossible command authority");
+    }
+    if (receipt.execution !== "EXECUTED") continue;
+    if (!Number.isInteger(receipt.exitCode) || !Array.isArray(receipt.coveredFiles) || typeof receipt.validator?.name !== "string") {
+      fail("claims an execution without its result");
+    }
+    // Mirrors hasCodeValidationCheck: a pass, or a TypeScript failure confined to unchanged files.
+    const isolated = receipt.kind === "TYPESCRIPT" && receipt.diagnostics?.count > 0 && receipt.diagnostics.affectsChangedFile === false;
+    if (check.validator && (receipt.exitCode === 0 || isolated)) for (const covers of receipt.coveredFiles) covered.add(covers);
+  }
+  const uncovered = manifest.filter((entry) => CODE_FILE_EXTENSIONS.has(path.extname(entry.path).toLowerCase()) && !covered.has(entry.path));
+  if (uncovered.length > 0) {
+    throw new Error(`${label} has no engine-executed validator covering ${uncovered.map((entry) => entry.path).join(", ")}.`);
+  }
+};
+
 /**
  * FINALIZE's read of the persisted evidence. Pure reading: it never executes a
  * validator (status and preview share it). Compatibility is explicit: slice
@@ -355,7 +423,7 @@ export const validationEvidenceFor = async (root, previousState, validation, fre
  * every slice transition must carry one, so evidence can be neither stripped
  * from a later slice nor invented for another.
  */
-export const verifyValidationEvidence = async (state, events, completedSlices = state.completedSlices) => {
+export const verifyValidationEvidence = async (root, state, events, completedSlices = state.completedSlices) => {
   const transitions = events.filter((event) => event.event === "ADVANCED" && EVIDENCE_STEPS.has(event.from));
   const first = transitions.findIndex((event) => Object.hasOwn(event, "validationEvidence"));
   if (first === -1) return { status: "LEGACY_UNRECORDED", slices: [] };
@@ -383,23 +451,36 @@ export const verifyValidationEvidence = async (state, events, completedSlices = 
         throw new Error(`${label} check ${receipt.check} claims execution without engine authority.`);
       }
     }
-    latest.set(body.slice, body);
+    // An unkeyed digest only proves the envelope is self-consistent, so it must
+    // also agree with what the record pins independently of it. The source
+    // binding never moves after bootstrap; in one root its digest legitimately
+    // covers the files the migration rewrites, so it is only comparable apart.
+    if (!samePath(state.source.root, state.target.root) && body.sourceDigest !== state.bindings.source.digest) {
+      throw new Error(`${label} is bound to a different source binding.`);
+    }
+    // The transition that entered the current state captured the current target binding.
+    if (event.revision === state.revision && body.checkpoint === "VERIFY_SLICES" &&
+        body.targetDigest !== state.bindings.target.digest) {
+      throw new Error(`${label} is bound to a different target binding.`);
+    }
+    latest.set(body.slice, { body, label });
   }
+  for (const { body, label } of latest.values()) await assertEvidenceMatchesSlice(root, state, body, label);
   const missing = completedSlices.filter((slice) =>
-    latest.get(slice)?.checkpoint !== "VERIFY_SLICES" && !(legacySlices.has(slice) && !latest.has(slice)));
+    latest.get(slice)?.body.checkpoint !== "VERIFY_SLICES" && !(legacySlices.has(slice) && !latest.has(slice)));
   if (missing.length > 0) throw new Error(`Validator evidence does not cover verified slice(s): ${missing.join(", ")}.`);
   // Each changed file is judged by the newest evidence that covered it: a later
   // slice may legitimately rewrite an earlier slice's file, but nothing may
   // rewrite it after its last validation.
   const owner = new Map();
-  for (const body of latest.values()) for (const file of body.changedFiles) owner.set(file.path, file.sha256);
+  for (const { body } of latest.values()) for (const file of body.changedFiles) owner.set(file.path, file.sha256);
   for (const [file, expected] of owner) {
     const actual = await secureHash(state.target.root, file, "validated target file").catch(() => null);
     if (actual !== expected) throw new Error(`Target file '${file}' changed after its validator evidence was recorded.`);
   }
   return {
     status: legacySlices.size > 0 ? "PARTIAL_LEGACY" : "RECORDED",
-    slices: [...latest.values()].map((body) => ({
+    slices: [...latest.values()].map(({ body }) => ({
       slice: body.slice,
       digest: evidenceDigest(body),
       executed: body.receipts.filter((receipt) => receipt.execution === "EXECUTED").length,

@@ -49,10 +49,12 @@ must appear exactly once, as `{path, disposition, ref?, rationale?}` where
 `path` is that key.
 
 A CommonJS export is a unit too: `module.exports = ...`, `exports.x = ...` and
-`module.exports.x = ...` key as `<file>#module.exports` and
-`<file>#module.exports.x`. An export the census cannot decide (a `require()`
+`module.exports.x = ...` (or `module["exports"]`) key as `<file>#module.exports`
+and `<file>#module.exports.x`. An export the census cannot decide (a root set to
+a call result such as `module.exports = buildExports()`, a `require()`
 re-export, a computed key, a write inside a function or branch, the export
-object handed to another call) is still a unit -- `module.exports.<computed>`,
+object handed to another call) is still a unit -- `module.exports` itself,
+`module.exports.<computed>`,
 `module.exports.<dynamic>`, `module.exports.<unresolved>` -- and such a CommonJS
 unit also requires a `rationale` saying how it was decided. A script with no
 exports at all (a side-effect entry) has no units. FINALIZE re-derives this

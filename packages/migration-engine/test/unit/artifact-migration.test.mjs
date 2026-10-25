@@ -6195,6 +6195,41 @@ test("M13 census: undecidable CommonJS exports stay visible as unresolved units"
   assert.deepEqual(unitsOf("rebind.cjs", "exports = { a: 1 };\n"), ["module.exports:U", "module.exports.a:R"]);
 });
 
+test("M13.1 census: a CommonJS root whose shape is decided at run time is unresolved", () => {
+  // A call result decides the exported names when it runs; it is never resolved.
+  assert.deepEqual(unitsOf("built.cjs", "module.exports = buildExports();\n"), ["module.exports:U"]);
+  assert.deepEqual(
+    unitsOf("built-alias.cjs", "const api = buildExports();\nmodule.exports = api;\n"),
+    ["module.exports:U", "module.exports.<unresolved>:U"],
+  );
+  assert.deepEqual(unitsOf("new.cjs", "module.exports = new Api();\n"), ["module.exports:U"]);
+  assert.deepEqual(unitsOf("member.cjs", "module.exports = registry.api;\n"), ["module.exports:U"]);
+  assert.deepEqual(unitsOf("either.cjs", "module.exports = flag ? { a: 1 } : make();\n"), ["module.exports:U", "module.exports.a:R"]);
+  // Statically decidable roots stay resolved.
+  assert.deepEqual(unitsOf("class.cjs", "module.exports = class Api {};\n"), ["module.exports:R"]);
+  assert.deepEqual(unitsOf("value.cjs", "module.exports = 'v1';\n"), ["module.exports:R"]);
+  // The root is decided; descending into the alias is the same walk ESM uses.
+  assert.deepEqual(unitsOf("arrow.cjs", "const f = () => 1;\nmodule.exports = f;\n"), ["module.exports:R", "module.exports.<unresolved>:U"]);
+});
+
+test("M13.1 census: bracketed module['exports'] is the export object", () => {
+  assert.deepEqual(unitsOf("sq.cjs", "module['exports'] = { a: 1 };\n"), ["module.exports:R", "module.exports.a:R"]);
+  assert.deepEqual(unitsOf("dq.cjs", "module[\"exports\"] = { a: 1 };\n"), ["module.exports:R", "module.exports.a:R"]);
+  assert.deepEqual(unitsOf("dyn.cjs", "module[\"exports\"] = buildExports();\n"), ["module.exports:U"]);
+  assert.deepEqual(unitsOf("req.cjs", "module['exports'] = require('./impl');\n"), ["module.exports:U"]);
+  assert.deepEqual(
+    unitsOf("members.cjs", "module['exports'].x = 1;\nmodule[\"exports\"]['y'] = 2;\nmodule['exports'][k] = 3;\n"),
+    ["module.exports:R", "module.exports.<computed>:U", "module.exports.x:R", "module.exports.y:R"],
+  );
+  assert.deepEqual(
+    unitsOf("handed.cjs", "Object.assign(module['exports'], mixin);\n"),
+    ["module.exports:R", "module.exports.<dynamic>:U"],
+  );
+  assert.deepEqual(unitsOf("twice-b.cjs", "module.exports = 1;\nmodule['exports'] = 2;\n"), ["module.exports:U"]);
+  // Any other key on `module` is not the export object.
+  assert.deepEqual(unitsOf("other.cjs", "module['id'] = 1;\n"), []);
+});
+
 test("M13 census: ESM and TypeScript units are unchanged", () => {
   assert.deepEqual(unitsOf("theme.ts", "export const theme = { a: 1 };\n"), ["theme:R", "theme.a:R"]);
   assert.deepEqual(unitsOf("fn.js", "function slugify(){}\nexport default slugify;\n"), ["slugify:U"]);
@@ -6240,6 +6275,30 @@ test("M13 completeness: omitted, altered and undisposed CommonJS units cannot pa
     assert.equal((await stateOf(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
     result = await tryCompleteness(fixture, cjsUnits(["module.exports", "module.exports.slugify", "module.exports.<computed>"], {
       "module.exports.<computed>": { rationale: "k is always 'default'; covered by B-1" },
+    }));
+    assert.equal(result.outcome, "CONTINUE", result.reason);
+    assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13.1 completeness: a dynamically built CommonJS export cannot be omitted or left unjustified", async () => {
+  const fixture = await createFixture();
+  try {
+    await addCommonJsSource(fixture, "function buildExports() { return { slugify() {} }; }\nmodule.exports = buildExports();\n");
+    await bootstrap(fixture);
+    await authorSource(fixture);
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    let result = await tryCompleteness(fixture, censusUnits());
+    assert.match(result.reason, /discovery completeness\.units must be exactly/);
+    result = await tryCompleteness(fixture, cjsUnits(["module.exports"]));
+    assert.match(result.reason, /unresolved unit 'widget\/slug\.cjs#module\.exports' rationale/);
+    result = await tryCompleteness(fixture, cjsUnits(["module.exports"], { "module.exports": { rationale: "  " } }));
+    assert.match(result.reason, /unresolved unit 'widget\/slug\.cjs#module\.exports' rationale/);
+    assert.equal((await stateOf(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+    result = await tryCompleteness(fixture, cjsUnits(["module.exports"], {
+      "module.exports": { rationale: "buildExports() returns exactly { slugify }; covered by B-1" },
     }));
     assert.equal(result.outcome, "CONTINUE", result.reason);
     assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
@@ -6461,7 +6520,29 @@ test("M13 evidence: FINALIZE refuses tampered, rebound or stripped evidence and 
     // Evidence for bytes other than the ones on disk (as if validated, then edited).
     await refuse((events) => events.map((event) => event.validationEvidence
       ? { ...event, validationEvidence: sealed({ ...event.validationEvidence, changedFiles: event.validationEvidence.changedFiles.map((file) => ({ ...file, sha256: "0".repeat(64) })) }) }
-      : event), /changed after its validator evidence was recorded/);
+      : event), /changed files do not match the slice document/);
+    // M13.1: re-sealed evidence must still agree with what the record pins
+    // independently of it, field by field.
+    const reseal = (change) => (events) => events.map((event) => event.validationEvidence
+      ? { ...event, validationEvidence: sealed(change(event.validationEvidence)) }
+      : event);
+    const firstReceipt = (change) => reseal((body) => ({ ...body, receipts: [change(body.receipts[0]), ...body.receipts.slice(1)] }));
+    await refuse(reseal((body) => ({ ...body, sourceDigest: "1".repeat(64) })), /different source binding/);
+    await refuse(reseal((body) => ({ ...body, targetDigest: "2".repeat(64) })), /different target binding/);
+    await refuse(reseal((body) => ({ ...body, sliceDocument: { ...body.sliceDocument, sha256: "3".repeat(64) } })), /pinned slice document/);
+    await refuse(reseal((body) => ({ ...body, sliceDocument: { ...body.sliceDocument, path: "slices/other.json" } })), /pinned slice document/);
+    await refuse(reseal((body) => ({ ...body, changedFiles: [] })), /changed files do not match the slice document/);
+    await refuse(reseal((body) => ({ ...body, receipts: [] })), /exactly one receipt per declared check/);
+    await refuse(reseal((body) => ({ ...body, receipts: [...body.receipts, body.receipts[0]] })), /exactly one receipt per declared check/);
+    await refuse(firstReceipt((receipt) => ({ ...receipt, check: 1 })), /out of declaration order/);
+    await refuse(firstReceipt((receipt) => ({ ...receipt, declared: { ...receipt.declared, project: "other/tsconfig.json" } })), /does not match its declared validator/);
+    await refuse(firstReceipt((receipt) => ({ ...receipt, kind: "NODE_CHECK" })), /does not match its declared validator/);
+    await refuse(firstReceipt((receipt) => ({ ...receipt, execution: "UNSUPPORTED" })), /impossible validator authority/);
+    // Downgrading the executed validator leaves the changed code without engine coverage.
+    await refuse(firstReceipt((receipt) => ({ ...receipt, execution: "NOT_REQUIRED", exitCode: null })), /no engine-executed validator covering/);
+    await refuse(firstReceipt((receipt) => ({ ...receipt, exitCode: 2 })), /no engine-executed validator covering/);
+    await refuse(firstReceipt((receipt) => ({ ...receipt, coveredFiles: [] })), /no engine-executed validator covering/);
+    await refuse(firstReceipt(({ validator: _v, ...receipt }) => receipt), /claims an execution without its result/);
     // End to end, a real edit after validation is refused (the parity and gate
     // hashes and binding freshness see it too; the evidence check is behind them).
     await restoreRecord(fixture, pristine);
@@ -6470,6 +6551,45 @@ test("M13 evidence: FINALIZE refuses tampered, rebound or stripped evidence and 
     assert.notEqual(refused.outcome, "COMPLETE");
     assert.match(refused.reason, /changed after its validator evidence was recorded|drift|does not match/);
     assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("M13.1 evidence: FINALIZE refuses command receipts promoted, rebound or reordered after the fact", async () => {
+  const fixture = await createFixture();
+  try {
+    const checks = [typescriptCheck(), { command: "npm run check", status: "PASS" }, { command: "make lint", status: "PASS" }];
+    await authorSlice(fixture, undefined, checks);
+    await writeJson(fixture.targetRoot, "package.json", { name: "t", private: true, scripts: { check: "node -e \"process.exit(0)\"" } });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await advanceVerification(fixture, { ui: false });
+    await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+    const pristine = await snapshotRecord(fixture);
+    const refuse = async (change, pattern) => {
+      await restoreRecord(fixture, pristine);
+      await rewriteRecord(fixture, { events: (events) => events.map((event) => event.validationEvidence
+        ? { ...event, validationEvidence: sealed({ ...event.validationEvidence, receipts: change(event.validationEvidence.receipts) }) }
+        : event) });
+      const refused = await runArtifact(fixture.options);
+      assert.equal(refused.outcome, "CONTINUE");
+      assert.match(refused.reason, pattern);
+      assert.equal((await stateOf(fixture)).currentStep, "FINALIZE");
+    };
+    const [validator, script, declaration] = (await historyEvents(fixture)).find((event) => event.validationEvidence).validationEvidence.receipts;
+    assert.deepEqual([script.kind, declaration.kind], ["PACKAGE_SCRIPT", "COMMAND"]);
+    // An agent declaration promoted to an engine execution.
+    await refuse(() => [validator, script, { ...script, check: 2, declared: { ...script.declared, commandSha256: declaration.declared.commandSha256 } }], /impossible command authority/);
+    // A receipt for another command.
+    await refuse(() => [validator, { ...script, declared: { ...script.declared, commandSha256: declaration.declared.commandSha256 } }, declaration], /does not match its declared command/);
+    await refuse(() => [validator, { ...script, declared: { ...script.declared, script: "lint" } }, declaration], /impossible command authority/);
+    await refuse(() => [validator, { ...script, exitCode: 1 }, declaration], /impossible command authority/);
+    await refuse(() => [validator, declaration, script], /out of declaration order/);
+    // The untouched record completes.
+    await restoreRecord(fixture, pristine);
+    const result = await runArtifact(fixture.options);
+    assert.equal(result.outcome, "COMPLETE", result.reason);
   } finally {
     await fixture.cleanup();
   }

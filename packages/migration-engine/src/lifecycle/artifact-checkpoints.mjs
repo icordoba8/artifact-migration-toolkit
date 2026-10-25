@@ -927,7 +927,7 @@ export const validateFinal = async (root, state) => {
       await structuralCensus(state, baseline.target.source.document, rewritten),
       "final structural coverage",
     );
-    validatorEvidence = await verifyValidationEvidence(state, (await readHistory(root)).events);
+    validatorEvidence = await verifyValidationEvidence(root, state, (await readHistory(root)).events);
   }
 
   // A requirement disposed as carried into the target owes a target file that

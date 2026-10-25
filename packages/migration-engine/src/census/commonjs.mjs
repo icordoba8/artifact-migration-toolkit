@@ -12,9 +12,10 @@ const CJS_ROOT = "module.exports";
  * The CommonJS half of `structuralUnits`: `module.exports = ...`,
  * `exports.name = ...`, `module.exports.name = ...` and their bracketed forms,
  * resolved through local bindings exactly as ESM exports are. Anything that
- * touches the export object in a way this walk cannot decide -- a computed key,
- * a write inside a function or branch, the object handed to another call, a
- * repeated root assignment, a `require()` re-export -- is surfaced with
+ * touches the export object in a way this walk cannot decide -- a call result
+ * (`module.exports = buildExports()`), a computed key, a write inside a
+ * function or branch, the object handed to another call, a repeated root
+ * assignment, a `require()` re-export -- is surfaced with
  * `resolved: false`, never dropped, so a CommonJS file can no longer leave the
  * completeness universe with zero units.
  * shortcut: a local binding or parameter named `exports`/`module` is not
@@ -35,33 +36,41 @@ export const commonJsUnits = (ts, source, locals, { add, descend }) => {
   }
   const strip = (node) =>
     ts.isParenthesizedExpression(node) || ts.isAsExpression?.(node) ? strip(node.expression) : node;
-  const isRequire = (node) =>
-    ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require";
-  // A root value is decidable when this file holds its shape: not a
-  // `require()` re-export and not a binding that is imported, cyclic or unset.
+  const literalKey = (argument) =>
+    argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral?.(argument) || ts.isNumericLiteral(argument))
+      ? argument.text
+      : null;
+  // A root value is decidable only when this file holds its shape: a literal
+  // object, function, class or primitive, or a local binding to one. A call
+  // result (`buildExports()`, `require()`), `new`, a member read or any other
+  // expression decides the exported names at run time, so it is unresolved.
   const decidable = (node, seen = new Set()) => {
     if (!node) return false;
     const value = strip(node);
-    if (isRequire(value)) return false;
-    if (!ts.isIdentifier(value)) return true;
-    if (declared.has(value.text)) return true;
-    if (seen.has(value.text) || !locals.has(value.text)) return false;
-    seen.add(value.text);
-    return decidable(locals.get(value.text), seen);
+    if (ts.isIdentifier(value)) {
+      if (declared.has(value.text)) return true;
+      if (seen.has(value.text) || !locals.has(value.text)) return false;
+      seen.add(value.text);
+      return decidable(locals.get(value.text), seen);
+    }
+    if (ts.isConditionalExpression(value)) return decidable(value.whenTrue, seen) && decidable(value.whenFalse, seen);
+    return ts.isObjectLiteralExpression(value) || ts.isFunctionExpression(value) || ts.isArrowFunction(value) ||
+      ts.isClassExpression(value) || ts.isStringLiteral(value) || ts.isNumericLiteral(value) ||
+      ts.isNoSubstitutionTemplateLiteral(value) || value.kind === ts.SyntaxKind.TrueKeyword ||
+      value.kind === ts.SyntaxKind.FalseKeyword || value.kind === ts.SyntaxKind.NullKeyword;
   };
+  // `exports`, `module.exports`, `module["exports"]` and `module['exports']`.
   const isExportObject = (node) => {
     const value = strip(node);
     if (ts.isIdentifier(value)) return value.text === "exports";
-    return ts.isPropertyAccessExpression(value) && ts.isIdentifier(value.expression) &&
-      value.expression.text === "module" && value.name.text === "exports";
+    if (ts.isPropertyAccessExpression(value)) {
+      return ts.isIdentifier(value.expression) && value.expression.text === "module" && value.name.text === "exports";
+    }
+    return ts.isElementAccessExpression(value) && ts.isIdentifier(value.expression) &&
+      value.expression.text === "module" && literalKey(value.argumentExpression) === "exports";
   };
-  const memberKey = (access) => {
-    if (ts.isPropertyAccessExpression(access)) return access.name.text;
-    const argument = access.argumentExpression;
-    return argument && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral?.(argument) || ts.isNumericLiteral(argument))
-      ? argument.text
-      : null;
-  };
+  const memberKey = (access) =>
+    ts.isPropertyAccessExpression(access) ? access.name.text : literalKey(access.argumentExpression);
   const values = [];
   let rootAssignments = 0;
   const visit = (node) => {
