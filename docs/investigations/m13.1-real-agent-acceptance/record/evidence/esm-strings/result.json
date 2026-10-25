@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "sliceId": "esm-strings",
+  "status": "PASS",
+  "checks": [
+    { "behaviorId": "B-WORDS", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670", "status": "VERIFIED" }] },
+    { "behaviorId": "B-SLUGIFY", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670", "status": "VERIFIED" }] },
+    { "behaviorId": "B-TRUNCATE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670", "status": "VERIFIED" }] },
+    { "behaviorId": "B-TITLECASE", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670", "status": "VERIFIED" }] },
+    { "behaviorId": "B-CASE-CONVERTERS", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670", "status": "VERIFIED" }] },
+    { "behaviorId": "B-EXPORTS", "status": "PASS", "evidence": [{ "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670", "status": "VERIFIED" }] }
+  ],
+  "runtimeEvidence": []
+}

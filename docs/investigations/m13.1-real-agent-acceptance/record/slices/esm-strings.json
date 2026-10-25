@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "sliceId": "esm-strings",
+  "status": "COMPLETE",
+  "changedFiles": [
+    { "path": "src/utils/strings.js", "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670" }
+  ],
+  "checks": [
+    { "validator": { "kind": "NODE_CHECK", "file": "src/utils/strings.js" }, "status": "PASS" }
+  ],
+  "preservedTargetNativeIds": []
+}

@@ -1,0 +1,256 @@
+{
+ "exports": [
+  "VERSION",
+  "kebabCase",
+  "slugify",
+  "snakeCase",
+  "titleCase",
+  "truncate"
+ ],
+ "version": "2.1.0",
+ "rows": [
+  {
+   "fn": "slugify",
+   "args": [
+    "Hello World"
+   ],
+   "expected": "hello-world"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "  Héllo,  Wörld!  "
+   ],
+   "expected": "hello-world"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "fooBarBaz"
+   ],
+   "expected": "foo-bar-baz"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "already-a-slug"
+   ],
+   "expected": "already-a-slug"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    ""
+   ],
+   "expected": ""
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "Hello World",
+    {
+     "separator": "_"
+    }
+   ],
+   "expected": "hello_world"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "Hello Big World",
+    {
+     "maxLength": 9
+    }
+   ],
+   "expected": "hello-big"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "Hello Big World",
+    {
+     "maxLength": 6
+    }
+   ],
+   "expected": "hello"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "a b c",
+    {
+     "separator": "--",
+     "maxLength": 4
+    }
+   ],
+   "expected": "a--b"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    "Ünïcödé Çafé 2024"
+   ],
+   "expected": "unicode-cafe-2024"
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello world",
+    5
+   ],
+   "expected": "he..."
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello",
+    5
+   ],
+   "expected": "hello"
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello",
+    10
+   ],
+   "expected": "hello"
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello world",
+    8,
+    "~"
+   ],
+   "expected": "hello w~"
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello world",
+    2
+   ],
+   "expected": ".."
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello world",
+    0
+   ],
+   "expected": ""
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "hello world",
+    3,
+    ""
+   ],
+   "expected": "hel"
+  },
+  {
+   "fn": "titleCase",
+   "args": [
+    "hello world"
+   ],
+   "expected": "Hello World"
+  },
+  {
+   "fn": "titleCase",
+   "args": [
+    "XMLHttpRequest handler"
+   ],
+   "expected": "Xmlhttp Request Handler"
+  },
+  {
+   "fn": "titleCase",
+   "args": [
+    "snake_case-and kebab"
+   ],
+   "expected": "Snake Case And Kebab"
+  },
+  {
+   "fn": "titleCase",
+   "args": [
+    ""
+   ],
+   "expected": ""
+  },
+  {
+   "fn": "kebabCase",
+   "args": [
+    "fooBar baz"
+   ],
+   "expected": "foo-bar-baz"
+  },
+  {
+   "fn": "kebabCase",
+   "args": [
+    "Hello  World!"
+   ],
+   "expected": "hello-world"
+  },
+  {
+   "fn": "kebabCase",
+   "args": [
+    "  Ça va?  "
+   ],
+   "expected": "ca-va"
+  },
+  {
+   "fn": "snakeCase",
+   "args": [
+    "Foo-Bar"
+   ],
+   "expected": "foo_bar"
+  },
+  {
+   "fn": "snakeCase",
+   "args": [
+    "userID value"
+   ],
+   "expected": "user_id_value"
+  },
+  {
+   "fn": "snakeCase",
+   "args": [
+    "already_snake"
+   ],
+   "expected": "already_snake"
+  }
+ ],
+ "throws": [
+  {
+   "fn": "slugify",
+   "args": [
+    42
+   ],
+   "error": "TypeError"
+  },
+  {
+   "fn": "slugify",
+   "args": [
+    null
+   ],
+   "error": "TypeError"
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "abc",
+    -1
+   ],
+   "error": "RangeError"
+  },
+  {
+   "fn": "truncate",
+   "args": [
+    "abc",
+    1.5
+   ],
+   "error": "RangeError"
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+{
+ "sessions": 1,
+ "promptTurnsFromUser": 0,
+ "toolCalls": 44,
+ "toolErrors": 2,
+ "byTool": {
+  "Bash": 19,
+  "Read": 7,
+  "Grep": 5,
+  "Write": 13
+ },
+ "result": "success",
+ "numTurns": 45,
+ "model": "claude-opus-5-5",
+ "durationMs": 221076
+}

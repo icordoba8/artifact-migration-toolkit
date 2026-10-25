@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "artifactId": "strings-2eb849682dc8",
+  "hasVisibleUi": false,
+  "sourceFiles": ["legacy/strings.cjs"],
+  "behaviors": [
+    {
+      "id": "B-WORDS",
+      "description": "Internal word splitter: String() coercion, NFKD normalization, strips combining diacritics U+0300-U+036F, splits camelCase boundaries ([a-z0-9][A-Z]), splits on any run of non-alphanumerics, drops empty parts, lowercases each word.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-SLUGIFY",
+      "description": "slugify(input, options): throws TypeError('slugify expects a string') for non-string input; joins words with options.separator (default '-', falsy separator falls back to '-'); when options.maxLength is an integer and the slug is longer, slices to maxLength then strips any trailing separator(s).",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-TRUNCATE",
+      "description": "truncate(text, max, ellipsis): ellipsis defaults to '...' only when undefined; throws RangeError('max must be a non-negative integer') for non-integer or negative max; returns text unchanged when length <= max; returns tail.slice(0, max) when max <= tail length; otherwise text.slice(0, max - tail.length) + tail.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-TITLECASE",
+      "description": "titleCase(input): words(input) with each word's first character uppercased, joined by a single space.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-CASE-CONVERTERS",
+      "description": "Generated case converters from SEPARATORS {kebab:'-', snake:'_'}: kebabCase(input) = words(input).join('-'), snakeCase(input) = words(input).join('_'). No type check (input is String()-coerced).",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    },
+    {
+      "id": "B-EXPORTS",
+      "description": "Public export surface: module.exports = createApi() yields {slugify, truncate, titleCase, kebabCase, snakeCase}, plus module.exports.VERSION = '2.1.0'. The target is the ESM module src/utils/strings.js exposing the same named exports consumed by src/index.js.",
+      "visible": false,
+      "evidence": [{ "path": "legacy/strings.cjs", "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30", "status": "VERIFIED" }]
+    }
+  ],
+  "globalContracts": [],
+  "featureLocalVisuals": [],
+  "operatorDecisions": []
+}

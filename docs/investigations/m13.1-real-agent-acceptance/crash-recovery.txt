@@ -1,0 +1,3 @@
+{"mode":"forged","engine":"THREW exit=2  Reason: Recovered transaction event does not reproduce the persisted proposal.","journalLeft":true,"step":"IMPLEMENT_SLICES","lastSeq":6,"evidenceMatchesGenuine":null}
+{"mode":"genuine","engine":"strings-2eb849682dc8 -> src/utils/strings.js | 9/9 FINALIZE | CONTINUE","journalLeft":false,"step":"FINALIZE","lastSeq":8,"evidenceMatchesGenuine":false}
+recovery: forged journal refused (event does not reproduce); genuine journal reproved by re-executing NODE_CHECK, journal cleared; recovered seq7 identical to journal event and to the agent run's evidence; recovered record reached COMPLETE through FINALIZE evidence verification

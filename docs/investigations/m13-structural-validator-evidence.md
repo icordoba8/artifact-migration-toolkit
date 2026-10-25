@@ -91,3 +91,68 @@ receipt exactly. FINALIZE re-reads the envelopes (a pure read) and refuses:
   record can rewrite it consistently. The evidence is tamper-evident relative to
   the chain, not cryptographically attested.
 - `--status` does not yet display the persisted evidence.
+
+# M13.1: corrections found by independent review
+
+## A. CommonJS dynamic exports were classified as resolved
+
+`commonjs.mjs` `decidable` returned `true` for every root value that was not an
+identifier or a `require()` call. `module.exports = buildExports()`, `new Api()`
+or `registry.api` (directly or through a local alias) therefore became a
+**resolved** `module.exports` unit, and `descend` found no object literal in a
+zero-argument call, so no member units existed either: every name the call
+exports left the completeness universe without a rationale.
+
+Fix: a root is decidable only when this file holds its shape, which means an
+object, function, class or primitive literal, a conditional whose branches are
+both decidable, or a local binding to one of these. Anything else is a visible
+`module.exports` unit with `resolved: false`, so it owes a rationale. Member
+writes (`module.exports.x = make()`) keep their resolved name, just as ESM
+`export const x = make()` does.
+
+## B. `module["exports"]` was not the export object
+
+`isExportObject` recognized only `module.exports`. As a result,
+`module['exports'] = {...}` and `module["exports"].x = ...` produced no units at
+all. The bracketed forms with a literal key, `'exports'`, `"exports"` or a plain
+template, are now the export object for root writes, member writes, reads and
+hand-offs, exactly like the property form. Any other key on `module` remains
+ignored.
+
+## C. FINALIZE trusted re-sealed evidence
+
+`verifyValidationEvidence` checked the envelope's own digest and its history
+binding: artifact id, slice, checkpoint and revision. Both are unkeyed and
+self-consistent, so an envelope rewritten and re-sealed alongside the chain
+passed, even when it no longer described what the record itself pins. Already
+enforced elsewhere, and not duplicated here:
+
+- the history hash chain and `integrity.json`
+- the slice document pin (`artifactHashes`, revalidated on every run)
+- changed-file bytes (re-hashed against the newest evidence)
+
+Now also required of the newest envelope of each slice:
+
+| Property | Cross-check |
+| --- | --- |
+| slice document | path is `slices/<slice>.json`; its hash equals the record's pin and the current bytes |
+| changed files | exactly the slice document's `changedFiles` manifest |
+| receipt cardinality and order | one receipt per declared check, `check` equal to the index |
+| declared validator identity | `kind` and `declared` equal the declared validator |
+| declared command | `commandSha256` equals the declared command's digest |
+| execution authority | validator receipts are `ENGINE` and `EXECUTED` or `NOT_REQUIRED`. Command receipts are either an agent declaration (`COMMAND`, `UNSUPPORTED`) or a `PACKAGE_SCRIPT` executed with exit 0 for the exact `manager`/`script` that the command names. An executed receipt carries its exit code, covered files and validator identity |
+| coverage | every changed code file is covered by an engine-executed validator: a pass, or a TypeScript failure confined to unchanged files, as the live gate required |
+| source digest | equals the immutable source binding (separate roots only; in one root it covers files that the migration rewrites) |
+| target digest | the transition that entered the current state carries the current target binding |
+
+Every row has a negative test in `artifact-migration.test.mjs` (M13.1 tests).
+Legacy records (`LEGACY_UNRECORDED`, `PARTIAL_LEGACY`) are unchanged.
+
+Remaining limits:
+
+- An unkeyed chain cannot stop someone who rewrites the slice document, its pin,
+  the evidence and the chain together. These checks make the evidence agree with
+  the record; they do not attest it.
+- Whether a package script was present in the manifest when it ran is not
+  re-decidable, because the manifest may legitimately change later.
+- Target digests of earlier transitions are not recorded anywhere else.

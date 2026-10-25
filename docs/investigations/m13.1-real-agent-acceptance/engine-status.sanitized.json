@@ -1,0 +1,210 @@
+{
+  "artifactId": "strings-2eb849682dc8",
+  "exists": true,
+  "status": "COMPLETE",
+  "outcome": "COMPLETE",
+  "state": {
+    "contractVersion": 1,
+    "formatVersion": 14,
+    "workflowVersion": "1.0",
+    "artifactId": "strings-2eb849682dc8",
+    "artifactType": "artifact",
+    "source": {
+      "root": "<disposable>/consumer",
+      "path": "legacy/strings.cjs"
+    },
+    "target": {
+      "root": "<disposable>/consumer",
+      "path": "src/utils/strings.js"
+    },
+    "designSource": "target-system",
+    "figmaSources": [],
+    "resolution": "MIGRATE_NEW",
+    "hasVisibleUi": false,
+    "status": "COMPLETE",
+    "currentStep": "COMPLETE",
+    "activeSlice": null,
+    "completedSteps": [
+      "RESOLVE",
+      "DISCOVER_LEGACY",
+      "DISCOVERY_COMPLETENESS",
+      "ASSESS_TARGET",
+      "BUILD_BASELINE",
+      "PLAN",
+      "IMPLEMENT_SLICES",
+      "VERIFY_SLICES",
+      "FINALIZE"
+    ],
+    "pendingSteps": [],
+    "completedSlices": [
+      "esm-strings"
+    ],
+    "pendingSlices": [],
+    "bindings": {
+      "source": {
+        "revision": "918e0e9bc90ff24d6595b11d1e6d2939e00396a9",
+        "pathScoped": true,
+        "dirtyDigest": "040b665173b383158c61193a495f5963c5f13457634757960473bc2e5f0df914",
+        "paths": [
+          "legacy/strings.cjs"
+        ],
+        "entries": [
+          {
+            "path": "legacy/strings.cjs",
+            "kind": "FILE",
+            "sha256": "9b31168ea4d64be58c0b6d1762ee5aa8df8c3d8c064a96d2b8b0ace247217b30"
+          }
+        ],
+        "digest": "c55f3bc4df1a2831c026a588924b2c633def12050daf90821dadd1de72c88fa1"
+      },
+      "target": {
+        "revision": "918e0e9bc90ff24d6595b11d1e6d2939e00396a9",
+        "pathScoped": true,
+        "dirtyDigest": "0ab6be1563e238f92dc61869e029914e7a184221a3150f8b77f31fbb112c9592",
+        "paths": [
+          "src/utils/strings.js"
+        ],
+        "entries": [
+          {
+            "path": "src/utils/strings.js",
+            "kind": "FILE",
+            "sha256": "c090dfe2c0b065dc7cc67d1a1a5c3f7e1d5ac9c1cf2b37f32a7bb3653ddc4670"
+          }
+        ],
+        "digest": "c49d5702e1097774ed0d12ce92528db6236cb2ead3396dec568a44cccb9c510f"
+      }
+    },
+    "artifactHashes": {
+      "inventories/source.json": "54426686eb5a4871503864038f00111b021fe2c01008dc9e9fc22fdb4f6723ae",
+      "inventories/completeness.json": "4299c6c2a7f92adb43940d7074ced59ae58f1628213444d31972ffe20657bd15",
+      "inventories/target.json": "6a5332c729401f1f3cb12b7b6ad1670d397f708550c2d33e54b1c2d7e1070bd8",
+      "matrices/parity.json#immutable": "21069a7294c0f7ccf8ecbfce8d5a516ed66cc613f1931f7953706667304e9148",
+      "matrices/target-native.json#immutable": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "matrices/design-system.json#immutable": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "matrices/global-contract.json#immutable": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "slices/index.json": "8073a2e49cc422385eaadf2eff60ae59c84854c4dee174685fa8d74dd8529102",
+      "slices/esm-strings.json": "b84f2bdce392f90cb2977eee14f13380427755115ef4c4f99148b1141252ec8d",
+      "evidence/esm-strings/result.json#semantic": "00b698aee2449cf6eddb619063325e6afa878aa29f1f3d897f12082531fbc8f2",
+      "matrices/parity.json": "c01ea50d702a1c4ae8d94ffebe743309f9b1b5684dd7a3c1e454d130d583efaf",
+      "matrices/target-native.json": "59416b233ad007147b7b84d31da3ff6a6d9f38034f0d074bb273ba9eca3e6374",
+      "matrices/design-system.json": "59416b233ad007147b7b84d31da3ff6a6d9f38034f0d074bb273ba9eca3e6374",
+      "matrices/global-contract.json": "59416b233ad007147b7b84d31da3ff6a6d9f38034f0d074bb273ba9eca3e6374",
+      "gates.json": "e67a3e7c830b862f03112261ddbea609ddfde6361c8c24d2cc2b298600ddab76"
+    },
+    "toolkitIdentity": {
+      "name": "artifact-migration-tools",
+      "version": "0.0.1",
+      "commit": "0a791e718b7e76927a9e50c2f82d2bd611d3730b",
+      "contentHash": "sha256:c2d52e56b13dc7b1e9b08b124ba1ebbf9d3b97db0d2539b5dcdf81d48beb0c3e"
+    },
+    "revision": 8,
+    "nextAction": "Artifact migration is complete.",
+    "nextCommand": "/migrate-artifact \"legacy/strings.cjs\" \"--type\" \"artifact\" \"--target\" \"src/utils/strings.js\" \"--source-root\" \"<disposable>/consumer\" \"--target-root\" \"<disposable>/consumer\"",
+    "createdAt": "2026-10-25T01:20:33.723Z",
+    "updatedAt": "2026-10-25T01:23:44.808Z"
+  },
+  "root": "<disposable>/consumer/.agents/knowledge/migrations/artifacts/strings-2eb849682dc8",
+  "validation": null,
+  "progress": {
+    "module": "strings-2eb849682dc8",
+    "target": "src/utils/strings.js",
+    "status": "COMPLETE",
+    "revision": 8,
+    "mode": "none",
+    "checkpoints": [
+      {
+        "index": 1,
+        "total": 9,
+        "name": "RESOLVE",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 2,
+        "total": 9,
+        "name": "DISCOVER_LEGACY",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 3,
+        "total": 9,
+        "name": "DISCOVERY_COMPLETENESS",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 4,
+        "total": 9,
+        "name": "ASSESS_TARGET",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 5,
+        "total": 9,
+        "name": "BUILD_BASELINE",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 6,
+        "total": 9,
+        "name": "PLAN",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 7,
+        "total": 9,
+        "name": "IMPLEMENT_SLICES",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 8,
+        "total": 9,
+        "name": "VERIFY_SLICES",
+        "state": "COMPLETED"
+      },
+      {
+        "index": 9,
+        "total": 9,
+        "name": "FINALIZE",
+        "state": "COMPLETED"
+      }
+    ],
+    "activeCheckpoint": null,
+    "activeSlice": null,
+    "slices": {
+      "completed": 1,
+      "total": 1,
+      "items": [
+        {
+          "id": "esm-strings",
+          "state": "COMPLETED"
+        }
+      ]
+    },
+    "uiEvidence": null,
+    "formatUpgrade": null,
+    "blocker": null,
+    "stopReason": null,
+    "nextWork": null
+  },
+  "progressChecklist": "progress: strings-2eb849682dc8 -> src/utils/strings.js  status=COMPLETE  revision=8  mode=none\n[x] 1/9 RESOLVE\n[x] 2/9 DISCOVER_LEGACY\n[x] 3/9 DISCOVERY_COMPLETENESS\n[x] 4/9 ASSESS_TARGET\n[x] 5/9 BUILD_BASELINE\n[x] 6/9 PLAN\n[x] 7/9 IMPLEMENT_SLICES\n[x] 8/9 VERIFY_SLICES\n[x] 9/9 FINALIZE\nslices: 1/1 done\n  [x] esm-strings\n",
+  "formatUpgrade": null,
+  "toolkitIdentity": {
+    "name": "artifact-migration-tools",
+    "version": "0.0.1",
+    "commit": "0a791e718b7e76927a9e50c2f82d2bd611d3730b",
+    "contentHash": "sha256:c2d52e56b13dc7b1e9b08b124ba1ebbf9d3b97db0d2539b5dcdf81d48beb0c3e"
+  },
+  "activeToolkitIdentity": {
+    "name": "artifact-migration-tools",
+    "version": "0.0.1",
+    "commit": "0a791e718b7e76927a9e50c2f82d2bd611d3730b",
+    "contentHash": "sha256:c2d52e56b13dc7b1e9b08b124ba1ebbf9d3b97db0d2539b5dcdf81d48beb0c3e"
+  },
+  "toolkitIdentityStatus": "MATCH",
+  "metrics": {
+    "durationMs": 59,
+    "discoveryScans": 0,
+    "filesParsed": 0,
+    "validatorRuns": 0,
+    "previewAdvanceCalls": 0
+  }
+}
