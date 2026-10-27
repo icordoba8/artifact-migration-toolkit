@@ -34,8 +34,9 @@ const put = (file, value) => writeFile(file, `${JSON.stringify(value, null, 2)}\
 const runner = `node ${process.version}`;
 
 // The legacy module and its consumers. `checkout.js` is production: it calls
-// `signIn` with the options bag and reaches `issueToken` by its deep path. The
-// test reaches an internal on purpose and sets no contract.
+// `signIn` with the options bag through the module's public index, which owes
+// every export it has, and reaches `issueToken` by its deep path, which owes
+// only that name. The test reaches an internal on purpose and sets no contract.
 const LEGACY = {
   "auth/marker.txt": "auth\n",
   "auth/session.js": `'use strict';
@@ -48,12 +49,18 @@ function signIn(user, options) {
 function resetForTests() {}
 module.exports = { signIn, resetForTests };
 `,
+  "auth/index.js": `'use strict';
+const { signIn } = require('./session');
+const { issueToken } = require('./tokens');
+function describeSession(session) { return session.user + '@' + session.token; }
+module.exports = { signIn, issueToken, describeSession };
+`,
   "auth/tokens.js": `'use strict';
 function issueToken(name, now) { return name + ':' + (now || new Date()).toISOString(); }
 module.exports = { issueToken };
 `,
   "orders/checkout.js": `'use strict';
-const { signIn } = require('../auth/session');
+const { signIn } = require('../auth');
 const { issueToken } = require('../auth/tokens');
 module.exports = { checkout: (user, now) => [signIn(user, { now }), issueToken(user.name, now)] };
 `,
@@ -64,6 +71,8 @@ resetForTests();
 };
 
 // The target keeps `issueToken` only in its feature index, under another file name.
+// Its first index forgets `describeSession`, which no consumer names but the public index exports.
+const INDEX_KEPT = "export { signIn } from './session.js';\nexport { issueToken } from './token-format.js';\nexport const describeSession = (session) => `${session.user}@${session.token}`;\n";
 const TARGET = {
   "src/features/auth/token-format.js": "export function issueToken(name, now = new Date()) {\n  return `${name}:${now.toISOString()}`;\n}\n",
   "src/features/auth/index.js": "export { signIn } from './session.js';\nexport { issueToken } from './token-format.js';\n",
@@ -240,7 +249,8 @@ test("FINALIZE refuses a changed export call contract, then source changed after
     const changed = await runTo("FINALIZE");
     assert.equal(changed.outcome, "CONTINUE", JSON.stringify(changed));
     assert.match(changed.reason, /^EXPORT_CONTRACT_INCOMPATIBLE: /);
-    assert.match(changed.reason, /legacy auth\/session\.js export 'signIn\(user, options\)' reads 'options\.now' from argument 2 \('options'\); target 'signIn\(user, now\)' never reads that key from its argument 2 \('now'\)/);
+    assert.match(changed.reason, /\(1\) legacy auth\/index\.js export 'describeSession\(session\)' is not exported by src\/features\/auth\/index\.js\./);
+    assert.match(changed.reason, /\(2\) legacy auth\/index\.js export 'signIn\(user, options\)' reads 'options\.now' from argument 2 \('options'\); target 'signIn\(user, now\)' never reads that key from its argument 2 \('now'\)/);
     // `issueToken` moved file but kept its contract in the feature index; the test-only export sets nothing.
     assert.doesNotMatch(changed.reason, /issueToken|resetForTests/);
     const validated = call("validate", ["auth", "--complete"]);
@@ -249,10 +259,11 @@ test("FINALIZE refuses a changed export call contract, then source changed after
 
     // 2. The fix changes source VERIFY_SLICES verified; the final run predates it.
     await writeTarget("src/features/auth/session.js", SESSION_KEPT);
-    await age(path.join(target, "src/features/auth/session.js"), 60);
+    await writeTarget("src/features/auth/index.js", INDEX_KEPT);
+    for (const file of ["session.js", "index.js"]) await age(path.join(target, "src/features/auth", file), 60);
     await gates();
     const stale = await runTo("FINALIZE");
-    assert.match(stale.reason, /^STALE_VERIFICATION_EVIDENCE: 'src\/features\/auth\/session\.js' \(verified by slice-a\) changed after VERIFY_SLICES verified it, and no FINAL_VERIFY evidence file was written after the change/);
+    assert.match(stale.reason, /^STALE_VERIFICATION_EVIDENCE: 'src\/features\/auth\/index\.js' \(verified by slice-a\), 'src\/features\/auth\/session\.js' \(verified by slice-a\) changed after VERIFY_SLICES verified them, and no FINAL_VERIFY evidence file was written after the change/);
 
     // 3. Verification re-run against the current bytes and recorded as FINAL_VERIFY evidence.
     await writeFile(finalRun, "TAP version 13\nok 1 - Sign in\nok 2 - Sign out\nok 3 - Sign in with the legacy options bag\n");

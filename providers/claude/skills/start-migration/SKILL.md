@@ -1125,7 +1125,8 @@ Full JSON schemas for every artifact below live in
    `FUNCTIONAL_PARITY_GATE` can never be `NOT_APPLICABLE`. A Ponytail target
    requires the owning gate rows to
    carry typed evidence (`kind`/`reference`), never prose. The engine derives
-   the call contract of every export a production legacy consumer imports from
+   the call contract of every export a production legacy consumer imports, and
+   of every export of a module root's public entry such a consumer imports, from
    both sources and refuses a target that drops the export, makes it
    non-callable, drops a used argument or stops reading a key the legacy code
    read from one (`EXPORT_CONTRACT_INCOMPATIBLE`). Source a slice verified that

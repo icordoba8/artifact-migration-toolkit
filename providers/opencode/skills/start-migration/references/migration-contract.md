@@ -2317,7 +2317,9 @@ every record that has a discovery scan, whatever its gates claim:
   pinned scan; tests, type imports and framework ancestors set no contract),
   the engine reads the export's call contract from the pinned legacy source and
   from the target counterpart: the same path under `src/features/<target>/`,
-  then that feature's `index`. It refuses an export the target no longer
+  then that feature's `index`. A module root's public entry (its `index`, or a
+  root that is one file) owes every export it has; a deeper file owes the names
+  its consumers import. It refuses an export the target no longer
   exports, one no longer callable, a used argument with no target parameter,
   and a key the legacy function read from an argument (`options.now`, through
   aliases, destructuring and hand-offs to local functions) that the target

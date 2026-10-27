@@ -12,7 +12,9 @@
  *
  * A consumer is a production file that imports or requires the export. A test
  * reaches internals on purpose, and a framework ancestor or a type import never
- * calls it, so neither sets the contract.
+ * calls it, so neither sets the contract. A module root's public entry (its
+ * `index`, or a root that is one file) owes every export it has once any
+ * consumer imports it; a deeper file owes only the names its consumers take.
  */
 import path from "node:path";
 import {
@@ -30,6 +32,9 @@ import { readJson } from "../store/index.mjs";
 const SCRIPT = /\.[cm]?[jt]sx?$/;
 const CALL_EDGES = new Set(["IMPORT", "REEXPORT", "REQUIRE", "DYNAMIC"]);
 
+const isPublicEntry = (scan, file) => (scan.moduleRoots ?? []).some((root) =>
+  file === root || (path.posix.dirname(file) === root && /^index\.[cm]?[jt]sx?$/.test(path.posix.basename(file))));
+
 /** Legacy entry file -> the symbols its production consumers import, from the pinned scan. */
 const consumedEntries = async (scan, legacy) => {
   const owned = new Set(scan.census ?? []);
@@ -38,8 +43,10 @@ const consumedEntries = async (scan, legacy) => {
     if (!CALL_EDGES.has(edge.kind) || owned.has(edge.from) || TEST_PATTERN.test(edge.from) ||
       !owned.has(edge.to) || !SCRIPT.test(edge.to)) continue;
     const symbols = entries.get(edge.to) ?? new Set();
-    // The scan records a CommonJS `require` as the whole module; its destructuring names the part used.
-    const required = edge.kind === "REQUIRE" ? await legacy.requiredNames(edge.from, edge.to, edge.line) : null;
+    // A public entry owes everything. Elsewhere the scan records a CommonJS `require`
+    // as the whole module, and its destructuring names the part used.
+    const required = isPublicEntry(scan, edge.to) ? ["*"]
+      : edge.kind === "REQUIRE" ? await legacy.requiredNames(edge.from, edge.to, edge.line) : null;
     for (const symbol of required ?? edge.symbols ?? ["*"]) symbols.add(symbol);
     entries.set(edge.to, symbols);
   }
