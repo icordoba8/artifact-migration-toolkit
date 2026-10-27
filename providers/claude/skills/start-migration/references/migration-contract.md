@@ -135,7 +135,8 @@ format gates each linked section states.
   recorded `boundTo` is never refreshed. `result`, `attempts`, `kind`,
   `producedAt`, `producer` and `environment` stay authored. Write the evidence
   files and entries first.
-- Rules: [Final gates](#final-gates),
+- Rules: [Final gates](#final-gates) (with the exported call contract and
+  verification freshness),
   [Content identity for ordinary file pins](#content-identity-for-ordinary-file-pins),
   [Unclaimed target drift](#unclaimed-target-drift).
 
@@ -2307,6 +2308,29 @@ engine checks its reference, binding and freshness, never that a Ponytail skill
 ran.
 
 `FUNCTIONAL_PARITY_GATE` cannot be omitted or made not applicable.
+
+FINALIZE also holds the target to two facts the engine derives itself, for
+every record that has a discovery scan, whatever its gates claim:
+
+- **Exported call contract** (`EXPORT_CONTRACT_INCOMPATIBLE`). For each owned
+  file a production legacy consumer imports or requires (an inbound edge of the
+  pinned scan; tests, type imports and framework ancestors set no contract),
+  the engine reads the export's call contract from the pinned legacy source and
+  from the target counterpart: the same path under `src/features/<target>/`,
+  then that feature's `index`. It refuses an export the target no longer
+  exports, one no longer callable, a used argument with no target parameter,
+  and a key the legacy function read from an argument (`options.now`, through
+  aliases, destructuring and hand-offs to local functions) that the target
+  never reads from the same position. A use it cannot establish (a spread, an
+  unresolvable callee, a redeclared name) is open and never refused. Keep the
+  legacy call contract; adapt inside the target.
+- **Verification freshness** (`STALE_VERIFICATION_EVIDENCE`). VERIFY_SLICES
+  records, on its history event, the content identity of every file the slice
+  claims. A file whose bytes differ at FINALIZE from the newest verification of
+  a completed slice that claimed it needs a `FINAL_VERIFY` evidence file (not
+  that source file) modified after the change: re-run the verification, record
+  its output, and rebind `gates.json`, or restore the verified bytes. Slices
+  verified before an engine wrote the snapshot are not judged by it.
 
 Read the binding instead of guessing it. `migration_evidence_binding`
 (CLI: `artifact-migration-validate <module> --evidence-binding --reference

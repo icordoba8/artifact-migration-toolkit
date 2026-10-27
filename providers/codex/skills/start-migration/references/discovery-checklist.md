@@ -205,9 +205,11 @@ and at least one consumer call site, and map:
 Trace each to a stable OpenSpec scenario that calls the export the way the
 legacy consumer calls it. Target conventions decide file layout, naming of
 private helpers and error classes, never a consumer-visible parameter shape:
-changing one (for example an options object into a positional value) is a
-`REDESIGN` with explicit approval and acceptance coverage, not an adaptation.
-Tests written only against the target's own signature do not prove parity.
+changing one (for example an options object into a positional value) is not an
+adaptation, and FINALIZE refuses it (`EXPORT_CONTRACT_INCOMPATIBLE`, see
+*Final gates* in `migration-contract.md`). Keep the legacy call contract and
+adapt inside the target. Tests written only against the target's own
+signature do not prove parity.
 
 ## Runtime discovery
 

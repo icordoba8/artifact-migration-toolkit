@@ -35,7 +35,7 @@ import {
   rawDecisionLedgerBytes,
   rawDecisionLedgerDigest,
 } from "../decisions/index.mjs";
-import { inspectSliceArtifacts } from "../slices/index.mjs";
+import { inspectSliceArtifacts, verifiedFileIdentities } from "../slices/index.mjs";
 import { activeArtifact, confirmationIdFor, expectedNextCheckpoint } from "./checkpoints.mjs";
 import { readContext } from "./context.mjs";
 import { assertCurrentOpenSpecAuthority } from "./openspec.mjs";
@@ -517,6 +517,10 @@ const advanceUnderLock = async ({
     slice: activeSlice ?? null,
     ...(currentStep === "VERIFY_SLICES" && validated?.visualComparison?.length
       ? { visualComparison: validated.visualComparison }
+      : {}),
+    // M14.1: the bytes this verification ran against, judged again at FINALIZE.
+    ...(currentStep === "VERIFY_SLICES"
+      ? { verifiedFiles: await verifiedFileIdentities(context.root, activeSlice, registryData) }
       : {}),
     // Format 19 only, and only when this advance actually consumed authority.
     // Ordered by decision id so the event -- and therefore the history chain

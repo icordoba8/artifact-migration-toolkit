@@ -762,7 +762,8 @@ legacy consumer reaches, its parameters in order, every options key the code
 reads and its default, the return shape and the error identifiers. Give each a
 scenario that calls the export the way the legacy consumer does. Changing a
 consumer-visible parameter shape is a redesign, never a target adaptation
-(`references/discovery-checklist.md`, *Exported call-contract traceability*).
+(`references/discovery-checklist.md`, *Exported call-contract traceability*),
+and FINALIZE refuses it (`EXPORT_CONTRACT_INCOMPATIBLE`).
 
 Format 21 also holds the proposal to the legacy module's **API response
 contract**, which the engine derives from source (discovery scanner algorithm
@@ -1123,7 +1124,14 @@ Full JSON schemas for every artifact below live in
    `migration_evidence_binding`. Never submit a guess).
    `FUNCTIONAL_PARITY_GATE` can never be `NOT_APPLICABLE`. A Ponytail target
    requires the owning gate rows to
-   carry typed evidence (`kind`/`reference`), never prose. Advance to
+   carry typed evidence (`kind`/`reference`), never prose. The engine derives
+   the call contract of every export a production legacy consumer imports from
+   both sources and refuses a target that drops the export, makes it
+   non-callable, drops a used argument or stops reading a key the legacy code
+   read from one (`EXPORT_CONTRACT_INCOMPATIBLE`). Source a slice verified that
+   changed afterwards needs a `FINAL_VERIFY` evidence file written after the
+   change (`STALE_VERIFICATION_EVIDENCE`): re-run the verification, record its
+   output, rebind `gates.json`. Advance to
    `COMPLETE`, then run `artifact-migration-validate <module> --complete`.
    `COMPLETE` means ready for commit — it never commits, pushes, or opens a
    pull request itself.

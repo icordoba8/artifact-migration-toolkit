@@ -123,7 +123,7 @@ export const REACHABILITY_VALUES = [
   "UNREACHABLE",
 ];
 
-const TEST_PATTERN =
+export const TEST_PATTERN =
   /(^|\/)(tests?|__tests__|e2e)\/|\.(test|spec|e2e-spec|integration-spec)\.[^/]+$/;
 
 const extensionOf = (relativePath) => path.extname(relativePath).toLowerCase();

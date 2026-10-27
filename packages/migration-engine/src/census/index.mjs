@@ -30,6 +30,7 @@ export {
   runDiscoveryScan,
   structuralUnits,
   SUPPORTED_ALGORITHM_VERSIONS,
+  TEST_PATTERN,
   VISUAL_KINDS,
 } from "./scan.mjs";
 export {
@@ -112,3 +113,4 @@ export {
   unplannedResponses,
   unprovenResponses,
 } from "./api.mjs";
+export { exportAnalyzer, exportContractIssues, sourceReader } from "./exports.mjs";

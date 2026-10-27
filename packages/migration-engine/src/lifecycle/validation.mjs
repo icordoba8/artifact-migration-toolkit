@@ -27,6 +27,7 @@ import {
 } from "../census/index.mjs";
 import { engineCommand } from "../engine-paths.mjs";
 import { assertApiContractPlanned, assertApiResponseEvidence } from "./api-evidence.mjs";
+import { assertExportContractKept } from "./export-contract.mjs";
 import {
   CAPABILITY_OWNERSHIP_FILE,
   DISCOVERY_SCAN_FILE,
@@ -83,6 +84,7 @@ import {
   assertPostAnchorEvidence,
   assertSharedPrerequisitesBuilt,
   assertSlicePassed,
+  assertVerificationFresh,
   completeSliceAmendment,
   draftSliceAmendment,
   implementationDigests,
@@ -1207,9 +1209,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
     );
   }
   if (step === "FINALIZE") {
-    if (state.pendingSlices.length > 0) {
-      throw new Error("Cannot finalize while slices remain pending.");
-    }
+    if (state.pendingSlices.length > 0) throw new Error("Cannot finalize while slices remain pending.");
     await assertDiscoveryUnchanged(root, state, roots);
     await validateBaseline(root, { final: true, roots, state });
     const { slices, capabilityRows } = await validatePlan(root, state, roots);
@@ -1235,7 +1235,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
     );
     await validateGates(root, state, roots);
     await assertGatesCoverSliceScenarios(root, state, slices);
-    await assertApiContractPlanned({ root, state, roots, slices });
+    for (const check of [assertApiContractPlanned, assertExportContractKept, assertVerificationFresh]) await check({ root, state, roots, slices });
   }
 };
 

@@ -68,6 +68,7 @@ export {
   draftSliceAmendment,
   SLICE_AMENDMENT_ROOT,
 } from "./amendment.mjs";
+export { assertVerificationFresh, verifiedFileIdentities } from "./freshness.mjs";
 export {
   assertSliceStateConsistent,
   inspectSliceArtifacts,
