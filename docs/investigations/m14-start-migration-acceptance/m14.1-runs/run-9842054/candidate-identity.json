@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "name": "artifact-migration-tools",
+    "version": "0.0.1",
+    "commit": "98420543e080971db442b6112ae29a0e69bd2379",
+    "contentHash": "sha256:3ec13f7935e092c1dc916880f1637190e1a6b2217058a62db071867e6c095d11"
+  },
+  "archiveDigest": "sha256:f3e8d576a27f5bbb9346795ea65321bc034cfbe498556ebab01600a7ecf8a480",
+  "pin": "sha256:4aefed69f7e38b870dd7feae0cbdbecca20fbd98792c7e239f42099c99e60af5",
+  "stagingRoot": "<acceptance>/runs/run-9842054/candidate/release-candidate-iUfr5q/dist/artifact-migration-tools-0.0.1"
+}

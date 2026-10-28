@@ -1,0 +1,32 @@
+[
+  {
+    "case": "as-completed",
+    "export": "PASS",
+    "freshness": "PASS"
+  },
+  {
+    "case": "d1-bare-date",
+    "export": "EXPORT_CONTRACT_INCOMPATIBLE: EXPORT_CONTRACT_INCOMPATIBLE: the target breaks the call contract legacy consumers rely on: (1) legacy src/features/discounts/index.js export 'quote(cart, options)' reads 'options.now' from argument 2 ('options'); target 'quote(cart, now)' never reads that key from its argument 2 ('now'). An export's parameter shape is observable behavior: keep the legacy call contract (adapt inside the target if ",
+    "freshness": "STALE_VERIFICATION_EVIDENCE: STALE_VERIFICATION_EVIDENCE: 'src/features/discounts/quote.js' (verified by discounts-002) changed after VERIFY_SLICES verified it, and no FINAL_VERIFY evidence file was written after the change. Slice evidence was produced against the earlier bytes. Re-run the verification against the current files, record its output as FINAL_VERIFY evidence (rebind gates.json), or restore the verified bytes."
+  },
+  {
+    "case": "quote-not-exported",
+    "export": "EXPORT_CONTRACT_INCOMPATIBLE: EXPORT_CONTRACT_INCOMPATIBLE: the target breaks the call contract legacy consumers rely on: (1) legacy src/features/discounts/index.js export 'quote(cart, options)' is not exported by src/features/discounts/index.js. An export's parameter shape is observable behavior: keep the legacy call contract (adapt inside the target if its own design differs), re-run verification, and record that run as FINA",
+    "freshness": "STALE_VERIFICATION_EVIDENCE: STALE_VERIFICATION_EVIDENCE: 'src/features/discounts/index.js' (verified by discounts-002) changed after VERIFY_SLICES verified it, and no FINAL_VERIFY evidence file was written after the change. Slice evidence was produced against the earlier bytes. Re-run the verification against the current files, record its output as FINAL_VERIFY evidence (rebind gates.json), or restore the verified bytes."
+  },
+  {
+    "case": "unused-export-dropped",
+    "export": "PASS",
+    "freshness": "STALE_VERIFICATION_EVIDENCE: STALE_VERIFICATION_EVIDENCE: 'src/features/discounts/index.js' (verified by discounts-002) changed after VERIFY_SLICES verified it, and no FINAL_VERIFY evidence file was written after the change. Slice evidence was produced against the earlier bytes. Re-run the verification against the current files, record its output as FINAL_VERIFY evidence (rebind gates.json), or restore the verified bytes."
+  },
+  {
+    "case": "benign-edit-after-verify",
+    "export": "PASS",
+    "freshness": "STALE_VERIFICATION_EVIDENCE: STALE_VERIFICATION_EVIDENCE: 'src/features/discounts/quote.js' (verified by discounts-002) changed after VERIFY_SLICES verified it, and no FINAL_VERIFY evidence file was written after the change. Slice evidence was produced against the earlier bytes. Re-run the verification against the current files, record its output as FINAL_VERIFY evidence (rebind gates.json), or restore the verified bytes."
+  },
+  {
+    "case": "benign-edit-then-fresh-final-verify",
+    "export": "PASS",
+    "freshness": "PASS"
+  }
+]

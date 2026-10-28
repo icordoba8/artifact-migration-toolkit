@@ -1,0 +1,157 @@
+{
+  "verifier": "m14-discounts",
+  "module": "<acceptance>/runs/run-49a4e1e/consumer/target/src/features/discounts/index.js",
+  "passed": 37,
+  "total": 37,
+  "failures": [],
+  "results": [
+    {
+      "id": "API-001 exports quote and validateCoupon functions",
+      "pass": true
+    },
+    {
+      "id": "Q-001 single item, no discount, shipping charged",
+      "pass": true
+    },
+    {
+      "id": "Q-002 free shipping at exactly 5000",
+      "pass": true
+    },
+    {
+      "id": "Q-003 volume 5% at 10 items, half-up rounding 52.5->53",
+      "pass": true
+    },
+    {
+      "id": "Q-004 volume 10% at 50 items",
+      "pass": true
+    },
+    {
+      "id": "Q-005 9 items get no volume discount",
+      "pass": true
+    },
+    {
+      "id": "Q-006 loyalty applies after volume on remaining",
+      "pass": true
+    },
+    {
+      "id": "Q-007 platinum 4%",
+      "pass": true
+    },
+    {
+      "id": "Q-008 SAVE10 trimmed and case-insensitive, after volume and loyalty",
+      "pass": true
+    },
+    {
+      "id": "Q-009 FLAT500 fixed amount",
+      "pass": true
+    },
+    {
+      "id": "Q-010 FREESHIP waives shipping, no discount row",
+      "pass": true
+    },
+    {
+      "id": "Q-011 shipping decided on the discounted amount",
+      "pass": true
+    },
+    {
+      "id": "Q-012 SUMMER23 valid on its last day",
+      "pass": true
+    },
+    {
+      "id": "Q-013 empty coupon string is ignored",
+      "pass": true
+    },
+    {
+      "id": "Q-014 zero-priced items allowed",
+      "pass": true
+    },
+    {
+      "id": "Q-015 null tier means no loyalty",
+      "pass": true
+    },
+    {
+      "id": "Q-016 coupon minimum uses the subtotal even when volume lowers the remaining amount",
+      "pass": true
+    },
+    {
+      "id": "E-001 empty items",
+      "pass": true
+    },
+    {
+      "id": "E-002 missing cart",
+      "pass": true
+    },
+    {
+      "id": "E-003 fractional qty",
+      "pass": true
+    },
+    {
+      "id": "E-004 zero qty",
+      "pass": true
+    },
+    {
+      "id": "E-005 negative price",
+      "pass": true
+    },
+    {
+      "id": "E-006 qty checked before price",
+      "pass": true
+    },
+    {
+      "id": "E-007 unknown tier",
+      "pass": true
+    },
+    {
+      "id": "E-008 unknown coupon",
+      "pass": true
+    },
+    {
+      "id": "E-009 coupon minimum compared to pre-discount subtotal",
+      "pass": true
+    },
+    {
+      "id": "E-010 expired coupon",
+      "pass": true
+    },
+    {
+      "id": "E-011 tier error precedes coupon error",
+      "pass": true
+    },
+    {
+      "id": "E-012 domain errors are Error instances carrying the code",
+      "pass": true
+    },
+    {
+      "id": "V-001 valid coupon normalizes the code",
+      "pass": true
+    },
+    {
+      "id": "V-002 unknown",
+      "pass": true
+    },
+    {
+      "id": "V-003 below minimum",
+      "pass": true
+    },
+    {
+      "id": "V-004 expired is checked before minimum",
+      "pass": true
+    },
+    {
+      "id": "V-005 last valid day inclusive",
+      "pass": true
+    },
+    {
+      "id": "V-006 default now: SUMMER23 is expired today",
+      "pass": true
+    },
+    {
+      "id": "DIFF-001 3000 generated carts match legacy exactly (value or error code)",
+      "pass": true
+    },
+    {
+      "id": "DIFF-002 inputs are not mutated",
+      "pass": true
+    }
+  ]
+}
