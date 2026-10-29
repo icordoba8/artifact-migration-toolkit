@@ -828,6 +828,10 @@ evidence never resolves under `inventories/legacy-runtime/`; a declared
 `capture.role` must match the slot it is cited from (`TARGET_VERIFICATION` for
 slice evidence). Byte-identical authority and target screenshots at disjoint
 paths are a perfect 1:1 match and pass — no rule compares them for inequality.
+A record whose discovery found no UI behavior has nothing to capture: its
+context is exactly `{"version": 2, "frames": []}` and its visual acceptance
+`{"version": 2, "rows": [], "unbacked": []}`, authored without a browser.
+`frames` may be empty only then; with any UI behavior it must be non-empty.
 **Engine capture.** `migration_capture` (CLI
 `artifact-migration-validate <module> --capture <request.json>`) drives a real
 Chromium-family browser against the explicit `origin` and `route` and persists
@@ -1263,7 +1267,12 @@ observed mismatch in `uiMismatches`.
 `uiBehaviors`, no visible `uiComponents`, and no Playwright. `hasVisibleUi: true`
 makes it required. The two cannot disagree with what discovery found — a visible
 inventory with no UI behaviors, and a non-UI inventory with visible components,
-are both refused.
+are both refused. Closing `DISCOVERY_COMPLETENESS` also reads the code: a
+production-reachable owned file that renders or may render (JSX, a rendering
+API under any alias, a DOM markup write, a UI-runtime or CSS-in-JS import, a
+`.vue`/`.svelte`/`.html` document) under `hasVisibleUi: false` is
+refused with `VISUAL_APPLICABILITY_MISMATCH`, whatever its extension. A record
+already past that checkpoint keeps the value its history consumed.
 
 A `uiBehaviors` row is an interaction inventory, not a component census:
 

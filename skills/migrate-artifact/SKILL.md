@@ -137,6 +137,22 @@ module state. Existing target behavior is resolved as `TARGET_REUSE`,
 `TARGET_EXTEND`, or `MIGRATE_NEW`; reuse requires verified target evidence and
 extend keeps every target-native row through finalization.
 
+The engine classifies the bound source files by what they do, not their
+extension: `VISUAL_UI` (renders or may render: JSX, a rendering API under any
+alias, a DOM markup write, a UI-runtime or CSS-in-JS import, a template or
+component document such as `.vue` or `.html`), `VISUAL_DEPENDENCY` (a stylesheet
+or asset, or a script that only imports one) or `NON_VISUAL` (types, services,
+utilities, nonvisual hooks). Doubt classifies as `VISUAL_UI`, never the reverse.
+`DISCOVER_LEGACY` refuses a `hasVisibleUi` that disagrees with it
+(`VISUAL_APPLICABILITY_MISMATCH`): `VISUAL_UI` must be `true`; the other two
+must be `false` and use no browser, Playwright MCP or screenshot. Never wrap a
+stylesheet in temporary markup to capture it: its visual verification belongs
+to the UI migrations its global contracts name as consumers, and `--status`
+reports each one under `visualApplicability.consumers` (`VERIFIED`, `PENDING`,
+`STALE`, `UNCOVERED`, `UNMIGRATED`). With `--design-source legacy-runtime` and
+`hasVisibleUi: false`, author `{"version": 2, "frames": []}` and
+`{"version": 2, "rows": [], "unbacked": []}` — no capture.
+
 Visible UI requires hashed Playwright runtime records at `VERIFY_SLICES` and
 fresh references to those records at `FINALIZE`. Each visible behavior declares
 its required `runtimeStates`, and each runtime record carries an `origin`

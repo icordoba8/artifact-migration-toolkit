@@ -79,7 +79,9 @@ import {
 import {
   artifactIdFor,
   architectureFindings,
+  classifyVisualFile,
   legacyDependencies,
+  structuralParser,
   structuralUnits,
   targetTypeScript,
 } from "../../src/census/index.mjs";
@@ -340,14 +342,19 @@ const writeJson = async (root, relative, value) => {
   return file;
 };
 
-const createFixture = async () => {
+// A visible-UI record must bind a source that actually renders; DISCOVER_LEGACY
+// classifies the bound bytes and refuses `hasVisibleUi` on a file that does not.
+const RENDERS = "export const source = document.createElement(\"div\") && ";
+const RENDERING_SOURCE = `${RENDERS}true;\n`;
+
+const createFixture = async ({ ui = false } = {}) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "artifact-migration-"));
   const sourceRoot = path.join(root, "legacy");
   const targetRoot = path.join(root, "target");
   await mkdir(path.join(sourceRoot, "widget"), { recursive: true });
   await mkdir(path.join(targetRoot, "src"), { recursive: true });
   await Promise.all([
-    writeFile(path.join(sourceRoot, "widget/source.ts"), "export const source = true;\n"),
+    writeFile(path.join(sourceRoot, "widget/source.ts"), ui ? RENDERING_SOURCE : "export const source = true;\n"),
     writeFile(path.join(sourceRoot, "widget/theme.css"), ":root { --accent: red; }\n"),
     writeFile(path.join(sourceRoot, "widget/consumer-a.ts"), "export const a = 'theme';\n"),
     writeFile(path.join(sourceRoot, "widget/consumer-b.ts"), "export const b = 'theme';\n"),
@@ -499,7 +506,7 @@ const sourceInventory = async (fixture, { ui = false, pendingDecision = false, r
         id: "GC-1",
         kind: "GLOBAL_THEME",
         sourcePath: "widget/theme.css",
-        consumers: ["widget/consumer-a.ts", "widget/consumer-b.ts"],
+        consumers: fixture.consumers ?? ["widget/consumer-a.ts", "widget/consumer-b.ts"],
       },
     ],
     featureLocalVisuals: [
@@ -535,8 +542,9 @@ const advanceDiscovery = async (fixture, options) => {
     })),
     requirements: options?.requirements ?? [],
   });
-  assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
-  assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
+  const completed = await runArtifact(fixture.options);
+  assert.equal(completed.outcome, "CONTINUE");
+  assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET", completed.reason);
 };
 
 const targetInventory = async (fixture, resolution) => {
@@ -634,7 +642,7 @@ const baselineDocuments = async (fixture, resolution, { final = false } = {}) =>
           sourceContractId: "GC-1",
           kind: "GLOBAL_THEME",
           targetPath: "src/theme.ts",
-          consumers: ["widget/consumer-a.ts", "widget/consumer-b.ts"],
+          consumers: fixture.consumers ?? ["widget/consumer-a.ts", "widget/consumer-b.ts"],
           status: final ? "VERIFIED" : "PLANNED",
           evidence: final ? [await targetEvidence(fixture, "src/theme.ts")] : [],
         },
@@ -817,7 +825,14 @@ const gatesDocument = async (fixture, { ui = false, requirementElements = [] } =
   };
 };
 
+const renderSource = async (fixture) => {
+  const file = path.join(fixture.sourceRoot, "widget/source.ts");
+  const text = await readFile(file, "utf8");
+  if (!text.includes(RENDERS)) await writeFile(file, text.replace("export const source = ", RENDERS));
+};
+
 const driveToBuild = async (fixture, resolution, options = {}) => {
+  if (options.ui) await renderSource(fixture);
   await bootstrap(fixture, options.bootstrap);
   await advanceDiscovery(fixture, options);
   await advanceAssessment(fixture, resolution);
@@ -1934,7 +1949,7 @@ test("pilot 14 status, pending and locked run re-read weak and stale source auth
 test("no infrastructure: default 14 explicitly approves/rejects source and visual decisions, consumes and recovers", async () => {
   return withDecisionPolicy(null, async () => {
     for (const visual of [false, true]) for (const decisionResult of ["APPROVED", "REJECTED", "GROUP"]) {
-      const fixture = await createFixture();
+      const fixture = await createFixture({ ui: visual });
       try {
         const options = { ...fixture.options,
           ...(visual ? { designSource: "legacy-runtime" } : {}) };
@@ -2213,7 +2228,7 @@ test("pilot 14 rejects a reviewed source candidate when current evidence or poli
 });
 
 test("pilot 14 rejects forged visual receipts without bypassing visual checks", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
   try {
     const preview = await previewArtifact(options);
@@ -2247,7 +2262,7 @@ test("pilot 14 rejects forged visual receipts without bypassing visual checks", 
 });
 
 test("pilot 14 visual projections re-read the ledger and stale evidence without advancing", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
   return withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, { VISUAL_UNBACKED: "HUMAN_ATTESTED" }), async () => {
   try {
@@ -2300,7 +2315,7 @@ test("pilot 14 visual projections re-read the ledger and stale evidence without 
 });
 
 test("pilot 14 derives a policy-bound visual candidate from current evidence", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = { ...fixture.options, pilotFormat: 14, designSource: "legacy-runtime" };
   try {
     const preview = await previewArtifact(options);
@@ -5565,7 +5580,7 @@ test("Figma parity: CLI validation, persisted canonical sources, shared evidence
     /--design-source accepts target-system or figma-mcp/,
   );
 
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = {
     ...fixture.options,
     designSource: parsed.designSource,
@@ -5729,7 +5744,7 @@ test("DR18: an artifact record applies the module's design-source immutability r
 });
 
 test("structured Figma authority: artifact lifecycle compares child facts, pins evidence and refuses injections", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = { ...fixture.options, designSource: "figma-mcp",
     figma: ["https://www.figma.com/design/File123?node-id=12-34"] };
   try {
@@ -5880,7 +5895,7 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
   ]);
   assert.equal(parsed.designSource, "legacy-runtime");
 
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = { ...fixture.options, designSource: parsed.designSource };
   try {
     // The shared rule, reached through the artifact front end.
@@ -6019,7 +6034,7 @@ test("legacy-runtime parity: migrate-artifact pins the same authority and takes 
 });
 
 test("Figma parity: DEGRADED frames cannot back acceptance and pinned evidence rejects tampering", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const options = {
     ...fixture.options,
     designSource: "figma-mcp",
@@ -6112,7 +6127,7 @@ test("pilot 14 signer: signed ARTIFACT_DECISION APPROVED and REJECTED, stale aft
 
 test("pilot 14 signer: signed VISUAL_UNBACKED uses the same protocol; artifact 13 and groups are refused", async () => {
   assert.deepEqual(ATTESTED_ARTIFACT_KINDS, ["ARTIFACT_DECISION", "VISUAL_UNBACKED"]);
-  const fixture = await createFixture();
+  const fixture = await createFixture({ ui: true });
   const legacy = await createFixture();
   const signed = await enrolledSigner();
   try {
@@ -6654,5 +6669,393 @@ test("M13 compatibility: pre-M13 records without validator evidence still comple
     } finally {
       await fixture.cleanup();
     }
+  }
+});
+
+// Visual applicability. Each case binds one exact source file next to the shared
+// fixture; the shared helpers still author B-1, GC-1 (widget/theme.css) and
+// FV-1, so the structural census is that file's units plus the theme.
+const visualCase = (fixture, relative, target = fixture.options.target) => {
+  const options = { ...fixture.options, source: relative, target };
+  const id = artifactIdFor({ source: relative, type: options.type });
+  return { ...fixture, options, id, artifactRoot: artifactRoot(fixture.targetRoot, id) };
+};
+
+const visualFixture = async (relative, text, target) => {
+  const fixture = await createFixture();
+  await writeFile(path.join(fixture.sourceRoot, relative), text);
+  return visualCase(fixture, relative, target);
+};
+
+const censusOf = async (fixture) => {
+  const parser = await structuralParser();
+  const relative = fixture.options.source;
+  const text = await readFile(path.join(fixture.sourceRoot, relative), "utf8");
+  const keys = structuralUnits(parser, relative, text)
+    .map((unit) => (unit.path === relative ? relative : `${relative}#${unit.path}`));
+  return [...new Set([...keys, "widget/theme.css"])].sort()
+    .map((key) => ({ path: key, disposition: "MIGRATED_BEHAVIOR", ref: "B-1" }));
+};
+
+// No browser was asked for and none was used: nothing under the authority's
+// capture tree, no slice ui/ directory, no runtime row, no UI evidence.
+const assertNoRuntimeCapture = async (fixture) => {
+  assert.equal(await exists(path.join(fixture.artifactRoot, "inventories/legacy-runtime")), false);
+  assert.equal(await exists(path.join(fixture.artifactRoot, "evidence/slice-1/ui")), false);
+  const result = JSON.parse(await readFile(path.join(fixture.artifactRoot, "evidence/slice-1/result.json"), "utf8"));
+  assert.deepEqual(result.runtimeEvidence, []);
+  const gates = JSON.parse(await readFile(path.join(fixture.artifactRoot, "gates.json"), "utf8"));
+  assert.deepEqual(gates.uiEvidence, []);
+};
+
+const refusedAtDiscovery = async (fixture, ui) => {
+  await bootstrap(fixture);
+  await authorSource(fixture, { ui });
+  const result = await runArtifact(fixture.options);
+  assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+  return result.reason ?? "";
+};
+
+for (const [name, relative, text] of [
+  ["a simple .ts interface", "widget/user.ts", "export interface User {\n  id: string;\n  name: string;\n}\n"],
+  ["a nonvisual TS service", "widget/user-service.ts",
+    "export class UserService {\n  constructor(private readonly http: { get(path: string): Promise<unknown> }) {}\n  list() {\n    return this.http.get(\"users\");\n  }\n}\n"],
+  ["a .tsx hook that renders nothing", "widget/use-count.tsx", "export const useCount = (start: number) => start + 1;\n"],
+  ["a plain .js utility", "widget/format.js", "export const format = (name) => name.trim();\n"],
+  ["a .mjs service that writes streams and form data", "widget/upload.mjs",
+    "export const upload = (stream, form) => {\n  stream.write(\"x\");\n  form.append(\"file\", \"x\");\n};\n"],
+]) {
+  test(`visual applicability: ${name} is NON_VISUAL and completes with no browser evidence`, async () => {
+    const fixture = await visualFixture(relative, text);
+    try {
+      await driveToComplete(fixture, "TARGET_EXTEND", { units: await censusOf(fixture) });
+      await assertNoRuntimeCapture(fixture);
+      const status = await getArtifactStatus(fixture.options);
+      assert.equal(status.status, "COMPLETE");
+      assert.equal(status.visualApplicability.classification, "NON_VISUAL");
+      assert.equal(status.visualApplicability.verification, "NOT_APPLICABLE");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+test("visual applicability: a NON_VISUAL artifact cannot be declared visible UI", async () => {
+  const fixture = await visualFixture("widget/user.ts", "export interface User {\n  id: string;\n}\n");
+  try {
+    assert.match(await refusedAtDiscovery(fixture, true), /VISUAL_APPLICABILITY_MISMATCH: this artifact is NON_VISUAL.*No browser, Playwright or screenshot evidence applies/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("visual applicability: standalone CSS is a VISUAL_DEPENDENCY, completes without screenshots and refuses fabricated UI", async () => {
+  const fixture = await visualFixture("widget/local.css", ".widget { color: red; }\n");
+  try {
+    assert.match(await refusedAtDiscovery(fixture, true), /VISUAL_DEPENDENCY.*never wrap it in temporary markup/);
+    // The refused source inventory is simply re-authored: nothing was consumed.
+    await advanceDiscovery(fixture, { ui: false, units: await censusOf(fixture) });
+    await advanceAssessment(fixture, "TARGET_EXTEND");
+    await advanceBaseline(fixture, "TARGET_EXTEND");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await advanceImplementation(fixture, "TARGET_EXTEND");
+    await advanceVerification(fixture, { ui: false });
+    await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    await assertNoRuntimeCapture(fixture);
+    const { visualApplicability } = await getArtifactStatus(fixture.options);
+    assert.equal(visualApplicability.classification, "VISUAL_DEPENDENCY");
+    assert.equal(visualApplicability.verification, "CONSUMERS");
+    assert.deepEqual(visualApplicability.consumers, []);
+    assert.equal(visualApplicability.consumerCoverage, "NO_CONSUMER");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("visual applicability: CSS consumed by a React component is verified by that component's own visual evidence", async () => {
+  const base = await createFixture();
+  try {
+    await writeFile(
+      path.join(base.sourceRoot, "widget/consumer-a.ts"),
+      "import { createElement } from \"react\";\nimport \"./theme.css\";\nexport const a = () => createElement(\"span\", { className: \"accent\" });\n",
+    );
+    await writeJson(base.targetRoot, "package.json", { name: "target", private: true, dependencies: { react: "18.3.1" } });
+    // The stylesheet record: its only consumer contract names the component.
+    const css = { ...visualCase(base, "widget/theme.css", "src/placeholder.ts"), consumers: ["widget/consumer-a.ts"] };
+    const react = { element: "EXTERNAL react", disposition: "EXTERNAL_DEPENDENCY", ref: "react" };
+    await driveToComplete(css, "TARGET_EXTEND", { units: await censusOf(css), requirements: [react] });
+    await assertNoRuntimeCapture(css);
+    const ownership = async () => (await getArtifactStatus(css.options)).visualApplicability;
+    assert.deepEqual((await ownership()).consumers, [
+      { dependency: "widget/theme.css", consumer: "widget/consumer-a.ts", owner: null, status: "UNMIGRATED" },
+    ]);
+    assert.equal((await ownership()).consumerCoverage, "PENDING");
+
+    // The consuming component: VISUAL_UI, so it cannot be declared invisible,
+    // and it carries the stylesheet into its visible behavior.
+    const component = visualCase(base, "widget/consumer-a.ts", "src/widget.ts");
+    assert.match(await refusedAtDiscovery(component, false), /VISUAL_UI \(widget\/consumer-a\.ts: createElement reference\)/);
+    const requirements = [react, { element: "widget/theme.css", disposition: "MIGRATED_BEHAVIOR", ref: "B-1" }];
+    await advanceDiscovery(component, { ui: true, units: await censusOf(component), requirements });
+    assert.equal((await ownership()).consumers[0].status, "PENDING");
+    assert.equal((await ownership()).consumers[0].owner, component.id);
+    await advanceAssessment(component, "TARGET_EXTEND");
+    await advanceBaseline(component, "TARGET_EXTEND");
+    await advancePlan(component, "TARGET_EXTEND");
+    await advanceImplementation(component, "TARGET_EXTEND");
+    await advanceVerification(component, { ui: true });
+    await writeBaseline(component, "TARGET_EXTEND", { final: true });
+    await writeJson(component.artifactRoot, "gates.json",
+      await gatesDocument(component, { ui: true, requirementElements: ["widget/theme.css"] }));
+    assert.equal((await runArtifact(component.options)).outcome, "COMPLETE");
+    assert.deepEqual(await ownership(), {
+      classification: "VISUAL_DEPENDENCY",
+      files: [{ path: "widget/theme.css", classification: "VISUAL_DEPENDENCY", reason: "style" }],
+      verification: "CONSUMERS",
+      consumers: [{ dependency: "widget/theme.css", consumer: "widget/consumer-a.ts", owner: component.id, status: "VERIFIED" }],
+      consumerCoverage: "VERIFIED",
+    });
+  } finally {
+    await base.cleanup();
+  }
+});
+
+test("visual applicability: a React visual component cannot be declared invisible or complete without Playwright evidence", async () => {
+  const fixture = await visualFixture("widget/Badge.tsx", "export const Badge = ({ label }: { label: string }) => <span className=\"badge\">{label}</span>;\n");
+  try {
+    assert.match(await refusedAtDiscovery(fixture, false), /VISUAL_UI \(widget\/Badge\.tsx: JSX element\).*hasVisibleUi must be true/);
+    await advanceDiscovery(fixture, { ui: true, units: await censusOf(fixture) });
+    await advanceAssessment(fixture, "TARGET_EXTEND");
+    await advanceBaseline(fixture, "TARGET_EXTEND");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await advanceImplementation(fixture, "TARGET_EXTEND");
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", await verificationDocument(fixture, { ui: false }));
+    const bypass = await runArtifact(fixture.options);
+    assert.notEqual(bypass.outcome, "COMPLETE");
+    assert.match(bypass.reason, /Playwright TARGET runtime coverage/);
+    assert.equal((await stateOf(fixture)).currentStep, "VERIFY_SLICES");
+    assert.equal((await getArtifactStatus(fixture.options)).visualApplicability.verification, "SELF");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("visual applicability: an interactive component needs every interaction to pass, then completes with fresh UI evidence", async () => {
+  const fixture = await visualFixture("widget/SaveButton.tsx",
+    "export const SaveButton = ({ onSave }: { onSave: () => void }) => <button type=\"submit\" onClick={onSave} />;\n");
+  try {
+    await driveToBuild(fixture, "TARGET_EXTEND", { ui: true, units: await censusOf(fixture) });
+    await advanceBaseline(fixture, "TARGET_EXTEND");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await advanceImplementation(fixture, "TARGET_EXTEND");
+    const failed = await verificationDocument(fixture, { ui: true });
+    failed.runtimeEvidence[0].actions[0] = { ...failed.runtimeEvidence[0].actions[0], actual: "Nothing happened.", status: "FAIL" };
+    await writeJson(fixture.artifactRoot, "evidence/slice-1/result.json", failed);
+    assert.match((await runArtifact(fixture.options)).reason, /runtime action for 'B-1' did not PASS/);
+    await advanceVerification(fixture, { ui: true });
+    await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", { ...(await gatesDocument(fixture, { ui: true })), uiEvidence: [] });
+    assert.notEqual((await runArtifact(fixture.options)).outcome, "COMPLETE");
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture, { ui: true }));
+    assert.equal((await runArtifact(fixture.options)).outcome, "COMPLETE");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// The legacy runtime is a visual authority, not a reason to open a browser: a
+// record that discovered no UI behavior pins `{"frames": []}` and nothing else.
+const driveLegacyRuntimeToAssessment = async (fixture, ui) => {
+  await bootstrap(fixture, { designSource: "legacy-runtime" });
+  await advanceDiscovery(fixture, { ui, units: await censusOf(fixture) });
+  await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_EXTEND"));
+};
+
+test("visual applicability: explicit legacy-runtime on a NON_VISUAL artifact completes with no capture", async () => {
+  const fixture = await visualFixture("widget/user-service.ts", "export const listUsers = (get: (path: string) => unknown) => get(\"users\");\n");
+  try {
+    await driveLegacyRuntimeToAssessment(fixture, false);
+    // A01-shaped: an existing record parked at ASSESS_TARGET (4/9) under
+    // legacy-runtime. Resuming it rewrites no history and keeps its authority.
+    const parked = await getArtifactStatus(fixture.options);
+    assert.equal(parked.progress.activeCheckpoint, "ASSESS_TARGET");
+    const history = await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8");
+    await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", { version: 2, frames: [] });
+    const assessed = await runArtifact(fixture.options);
+    assert.equal(assessed.outcome, "CONTINUE", assessed.reason);
+    assert.ok((await readFile(path.join(fixture.artifactRoot, "history/history.ndjson"), "utf8")).startsWith(history));
+    assert.equal((await stateOf(fixture)).designSource, "legacy-runtime");
+    await writeBaseline(fixture, "TARGET_EXTEND");
+    await writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", { version: 2, rows: [], unbacked: [] });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await advanceImplementation(fixture, "TARGET_EXTEND");
+    await advanceVerification(fixture, { ui: false });
+    await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    await assertNoRuntimeCapture(fixture);
+    assert.equal((await stateOf(fixture)).designSource, "legacy-runtime");
+    const switched = await runArtifact({ ...fixture.options, designSource: "target-system" });
+    assert.equal(switched.outcome, "BLOCKED");
+    assert.match(switched.reason, /^Invocation design source conflicts with persisted state\./);
+    assert.equal((await stateOf(fixture)).designSource, "legacy-runtime");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("visual applicability: legacy-runtime still demands captured frames for a VISUAL_UI artifact", async () => {
+  const fixture = await visualFixture("widget/Badge.tsx", "export const Badge = () => <span className=\"badge\" />;\n");
+  try {
+    await driveLegacyRuntimeToAssessment(fixture, true);
+    await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", { version: 2, frames: [] });
+    const refused = await runArtifact(fixture.options);
+    assert.match(refused.reason, /must record a non-empty "frames" array/);
+    assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// Classifier false negatives found in review. Every one used to read
+// NON_VISUAL, which let `hasVisibleUi: false` skip all visual evidence and
+// refused the honest `true`. A doubtful file must ask for evidence, never skip it.
+test("visual applicability: aliased renderers, CSS-in-JS and JS/JSX/MJS components classify VISUAL_UI", async () => {
+  const parser = await structuralParser();
+  for (const [file, text, reason] of [
+    ["a.js", "import { createElement as h } from \"react\";\nexport const A = () => h(\"div\");\n", "createElement reference"],
+    ["a.mjs", "import React from \"react\";\nconst h = React.createElement;\nexport const A = () => h(\"div\");\n", "createElement reference"],
+    ["a.js", "import React from \"react\";\nconst { createElement: h } = React;\nexport const A = () => h(\"div\");\n", "createElement reference"],
+    ["a.js", "import { jsx as _jsx } from \"react/jsx-runtime\";\nexport const A = () => _jsx(\"div\", {});\n", "jsx reference"],
+    ["a.js", "import ReactDOM from \"react-dom\";\nReactDOM.render(null, document.body);\n", "imports default from 'react-dom'"],
+    ["a.mjs", "import { h as v } from \"preact\";\nexport const A = () => v(\"div\");\n", "imports h from 'preact'"],
+    ["a.js", "import { h } from \"vue\";\nexport default { setup: () => () => h(\"div\") };\n", "imports h from 'vue'"],
+    ["a.mjs", "import { html } from \"lit\";\nexport const A = () => html`<p>hi</p>`;\n", "imports html from 'lit'"],
+    ["a.js", "import s from \"styled-components\";\nexport const Button = s.button`color: red;`;\n", "imports default from 'styled-components'"],
+    ["a.jsx", "import { css } from \"@emotion/react\";\nexport const card = css`padding: 4px;`;\n", "imports css from '@emotion/react'"],
+    ["a.js", "import styled from \"@emotion/styled\";\nexport const Card = styled(\"div\")({ padding: 4 });\n", "imports default from '@emotion/styled'"],
+    ["a.js", "export const Button = styled.button`color: red;`;\n", "styled tagged template"],
+    ["a.js", "export const A = (el) => { el.innerHTML += \"<b>x</b>\"; };\n", "innerHTML reference"],
+    ["a.mjs", "export const A = (el) => { el[\"outerHTML\"] = \"<b>x</b>\"; };\n", "outerHTML reference"],
+    ["a.js", "export const A = (el, child) => el.appendChild(child);\n", "appendChild reference"],
+    ["a.js", "document.write(\"<p>x</p>\");\n", "document.write reference"],
+    ["a.mjs", "customElements.define(\"x-a\", class extends HTMLElement {});\n", "customElements reference"],
+    ["a.js", "export const A = () => <div />;\n", "JSX element"],
+    ["a.jsx", "export const A = () => <><span /></>;\n", "JSX element"],
+    ["a.mjs", "export const A = () => <div />;\n", "JSX element"],
+    ["a.vue", "<template><div /></template>\n", "markup document"],
+    ["a.svelte", "<div />\n", "markup document"],
+    ["a.html", "<p>x</p>\n", "markup document"],
+  ]) {
+    assert.deepEqual(classifyVisualFile(parser, file, text), { classification: "VISUAL_UI", reason }, `${file}: ${text}`);
+  }
+  // Nonvisual code using the same packages or look-alike APIs stays NON_VISUAL.
+  for (const [file, text] of [
+    ["a.jsx", "import { useState } from \"react\";\nexport const useA = () => useState(0);\n"],
+    ["a.mjs", "import { ref, computed } from \"vue\";\nexport const useA = () => computed(() => ref(1).value);\n"],
+    ["a.js", "import { Injectable } from \"@angular/core\";\nexport const A = Injectable;\n"],
+    ["a.ts", "import type { Root } from \"react-dom/client\";\nimport { type Container } from \"react-dom/client\";\nexport type A = Root | Container;\n"],
+    ["a.js", "const sql = (s) => s;\nexport const q = sql`select 1`;\n"],
+    ["a.cjs", "module.exports = { add: (a, b) => a + b };\n"],
+  ]) {
+    assert.deepEqual(classifyVisualFile(parser, file, text), { classification: "NON_VISUAL", reason: "renders nothing" }, `${file}: ${text}`);
+  }
+});
+
+for (const [name, relative, text, dependency] of [
+  ["an aliased createElement .js renderer", "widget/badge.js",
+    "import { createElement as h } from \"react\";\nexport const Badge = () => h(\"span\", null, \"new\");\n", "react"],
+  ["a .jsx component", "widget/Badge.jsx", "export const Badge = () => <span className=\"badge\" />;\n", null],
+  ["a .mjs lit component", "widget/badge.mjs", "import { html } from \"lit\";\nexport const badge = () => html`<span>new</span>`;\n", "lit"],
+]) {
+  test(`visual applicability: ${name} cannot be declared invisible, and its honest visible declaration is accepted`, async () => {
+    const fixture = await visualFixture(relative, text);
+    try {
+      if (dependency) {
+        await writeJson(fixture.targetRoot, "package.json", { name: "target", private: true, dependencies: { [dependency]: "1.0.0" } });
+      }
+      assert.match(await refusedAtDiscovery(fixture, false), /VISUAL_APPLICABILITY_MISMATCH: this artifact is VISUAL_UI.*hasVisibleUi must be true/);
+      const requirements = dependency
+        ? [{ element: `EXTERNAL ${dependency}`, disposition: "EXTERNAL_DEPENDENCY", ref: dependency }] : [];
+      await advanceDiscovery(fixture, { ui: true, units: await censusOf(fixture), requirements });
+      assert.equal((await getArtifactStatus(fixture.options)).visualApplicability.verification, "SELF");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+test("visual applicability: CSS coverage stays PENDING while any consumer is unmigrated or stale", async () => {
+  const base = await createFixture();
+  try {
+    await writeFile(
+      path.join(base.sourceRoot, "widget/consumer-a.ts"),
+      "import { createElement } from \"react\";\nimport \"./theme.css\";\nexport const a = () => createElement(\"span\", { className: \"accent\" });\n",
+    );
+    await writeJson(base.targetRoot, "package.json", { name: "target", private: true, dependencies: { react: "18.3.1" } });
+    const react = { element: "EXTERNAL react", disposition: "EXTERNAL_DEPENDENCY", ref: "react" };
+    const css = visualCase(base, "widget/theme.css", "src/placeholder.ts");
+    await driveToComplete(css, "TARGET_EXTEND", { units: await censusOf(css), requirements: [react] });
+    const component = visualCase(base, "widget/consumer-a.ts", "src/widget.ts");
+    await bootstrap(component);
+    await advanceDiscovery(component, { ui: true, units: await censusOf(component),
+      requirements: [react, { element: "widget/theme.css", disposition: "MIGRATED_BEHAVIOR", ref: "B-1" }] });
+    await advanceAssessment(component, "TARGET_EXTEND");
+    await advanceBaseline(component, "TARGET_EXTEND");
+    await advancePlan(component, "TARGET_EXTEND");
+    await advanceImplementation(component, "TARGET_EXTEND");
+    await advanceVerification(component, { ui: true });
+    await writeBaseline(component, "TARGET_EXTEND", { final: true });
+    await writeJson(component.artifactRoot, "gates.json",
+      await gatesDocument(component, { ui: true, requirementElements: ["widget/theme.css"] }));
+    assert.equal((await runArtifact(component.options)).outcome, "COMPLETE");
+
+    // One verified consumer of two is not verification: the record is COMPLETE,
+    // its visual coverage is not.
+    const ownership = async () => getArtifactStatus(css.options);
+    let status = await ownership();
+    assert.equal(status.status, "COMPLETE");
+    assert.deepEqual(status.visualApplicability.consumers.map((row) => [row.consumer, row.status]), [
+      ["widget/consumer-a.ts", "VERIFIED"],
+      ["widget/consumer-b.ts", "UNMIGRATED"],
+    ]);
+    assert.equal(status.visualApplicability.consumerCoverage, "PENDING");
+
+    // The verified consumer's source drifts: its evidence no longer covers it.
+    await writeFile(path.join(base.sourceRoot, "widget/consumer-a.ts"),
+      `${await readFile(path.join(base.sourceRoot, "widget/consumer-a.ts"), "utf8")}// drift\n`);
+    status = await ownership();
+    assert.equal(status.visualApplicability.consumers[0].status, "STALE");
+    assert.equal(status.visualApplicability.consumerCoverage, "PENDING");
+  } finally {
+    await base.cleanup();
+  }
+});
+
+test("visual applicability: an artifact that renders and binds a shared stylesheet still reports the stylesheet's other consumers", async () => {
+  const fixture = await createFixture();
+  try {
+    await mkdir(path.join(fixture.sourceRoot, "pages"), { recursive: true });
+    await writeFile(path.join(fixture.sourceRoot, "pages/home.ts"), "export const home = 'theme';\n");
+    await writeFile(path.join(fixture.sourceRoot, "widget/consumer-a.ts"),
+      "export const a = () => document.createElement(\"span\");\n");
+    const directory = { ...fixture, consumers: ["widget/consumer-a.ts", "pages/home.ts"] };
+    await bootstrap(directory);
+    await authorSource(directory, { ui: true });
+    const { visualApplicability } = await getArtifactStatus(directory.options);
+    assert.equal(visualApplicability.classification, "VISUAL_UI");
+    assert.equal(visualApplicability.verification, "SELF");
+    // consumer-a is this record's own file; pages/home.ts belongs to nobody yet.
+    assert.deepEqual(visualApplicability.consumers.map((row) => [row.consumer, row.owner, row.status]), [
+      ["widget/consumer-a.ts", directory.id, "PENDING"],
+      ["pages/home.ts", null, "UNMIGRATED"],
+    ]);
+    assert.equal(visualApplicability.consumerCoverage, "PENDING");
+  } finally {
+    await fixture.cleanup();
   }
 });

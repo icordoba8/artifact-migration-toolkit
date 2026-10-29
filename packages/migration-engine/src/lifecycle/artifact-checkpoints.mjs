@@ -49,6 +49,7 @@ import {
   UI_RUNTIME_STATES,
   validateEvidenceFile,
   validateSourceInventoryDocument,
+  visualApplicability,
 } from "../census/index.mjs";
 import { engineCommand } from "../engine-paths.mjs";
 import {
@@ -103,6 +104,28 @@ const PRESERVED_DISPOSITIONS = Object.freeze([
   "INTENTIONAL_FIX",
   "INTENTIONAL_DESIGN_ADAPTATION",
 ]);
+
+/**
+ * `hasVisibleUi` is a claim; the bound files are the evidence. A file that
+ * renders cannot be declared invisible (that would skip every Playwright
+ * check), and an artifact that renders nothing cannot be declared visible
+ * (capturing it would mean fabricating markup around a stylesheet or a
+ * service). Checked only where `hasVisibleUi` is decided, so a record past
+ * DISCOVER_LEGACY keeps the value its history already consumed.
+ */
+const assertVisualApplicability = (applicability, hasVisibleUi) => {
+  const renders = applicability.files.filter((file) => file.classification === "VISUAL_UI");
+  if (renders.length > 0 && !hasVisibleUi) {
+    throw new Error(
+      `VISUAL_APPLICABILITY_MISMATCH: this artifact is VISUAL_UI (${renders.map((file) => `${file.path}: ${file.reason}`).join("; ")}), so source inventory.hasVisibleUi must be true and its rendered behaviors visible with runtimeStates. Visual, interaction and accessibility evidence is required.`,
+    );
+  }
+  if (renders.length === 0 && hasVisibleUi) {
+    throw new Error(
+      `VISUAL_APPLICABILITY_MISMATCH: this artifact is ${applicability.classification}; no bound file renders UI, so source inventory.hasVisibleUi must be false and no behavior visible. ${applicability.classification === "VISUAL_DEPENDENCY" ? "Its visual verification belongs to the UI migrations that consume it; never wrap it in temporary markup to capture it." : "No browser, Playwright or screenshot evidence applies."}`,
+    );
+  }
+};
 
 export const validateSourceInventory = async (root, state) => {
   const { relative, document, behaviorIds, contractIds, visualIds } =
@@ -1044,6 +1067,7 @@ const runCheckpointValidation = async (root, state, capability) => {
     switch (state.currentStep) {
       case "DISCOVER_LEGACY": {
         const result = await validateSourceInventory(root, state);
+        assertVisualApplicability(await visualApplicability(state), result.document.hasVisibleUi);
         const reconciled = reconcileArtifactDecisions(state, result.decisions);
         if (usesArtifactDirectLedger(state.formatVersion) && reconciled.projection.state === "REJECTED") {
           return { ready: false, outcome: "BLOCKED", reason: "Current source decision is REJECTED.", decisionProjection: reconciled.projection };

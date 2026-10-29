@@ -7,7 +7,7 @@ import {
   readRecordedDecisions,
   requireModuleDecision,
 } from "../decisions/index.mjs";
-import { initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage } from "../formats/index.mjs";
+import { initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage, usesUiVerification } from "../formats/index.mjs";
 import { assertArray, assertNonEmpty, assertPlainObject, isPlainObject } from "../shared/index.mjs";
 import { readJson } from "../store/index.mjs";
 import { assertApiContractCovered } from "./api.mjs";
@@ -295,6 +295,29 @@ export const validateDiscoveryCompleteness = async (
     ) {
       throw new Error(
         `${label} is DEAD but records no PRESENT RUNTIME_OBSERVATION evidence. "Nothing imports it" is a graph fact, not proof it never runs.`,
+      );
+    }
+  }
+
+  // Visual applicability, the module side of the artifact gate: a reachable
+  // owned file that renders cannot ride `hasVisibleUi: false` past every
+  // Playwright check. Judged only while this checkpoint is being closed, so a
+  // record past it keeps what its history consumed.
+  if (state.currentStep === "DISCOVERY_COMPLETENESS" && usesUiVerification(state) && inventory.hasVisibleUi !== true) {
+    const { loadTypeScript } = await import("./scan.mjs");
+    const { classifyVisualFile } = await import("./toolchain.mjs");
+    const parser = loadTypeScript();
+    const rendering = [];
+    for (const filePath of scan.census.filter((file) => PRODUCTION_REACHABILITY.has(scan.reachability[file]))) {
+      // Only a script's bytes are read; any other kind is classified by name (`.vue`, `.html` are markup).
+      const text = scan.kinds[filePath] === "MODULE" || scan.kinds[filePath] === "COMPONENT"
+        ? await readFile(path.join(roots.legacyRoot, filePath), "utf8") : "";
+      const verdict = classifyVisualFile(parser, filePath, text);
+      if (verdict.classification === "VISUAL_UI") rendering.push(`${filePath}: ${verdict.reason}`);
+    }
+    if (rendering.length > 0) {
+      throw new Error(
+        `VISUAL_APPLICABILITY_MISMATCH: ${initialArtifacts.legacyInventory} declares hasVisibleUi false, but production-reachable owned files render UI (${rendering.join("; ")}). Declare hasVisibleUi true with their uiBehaviors; visual, interaction and accessibility evidence is required.`,
       );
     }
   }

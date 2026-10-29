@@ -24353,3 +24353,44 @@ browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row
     await server.close();
   }
 });
+
+test("visual applicability: a reachable module file that renders cannot ride hasVisibleUi false", async () => {
+  const fixture = await createFixture();
+  try {
+    const nonVisual = { ...LEGACY_INVENTORY, hasVisibleUi: false, uiBehaviors: [] };
+    await driveTo(fixture, "DISCOVER_LEGACY", advance, { legacy: nonVisual });
+    await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+    const file = path.join(fixture.legacyRoot, "auth/LoginForm.tsx");
+    await writeFile(file, "export const LoginForm = () => <form />;\n");
+    await writeClassification(fixture, {
+      ...MODULE_CLASSIFICATION,
+      declaredEntryPoints: [{ path: "auth/LoginForm.tsx", reason: "Module entry." }],
+      files: [
+        MODULE_CLASSIFICATION.files[0],
+        {
+          path: "auth/LoginForm.tsx",
+          scope: "OWNED",
+          reachability: "REACHABLE_FROM_ENTRY",
+          reachedFrom: [],
+          kind: "COMPONENT",
+          disposition: "BEHAVIOR_BACKED",
+          behaviorIds: ["LB-1"],
+          routeFlowIds: [],
+          rationale: "The sign-in entry.",
+          evidence: [],
+        },
+      ],
+    });
+    await assert.rejects(
+      advance(fixture),
+      /VISUAL_APPLICABILITY_MISMATCH: .*auth\/LoginForm\.tsx: JSX element/,
+    );
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+    // The same `.tsx` holding only a hook renders nothing, and closes the checkpoint.
+    await writeFile(file, "export const useLogin = (name: string) => name.trim();\n");
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});

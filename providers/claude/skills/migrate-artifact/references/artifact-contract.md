@@ -29,6 +29,16 @@ also declares its required `runtimeStates` (a subset of the engine's
 uses `{id, kind, sourcePath, consumers}`; all consumers must later appear in
 the global-contract matrix. Feature-local visual IDs are forbidden there.
 
+`hasVisibleUi` must match the engine's classification of the bound files
+(`VISUAL_APPLICABILITY_MISMATCH` otherwise, checked at `DISCOVER_LEGACY` only):
+`true` exactly when one renders UI (`VISUAL_UI`), `false` for `NON_VISUAL` and
+`VISUAL_DEPENDENCY`. A `VISUAL_DEPENDENCY` is verified by its consumers: a
+consumer is `VERIFIED` once a sibling record binding it is `COMPLETE`, fresh,
+visible, and binds the dependency or disposes it `MIGRATED_BEHAVIOR` onto a
+visible behavior. `--status` reports this as `visualApplicability`; a record
+that renders and also binds a dependency reports its consumers too, and
+`consumerCoverage` is `VERIFIED` only when every consumer is.
+
 Each artifact-13 `operatorDecisions` row is `{id, subject, decisionId?}`. It has no `status`
 field: a row is satisfied only when its `decisionId` names a ledger line in
 `decisions/operator-decisions.ndjson` whose recomputed candidate matches the

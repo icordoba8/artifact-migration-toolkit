@@ -97,6 +97,7 @@ export {
   architectureFindings,
   assertStructuralCoverage,
   asEngineFault,
+  classifyVisualFile,
   engineFault,
   legacyDependencies,
   pathKey,
@@ -104,6 +105,7 @@ export {
   structuralCensus,
   structuralParser,
   targetTypeScript,
+  visualApplicability,
 } from "./toolchain.mjs";
 export {
   API_CONTRACT_ALGORITHM,

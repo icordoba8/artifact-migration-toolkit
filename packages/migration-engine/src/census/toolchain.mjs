@@ -34,7 +34,7 @@ import {
   targetCodeFiles,
   TEST_UNDER_SRC,
 } from "./artifact.mjs";
-import { parserResolutionError, runDiscoveryScan, structuralUnits } from "./scan.mjs";
+import { kindOf, parserResolutionError, runDiscoveryScan, structuralUnits } from "./scan.mjs";
 
 // The parser still resolves from the artifact engine's installed location,
 // `src/artifact/artifact-migration.mjs`, and its refusal names that file,
@@ -385,6 +385,128 @@ export const sourceRequirements = (state) =>
       ].sort(),
     };
   });
+
+// What puts markup on screen without JSX, matched by name wherever the name
+// appears -- a call, a reference, an import or destructuring alias
+// (`{ createElement as h }`, `const h = React.createElement`) -- so renaming
+// cannot hide it. `render` counts too: a server template is still a page.
+const RENDERING_NAMES = new Set([
+  "createElement", "cloneElement", "createPortal", "createRoot", "hydrateRoot", "render", "jsx", "jsxs", "jsxDEV",
+  "innerHTML", "outerHTML", "insertAdjacentHTML", "createContextualFragment", "attachShadow",
+  "appendChild", "insertBefore", "replaceChildren", "replaceWith", "customElements",
+]);
+// Packages whose import is itself the signal: UI runtimes and CSS-in-JS. Vue,
+// Preact and Angular also ship nonvisual APIs, so only their rendering names count.
+const UI_PACKAGES = new Map([
+  ...["react-dom", "react-dom/client", "react-dom/server", "lit", "lit-html", "lit-element", "svelte", "solid-js/web",
+    "styled-components", "@emotion/styled", "@emotion/react", "@emotion/css", "@stitches/react", "goober",
+    "@linaria/core", "@linaria/react", "@vanilla-extract/css", "react-jss", "styled-jsx"].map((name) => [name, null]),
+  ["vue", new Set(["h", "createApp", "createSSRApp", "defineComponent", "createVNode"])],
+  ["preact", new Set(["h", "Fragment", "Component", "hydrate"])],
+  ["@angular/core", new Set(["Component", "Directive"])],
+]);
+// Tags whose template is markup or a style: lit `html`, styled-components, emotion.
+const RENDERING_TAGS = new Set(["html", "svg", "css", "styled", "keyframes", "createGlobalStyle", "injectGlobal"]);
+// Template and component documents are markup whatever they contain.
+const MARKUP_EXTENSIONS = new Set([".mdx", ".vue", ".svelte", ".astro", ".html", ".htm", ".hbs", ".handlebars", ".ejs",
+  ".pug", ".njk", ".liquid", ".mustache", ".twig", ".marko"]);
+const visualKind = (specifier) => ["STYLE", "ASSET"].includes(kindOf(specifier));
+const rootName = (parser, node) => {
+  while (parser.isPropertyAccessExpression(node) || parser.isCallExpression(node) || parser.isElementAccessExpression(node)) node = node.expression;
+  return parser.isIdentifier(node) ? node.text : null;
+};
+
+/**
+ * What a file does, not what it is named: `VISUAL_UI` when it renders or may
+ * render, `VISUAL_DEPENDENCY` when it is a stylesheet or asset -- or a script
+ * that only imports one -- and `NON_VISUAL` only when no rendering signal is
+ * left. The rule is one-sided on purpose: an uncertain file (a UI package
+ * import, a `render` call, a `css` template) is `VISUAL_UI`, so doubt asks for
+ * visual evidence and can never skip it. A `.tsx` holding only a hook is
+ * nonvisual; the compiler picks the dialect from the file name, so JSX is
+ * parsed wherever that file may legally hold it.
+ * ponytail: syntax only. A renderer reached through a value the parser cannot
+ * name (`obj[key]()`, a re-exporting local barrel) is not seen; add the rule
+ * here when a real artifact needs it.
+ */
+export const classifyVisualFile = (parser, file, text) => {
+  const kind = kindOf(file);
+  const extension = path.extname(file).toLowerCase();
+  if (kind === "STYLE" || kind === "ASSET") return { classification: "VISUAL_DEPENDENCY", reason: kind.toLowerCase() };
+  if (MARKUP_EXTENSIONS.has(extension)) return { classification: "VISUAL_UI", reason: "markup document" };
+  if (!STRUCTURAL_SCRIPT_EXTENSIONS.has(extension)) return { classification: "NON_VISUAL", reason: kind.toLowerCase() };
+  const sourceFile = parser.createSourceFile(file, text, parser.ScriptTarget.Latest, true);
+  let renders = null;
+  let styled = false;
+  const loaded = (specifier, names) => {
+    if (!parser.isStringLiteralLike(specifier ?? {})) return;
+    if (visualKind(specifier.text)) styled = true;
+    if (!UI_PACKAGES.has(specifier.text)) return;
+    // `names` is null for a bare or dynamic load: everything the package runs.
+    const rendering = UI_PACKAGES.get(specifier.text);
+    const hit = names === null ? (rendering ? null : "*") : names.find((name) => !rendering || rendering.has(name));
+    if (hit) renders = `imports ${hit === "*" ? "" : `${hit} from `}'${specifier.text}'`;
+  };
+  const visit = (node) => {
+    if (renders) return;
+    if (parser.isJsxElement(node) || parser.isJsxSelfClosingElement(node) || parser.isJsxFragment(node)) {
+      renders = "JSX element";
+    } else if (parser.isIdentifier(node) && RENDERING_NAMES.has(node.text)) {
+      renders = `${node.text} reference`;
+    } else if (parser.isElementAccessExpression(node) && parser.isStringLiteralLike(node.argumentExpression) &&
+        RENDERING_NAMES.has(node.argumentExpression.text)) {
+      renders = `${node.argumentExpression.text} reference`;
+    } else if (parser.isPropertyAccessExpression(node) && rootName(parser, node.expression) === "document" &&
+        ["write", "writeln"].includes(node.name.text)) {
+      renders = `document.${node.name.text} reference`;
+    } else if (parser.isTaggedTemplateExpression(node) && RENDERING_TAGS.has(rootName(parser, node.tag))) {
+      renders = `${rootName(parser, node.tag)} tagged template`;
+    } else if ((parser.isImportDeclaration(node) || parser.isExportDeclaration(node)) &&
+        !node.isTypeOnly && !node.importClause?.isTypeOnly) {
+      // A type-only import is erased; it cannot render.
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings ?? node.exportClause;
+      const names = !clause && !node.exportClause ? null : [
+        ...(clause?.name ? ["default"] : []),
+        ...(bindings && !bindings.elements ? ["*"] : []),
+        ...(bindings?.elements ?? []).filter((element) => !element.isTypeOnly)
+          .map((element) => (element.propertyName ?? element.name).text),
+      ];
+      loaded(node.moduleSpecifier, names);
+    } else if (parser.isCallExpression(node) &&
+        (node.expression.kind === parser.SyntaxKind.ImportKeyword || rootName(parser, node.expression) === "require")) {
+      loaded(node.arguments[0], null);
+    }
+    parser.forEachChild(node, visit);
+  };
+  parser.forEachChild(sourceFile, visit);
+  if (renders) return { classification: "VISUAL_UI", reason: renders };
+  return styled
+    ? { classification: "VISUAL_DEPENDENCY", reason: "imports a stylesheet or asset" }
+    : { classification: "NON_VISUAL", reason: "renders nothing" };
+};
+
+const VISUAL_RANK = ["NON_VISUAL", "VISUAL_DEPENDENCY", "VISUAL_UI"];
+
+/**
+ * The artifact's visual applicability, derived from the bound source files'
+ * own bytes: the strongest classification of any of them. The gate reads it at
+ * DISCOVER_LEGACY, before any slice can rewrite a same-root file in place.
+ */
+export const visualApplicability = async (state) => {
+  const parser = await structuralParser();
+  const files = [];
+  for (const entry of state.bindings.source.entries.filter((item) => item.kind === "FILE")) {
+    const script = STRUCTURAL_SCRIPT_EXTENSIONS.has(path.extname(entry.path).toLowerCase());
+    const text = script
+      ? await asEngineFault(`Cannot read source file '${entry.path}'`, () =>
+          readFile(path.join(state.source.root, entry.path), "utf8"))
+      : "";
+    files.push({ path: entry.path, ...classifyVisualFile(parser, entry.path, text) });
+  }
+  const rank = Math.max(0, ...files.map((file) => VISUAL_RANK.indexOf(file.classification)));
+  return { classification: VISUAL_RANK[rank], files };
+};
 
 // The machine structural census over the completeness universe's files. It is
 // derived from the source bytes every time it is needed -- at
