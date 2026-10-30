@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
+import { CODEX_MCP_TOOLS, commandFor } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
@@ -436,5 +438,39 @@ test("black-box acceptance refuses an unverified installed engine before startin
     assert.match(result, /Invalid exact toolkit identity/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex approves exactly the nine engine tools, per tool, and keeps approval_policy never", () => {
+  const { argv } = commandFor("codex", "$start-migration discounts", "/consumer/target");
+  const overrides = argv.filter((_, i) => argv[i - 1] === "-c");
+  assert.deepEqual(overrides, [
+    'projects={ "/consumer/target" = { trust_level = "trusted" } }', 'approval_policy="never"',
+    `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
+    ...CODEX_MCP_TOOLS.map((tool) => `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`)]);
+  assert.deepEqual(CODEX_MCP_TOOLS, ["artifact_status", "artifact_run", "migration_status", "migration_scan",
+    "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"]);
+  // No server-wide default, no relay grant, no sandbox escalation, no other server.
+  assert.doesNotMatch(argv.join(" "), /default_tools_approval_mode|migration_relay_decision|danger|bypass|mcp_servers\.(?!start-migration\.)/);
+  assert.deepEqual(argv.slice(0, 6), ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", "/consumer/target/.agents"]);
+});
+
+test("the runner fails visibly on bad arguments run directly or through a symlink, and importing it runs nothing", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "amt-entry-"));
+  try {
+    const link = path.join(dir, "acceptance.mjs");
+    await symlink(fileURLToPath(script), link);
+    for (const entry of [fileURLToPath(script), link]) {
+      const run = spawnSync(process.execPath, [entry, "--bogus", "x"], { encoding: "utf8" });
+      assert.equal(run.status, 1, entry);
+      assert.match(run.stderr, /AGENT_ACCEPTANCE_ERROR: Expected unique --provider/, entry);
+    }
+    const imported = spawnSync(process.execPath, ["--input-type=module", "-e",
+      `const m = await import(${JSON.stringify(script.href)}); console.log(typeof m.commandFor);`], { encoding: "utf8" });
+    assert.equal(imported.status, 0);
+    assert.equal(imported.stdout, "function\n");
+    assert.equal(imported.stderr, "");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

@@ -20,6 +20,7 @@ import { readdir, readFile, realpath, mkdir, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { verifyBundle } from "../providers/install-support.mjs";
+import { isMainModule } from "../packages/migration-engine/src/engine-paths.mjs";
 
 const fail = (message) => { throw new Error(message); };
 const argsOf = (argv) => {
@@ -147,7 +148,7 @@ const observeRecordDirectory = async (root, target) => {
 // Each host's headless permission model, granting only the installed
 // registration, the consumer's own Playwright MCP server (the skill's UI evidence
 // provider) and its state directory -- never a sandbox bypass.
-const commandFor = (provider, invocation, root) => {
+export const commandFor = (provider, invocation, root) => {
   const ask = "Invoke the installed start-migration skill with exactly these arguments: " +
     invocation + ". Follow its existing contract; do not repair or modify the installed toolkit.";
   if (provider === "claude") return { command: "claude",
@@ -158,10 +159,17 @@ const commandFor = (provider, invocation, root) => {
   if (provider === "opencode") return { command: "opencode",
     argv: ["run", "--standalone", "--format", "json", "--auto", ask] };
   // Codex workspace-write keeps .agents read-only, and an untrusted project skips its .codex/config.toml MCP entry.
+  // exec never prompts, so an MCP call needing approval is refused: approve only CODEX_MCP_TOOLS, per tool,
+  // on top of the installed start-migration entry (relay_decision stays out: operator decisions are not tool grants).
   return { command: "codex",
     argv: ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", path.join(root, ".agents"),
-      "-c", `projects={ ${JSON.stringify(root)} = { trust_level = "trusted" } }`, ask] };
+      "-c", `projects={ ${JSON.stringify(root)} = { trust_level = "trusted" } }`, "-c", 'approval_policy="never"',
+      "-c", `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
+      ...CODEX_MCP_TOOLS.flatMap((tool) => ["-c", `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`]),
+      ask] };
 };
+export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
+  "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
 
 async function main() {
   const options = argsOf(process.argv.slice(2));
@@ -360,4 +368,6 @@ async function score(options, root, output, report) {
   await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
 }
 
-main().catch(error => { console.error("AGENT_ACCEPTANCE_ERROR:", error.message); process.exitCode = 1; });
+// Imported by the tests for commandFor; run only as a script (directly or through a symlink).
+if (isMainModule(import.meta.url))
+  main().catch(error => { console.error("AGENT_ACCEPTANCE_ERROR:", error.message); process.exitCode = 1; });

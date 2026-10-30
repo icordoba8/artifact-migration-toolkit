@@ -141,6 +141,25 @@ filter that refuses `socket(AF_NETLINK, NETLINK_ROUTE)` (such as a managed
 Codex session) breaks bubblewrap's loopback setup; launch from a plain
 terminal (`Seccomp: 0` in `/proc/self/status`).
 
+**Codex MCP grants (harness only).** `codex exec` never prompts, so with the
+installed `.codex/config.toml` alone every MCP call that needs approval is
+refused (`approval policy is never`). For Codex launches only, the runner adds
+invocation-scoped `-c` overrides on top of the installed `start-migration`
+entry, whose command, arguments and bytes stay untouched:
+`approval_policy="never"`;
+`mcp_servers.start-migration.enabled_tools` set to exactly `artifact_status`,
+`artifact_run`, `migration_status`, `migration_scan`,
+`migration_evidence_binding`, `migration_prefill`, `migration_capture`,
+`migration_pending_decisions`, `migration_run`; and
+`mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
+those nine (Codex CLI 0.165.0 keys). There is no server-wide
+`default_tools_approval_mode`, no grant for `migration_relay_decision`, any
+other server (including a frontend consumer's Playwright server) or unknown
+tools, and no sandbox escalation. Tool execution permission is not an operator
+decision: the engine still refuses decisions without the operator's own
+authorization. This configures only this harness; an ordinary installed
+`codex exec` is unchanged.
+
 **Record continuity refusal:** the agent may legitimately write
 `modules/<target>/state.json` through the engine, but it must never remove and
 recreate the containing `modules/<target>` record directory to erase prior
