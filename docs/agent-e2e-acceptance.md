@@ -121,6 +121,26 @@ replacement. It does not certify native task-UI recording or every supported
 platform. On a host without unprivileged namespaces the runner refuses;
 `--isolation none` yields functional evidence with `certified: false`.
 
+**Launch as a non-root user.** The agent keeps the runner's effective UID and
+GID inside its namespace (`unshare --map-current-user` maps the effective IDs
+onto themselves), never namespace root, so
+a provider's own nested sandbox (Codex bubblewrap) can still map its user
+namespace: Linux 5.12+ lets a namespace map parent UID 0 only when its creator
+held `CAP_SETFCAP`, which the agent never does. With `--isolation os` the
+runner refuses with `ACCEPTANCE_PRECONDITION`, before the isolation probe and
+the provider start, when its real **or** effective UID is 0: an effective root
+agent would own root's files, and a real root could switch back to them. GIDs
+are not checked. Compatible launch context: a non-root login whose real and
+effective UIDs are both nonzero (not under `sudo` or a setuid wrapper), on a
+host that allows unprivileged user namespaces. It needs util-linux 2.38+
+`unshare`/`setpriv`. Capability boundary: only the trusted setup shell holds
+capabilities (`--keep-caps`, in the new namespace only) to create the read-only
+bind mounts; `setpriv` empties all five capability sets and sets
+`no_new_privs` before the agent starts. A runner launched under a seccomp
+filter that refuses `socket(AF_NETLINK, NETLINK_ROUTE)` (such as a managed
+Codex session) breaks bubblewrap's loopback setup; launch from a plain
+terminal (`Seccomp: 0` in `/proc/self/status`).
+
 **Record continuity refusal:** the agent may legitimately write
 `modules/<target>/state.json` through the engine, but it must never remove and
 recreate the containing `modules/<target>` record directory to erase prior

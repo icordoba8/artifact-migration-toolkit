@@ -98,8 +98,13 @@ const run = ({ command, argv, cwd, timeoutMs }) => new Promise((resolve, reject)
  * ponytail: unshare(1) + setpriv(1), no container runtime. Ceiling: the agent
  * still shares the network and every path not listed, including the consumer
  * record it legitimately writes through the engine.
+ * The agent keeps the runner's own non-root UID/GID, never namespace root: a
+ * provider's own sandbox (Codex bubblewrap) may map parent UID 0 only if its
+ * creator held CAP_SETFCAP (Linux >= 5.12), which the agent never does.
+ * --keep-caps lets the trusted setup shell mount; setpriv then drops every
+ * capability set before the agent starts.
  */
-const ISOLATE = ["--user", "--map-root-user", "--mount", "--propagation", "private",
+const ISOLATE = ["--user", "--map-current-user", "--keep-caps", "--mount", "--propagation", "private",
   "--pid", "--fork", "--mount-proc", "--kill-child"];
 const ISOLATE_SETUP = 'set -e; n=$1; shift; while [ "$n" -gt 0 ]; do mount --bind "$1" "$1"; ' +
   'mount -o remount,bind,ro "$1"; shift; n=$((n - 1)); done; ' +
@@ -270,10 +275,15 @@ async function score(options, root, output, report) {
     // and the independent record-continuity refusal gate. Never pre-award it.
     certified: false };
   if (options.isolation === "os") {
+    // unshare maps the effective IDs onto themselves, so an effective root would keep host
+    // root's file ownership inside the namespace; a real root could regain it (setuid(0)).
+    if (process.getuid() === 0 || process.geteuid() === 0) fail("ACCEPTANCE_PRECONDITION: OS isolation refuses to run " +
+      "with a real or effective UID of 0: the agent keeps the runner's effective UID, so launch the runner as a " +
+      "non-root user. Rerun with --isolation none for functional evidence that is NOT security-certified.");
     const probe = await run({ ...isolated({ command: "true", argv: [] }, readOnly), cwd: root, timeoutMs: 30000 })
       .catch((error) => ({ code: 1, stderr: error.message }));
     if (probe.code !== 0) fail("ACCEPTANCE_PRECONDITION: OS isolation is unavailable here (unprivileged user, mount and PID " +
-      "namespaces via unshare and setpriv): " + String(probe.stderr).trim() + ". Rerun with --isolation none for " +
+      "namespaces via unshare --map-current-user --keep-caps and setpriv): " + String(probe.stderr).trim() + ". Rerun with --isolation none for " +
       "functional evidence that is NOT security-certified.");
   }
   // Watch the parent from THIS trusted runner, not inside the agent namespace.

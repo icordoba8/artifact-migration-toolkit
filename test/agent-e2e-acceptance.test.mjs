@@ -239,7 +239,7 @@ test("record deletion and recreation is detected by a trusted observer and never
 
 const isolationAvailable = (() => {
   try {
-    execFileSync("unshare", ["--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc", "--kill-child",
+    execFileSync("unshare", ["--user", "--map-current-user", "--keep-caps", "--mount", "--pid", "--fork", "--mount-proc", "--kill-child",
       "setpriv", "--no-new-privs", "--inh-caps=-all", "--bounding-set=-all", "--", "true"], { stdio: "ignore", timeout: 10000 });
     return true;
   } catch {
@@ -259,6 +259,8 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
       const engineFile = path.join(release, "packages/migration-engine/package.json");
       const engineBytes = await readFile(engineFile, "utf8");
       const canary = path.join(root, "late-write");
+      // unshare --map-current-user maps the effective IDs, so those are what the agent must see.
+      const uid = process.geteuid(), gid = process.getegid();
       const attempt = (label, command) => `(${command}) 2>/dev/null && echo ${label}=WRITABLE >> observed || echo ${label}=DENIED >> observed`;
       await writeFile(path.join(bin, "opencode"), ["#!/bin/sh",
         attempt("receipt", "echo hacked > .artifact-migration-tools/opencode.json"),
@@ -267,6 +269,13 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         attempt("dependency", `echo 'export default 0;' > '${dependency}'`),
         attempt("report", `echo forged > '${output}/report.json'`),
         attempt("remount", `mount -o remount,bind,rw '${release}'`),
+        // The agent's own identity, and the nested map a provider sandbox (bubblewrap) makes:
+        // first its own UID as root, then back to that UID one level deeper.
+        "awk '{print \"uid_map=\" $1 \" \" $2 \" \" $3}' /proc/$$/uid_map >> identity",
+        "awk '{print \"gid_map=\" $1 \" \" $2 \" \" $3}' /proc/$$/gid_map >> identity",
+        "grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs):' /proc/$$/status | tr -d ' \\t' >> identity",
+        `(unshare --user --map-root-user unshare --user --map-user=${uid} --map-group=${gid} true) 2>/dev/null ` +
+          "&& echo nested=MAPPED >> identity || echo nested=REFUSED >> identity",
         `(sleep 1; echo late > '${canary}') &`, ""].join("\n"), { mode: 0o755 });
       assert.throws(() => execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
         "--module", "auth", "--target", "auth", "--output", output, "--goal", "complete", "--expected-pin", pin],
@@ -275,6 +284,10 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
       (error) => !/modified|Agent left/.test(String(error.stderr)));
       assert.deepEqual((await readFile(path.join(target, "observed"), "utf8")).trim().split("\n"),
         ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "remount=DENIED"]);
+      // ponytail: map-root-user would read "uid_map=0 <uid> 1" and nested=REFUSED (EPERM without CAP_SETFCAP).
+      assert.deepEqual((await readFile(path.join(target, "identity"), "utf8")).trim().split("\n"),
+        [`uid_map=${uid} ${uid} 1`, `gid_map=${gid} ${gid} 1`, ...["Inh", "Prm", "Eff", "Bnd", "Amb"]
+          .map((set) => `Cap${set}:0000000000000000`), "NoNewPrivs:1", "nested=MAPPED"]);
       assert.equal(await readFile(receiptPath, "utf8"), receipt);
       assert.equal(await readFile(engineFile, "utf8"), engineBytes);
       const blocked = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
@@ -349,6 +362,52 @@ test("under OS isolation a verifier in a broad directory (an ancestor of HOME) s
       await rm(root, { recursive: true, force: true });
     }
   });
+
+test("OS isolation refuses a UID-0 runner before the provider starts",
+  { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-uid0-"));
+    try {
+      const { target, bin, pin } = await installedCandidate(root, path.join(root, "verifier"));
+      const started = path.join(root, "agent-started");
+      await writeFile(path.join(bin, "opencode"), `#!/bin/sh\necho yes > '${started}'\n`, { mode: 0o755 });
+      const output = path.join(root, "reports");
+      // Namespace root stands in for a root launch: the runner then sees UID 0.
+      assert.throws(() => execFileSync("unshare", ["--user", "--map-root-user", process.execPath, script.pathname,
+        "--provider", "opencode", "--cwd", target, "--module", "auth", "--target", "auth", "--output", output,
+        "--goal", "complete", "--expected-pin", pin],
+      { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+      (error) => /ACCEPTANCE_PRECONDITION: OS isolation refuses to run with a real or effective UID of 0/.test(String(error.stderr)));
+      const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+      assert.equal(report.verdict, "FAIL");
+      assert.equal(report.security.certified, false);
+      await assert.rejects(readFile(started), { code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+// Simulated credentials: an --import shim makes process.geteuid() report 0 while
+// the real UID stays the caller's own (non-root), the setuid-root launcher shape.
+test("OS isolation refuses an effective UID 0 with a non-root real UID before the provider starts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-euid0-"));
+  try {
+    const { target, bin, pin } = await installedCandidate(root, path.join(root, "verifier"));
+    const started = path.join(root, "agent-started");
+    await writeFile(path.join(bin, "opencode"), `#!/bin/sh\necho yes > '${started}'\n`, { mode: 0o755 });
+    const output = path.join(root, "reports");
+    assert.throws(() => execFileSync(process.execPath, ["--import", "data:text/javascript,process.geteuid=()=>0",
+      script.pathname, "--provider", "opencode", "--cwd", target, "--module", "auth", "--target", "auth",
+      "--output", output, "--goal", "complete", "--expected-pin", pin],
+    { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+    (error) => /ACCEPTANCE_PRECONDITION: OS isolation refuses to run with a real or effective UID of 0/.test(String(error.stderr)));
+    const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
+    assert.equal(report.verdict, "FAIL");
+    assert.equal(report.security.certified, false);
+    await assert.rejects(readFile(started), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("black-box acceptance refuses an unverified installed engine before starting the agent", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-bundle-"));
