@@ -202,6 +202,8 @@ export const commandFor = (provider, invocation, root, native = false) => {
       "-c", `projects={ ${JSON.stringify(root)} = { trust_level = "trusted" } }`, "-c", 'approval_policy="never"',
       "-c", `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
       ...CODEX_MCP_TOOLS.flatMap((tool) => ["-c", `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`]),
+      // Codex hands an MCP server only an env allowlist; forward the launcher's pnpm refusal to the engine's validators.
+      "-c", 'mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]',
       "-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="high"',
       ...(native ? [] : [ask])] };
 };
@@ -374,7 +376,8 @@ async function score(options, root, output, report) {
   const broad = writable.some((dir) => dir === verifierDir || dir.startsWith(path.join(verifierDir, path.sep)));
   const verifierModules = await realpath(path.join(verifierDir, "node_modules")).catch(() => null);
   const sealedVerifier = broad ? [verifier, verifierModules].filter(Boolean) : [verifierDir];
-  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), installed.store, ...sealedVerifier, receiptPath, markerPath, skills, output]
+  // AMT_PNPM_DIR is the official launcher's per-run pinned pnpm (scripts/m15-official-run.sh).
+  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), installed.store, ...sealedVerifier, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],

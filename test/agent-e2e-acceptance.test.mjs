@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -283,6 +282,8 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
       const engineFile = path.join(release, "packages/migration-engine/package.json");
       const engineBytes = await readFile(engineFile, "utf8");
       const canary = path.join(root, "late-write");
+      const pnpmDir = path.join(root, "pnpm-run");
+      await mkdir(pnpmDir);
       // unshare --map-current-user maps the effective IDs, so those are what the agent must see.
       const uid = process.geteuid(), gid = process.getegid();
       const attempt = (label, command) => `(${command}) 2>/dev/null && echo ${label}=WRITABLE >> observed || echo ${label}=DENIED >> observed`;
@@ -292,6 +293,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         attempt("verifier", `echo 'process.exit(0)' > '${verifier}'`),
         attempt("dependency", `echo 'export default 0;' > '${dependency}'`),
         attempt("report", `echo forged > '${output}/report.json'`),
+        attempt("pnpm", `echo forged > '${pnpmDir}/pnpm'`),
         attempt("remount", `mount -o remount,bind,rw '${release}'`),
         // The agent's own identity, and the nested map a provider sandbox (bubblewrap) makes:
         // first its own UID as root, then back to that UID one level deeper.
@@ -303,11 +305,11 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         `(sleep 1; echo late > '${canary}') &`, ""].join("\n"), { mode: 0o755 });
       assert.throws(() => execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
         "--module", "auth", "--target", "auth", "--output", output, "--goal", "complete", "--expected-pin", pin],
-      { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
+      { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH, AMT_PNPM_DIR: pnpmDir } }),
       // The fake agent creates no record, so the run fails afterwards -- but not on a tamper check.
       (error) => !/modified|Agent left/.test(String(error.stderr)));
       assert.deepEqual((await readFile(path.join(target, "observed"), "utf8")).trim().split("\n"),
-        ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "remount=DENIED"]);
+        ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "pnpm=DENIED", "remount=DENIED"]);
       // ponytail: map-root-user would read "uid_map=0 <uid> 1" and nested=REFUSED (EPERM without CAP_SETFCAP).
       assert.deepEqual((await readFile(path.join(target, "identity"), "utf8")).trim().split("\n"),
         [`uid_map=${uid} ${uid} 1`, `gid_map=${gid} ${gid} 1`, ...["Inh", "Prm", "Eff", "Bnd", "Amb"]
@@ -470,7 +472,7 @@ test("Codex approves exactly the nine engine tools, per tool, and keeps approval
     'projects={ "/consumer/target" = { trust_level = "trusted" } }', 'approval_policy="never"',
     `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
     ...CODEX_MCP_TOOLS.map((tool) => `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`),
-    'model_reasoning_effort="high"']);
+    'mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]', 'model_reasoning_effort="high"']);
   assert.equal(argv[argv.indexOf("-m") + 1], "gpt-6.1-sol");
   assert.deepEqual(CODEX_MCP_TOOLS, ["artifact_status", "artifact_run", "migration_status", "migration_scan",
     "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"]);
@@ -975,30 +977,40 @@ const provisionedPnpm = '/home/utmwac/.cache/amt-pnpm/pnpm-11.21.0.tgz';
 
 test('official launcher puts only the verified pinned pnpm first on PATH; a missing or altered tarball refuses', async (t) => {
   const launcher = await readFile(new URL('../scripts/m15-official-run.sh', import.meta.url), 'utf8');
-  assert.match(launcher, /^AMT_PNPM_BIN=\$\(bash "\$AMT_REPO\/scripts\/m15-pnpm\.sh" \/home\/utmwac\/\.cache\/amt-pnpm\/pnpm-11\.21\.0\.tgz\)$/m);
-  assert.match(launcher, /^exec env -i PATH="\$AMT_PNPM_BIN:/m);
+  assert.match(launcher, /^AMT_PNPM_RUN=\/home\/utmwac\/\.cache\/amt-pnpm\/pnpm-11\.21\.0\.tgz\.run\.\$\$\ntrap 'rm -rf -- "\$AMT_PNPM_RUN"' EXIT\ntrap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM\nbash "\$AMT_REPO\/scripts\/m15-pnpm\.sh" \/home\/utmwac\/\.cache\/amt-pnpm\/pnpm-11\.21\.0\.tgz "\$AMT_PNPM_RUN"$/m);
+  assert.match(launcher, /^env -i PATH="\$AMT_PNPM_RUN\/bin:/m);
+  assert.match(launcher, /^  COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm_config_pm_on_fail=error AMT_PNPM_DIR="\$AMT_PNPM_RUN" \\$/m);
+  assert.doesNotMatch(launcher, /^exec /m, 'the cleanup trap must outlive the runner');
   assert.match(launcher, /^test "\$\(sha256sum "\$AMT_NODE" \| cut -d' ' -f1\)" = af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8$/m);
   const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const missing = spawnSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz')], { encoding: 'utf8' });
+  const missing = spawnSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz'), path.join(root, 'run')], { encoding: 'utf8' });
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /PNPM_MISSING/);
   await writeFile(path.join(root, 'forged.tgz'), 'not pnpm\n');
-  const altered = spawnSync('bash', [pnpmHelper, path.join(root, 'forged.tgz')], { encoding: 'utf8' });
+  const altered = spawnSync('bash', [pnpmHelper, path.join(root, 'forged.tgz'), path.join(root, 'run')], { encoding: 'utf8' });
   assert.notEqual(altered.status, 0);
   assert.match(altered.stderr, /PNPM_HASH_MISMATCH/);
   assert.equal(altered.stdout, '');
   assert.deepEqual(await readdir(root), ['forged.tgz'], 'a refused tarball leaves no unpacked run behind');
 });
 
-test('the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx',
-  { skip: existsSync(provisionedPnpm) ? false : `requires the provisioned ${provisionedPnpm}` }, async (t) => {
+// Off CI a missing tarball fails here instead of skipping: the official host must have it.
+test('the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx, and refuses a target pinning another pnpm',
+  { skip: process.env.CI ? `tarball not cached on runner: CI does not provision ${provisionedPnpm}` : false }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(provisionedPnpm, path.join(root, 'pnpm-11.21.0.tgz'));
-  const bin = execFileSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz')], { encoding: 'utf8' }).trim();
-  assert.ok(bin.startsWith(path.join(root, 'pnpm-11.21.0.tgz.run.')), bin);
+  execFileSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz'), path.join(root, 'run')]);
+  const bin = path.join(root, 'run', 'bin');
   const env = { PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter), HOME: root };
   assert.equal(execFileSync('pnpm', ['--version'], { cwd: root, env, encoding: 'utf8' }).trim(), '11.21.0');
   assert.equal(execFileSync('bash', ['-c', 'command -v pnpx'], { env, encoding: 'utf8' }).trim(), path.join(bin, 'pnpx'));
+  // Port 9 is closed: a download attempt would fail with a fetch error, not the version refusal.
+  await writeFile(path.join(root, 'package.json'), '{"packageManager":"pnpm@10.0.0","scripts":{"check":"echo SCRIPT_RAN"}}\n');
+  const other = spawnSync('pnpm', ['run', 'check'], { cwd: root, encoding: 'utf8',
+    env: { ...env, pnpm_config_pm_on_fail: 'error', pnpm_config_registry: 'http://127.0.0.1:9/' } });
+  assert.notEqual(other.status, 0);
+  assert.match(other.stdout + other.stderr, /This project is configured to use 10\.0\.0 of pnpm\. Your current pnpm is v11\.21\.0/);
+  assert.doesNotMatch(other.stdout + other.stderr, /127\.0\.0\.1:9|SCRIPT_RAN/);
 });

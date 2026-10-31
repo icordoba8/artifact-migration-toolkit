@@ -152,7 +152,10 @@ entry, whose command, arguments and bytes stay untouched:
 `migration_evidence_binding`, `migration_prefill`, `migration_capture`,
 `migration_pending_decisions`, `migration_run`; and
 `mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
-those nine (Codex CLI 0.165.0 keys). There is no server-wide
+those nine (Codex CLI 0.165.0 keys); plus
+`mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]`, because Codex
+passes an MCP server only an environment allowlist and the official launcher's
+pnpm version-switch refusal must reach the engine's validators. There is no server-wide
 `default_tools_approval_mode`, no grant for `migration_relay_decision`, any
 other server (including a frontend consumer's Playwright server) or unknown
 tools, and no sandbox escalation. Tool execution permission is not an operator
