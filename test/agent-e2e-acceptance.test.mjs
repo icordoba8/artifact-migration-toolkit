@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
-import { CODEX_MCP_TOOLS, commandFor } from "../scripts/agent-e2e-acceptance.mjs";
+import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
+
+import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256 } from '../scripts/acceptance-evidence.mjs';
+import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src/lifecycle/index.mjs';
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
 
@@ -38,11 +41,27 @@ const installedCandidate = async (root, verifierHome = root) => {
   const receiptPath = path.join(target, ".artifact-migration-tools/opencode.json");
   const receipt = JSON.stringify({ provider: "opencode", root: target, store, release, pin,
     toolkit: manifest.toolkit, commands: {
+      "artifact-migrate": [process.execPath, path.join(release, "packages/migration-engine", pkg.bin["artifact-migrate"])],
       "artifact-migration-discover": [process.execPath,
         path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-discover"])],
     } });
   await writeFile(receiptPath, receipt);
   return { target, bin, verifier, pin, release, receiptPath, receipt };
+};
+
+const installedArtifactCandidate = async root => {
+  const installed = await installedCandidate(root);
+  const { target } = installed;
+  await mkdir(path.join(target, 'legacy'));
+  await writeFile(path.join(target, 'legacy/source.js'), 'export const value = 1;\n');
+  await writeFile(path.join(target, 'package.json'), '{"type":"module"}\n');
+  for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Disposable test fixture']])
+    execFileSync('git', args, { cwd: target });
+  const markerPath = path.join(target, '.artifact-migration-acceptance.json');
+  const marker = JSON.parse(await readFile(markerPath, 'utf8'));
+  Object.assign(marker, { kind: 'artifact', source: 'legacy/source.js', sourceRoot: target, artifactTarget: 'src/result.js' });
+  await writeFile(markerPath, JSON.stringify(marker));
+  return installed;
 };
 const failRun = argv => {
   try {
@@ -77,14 +96,16 @@ test("black-box acceptance requires an explicitly disposable consumer", async ()
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-negative-"));
   try {
     const argv = ["--provider", "codex", "--cwd", root, "--module", "auth",
-      "--target", "auth", "--output", path.join(os.tmpdir(), "acceptance-report")];
+      "--target", "auth", "--output", path.join(root, "../" + path.basename(root) + "-report")];
     assert.match(failRun(argv), /ENOENT/);
     const verifier = path.join(root, "trusted-verifier.mjs");
     await writeFile(verifier, "process.exit(0);\n");
     await writeFile(path.join(root, ".artifact-migration-acceptance.json"),
       JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
         verifierSha256: createHash("sha256").update("process.exit(0);\n").digest("hex") }));
+    await rm(argv.at(-1), { recursive: true, force: true });
     assert.match(failRun(argv), /verifier must reside OUTSIDE/);
+    await rm(argv.at(-1), { recursive: true, force: true });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -447,7 +468,9 @@ test("Codex approves exactly the nine engine tools, per tool, and keeps approval
   assert.deepEqual(overrides, [
     'projects={ "/consumer/target" = { trust_level = "trusted" } }', 'approval_policy="never"',
     `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
-    ...CODEX_MCP_TOOLS.map((tool) => `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`)]);
+    ...CODEX_MCP_TOOLS.map((tool) => `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`),
+    'model_reasoning_effort="high"']);
+  assert.equal(argv[argv.indexOf("-m") + 1], "gpt-6.1-sol");
   assert.deepEqual(CODEX_MCP_TOOLS, ["artifact_status", "artifact_run", "migration_status", "migration_scan",
     "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"]);
   // No server-wide default, no relay grant, no sandbox escalation, no other server.
@@ -473,4 +496,469 @@ test("the runner fails visibly on bad arguments run directly or through a symlin
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('artifact acceptance uses the installed artifact CLI and independent verifier pin', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-artifact-'));
+  try {
+    const { target, bin, receipt, verifier } = await installedArtifactCandidate(root);
+    const cli = JSON.parse(receipt).commands['artifact-migrate'];
+    await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\nexec ' + cli.map(x => "'" + x + "'").join(' ') +
+      " legacy/source.js --target src/result.js --mode auto --json\n", { mode: 0o755 });
+    const output = path.join(root, 'reports');
+    execFileSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+      '--target', 'auth', '--output', output, '--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target,
+      '--artifact-target', 'src/result.js', '--isolation', 'none'],
+    { timeout: 60000, stdio: 'pipe', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+    const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+    assert.equal(report.verdict, 'BOOTSTRAP_PASS');
+    assert.match(report.record, /artifacts\/source-/);
+    assert.match(report.invocation, /^\/migrate-artifact /);
+    assert.equal(report.engine.currentStep, 'DISCOVER_LEGACY');
+    assert.equal(report.presentation.progressAppearsInAgentOutput, true);
+    assert.equal(report.security.certified, false);
+    assert.equal(report.independentVerification, null); // Bootstrap must not call the verifier or claim completion.
+    assert.equal(report.presentation.nativeUiCertified, false);
+    assert.equal(report.openspec.status, 'NOT_TESTED');
+    await writeFile(verifier, 'process.exit(1);');
+    const second = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+      '--target', 'auth', '--output', path.join(root, 'second'), '--kind', 'artifact', '--source', 'legacy/source.js',
+      '--source-root', target, '--artifact-target', 'src/result.js', '--isolation', 'none'], { encoding: 'utf8' });
+    assert.match(second.stderr, /verifier digest does not match/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('read-only consumer is sealed and unchanged',
+  { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-readonly-'));
+    try {
+      const { target, bin, pin } = await installedCandidate(root);
+      await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\nif touch should-not-exist; then exit 9; fi\necho read-only filesystem\n', { mode: 0o755 });
+      const output = path.join(root, 'report');
+      const result = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+        '--target', 'auth', '--output', output, '--scenario', 'read-only', '--expected-pin', pin],
+      { timeout: 60000, stdio: 'pipe', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(result.status, 0, JSON.stringify(report));
+      assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.equal(report.safety.unchanged, true);
+      assert.ok(report.security.readOnly.includes(target));
+      assert.equal(report.security.certified, false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('live and abandoned scenarios retain genuine owner proof across PID isolation',
+  { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-locks-'));
+    try {
+      const { target, bin, pin, release } = await installedCandidate(root);
+      const lockModule = new URL('../packages/migration-engine/src/lifecycle/lock.mjs', new URL('file://' + release + '/scripts/')).href;
+      const probe = path.join(root, 'lock-probe.mjs');
+      await writeFile(probe, `const { acquireModuleLock } = await import(${JSON.stringify(lockModule)});\n` +
+        `try { await (await acquireModuleLock(process.cwd(), 'auth', { timeoutMs: 50 }))(); console.log('unexpected acquire'); }\n` +
+        `catch(e) { console.log(e.message); }\n`);
+      await writeFile(path.join(bin, 'opencode'), `#!/bin/sh\nexec '${process.execPath}' '${probe}'\n`, { mode: 0o755 });
+      for (const scenario of ['live-lock', 'abandoned-lock']) {
+        const output = path.join(root, scenario);
+        const result = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+          '--target', 'auth', '--output', output, '--scenario', scenario, '--expected-pin', pin],
+        { timeout: 60000, encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+        const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+        assert.equal(report.security.certified, false);
+        assert.deepEqual(report.lock.before, report.lock.after);
+        if (scenario === 'live-lock') {
+          assert.equal(result.status, 0, result.stderr);
+          assert.equal(report.lock.holderAliveAfter, true);
+          assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+        } else {
+          assert.equal(result.status, 1);
+          assert.equal(report.lock.ownerExited, true);
+          assert.equal(report.lock.recovery, 'BLOCKED_OWNER_PROOF');
+          assert.match(report.failure, /ACCEPTANCE_LOCK_OWNER_PROOF/);
+        }
+      }
+      // Failure control: an agent that deletes the abandoned lock by hand must never pass.
+      await rm(lockPathFor(target, 'auth'), { recursive: true }); // fixture reset: the runner refuses a pre-existing lock
+      await writeFile(path.join(bin, 'opencode'), `#!/bin/sh\nrm -rf .agents/knowledge/migrations/locks/auth.lock\nexec '${process.execPath}' '${probe}'\n`, { mode: 0o755 });
+      const removed = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+        '--target', 'auth', '--output', path.join(root, 'removed'), '--scenario', 'abandoned-lock', '--expected-pin', pin],
+      { timeout: 60000, encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+      const report = JSON.parse(await readFile(path.join(root, 'removed/report.json')));
+      assert.equal(removed.status, 1);
+      assert.equal(report.lock.after, null);
+      assert.equal(report.lock.recovery, 'REMOVED_WITHOUT_OWNER_PROOF');
+      assert.match(report.failure, /ACCEPTANCE_LOCK_REMOVED/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('checkpoint waits for committed state and preserves history, integrity and frozen bytes', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'checkpoint-'));
+  try {
+    const record = path.join(root, 'record'), lock = path.join(root, 'lock');
+    await mkdir(path.join(record, 'history'), { recursive: true });
+    const state = { revision: 1, currentStep: 'DISCOVERY_COMPLETENESS', artifactHashes: { 'source.json': 'engine-pin' } };
+    await writeFile(path.join(record, 'state.json'), JSON.stringify(state));
+    await writeFile(path.join(record, 'integrity.json'), '{}');
+    await writeFile(path.join(record, 'source.json'), '{"source":"frozen"}');
+    const history = JSON.stringify({ event: 'STEP_COMPLETED', revision: 1 }) + '\n';
+    await writeFile(path.join(record, 'history/history.ndjson'), history);
+    for (const busy of [lock, path.join(record, 'advance.journal'), path.join(record, 'transaction.json')]) {
+      await writeFile(busy, '{}');
+      assert.equal(await checkpoint(record, lock), null);
+      await rm(busy);
+    }
+    const saved = await checkpoint(record, lock);
+    assert.equal(saved.revision, 1);
+    await verifyCheckpoint(record, saved, true);
+    await writeFile(path.join(record, 'state.json'), JSON.stringify({ ...state, revision: 2 }));
+    await appendFile(path.join(record, 'history/history.ndjson'), '{"event":"STEP_COMPLETED","revision":2}\n');
+    await verifyCheckpoint(record, saved);
+    await writeFile(path.join(record, 'state.json'), JSON.stringify({ ...state, revision: 2, artifactHashes: { 'source.json': 'changed-pin' } }));
+    await assert.rejects(verifyCheckpoint(record, saved), /engine pin/);
+    await writeFile(path.join(record, 'state.json'), JSON.stringify({ ...state, revision: 2 }));
+    await assert.rejects(verifyCheckpoint(record, saved, true), /saved record differs/);
+    await writeFile(path.join(record, 'source.json'), 'rewritten');
+    await assert.rejects(verifyCheckpoint(record, saved), /completed artifact/);
+    await writeFile(path.join(record, 'history/history.ndjson'), history.replace('STEP_COMPLETED', 'CREATED'));
+    await assert.rejects(verifyCheckpoint(record, saved), /history prefix/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('snapshot notices empty-directory, mode and symlink mutations', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'tree-evidence-'));
+  try {
+    await writeFile(path.join(root, 'file'), 'unchanged');
+    await writeFile(path.join(root, '__proto__'), 'included');
+    assert.ok((await snapshotTree(root)).__proto__.sha256);
+    const before = await snapshotTree(root);
+    assert.ok(sameTree(before, await snapshotTree(root)));
+    await mkdir(path.join(root, 'empty'));
+    assert.equal(sameTree(before, await snapshotTree(root)), false);
+    await rm(path.join(root, 'empty'), { recursive: true });
+    await chmod(path.join(root, 'file'), 0o600);
+    assert.equal(sameTree(before, await snapshotTree(root)), false);
+    await symlink('/outside', path.join(root, 'link'));
+    assert.equal((await snapshotTree(root)).link.link, '/outside');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('real lock owner survives contention and only same-realm proven death allows recovery', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'owner-proof-'));
+  let holder;
+  try {
+    holder = await startLockHolder(process.execPath, new URL('../packages/migration-engine/src/lifecycle/lock.mjs', import.meta.url).href, root, 'auth');
+    const before = await snapshotTree(lockPathFor(root, 'auth'));
+    await assert.rejects(acquireModuleLock(root, 'auth', { timeoutMs: 0 }), /holds the lock/);
+    assert.ok(sameTree(before, await snapshotTree(lockPathFor(root, 'auth'))));
+    await holder.stop(true);
+    const release = await acquireModuleLock(root, 'auth', { timeoutMs: 100 });
+    assert.equal(sameTree(before, await snapshotTree(lockPathFor(root, 'auth'))), false);
+    await release();
+  } finally { if (holder?.alive()) await holder.stop(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('interruption kills a provider only after the trusted checkpoint predicate and errors fail closed', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'interrupt-control-'));
+  try {
+    const command = { command: process.execPath, argv: ['-e', 'console.log("started");setInterval(()=>{},1000)'], cwd: root, timeoutMs: 2000 };
+    let checks = 0;
+    const result = await run({ ...command, stopWhen: async () => ++checks === 2 });
+    assert.equal(result.interrupted, true);
+    assert.equal(result.timedOut, false);
+    assert.match(result.stdout, /started/);
+    const error = await run({ ...command, stopWhen: async () => { throw new Error('bad checkpoint'); } });
+    assert.equal(error.interrupted, false);
+    assert.equal(error.stopError, 'bad checkpoint');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('complete acceptance fails for each independent-verifier and agent failure control', () => {
+  const ok = { code: 0, timedOut: false, overflow: false };
+  assert.equal(acceptanceVerdict('complete', ok, true, true, ok, 'progress'), 'E2E_COMPLETE_PASS');
+  for (const bad of [null, { ...ok, code: 1 }, { ...ok, timedOut: true }, { ...ok, overflow: true }])
+    assert.equal(acceptanceVerdict('complete', ok, true, true, bad, 'progress'), 'FAIL');
+  for (const bad of [{ ...ok, code: 1 }, { ...ok, timedOut: true }, { ...ok, overflow: true }])
+    assert.equal(acceptanceVerdict('complete', bad, true, true, ok, 'progress'), 'FAIL');
+  assert.equal(acceptanceVerdict('complete', ok, true, false, ok, 'progress'), 'FAIL');
+  assert.equal(acceptanceVerdict('complete', ok, true, true, ok, ''), 'FAIL');
+});
+
+test('native and headless launches share exact permissions; prose cannot certify OpenSpec correction', () => {
+  const headless = commandFor('codex', '/migrate-artifact source.js', '/target');
+  const native = commandFor('codex', '/migrate-artifact source.js', '/target', true);
+  assert.deepEqual(native.argv.slice(1), headless.argv.slice(2, -1));
+  assert.equal(native.argv[0], '--no-daemon');
+  assert.match(headless.argv.at(-1), /installed migrate-artifact skill/);
+  const namespace = isolated(native, ['/trusted']);
+  assert.ok(namespace.argv.includes('--map-current-user'));
+  assert.match(namespace.argv.join(' '), /--no-new-privs --inh-caps=-all --bounding-set=-all/);
+  const prose = JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'OpenSpec rejected and corrected' } });
+  assert.deepEqual(openspecLeads(prose), []);
+  const tool = JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'Invalid OpenSpec requirement', exit_code: 1 } });
+  assert.equal(openspecLeads(prose + '\n' + tool)[0].line, 2);
+});
+
+test('artifact resume preserves store and trusted identities; pending replayable journals refuse without launch or mutation',
+  { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-resume-'));
+    try {
+      const { target, bin, release, pin, receiptPath } = await installedArtifactCandidate(root);
+      const store = path.dirname(release);
+      // Use a real installed receipt and bootstrap, with network resolution forbidden below.
+      await rm(receiptPath);
+      const { adapter } = await import('../providers/install-support.mjs');
+      await adapter('opencode', { action: 'install', scope: 'project', root: target, store, bundle: release, pin });
+      const receiptBytes = await readFile(receiptPath);
+      const launches = path.join(root, 'provider-launches');
+      const driver = path.join(root, 'checkpoint-provider.mjs');
+      await writeFile(driver, `
+        import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+        import { createHash } from 'node:crypto';
+        import path from 'node:path';
+        await appendFile(${JSON.stringify(launches)}, 'launch\\n');
+        const { ensureRuntime } = await import(${JSON.stringify(new URL('file://' + target + '/.opencode/skills/migrate-artifact/scripts/runtime.mjs').href)});
+        const runtime = await ensureRuntime({ provider: 'opencode', root: process.cwd() }, {
+          resolve: async () => { throw new Error('Network forbidden in fixture'); },
+          download: async () => { throw new Error('Download forbidden in fixture'); },
+        });
+        if (runtime.network !== false || runtime.bootstrapped !== false) throw new Error('Expected original offline receipt');
+        console.log('ORIGINAL_STORE_OFFLINE ' + process.env.ARTIFACT_MIGRATION_TOOLS_STORE);
+        const api = await import(${JSON.stringify(new URL('file://' + release + '/packages/migration-engine/src/artifact/artifact-migration.mjs').href)});
+        const options = { source: 'legacy/source.js', target: 'src/result.js', sourceRoot: process.cwd(), targetRoot: process.cwd(), mode: 'auto' };
+        let status = await api.getArtifactStatus(options);
+        if (!status.exists) {
+          await api.runArtifact(options);
+          status = await api.getArtifactStatus(options);
+          const inventory = { version: 1, artifactId: status.artifactId, hasVisibleUi: false,
+            sourceFiles: ['legacy/source.js'], behaviors: [{ id: 'B-1', description: 'Exports value 1', visible: false,
+              evidence: [{ path: 'legacy/source.js', sha256: createHash('sha256').update(await readFile('legacy/source.js')).digest('hex'), status: 'VERIFIED' }] }],
+            globalContracts: [], featureLocalVisuals: [], operatorDecisions: [] };
+          await mkdir(path.join(status.root, 'inventories'), { recursive: true });
+          await writeFile(path.join(status.root, 'inventories/source.json'), JSON.stringify(inventory));
+          const result = await api.runArtifact(options);
+          console.log(JSON.stringify(result));
+          if (result.outcome !== 'CONTINUE') process.exit(2);
+          setInterval(() => {}, 1000);
+        } else {
+          await writeFile(path.join(status.root, 'inventories/completeness.json'), JSON.stringify({ version: 1,
+            sourceFiles: ['legacy/source.js'], units: [{ path: 'legacy/source.js#value', disposition: 'MIGRATED_BEHAVIOR', ref: 'B-1' }], requirements: [] }));
+          const result = await api.runArtifact(options);
+          console.log(JSON.stringify(result));
+          if (result.outcome !== 'CONTINUE') process.exit(2);
+        }
+      `);
+      await writeFile(path.join(bin, 'opencode'), `#!/bin/sh\nexec '${process.execPath}' '${driver}'\n`, { mode: 0o755 });
+      const common = [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth', '--target', 'auth',
+        '--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target, '--artifact-target', 'src/result.js', '--expected-pin', pin];
+      const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH };
+      const interrupted = path.join(root, 'interrupted');
+      const first = spawnSync(process.execPath, [...common, '--scenario', 'interrupt', '--output', interrupted], { env, encoding: 'utf8', timeout: 60000 });
+      const savedPath = path.join(interrupted, 'report.json');
+      const saved = JSON.parse(await readFile(savedPath));
+      assert.equal(first.status, 0, JSON.stringify(saved));
+      assert.equal(saved.verdict, 'INTERRUPTED_CHECKPOINT');
+      assert.equal(saved.checkpoint.step, 'DISCOVERY_COMPLETENESS');
+      const markerPath = path.join(target, '.artifact-migration-acceptance.json');
+      const markerBytes = await readFile(markerPath);
+      const verifier = JSON.parse(markerBytes).verifier;
+      const verifierBytes = await readFile(verifier);
+      assert.deepEqual(saved.trusted, {
+        marker: { path: markerPath, sha256: sha256(markerBytes) },
+        receipt: { path: receiptPath, sha256: sha256(receiptBytes), store, release },
+        verifier: { path: verifier, sha256: sha256(verifierBytes) },
+      });
+      assert.match(await readFile(path.join(interrupted, 'agent.stdout.log'), 'utf8'), /ORIGINAL_STORE_OFFLINE/);
+      const beforeLaunches = await readFile(launches, 'utf8');
+      const refuseResume = async (name, pattern, reportPath = savedPath) => {
+        const output = path.join(root, name);
+        const before = await snapshotTree(target);
+        const result = spawnSync(process.execPath, [...common, '--scenario', 'resume', '--resume-from', reportPath,
+          '--output', output], { env, encoding: 'utf8', timeout: 60000 });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, pattern);
+        assert.ok(sameTree(before, await snapshotTree(target)), 'refusal must not mutate the consumer');
+        assert.equal(await readFile(launches, 'utf8'), beforeLaunches, 'provider must not start');
+        const refused = JSON.parse(await readFile(path.join(output, 'report.json')));
+        assert.equal(refused.agent, undefined);
+        await assert.rejects(readFile(path.join(output, 'resume-before-status.json')), { code: 'ENOENT' });
+      };
+      const oldReport = path.join(root, 'old-report.json');
+      const { trusted, ...withoutTrusted } = saved;
+      await writeFile(oldReport, JSON.stringify(withoutTrusted));
+      await refuseResume('missing-trusted', /trusted marker, receipt or verifier identity/, oldReport);
+      await writeFile(verifier, 'process.exit(0); // replacement verifier\n');
+      await writeFile(markerPath, JSON.stringify({ ...JSON.parse(markerBytes), verifierSha256: sha256(await readFile(verifier)) }));
+      await refuseResume('replaced-verifier-and-marker', /trusted marker, receipt or verifier identity/);
+      await writeFile(markerPath, markerBytes);
+      await writeFile(verifier, verifierBytes);
+      await writeFile(receiptPath, Buffer.concat([receiptBytes, Buffer.from('\n')]));
+      await refuseResume('replaced-receipt', /trusted marker, receipt or verifier identity/);
+      await writeFile(receiptPath, receiptBytes);
+
+      // Capture a real next transition and prove its journal replayable in this disposable fixture.
+      const recordFiles = ['state.json', 'integrity.json', 'history/history.ndjson'];
+      const pre = await Promise.all(recordFiles.map(file => readFile(path.join(saved.record, file))));
+      const next = spawnSync(process.execPath, [driver], { cwd: target,
+        env: { ...env, ARTIFACT_MIGRATION_TOOLS_STORE: store }, encoding: 'utf8', timeout: 60000 });
+      assert.equal(next.status, 0, next.stderr);
+      const post = await Promise.all(recordFiles.map(file => readFile(path.join(saved.record, file))));
+      const event = JSON.parse(post[2].toString().trim().split('\n').at(-1));
+      const journal = JSON.stringify({ version: 2, previousState: JSON.parse(pre[0]), previousIntegrity: JSON.parse(pre[1]),
+        input: { kind: 'ADVANCE', selectedSlice: null }, state: JSON.parse(post[0]), event });
+      const restorePre = async () => {
+        for (const [i, file] of recordFiles.entries()) await writeFile(path.join(saved.record, file), pre[i]);
+        await writeFile(path.join(saved.record, 'transaction.json'), journal);
+      };
+      await restorePre();
+      const cli = JSON.parse(receiptBytes).commands['artifact-migrate'];
+      const replay = spawnSync(cli[0], [...cli.slice(1), 'legacy/source.js', '--source-root', target, '--target-root', target,
+        '--target', 'src/result.js', '--mode', 'auto', '--json'], { cwd: target, encoding: 'utf8', timeout: 60000 });
+      assert.equal(replay.status, 0, replay.stderr);
+      await assert.rejects(readFile(path.join(saved.record, 'transaction.json')), { code: 'ENOENT' });
+      assert.deepEqual(await readFile(path.join(saved.record, 'state.json')), post[0]);
+      await restorePre();
+      // Reset only the test provider counter; rejection must neither start it nor replay this journal.
+      await writeFile(launches, beforeLaunches);
+      await refuseResume('pending-transaction', /ACCEPTANCE_CHECKPOINT_BUSY: pending journal before resume/);
+      await rm(path.join(saved.record, 'transaction.json'));
+      await writeFile(path.join(saved.record, 'advance.journal'), journal);
+      await refuseResume('pending-advance', /ACCEPTANCE_CHECKPOINT_BUSY: pending journal before resume/);
+      await rm(path.join(saved.record, 'advance.journal'));
+      const invalid = path.join(root, 'invalid-report.json');
+      await writeFile(invalid, 'null');
+      const nullReport = spawnSync(process.execPath, [...common, '--scenario', 'resume', '--resume-from', invalid,
+        '--output', path.join(root, 'invalid-report-result')], { env, encoding: 'utf8', timeout: 60000 });
+      assert.match(nullReport.stderr, /Resume report must be an interruption report object/);
+
+      const source = await readFile(path.join(target, 'legacy/source.js'));
+      await writeFile(path.join(target, 'legacy/source.js'), 'changed');
+      const bad = spawnSync(process.execPath, [...common, '--scenario', 'resume', '--resume-from', savedPath, '--output', path.join(root, 'changed')], { env, encoding: 'utf8', timeout: 60000 });
+      assert.match(bad.stderr, /source was rebuilt or changed/);
+      await writeFile(path.join(target, 'legacy/source.js'), source); // local negative-control fixture only
+      const resumed = path.join(root, 'resumed');
+      const freshHome = path.join(root, 'fresh-home');
+      await mkdir(freshHome);
+      const second = spawnSync(process.execPath, [...common, '--scenario', 'resume', '--resume-from', savedPath, '--output', resumed],
+        { env: { ...env, HOME: freshHome, CODEX_HOME: path.join(freshHome, 'codex'), XDG_DATA_HOME: path.join(freshHome, 'data'),
+          ARTIFACT_MIGRATION_TOOLS_STORE: path.join(freshHome, 'wrong-store') }, encoding: 'utf8', timeout: 60000 });
+      const report = JSON.parse(await readFile(path.join(resumed, 'report.json')));
+      assert.equal(second.status, 0, JSON.stringify(report));
+      assert.equal(report.verdict, 'BOOTSTRAP_PASS');
+      assert.equal(report.engine.currentStep, 'ASSESS_TARGET');
+      assert.equal(report.resume.historyPrefixPreserved, true);
+      assert.match(await readFile(path.join(resumed, 'agent.stdout.log'), 'utf8'), /ORIGINAL_STORE_OFFLINE/);
+      assert.deepEqual(await readFile(receiptPath), receiptBytes);
+      assert.deepEqual(report.trusted, saved.trusted);
+      assert.equal(report.security.certified, false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('native launcher records a real PTY without awarding native UI acceptance',
+  { skip: isolationAvailable && process.version === 'v22.13.0' ? false : 'requires namespaces and pinned Node' }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent'e2e-native-"));
+    try {
+      const { target, bin, receipt } = await installedCandidate(root);
+      const installed = JSON.parse(receipt);
+      installed.provider = 'codex';
+      await writeFile(path.join(target, '.artifact-migration-tools/codex.json'), JSON.stringify(installed));
+      await mkdir(path.join(target, '.agents/skills'), { recursive: true });
+      await writeFile(path.join(bin, 'codex'), '#!/bin/sh\nif [ "$1" = --version ]; then echo codex-cli 0.165.0; else test -t 0 && echo LOCAL_TEST_PTY_VISIBLE; fi\n', { mode: 0o755 });
+      const output = path.join(root, 'report');
+      const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+      const command = [process.execPath, script.pathname, '--provider', 'codex', '--cwd', target, '--module', 'auth',
+        '--target', 'auth', '--output', output, '--ui', 'native'].map(quote).join(' ');
+      const result = spawnSync('script', ['--quiet', '--return', '--command', command, '/dev/null'],
+        { env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }, encoding: 'utf8', timeout: 60000 });
+      assert.equal(result.status, 1); // mock provider cannot create a migration record
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(report.presentation.nativeUiCertified, false);
+      assert.equal(report.security.certified, false);
+      assert.match(await readFile(path.join(output, 'native.typescript'), 'utf8'), /LOCAL_TEST_PTY_VISIBLE/);
+      assert.ok((await readFile(path.join(output, 'native.timing'))).length);
+      await writeFile(path.join(bin, 'codex'), '#!/bin/sh\necho codex-cli 0.166.0\n', { mode: 0o755 });
+      const drift = spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', target, '--module', 'auth',
+        '--target', 'auth', '--output', path.join(root, 'version-drift')],
+      { env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }, encoding: 'utf8', timeout: 60000 });
+      assert.equal(drift.status, 1);
+      assert.match(drift.stderr, /require Codex 0.165.0 and Node 22.13.0/);
+      assert.equal(JSON.parse(await readFile(path.join(root, 'version-drift/report.json'))).agent, undefined);
+
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('official launcher binds external committed-harness pins and a clean tree; complete patch survives staging and commit', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'm15 launcher '));
+  const base = 'd7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d';
+  const repo = fileURLToPath(new URL('..', import.meta.url));
+  const fixture = path.join(root, 'fixture');
+  try {
+    execFileSync('git', ['clone', '--shared', '--no-checkout', '--quiet', repo, fixture], { stdio: 'pipe' });
+    const git = (...args) => execFileSync('git', args, { cwd: fixture, encoding: 'utf8', stdio: 'pipe' }).trim();
+    git('checkout', '--quiet', '--detach', base);
+    for (const file of ['m15-patch.sh', 'm15-official-run.sh'])
+      await cp(path.join(repo, 'scripts', file), path.join(fixture, 'scripts', file));
+    const added = path.join(fixture, 'new harness file.txt');
+    await writeFile(added, 'reviewed bytes\n');
+    await appendFile(path.join(fixture, 'README.md'), '\nLocal fixture delta.\n');
+    const patch = () => execFileSync('bash', ['scripts/m15-patch.sh'], { cwd: fixture });
+    const reviewed = patch();
+    const digest = sha256(reviewed);
+    const indexBefore = await readFile(path.join(fixture, '.git/index'));
+    patch();
+    assert.deepEqual(await readFile(path.join(fixture, '.git/index')), indexBefore, 'review does not stage anything');
+    git('add', '--', 'new harness file.txt');
+    assert.deepEqual(patch(), reviewed);
+    await writeFile(added, 'reviewed bytes\nunstaged after staging\n');
+    const unstagedDigest = sha256(patch());
+    git('add', '-A');
+    assert.equal(sha256(patch()), unstagedDigest);
+    await writeFile(added, 'reviewed bytes\n');
+    git('add', '-A');
+    assert.deepEqual(patch(), reviewed);
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'Disposable committed harness');
+    const approvedCommit = git('rev-parse', 'HEAD'); // External test driver supplies the fixture approval.
+    assert.notEqual(approvedCommit, base);
+    assert.deepEqual(patch(), reviewed, 'reviewed identity survives commit');
+    const bin = path.join(root, 'bin');
+    await mkdir(bin);
+    const sha = execFileSync('which', ['sha256sum'], { encoding: 'utf8' }).trim();
+    // Stop at the first binary check. No provider, auth, engine or scored run can start.
+    await writeFile(path.join(bin, 'sha256sum'), `#!/bin/sh\nif [ "$#" -gt 0 ]; then echo BINARY_CHECK_REACHED >&2; exit 90; fi\nexec '${sha}'\n`, { mode: 0o755 });
+    const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH,
+      AMT_HARNESS_COMMIT: approvedCommit, AMT_PATCH_SHA256: digest, AMT_PROFILE: path.join(root, 'unused-profile') };
+    const launch = (overrides = {}) => spawnSync('bash', ['scripts/m15-official-run.sh'],
+      { cwd: fixture, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000 });
+    const accepted = launch();
+    assert.notEqual(accepted.status, 0); // Deliberate stop before any binary can execute.
+    assert.match(accepted.stderr, /BINARY_CHECK_REACHED/);
+    for (const pins of [{ AMT_HARNESS_COMMIT: '' }, { AMT_PATCH_SHA256: '' }, { AMT_HARNESS_COMMIT: base },
+      { AMT_HARNESS_COMMIT: approvedCommit.slice(0, 8) }, { AMT_PATCH_SHA256: '0'.repeat(64) }]) {
+      const refused = launch(pins);
+      assert.notEqual(refused.status, 0);
+      assert.doesNotMatch(refused.stderr, /BINARY_CHECK_REACHED/);
+    }
+    for (const file of ['README.md', 'new harness file.txt', 'untracked.txt']) {
+      const full = path.join(fixture, file);
+      const original = await readFile(full).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+      await writeFile(full, 'changed after review\n');
+      const dirty = launch();
+      assert.notEqual(dirty.status, 0);
+      assert.doesNotMatch(dirty.stderr, /BINARY_CHECK_REACHED/);
+      git('add', '--', file);
+      const staged = launch();
+      assert.notEqual(staged.status, 0);
+      assert.doesNotMatch(staged.stderr, /BINARY_CHECK_REACHED/);
+      git('reset', '--quiet', 'HEAD', '--', file);
+      if (original === null) await rm(full); else await writeFile(full, original);
+    }
+    await rm(added);
+    assert.notEqual(launch().status, 0);
+    assert.doesNotMatch(launch().stderr, /BINARY_CHECK_REACHED/);
+    git('restore', '--', 'new harness file.txt');
+    // A later clean commit is still refused under the old externally supplied commit.
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '--quiet', '-m', 'Different harness commit');
+    assert.notEqual(launch().status, 0);
+    assert.doesNotMatch(launch().stderr, /BINARY_CHECK_REACHED/);
+    assert.deepEqual(patch(), reviewed);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

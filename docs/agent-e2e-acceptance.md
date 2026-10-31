@@ -261,3 +261,16 @@ For every provider and supported OS, the release record needs:
 
 **Green CI, a mock LLM, or a green engine fixture does not constitute live-agent
 production acceptance.** Never make that claim without the external evidence.
+
+## M15 scenario extensions
+
+The runner also supports standalone artifacts (`--kind artifact`), committed-checkpoint interruption and
+resume, deliberately read-only consumers, genuine live/abandoned lock probes, and a native Codex terminal
+launcher. See [the M15 runbook](m15-harness-implementation.md) for marker fields, commands, contract-row
+traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13.0 and explicitly select
+`gpt-6.1-sol` with high reasoning. Every output directory must be empty and outside the consumer.
+
+These capabilities do not supply missing certification evidence. The native launcher captures terminal
+output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
+review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery remains blocked by the
+existing owner-proof protocol. Bootstrap AUTO's contract/implementation contradiction remains unresolved.
