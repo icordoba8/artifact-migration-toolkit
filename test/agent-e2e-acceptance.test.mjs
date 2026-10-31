@@ -894,6 +894,11 @@ test('official launcher binds external committed-harness pins and a clean tree; 
   try {
     execFileSync('git', ['clone', '--shared', '--no-checkout', '--quiet', repo, fixture], { stdio: 'pipe' });
     const git = (...args) => execFileSync('git', args, { cwd: fixture, encoding: 'utf8', stdio: 'pipe' }).trim();
+    // Shallow CI checkouts lack the pinned BASE: fetch exactly that commit into the disposable fixture only.
+    if (spawnSync('git', ['cat-file', '-e', `${base}^{commit}`], { cwd: fixture, stdio: 'ignore' }).status !== 0)
+      git('fetch', '--quiet', '--no-tags', '--depth=1',
+        execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repo, encoding: 'utf8', stdio: 'pipe' }).trim(), base);
+    assert.equal(git('rev-parse', '--verify', `${base}^{commit}`), base, 'pinned BASE commit is present');
     git('checkout', '--quiet', '--detach', base);
     for (const file of ['m15-patch.sh', 'm15-official-run.sh'])
       await cp(path.join(repo, 'scripts', file), path.join(fixture, 'scripts', file));
