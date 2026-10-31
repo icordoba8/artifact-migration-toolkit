@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -966,4 +967,38 @@ test('official launcher binds external committed-harness pins and a clean tree; 
     assert.doesNotMatch(launch().stderr, /BINARY_CHECK_REACHED/);
     assert.deepEqual(patch(), reviewed);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// #202: the nvm bin's Corepack 0.30.0 `pnpm` shim cannot verify npm's current signing key.
+const pnpmHelper = fileURLToPath(new URL('../scripts/m15-pnpm.sh', import.meta.url));
+const provisionedPnpm = '/home/utmwac/.cache/amt-pnpm/pnpm-11.21.0.tgz';
+
+test('official launcher puts only the verified pinned pnpm first on PATH; a missing or altered tarball refuses', async (t) => {
+  const launcher = await readFile(new URL('../scripts/m15-official-run.sh', import.meta.url), 'utf8');
+  assert.match(launcher, /^AMT_PNPM_BIN=\$\(bash "\$AMT_REPO\/scripts\/m15-pnpm\.sh" \/home\/utmwac\/\.cache\/amt-pnpm\/pnpm-11\.21\.0\.tgz\)$/m);
+  assert.match(launcher, /^exec env -i PATH="\$AMT_PNPM_BIN:/m);
+  assert.match(launcher, /^test "\$\(sha256sum "\$AMT_NODE" \| cut -d' ' -f1\)" = af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8$/m);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const missing = spawnSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz')], { encoding: 'utf8' });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /PNPM_MISSING/);
+  await writeFile(path.join(root, 'forged.tgz'), 'not pnpm\n');
+  const altered = spawnSync('bash', [pnpmHelper, path.join(root, 'forged.tgz')], { encoding: 'utf8' });
+  assert.notEqual(altered.status, 0);
+  assert.match(altered.stderr, /PNPM_HASH_MISMATCH/);
+  assert.equal(altered.stdout, '');
+  assert.deepEqual(await readdir(root), ['forged.tgz'], 'a refused tarball leaves no unpacked run behind');
+});
+
+test('the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx',
+  { skip: existsSync(provisionedPnpm) ? false : `requires the provisioned ${provisionedPnpm}` }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await cp(provisionedPnpm, path.join(root, 'pnpm-11.21.0.tgz'));
+  const bin = execFileSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz')], { encoding: 'utf8' }).trim();
+  assert.ok(bin.startsWith(path.join(root, 'pnpm-11.21.0.tgz.run.')), bin);
+  const env = { PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter), HOME: root };
+  assert.equal(execFileSync('pnpm', ['--version'], { cwd: root, env, encoding: 'utf8' }).trim(), '11.21.0');
+  assert.equal(execFileSync('bash', ['-c', 'command -v pnpx'], { env, encoding: 'utf8' }).trim(), path.join(bin, 'pnpx'));
 });

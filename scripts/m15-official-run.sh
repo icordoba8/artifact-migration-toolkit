@@ -19,6 +19,8 @@ test "$("$AMT_NODE" --version)" = v22.13.0
 test "$(id -u)" != 0
 grep -q '^Seccomp:[[:space:]]*0$' /proc/self/status
 test -f "$AMT_PROFILE/codex/auth.json"
-exec env -i PATH="$(dirname "$AMT_CODEX"):$(dirname "$AMT_NODE"):/usr/local/bin:/usr/bin:/bin" \
+# The nvm bin's `pnpm` is a Corepack 0.30.0 shim whose embedded npm key no longer verifies; resolve a pinned pnpm first.
+AMT_PNPM_BIN=$(bash "$AMT_REPO/scripts/m15-pnpm.sh" /home/utmwac/.cache/amt-pnpm/pnpm-11.21.0.tgz)
+exec env -i PATH="$AMT_PNPM_BIN:$(dirname "$AMT_CODEX"):$(dirname "$AMT_NODE"):/usr/local/bin:/usr/bin:/bin" \
   HOME="$AMT_PROFILE/home" CODEX_HOME="$AMT_PROFILE/codex" LANG=C.UTF-8 TERM="${TERM:-xterm}" \
   COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$AMT_NODE" "$AMT_REPO/scripts/agent-e2e-acceptance.mjs" "$@"

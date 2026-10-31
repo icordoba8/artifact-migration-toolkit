@@ -32,6 +32,8 @@ const UNIDENTIFIED_SUITES = [
   "test/external/format-17-acceptance.test.mjs",
 ];
 
+const STRIP_TYPES_SUITE = "test/external/format-17-acceptance.test.mjs";
+
 const isUnidentifiedSuite = (file) =>
   UNIDENTIFIED_SUITES.some((suite) => file.replaceAll("\\", "/").endsWith(suite));
 
@@ -62,7 +64,13 @@ if (files.length === 0) {
 await withTestRoot(async (root) => {
   const fixture = await import(pathToFileURL(path.join(root,
     "packages/migration-engine/test/support/fixture-identity.mjs")).href);
-  const unidentified = await runTests(root, files.filter(isUnidentifiedSuite), "--test-concurrency=1");
+  // #11: format-17-acceptance imports a `.ts` fixture, which Node < 22.18 loads only with
+  // type stripping enabled. Scoped to that file; no other suite runs with the flag.
+  let unidentified = 0;
+  for (const file of files.filter(isUnidentifiedSuite)) {
+    const strip = file.replaceAll("\\", "/").endsWith(STRIP_TYPES_SUITE) ? ["--experimental-strip-types"] : [];
+    unidentified = (await runTests(root, [file], "--test-concurrency=1", ...strip)) || unidentified;
+  }
   let identified = 0;
   const rest = files.filter((file) => !isUnidentifiedSuite(file));
   if (rest.length > 0) {

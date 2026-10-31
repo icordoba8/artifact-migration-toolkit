@@ -111,6 +111,9 @@ cd /home/utmwac/amt-m15-uidmap
 R=/home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl
 N=/home/utmwac/.nvm/versions/node/v22.13.0/bin
 export PATH="$R/bin:$N:/usr/local/bin:/usr/bin:/bin"
+# One-time pnpm provisioning: the launcher verifies scripts/m15-pnpm.sh's pinned sha512 and never fetches.
+test -f ~/.cache/amt-pnpm/pnpm-11.21.0.tgz || { mkdir -p ~/.cache/amt-pnpm &&
+  curl -fsS --proto =https -o ~/.cache/amt-pnpm/pnpm-11.21.0.tgz https://registry.npmjs.org/pnpm/-/pnpm-11.21.0.tgz; }
 PIN=sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6
 VT=/home/utmwac/amt-evidence-vault/m15-20261030T2045Z/restricted/tmp
 V="$VT/amt-m15-run3-20261030T1910Z"
