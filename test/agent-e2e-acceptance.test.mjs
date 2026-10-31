@@ -745,8 +745,14 @@ test('complete acceptance fails for each independent-verifier and agent failure 
 
 test('native and headless launches share exact permissions; prose cannot certify OpenSpec correction', () => {
   const headless = commandFor('codex', '/migrate-artifact source.js', '/target');
-  const native = commandFor('codex', '/migrate-artifact source.js', '/target', true);
-  assert.deepEqual(native.argv.slice(1), headless.argv.slice(2, -1));
+  const server = { command: '/node', args: ['/release/packages/migration-engine/src/mcp-server.mjs'] };
+  const native = commandFor('codex', '/migrate-artifact source.js', '/target', true, server);
+  // Native adds only the installed entry's own transport (the TUI validates the -c layer alone at bootstrap).
+  const transport = ['-c', 'mcp_servers.start-migration.command="/node"', '-c', 'mcp_servers.start-migration.args=["/release/packages/migration-engine/src/mcp-server.mjs"]'];
+  const at = native.argv.indexOf(transport[1]) - 1;
+  assert.deepEqual(native.argv.slice(at, at + 4), transport);
+  assert.deepEqual([...native.argv.slice(1, at), ...native.argv.slice(at + 4)], headless.argv.slice(2, -1));
+  assert.ok(!headless.argv.some(arg => /start-migration\.(command|args)=/.test(arg)));
   assert.equal(native.argv[0], '--no-daemon');
   assert.match(headless.argv.at(-1), /installed migrate-artifact skill/);
   const namespace = isolated(native, ['/trusted']);
@@ -922,15 +928,25 @@ test('native launcher records a real PTY without awarding native UI acceptance',
       installed.provider = 'codex';
       await writeFile(path.join(target, '.artifact-migration-tools/codex.json'), JSON.stringify(installed));
       await mkdir(path.join(target, '.agents/skills'), { recursive: true });
-      await writeFile(path.join(bin, 'codex'), '#!/bin/sh\nif [ "$1" = --version ]; then echo codex-cli 0.165.0; else test -t 0 && echo LOCAL_TEST_PTY_VISIBLE; fi\n', { mode: 0o755 });
-      const output = path.join(root, 'report');
+      await writeFile(path.join(bin, 'codex'), '#!/bin/sh\nif [ "$1" = --version ]; then echo codex-cli 0.165.0; else test -t 0 && echo LOCAL_TEST_PTY_VISIBLE; ' +
+        'case "$*" in *mcp_servers.start-migration.command=*) echo TRANSPORT_RESTATED;; esac; fi\n', { mode: 0o755 });
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-      const command = [process.execPath, script.pathname, '--provider', 'codex', '--cwd', target, '--module', 'auth',
-        '--target', 'auth', '--output', output, '--ui', 'native'].map(quote).join(' ');
-      const result = spawnSync('script', ['--quiet', '--return', '--command', command, '/dev/null'],
-        { env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }, encoding: 'utf8', timeout: 60000 });
+      const nativeRun = output => spawnSync('script', ['--quiet', '--return', '--command', [process.execPath, script.pathname, '--provider', 'codex',
+        '--cwd', target, '--module', 'auth', '--target', 'auth', '--output', output, '--ui', 'native'].map(quote).join(' '), '/dev/null'],
+      { env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }, encoding: 'utf8', timeout: 60000 });
+      // The installed entry must be exactly the verified release's MCP server, or native refuses before launch.
+      const entry = server => '# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ' + JSON.stringify(installed.commands['artifact-migration-discover'][0]) +
+        '\nargs = ' + JSON.stringify([path.join(installed.release, 'packages/migration-engine/src', server)]) + '\n# END artifact-migration-tools\n';
+      await mkdir(path.join(target, '.codex'));
+      await writeFile(path.join(target, '.codex/config.toml'), entry('other-server.mjs'));
+      assert.equal(nativeRun(path.join(root, 'foreign-entry')).status, 1);
+      assert.match(JSON.parse(await readFile(path.join(root, 'foreign-entry/report.json'))).failure, /not the verified release's MCP server/);
+      await writeFile(path.join(target, '.codex/config.toml'), entry('mcp-server.mjs'));
+      const output = path.join(root, 'report');
+      const result = nativeRun(output);
       assert.equal(result.status, 1); // mock provider cannot create a migration record
       const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.match(await readFile(path.join(output, 'native.typescript'), 'utf8'), /TRANSPORT_RESTATED/);
       assert.equal(report.presentation.nativeUiCertified, false);
       assert.equal(report.security.certified, false);
       assert.match(await readFile(path.join(output, 'native.typescript'), 'utf8'), /LOCAL_TEST_PTY_VISIBLE/);

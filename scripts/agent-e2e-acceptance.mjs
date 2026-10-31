@@ -198,7 +198,7 @@ const observeRecordDirectory = async (record) => {
 // Each host's headless permission model, granting only the installed
 // registration, the consumer's own Playwright MCP server (the skill's UI evidence
 // provider) and its state directory -- never a sandbox bypass.
-export const commandFor = (provider, invocation, root, native = false) => {
+export const commandFor = (provider, invocation, root, native = false, mcpServer = null) => {
   const ask = "Invoke the installed " + (invocation.startsWith("/migrate-artifact") ? "migrate-artifact" : "start-migration") + " skill with exactly these arguments: " +
     invocation + ". Follow its existing contract; do not repair or modify the installed toolkit.";
   if (provider === "claude") return { command: "claude",
@@ -218,6 +218,10 @@ export const commandFor = (provider, invocation, root, native = false) => {
       ...CODEX_MCP_TOOLS.flatMap((tool) => ["-c", `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`]),
       // Codex hands an MCP server only an env allowlist; forward the launcher's pnpm refusal to the engine's validators.
       "-c", 'mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]',
+      // The TUI validates the -c layer on its own at bootstrap (account/read), so a grant-only table without a
+      // transport fails "invalid data". Restate the installed entry's own command/args, verified equal before launch.
+      ...(native ? ["-c", `mcp_servers.start-migration.command=${JSON.stringify(mcpServer.command)}`,
+        "-c", `mcp_servers.start-migration.args=${JSON.stringify(mcpServer.args)}`] : []),
       "-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="high"',
       ...(native ? [] : [ask])] };
 };
@@ -327,7 +331,7 @@ async function score(options, root, output, report) {
     report.source = { root: options.sourceRoot, tree: sourceBefore };
   }
   report.invocation = invocation;
-  const invocationCommand = commandFor(options.provider, invocation, root, options.ui === "native");
+  const native = options.ui === "native";
   // The receipt is the installation precondition. Check it before walking
   // provider files so a fresh consumer reports a useful error, not ENOENT.
   // The receipt is produced by the real skill runtime at install, never by this
@@ -364,6 +368,15 @@ async function score(options, root, output, report) {
   const cli = installed.commands?.[cliName];
   if (!Array.isArray(cli) || cli.length !== 2 || !path.isAbsolute(cli[0]) || cli[1] !== expectedCli || !packageJson.bin?.[cliName])
     fail("ACCEPTANCE_PRECONDITION: Status command is not the one from the verified release.");
+  // Native Codex restates the installed MCP entry; it must be byte-for-byte what the installer wrote for this release.
+  let mcpServer = null;
+  if (native) {
+    mcpServer = { command: cli[0], args: [path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs")] };
+    const config = await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => "");
+    if (!config.includes("[mcp_servers.start-migration]\ncommand = " + JSON.stringify(mcpServer.command) + "\nargs = " + JSON.stringify(mcpServer.args) + "\n"))
+      fail("ACCEPTANCE_PRECONDITION: installed Codex start-migration entry is not the verified release's MCP server");
+  }
+  const invocationCommand = commandFor(options.provider, invocation, root, native, mcpServer);
   report.trusted = {
     marker: { path: markerPath, sha256: sha256(markerBytes) },
     receipt: { path: receiptPath, sha256: sha256(receiptBytes), store: installed.store, release: installed.release },
