@@ -14,11 +14,11 @@
  * only and its report says it is not security-certified.
  */
 import { pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads } from "./acceptance-evidence.mjs";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
-import { watch } from "node:fs";
+import { constants as fsConstants, readlinkSync, watch } from "node:fs";
 import { createHash } from "node:crypto";
-import { readdir, readFile, realpath, mkdir, writeFile } from "node:fs/promises";
+import { open, readdir, readFile, realpath, mkdir, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { verifyBundle } from "../providers/install-support.mjs";
@@ -49,10 +49,10 @@ const argsOf = (argv) => {
   const scenario = options["--scenario"] ?? "fresh";
   const ui = options["--ui"] ?? "headless";
   if (!["module", "artifact"].includes(kind)) fail("--kind must be module or artifact");
-  if (!["fresh", "interrupt", "resume", "read-only", "live-lock", "abandoned-lock"].includes(scenario)) fail("Invalid --scenario");
+  if (!["fresh", "interrupt", "resume", "read-only", "live-lock", "abandoned-lock", "realm-abandoned-lock"].includes(scenario)) fail("Invalid --scenario");
   if (!["headless", "native"].includes(ui) || (ui === "native" && (options["--provider"] !== "codex" || scenario !== "fresh" || isolation !== "os")))
     fail("Native UI requires Codex, OS isolation and a fresh scenario");
-  if (["interrupt", "resume", "read-only", "live-lock", "abandoned-lock"].includes(scenario) && isolation !== "os")
+  if (["interrupt", "resume", "read-only", "live-lock", "abandoned-lock", "realm-abandoned-lock"].includes(scenario) && isolation !== "os")
     fail("Safety and interruption scenarios require OS isolation");
   if (scenario === "resume" && !options["--resume-from"]) fail("Resume requires --resume-from interrupt report");
   if (scenario !== "resume" && options["--resume-from"]) fail("--resume-from is only valid with resume");
@@ -150,6 +150,20 @@ export const isolated = ({ command, argv }, readOnly) => ({ command: "unshare",
   argv: [...ISOLATE, "sh", "-c", ISOLATE_SETUP, "sh", String(readOnly.length), ...readOnly, command, ...argv] });
 
 /**
+ * realm-abandoned-lock: inside the agent's own PID namespace, before the agent exists, a trusted
+ * step takes the real engine lock and exits WITHOUT releasing it (a genuinely abandoned owner in
+ * the agent's realm), then waits at a gate until the runner has pinned the lock from outside.
+ * Only a reclaimer in that realm (Codex's MCP server, not its per-command sandboxed shells) can
+ * prove this owner gone. Nothing is relaxed: same mounts, same dropped capabilities.
+ */
+const PLANT_SETUP = '"$1" --input-type=module -e "$2" "$3" "$4" "$5" || exit 97; ' +
+  'read -r go < "$6" && [ "$go" = GO ] || exit 98; shift 6; exec "$@"';
+const PLANT_OWNER = 'const { acquireModuleLock } = await import(process.argv[1]); ' +
+  'await acquireModuleLock(process.argv[2], process.argv[3], { timeoutMs: 0 }); process.exit(0);';
+const planted = ({ command, argv }, { node, lockModule, root, name, gate }) => ({ command: "sh",
+  argv: ["-c", PLANT_SETUP, "plant", node, PLANT_OWNER, lockModule, root, name, gate, command, ...argv] });
+
+/**
  * Trusted, out-of-namespace witness for destructive changes to the module
  * record directory. The engine legitimately replaces state.json atomically,
  * but NEVER deletes and recreates modules/<target> to start its history over.
@@ -209,6 +223,43 @@ export const commandFor = (provider, invocation, root, native = false) => {
 };
 export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
   "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
+
+/**
+ * Waits until the in-namespace plant step has exited and is blocked on the gate (a writer can open
+ * the FIFO only while its reader waits), pins the abandoned owner from outside, then releases the
+ * agent. Any doubt answers NO, so the agent never starts. Bounded by the agent run's own timeout.
+ */
+async function openGate(agentRun, gate, lock, report) {
+  let settled = false;
+  agentRun.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    let handle;
+    while (!handle) {
+      if (settled) return;
+      handle = await open(gate, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK).catch(error => {
+        if (error.code !== "ENXIO") throw error;
+        return null;
+      });
+      if (!handle) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    let answer = "NO\n";
+    try {
+      const entries = await readdir(lock).catch(() => []);
+      const owner = entries.length === 1 ? JSON.parse(await readFile(path.join(lock, entries[0]), "utf8")) : null;
+      const hostRealm = "linux:" + readlinkSync("/proc/self/ns/pid");
+      if (owner && owner.hostname === os.hostname() && typeof owner.realm === "string" && owner.realm !== hostRealm) {
+        report.lock = { owner, ownerEntry: entries[0], hostRealm, before: await snapshotTree(lock), ownerExited: true, plantedInAgentRealm: true };
+        answer = "GO\n";
+      }
+    } finally {
+      await handle.write(answer);
+      await handle.close();
+    }
+  } finally {
+    // Never leave a FIFO in the evidence directory: hashing or copying it would block.
+    await unlink(gate).catch(() => undefined);
+  }
+}
 
 export function acceptanceVerdict(goal, agent, bootstrapped, finished, verified, progress) {
   if (agent.code !== 0 || agent.timedOut || agent.overflow) return "FAIL";
@@ -412,10 +463,19 @@ async function score(options, root, output, report) {
       report.lock = { owner: JSON.parse(await readFile(path.join(lock, ownerFile), "utf8")), before: await snapshotTree(lock) };
       if (options.scenario === "abandoned-lock") { await holder.stop(true); report.lock.ownerExited = true; }
     }
+    const lockModule = pathToFileURL(path.join(installed.release, "packages/migration-engine/src/lifecycle/lock.mjs")).href;
+    const gate = path.join(output, "plant.gate");
+    if (options.scenario === "realm-abandoned-lock") {
+      if (await exists(lock)) fail("ACCEPTANCE_PRECONDITION: Fixture already has a lock");
+      const fifo = await run({ command: "mkfifo", argv: ["-m", "600", gate], cwd: root, timeoutMs: 10000 });
+      if (fifo.code !== 0) fail("ACCEPTANCE_PRECONDITION: cannot create the plant gate: " + fifo.stderr.trim());
+    }
     const beforeTree = ["read-only", "live-lock"].includes(options.scenario) ? await snapshotTree(root) : null;
     if (beforeTree) await writeFile(path.join(output, "consumer-before.json"), JSON.stringify(beforeTree, null, 2));
     let agent, interruptedAt;
-    let launch = options.isolation === "os" ? isolated(invocationCommand, readOnly) : invocationCommand;
+    const agentCommand = options.scenario === "realm-abandoned-lock"
+      ? planted(invocationCommand, { node: cli[0], lockModule, root, name: path.basename(lock, ".lock"), gate }) : invocationCommand;
+    let launch = options.isolation === "os" ? isolated(agentCommand, readOnly) : agentCommand;
     if (options.ui === "native") {
       if (!process.stdin.isTTY || !process.stdout.isTTY) fail("Native launch requires an operator terminal");
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -426,7 +486,7 @@ async function score(options, root, output, report) {
     report.launch = { ...launch, cwd: root };
     report.startedAt = new Date().toISOString();
     try {
-      agent = await run({ ...launch, cwd: root, timeoutMs: options.timeoutMs, native: options.ui === "native",
+      const agentRun = run({ ...launch, cwd: root, timeoutMs: options.timeoutMs, native: options.ui === "native",
         // Runtime selection must keep the installed store even when resume uses another HOME.
         env: { ...process.env, ARTIFACT_MIGRATION_TOOLS_STORE: installed.store },
         stopWhen: options.scenario === "interrupt" ? async () => {
@@ -434,6 +494,8 @@ async function score(options, root, output, report) {
           interruptedAt = await checkpoint(recordDir, lock);
           return interruptedAt !== null;
         } : undefined });
+      if (options.scenario === "realm-abandoned-lock") await openGate(agentRun, gate, lock, report);
+      agent = await agentRun;
     } finally {
       // Drain notifications already queued by the provider before closing watch.
       await new Promise((resolve) => setImmediate(resolve));
@@ -470,7 +532,7 @@ async function score(options, root, output, report) {
     await writeFile(path.join(output, "engine-status.stdout.log"), statusRun.stdout);
     await writeFile(path.join(output, "engine-status.stderr.log"), statusRun.stderr);
     if (sourceBefore && !sameTree(sourceBefore, await snapshotTree(options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot))) fail("Source changed during acceptance");
-    if (report.lock) {
+    if (holder) {
       report.lock.after = await exists(lock) ? await snapshotTree(lock) : null;
       report.lock.holderAliveAfter = holder.alive();
       if (options.scenario === "live-lock" && (!holder.alive() || !sameTree(report.lock.before, report.lock.after)))
@@ -482,6 +544,16 @@ async function score(options, root, output, report) {
         fail(report.lock.after ? "ACCEPTANCE_LOCK_OWNER_PROOF: abandoned host-realm owner cannot be reclaimed in the agent PID namespace; preserve lock, engine change/owner ruling required"
           : "ACCEPTANCE_LOCK_REMOVED: the abandoned lock vanished although no engine path can prove its host-realm owner gone; never certify");
       }
+    }
+    if (options.scenario === "realm-abandoned-lock") {
+      if (!report.lock?.ownerExited) fail("ACCEPTANCE_PRECONDITION: the in-realm abandoned owner was never planted; agent did not start");
+      report.lock.after = await exists(lock) ? await snapshotTree(lock) : null;
+      report.lock.removalLeads = lockRemovals(combined);
+      // Evidence lead, not proof: the reviewer still reads the transcript for any other way the entry vanished.
+      if (report.lock.removalLeads.length) fail("ACCEPTANCE_LOCK_REMOVED: the transcript shows a command removing a lock; never certify");
+      if (await exists(path.join(lock, report.lock.ownerEntry)))
+        fail("ACCEPTANCE_LOCK_NOT_RECLAIMED: the abandoned in-realm owner still holds the lock after the agent ran");
+      report.lock.recovery = "RECLAIMED_IN_AGENT_REALM";
     }
     if (agent.stopError) fail("Checkpoint observer failed: " + agent.stopError);
     if (beforeTree) {

@@ -82,6 +82,13 @@ export function openspecLeads(transcript) {
   });
 }
 
+// Review leads only: shell commands (Codex JSON command items, or plain trace lines) that remove or move a lock.
+export const lockRemovals = transcript => transcript.split('\n').flatMap((line, index) => {
+  let command = line;
+  try { const event = JSON.parse(line); command = event?.item?.type === 'command_execution' ? String(event.item.command) : ''; } catch {}
+  return command.includes('locks') && /\b(rm|rmdir|unlink|mv)\b/.test(command) ? [{ line: index + 1, sha256: sha256(line) }] : [];
+});
+
 // A real engine lock, owned by a separate trusted process in the host PID realm.
 export async function startLockHolder(node, moduleUrl, root, name) {
   const { spawn } = await import('node:child_process');

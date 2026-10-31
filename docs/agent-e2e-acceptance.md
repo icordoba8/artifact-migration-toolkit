@@ -276,4 +276,5 @@ traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13
 These capabilities do not supply missing certification evidence. The native launcher captures terminal
 output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
 review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery remains blocked by the
-existing owner-proof protocol. Bootstrap AUTO's contract/implementation contradiction remains unresolved.
+existing owner-proof protocol; `realm-abandoned-lock` plants the abandoned owner in the agent's own PID
+realm instead, where an in-realm reclaimer (the MCP server) can prove it gone. Bootstrap AUTO's contract/implementation contradiction remains unresolved.

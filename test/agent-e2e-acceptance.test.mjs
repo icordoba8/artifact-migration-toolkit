@@ -594,6 +594,63 @@ test('live and abandoned scenarios retain genuine owner proof across PID isolati
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+test('realm-abandoned-lock: an owner abandoned in the agent realm is reclaimed there, never across namespaces or by hand',
+  { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-realm-lock-'));
+    try {
+      const { target, bin, pin, receipt } = await installedArtifactCandidate(root);
+      const cli = JSON.parse(receipt).commands['artifact-migrate'].map(x => "'" + x + "'").join(' ');
+      const bootstrap = cli + ' legacy/source.js --target src/result.js --mode auto --json';
+      const runScenario = async (name, agentScript) => {
+        await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\n' + agentScript + '\n', { mode: 0o755 });
+        const output = path.join(root, name);
+        const result = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+          '--target', 'auth', '--output', output, '--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target,
+          '--artifact-target', 'src/result.js', '--scenario', 'realm-abandoned-lock', '--expected-pin', pin],
+        { timeout: 90000, encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+        const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+        assert.equal(report.lock.plantedInAgentRealm, true, name);
+        assert.notEqual(report.lock.owner.realm, report.lock.hostRealm, name);
+        assert.equal(Object.keys(report.lock.before).length, 2, name); // the lock directory and its one owner entry
+        return { result, report };
+      };
+      const reset = () => rm(path.join(target, '.agents/knowledge/migrations'), { recursive: true, force: true });
+      // Control: a reclaimer in a nested PID namespace (as Codex's per-command sandbox) cannot prove the owner gone.
+      const nested = await runScenario('nested', 'unshare --user --map-current-user --pid --fork --mount-proc ' + bootstrap);
+      assert.equal(nested.result.status, 1);
+      assert.match(nested.report.failure, /ACCEPTANCE_LOCK_NOT_RECLAIMED/);
+      assert.deepEqual(nested.report.lock.after, nested.report.lock.before);
+      await reset();
+      // Failure control: removing the lock by hand never passes.
+      const removed = await runScenario('removed', "sh -xc 'rm -rf .agents/knowledge/migrations/locks/*'; exec " + bootstrap);
+      assert.equal(removed.result.status, 1);
+      assert.match(removed.report.failure, /ACCEPTANCE_LOCK_REMOVED/);
+      assert.equal(removed.report.lock.removalLeads.length, 1);
+      await reset();
+      // Plant failure control: an unwritable lock root makes the plant exit 97; the agent never starts and no FIFO is left.
+      await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\necho AGENT_STARTED\n', { mode: 0o755 });
+      await mkdir(path.join(target, '.agents/knowledge/migrations/locks'), { recursive: true });
+      await chmod(path.join(target, '.agents/knowledge/migrations/locks'), 0o555);
+      const failedPlant = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
+        '--target', 'auth', '--output', path.join(root, 'plant-failed'), '--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target,
+        '--artifact-target', 'src/result.js', '--scenario', 'realm-abandoned-lock', '--expected-pin', pin, '--timeout-minutes', '1'],
+      { timeout: 90000, encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+      assert.equal(failedPlant.status, 1);
+      assert.ok(!(await readdir(path.join(root, 'plant-failed'))).includes('plant.gate'));
+      assert.doesNotMatch(await readFile(path.join(root, 'plant-failed/agent.stdout.log'), 'utf8').catch(() => ''), /AGENT_STARTED/);
+      await reset();
+      // Same realm: the engine itself proves the owner gone, reclaims, and bootstraps.
+      const same = await runScenario('same', 'exec ' + bootstrap);
+      assert.equal(same.result.status, 0, same.report.failure);
+      assert.equal(same.report.verdict, 'BOOTSTRAP_PASS');
+      assert.equal(same.report.lock.recovery, 'RECLAIMED_IN_AGENT_REALM');
+      assert.equal(same.report.lock.after, null);
+      assert.deepEqual(same.report.lock.removalLeads, []);
+      assert.equal(same.report.security.certified, false);
+      assert.ok(!(await readdir(path.join(root, 'same'))).includes('plant.gate'));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
 test('checkpoint waits for committed state and preserves history, integrity and frozen bytes', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'checkpoint-'));
   try {
