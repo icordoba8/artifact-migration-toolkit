@@ -1,0 +1,10 @@
+copilot --version: GitHub Copilot CLI 1.0.105.
+files: .github/mcp.json (mcpServers, 9 tools) + .vscode/mcp.json (servers, legacy)
+## trusted
+start-migration source=workspace path=$S/t1/consumer/.github/mcp.json tools=["artifact_status","artifact_run","migration_status","migration_scan","migration_evidence_binding","migration_prefill","migration_capture","migration_pending_decisions","migration_run"]
+github-mcp-server source=builtin path= tools=["*"]
+## untrusted (trustedFolders: [])
+github-mcp-server source=builtin path= tools=["*"]
+## trusted + foreign workspace-root .mcp.json with the same server name
+start-migration source=workspace path=$S/t1/consumer/.mcp.json tools=["*"]
+github-mcp-server source=builtin path= tools=["*"]
