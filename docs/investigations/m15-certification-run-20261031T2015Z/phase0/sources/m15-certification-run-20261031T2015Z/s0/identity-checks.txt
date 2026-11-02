@@ -1,0 +1,12 @@
+HEAD=42364020d6db36a60327b271dc83bfbebc4daf4e
+porcelain_lines=0
+patch_sha256=35d5cb6109b1c4543fededc42cee9b6e0e6d38a0f417448c21ae7ad227fbe296
+base_ancestor=ok
+codex_sha256=c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5 codex-cli 0.165.0
+node_sha256=af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8 v22.13.0
+pnpm_tgz_sha512=521705bce689924eac72f5a3587122f362689ef6571e55ba80076fd637c11132ecffada26fad4ea79c485bfddbfd3d5a2a5b05805a77e893de71ec8a6cca3bb1
+pin_from_vault_manifest=sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6 (/home/utmwac/amt-evidence-vault/m15-20261030T2045Z/restricted/tmp/amt-m15-codex-recovery-20261030T125104Z/store/artifact-migration-tools-1.6.5/release-manifest.json)
+payload_contentHash_in_manifest="contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+release_check={  "version": "1.6.5",  "commit": "42364020d6db36a60327b271dc83bfbebc4daf4e",  "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7",  "blockers": [],  "versionConflict": null}
+uptime_since=2026-10-31 08:01:58
+utc_now=2026-10-31T20:21:41Z

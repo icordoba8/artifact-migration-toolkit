@@ -1,0 +1,431 @@
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:docs/agent-e2e-acceptance.md (file sha256 27db063165e06d303f718faa769af75f0899b8d0ec1b570e4d7163fc8131951b) ===
+8: ## Non-negotiable boundary
+9:
+10: - Never run acceptance on a production consumer or on the customer's migration
+11:   workspace. Use a newly provisioned **disposable** consumer for each attempt.
+12: - Install the **exact immutable candidate release** of both skills into the
+13:   consumer using the documented installation path. Record package digest,
+14:   runtime identity, CLI versions, model names, OS and sandbox settings.
+15: - Do **not** inject valid OpenSpec into the target: the agent must derive it from
+16:   the unfamiliar legacy code. Do not pre-register the module merely to pass
+17:   the status check. Pin the fixture and the independent reference tests.
+18: - Never repair installed skill files, runtime receipts, locks, MCP config or
+19:   state during acceptance. No prompts after the one official invocation; any
+20:   rescue turns invalidate the attempt.
+21: - Authenticated providers may incur costs and may execute code. Run exclusively
+22:   in an isolated runner with disposable credentials and only test data.
+23: - Real operator decisions must be made by a real operator via the official
+24:   review path. Never forge `APPROVE` or mock decision ledgers to get `COMPLETE`.
+25:
+26: ## Test cases
+27:
+28: 1. Fresh, unregistered legacy module: derive OpenSpec and bootstrap with
+29:    `--target`. No hand-authored OpenSpec file is pre-seeded.
+30: 2. An authentic OpenSpec-rejection case: observe the agent correct its own
+31:    authored proposal and retry without rescue; the engine must still refuse
+32:    invalid requirements.
+33: 3. Full migration of an independently testable module, including UI and API
+34:    parity where applicable, with human participation only at a genuine
+35:    `OPERATOR_DECISION`.
+36: 4. Interruption after one committed checkpoint, then resume from saved state
+37:    without rebuilding the source artifacts.
+38: 5. Installation in a clean consumer, a provably abandoned lock, a live lock
+39:    and a sandbox deliberately configured read-only; only the first two may
+40:    proceed. A legitimate refusal is a passing *safety* result, not an
+41:    autonomous-completion result.
+42: 6. Canonical progress and visible activity: compare displayed checkpoints with
+43:    the engine's persisted `progressChecklist`; record the actual UI. A
+44:    headless transcript alone does not certify native task UI liveness.
+45:
+46: Run each provider declared production-certified by this release **separately**
+47: on fresh consumers and on each OS/platform for which compatibility is claimed.
+48: An adapter packaged for another provider is not thereby certified; label its
+49: status NOT_TESTED or experimental until a later exact-SHA release qualifies it.
+50: The reference tests must be prepared independently of the migrating model.
+51: Do not assume a successful Linux test certifies Windows/WSL.
+249: ## What can be signed off
+250:
+251: For every provider and supported OS, the release record needs:
+252:
+253: - Immutable release SHA/digest, installed skill/runtime identity, model,
+254:   CLI version, permission mode and isolated consumer fixture revision.
+255: - `BOOTSTRAP_PASS` on an unregistered module and independent full lifecycle
+256:   evidence, including legitimate operator decisions when required.
+257: - Logs, real MCP/CLI status, history, recorded UI/progress evidence, and
+258:   reference verifier results; no manual repair or rescue turns.
+259: - An explicit `PASS`, `FAIL` or `NOT_TESTED` for **every** declared matrix
+260:   cell. A `NOT_TESTED` provider/platform must not be marketed as certified.
+261:
+262: **Green CI, a mock LLM, or a green engine fixture does not constitute live-agent
+263: production acceptance.** Never make that claim without the external evidence.
+
+=== 1a9661b3aba58d7e8fe41076d5e72b3d1d87701a:docs/agent-e2e-acceptance.md (file sha256 fcd8460028512164b7c7f4e6bbef464eeb8077866c4b00a635ed2e7c3b21bc2c) ===
+253:
+254: For every provider and supported OS, the release record needs:
+255:
+256: - Immutable release SHA/digest, installed skill/runtime identity, model,
+257:   CLI version, permission mode and isolated consumer fixture revision.
+258: - `BOOTSTRAP_PASS` on an unregistered module and independent full lifecycle
+259:   evidence, including legitimate operator decisions when required.
+260: - Logs, real MCP/CLI status, history, recorded UI/progress evidence, and
+261:   reference verifier results; no manual repair or rescue turns.
+262: - An explicit `PASS`, `FAIL` or `NOT_TESTED` for **every** declared matrix
+263:   cell. A `NOT_TESTED` provider/platform must not be marketed as certified.
+264:
+265: **Green CI, a mock LLM, or a green engine fixture does not constitute live-agent
+266: production acceptance.** Never make that claim without the external evidence.
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:skills/start-migration/references/migration-contract.md (file sha256 e6b266ca34beef4ac45ea9ff186b4f67db9b5f437cbbeb27c6bc5cfe715535e2) ===
+1060: `decisions/auto-decisions.ndjson`. A `READY` format upgrade is confirmed through
+1061: that same single mechanism: the preflight computes it, the digest of its required
+1062: input is bound into the ID and re-checked under the record lock, and no
+1063: format-specific flag or separate confirmation exists. The carve-out is a bootstrap
+1064: (`NOT_STARTED`): initialization pins the OpenSpec authority for the migration's
+1065: whole life and there is no prior record to decide from, so it stays two-phase
+1066: under either mode.
+1067:
+1068: Either way the helper recomputes the preflight and rejects a missing or stale
+1069: ID. Confirmation is therefore scoped to one action and cannot be reused after
+1070: state, revision, legacy commit, checkpoint, slice, or invocation options
+1071: change. `--mode` is a property of a single invocation: it is never persisted,
+1072: never recorded in `state.json`, and never affects what an ID binds, so a
+1073: migration driven autonomously is indistinguishable on disk from one driven by
+1074: hand.
+1075:
+1076: `No` cancels without changes. Missing, ambiguous, or conditional replies do not
+1077: authorize execution. A blocker produces no confirmation ID. The internal flag
+1078: is not part of the user-facing slash-command interface.
+1079:
+1080: Persisted statuses are `ACTIVE` and `COMPLETE`. `BLOCKED` is a preflight report,
+1081: never a persisted state. `currentStep` follows the version-scoped lifecycle
+1082: (nine checkpoints for format 10, eight for pre-10) or is `COMPLETE`.
+1083: Only the helper updates state and hashes after step validation.
+1084:
+1085: Registration uses the same two-phase contract: `update-migration-registry.mjs`
+1086: previews the resolved registry, normalized identity, project binding, module,
+1087: target, aliases, and resulting change. Its confirmation ID binds both registry
+1088: and project-config snapshots. Confirmed execution persists the project binding
+1089: and updates the original registry through atomic writes; preview writes
+1090: nothing.
+1091:
+1092: Registration is never self-confirmed, in any mode: it persists a binding into
+1093: the canonical project's `package.json`, which is a project-level change rather
+1094: than a mechanical confirmation. It is therefore a stop condition for an
+1095: autonomous loop. An unregistered mapping is detected when `BUILD_BASELINE` is
+1096: advanced: the advance fails with exit `1` and "the migration mapping is not
+1097: registered", having written nothing — not as a preflight blocker, so the
+1098: preview still reports no blockers and still offers an ID.
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:skills/start-migration/references/v5-contract.md (file sha256 ae4779e1eabb4ec6019e409f0b806568c23bef8adf8acdf65c605ebd5946f39b) ===
+1: # Contract v5 (frozen)
+2:
+3: This document is the frozen authority for contract version 5 and for the single
+4: approved contract-4 to contract-5 upgrade. Its SHA-256 digest is an input to
+5: every upgrade confirmation ID: editing this file expires all outstanding
+6: confirmations, by design.
+216: ### 1.8 Registration
+217:
+218: **Selected:** keep the post-baseline registration intermission, and give the
+219: registration command the same exact two-phase confirmation as every other
+220: mutating helper.
+221:
+222: `update-migration-registry.mjs` gains a read-only preview that prints the
+223: resolved registry path, module, target, aliases, and the resulting change, plus
+224: a confirmation ID bound to that snapshot. It writes only when re-invoked with
+225: `--confirm-execution <id>`.
+226:
+227: - **Persisted fields:** the registry document.
+228: - **Compatibility:** advancing `BUILD_BASELINE` still requires a registered
+229:   mapping. The intermission does not move.
+230: - **Tests:** preview writes nothing; confirmation executes; stale confirmation
+231:   rejected after the registry changes; no-op registration reports unchanged.
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:packages/migration-engine/src/lifecycle/policy.mjs (file sha256 7a42a476298b81413d8b26263a123f426ca6bf4949d6503947f0b1a4c6bd618b) ===
+119: export const maySelfConfirm = ({ command, mode } = {}) => {
+120:   if (command !== "registry" && command !== "advance" && command !== "discover") {
+121:     throw new Error(`Unknown command '${command}' for self-confirmation.`);
+122:   }
+123:   return isAutoAuthority(mode);
+124: };
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:packages/migration-engine/src/lifecycle/lock.mjs (file sha256 d0ee04c886d61ebead30a44920ee2b42d986c3ae0278f095f7fd9430bdbd0a36) ===
+142: const inThisRealm = (owner) =>
+143:   owner.pid !== null &&
+144:   PID_REALM !== null &&
+145:   owner.hostname === os.hostname() &&
+146:   owner.realm === PID_REALM;
+147: const provablyGone = (owner) => inThisRealm(owner) && !processAlive(owner.pid);
+169:   // Released or reclaimed but not yet removed: free, whoever removes it.
+170:   if (entries.length === 0) return rmdirIfEmpty(lock).then(() => null);
+171:   const [entry] = entries;
+172:   if (entries.length !== 1 || !OWNER_ENTRY.test(entry)) return UNPROVEN;
+173:   const owner = await readOwner(path.join(lock, entry), entry.slice(0, -5));
+174:   if (!provablyGone(owner)) return owner;
+175:   // That name is this dead owner's alone: it removes its entry or nothing,
+176:   // even if a replacement owner has taken the lock since we read it.
+196: export const acquireModuleLock = async (
+197:   targetRoot,
+198:   name,
+199:   { timeoutMs = 30_000, pollMs = 25 } = {},
+200: ) => {
+201:   const lock = lockPathFor(targetRoot, name);
+202:   await mkdirDurably(path.dirname(lock));
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:packages/migration-engine/src/store/registry.mjs (file sha256 24aafc12822794c6dbbe17a198b92fbecc09eb32f97ba3e70b3797ce74ee51ed) ===
+316: export const resolveRegistryPath = async ({
+317:   cliPath,
+318:   moduleName,
+319:   cwd = process.cwd(),
+320:   environmentPath = process.env.MIGRATION_REGISTRY_PATH,
+321:   projectRoot,
+322: } = {}) => {
+323:   const resolvedProjectRoot = projectRoot ?? (await projectRootFor(cwd));
+324:   const project = await readProjectConfiguration(resolvedProjectRoot);
+325:   const sources = [
+326:     ["--registry", cliPath ? path.resolve(cwd, cliPath) : null],
+327:     ["project configuration", project.registryPath],
+328:     [
+329:       "MIGRATION_REGISTRY_PATH",
+330:       environmentPath ? path.resolve(cwd, environmentPath) : null,
+331:     ],
+332:   ].filter(([, value]) => value);
+333:
+334:   let state = moduleName ? await stateRegistryFromCwd(cwd, moduleName) : null;
+335:   if (!state && moduleName) {
+336:     for (const [, candidate] of sources) {
+337:       state = await stateRegistryFromCandidate(candidate, moduleName);
+338:       if (state) break;
+339:     }
+340:   }
+341:   if (!state && moduleName) {
+342:     state = await stateRegistryFromWorkspace(resolvedProjectRoot, moduleName);
+343:   }
+344:
+345:   const authoritative = state
+346:     ? ["existing migration state", state.registryPath]
+347:     : sources[0];
+348:   if (!authoritative) {
+349:     throw new Error(
+350:       "Migration registry is not configured. On first setup pass --registry <path>; otherwise restore config.startMigration.registry in the project package.json. MIGRATION_REGISTRY_PATH is available only as a CI fallback.",
+351:     );
+
+=== d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d:packages/migration-engine/src/transport/mcp.mjs (file sha256 03f4518ceb8f90bbde1675cb128e198488614c3c49bd851a9f22cfcab1ce3c69) ===
+185:   migration_bootstrap: (module) =>
+186:     engineCommand(
+187:       "cli/discover-module.mjs",
+188:       module,
+189:       "--registry",
+190:       "<path>",
+191:       "--openspec-proposal-stdin",
+227: const registryFor = async (arguments_) => {
+228:   const { registryPath } = await resolveRegistryPath({
+229:     cliPath: arguments_.registry,
+230:     moduleName: arguments_.module,
+231:   });
+232:   return { registryPath, moduleName: arguments_.module };
+680:       tool.loop?.(arguments_, structuredContent) ?? "",
+681:     );
+682:     return success(id, {
+683:       content: [...(progressText ? [{ type: "text", text: progressText }] : []), json],
+684:     });
+685:   } catch (error) {
+686:     return failure(id, JSON_RPC_INTERNAL_ERROR, error.message);
+687:   }
+688: };
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:providers/install-support.mjs (file sha256 5f90ca6d39452d8b0add5724e63b34291fd079f49bf0586a0078cfb1b6cfd9d0) ===
+19: const layouts = {
+20:   claude: { project: ['skills', null, '.mcp.json', 'mcpServers'], user: ['skills', null, '.mcp.json', 'mcpServers'] },
+21:   codex: { project: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null], user: ['.agents/skills', '.codex/prompts', '.codex/config.toml', null] },
+22:   opencode: { project: ['.opencode/skills', '.opencode/commands', 'opencode.json', 'mcp.servers'], user: ['.config/opencode/skills', '.config/opencode/commands', '.config/opencode/opencode.json', 'mcp.servers'] },
+23:   copilot: { project: ['.github/skills', '.github/prompts', '.vscode/mcp.json', 'servers'] },
+24: };
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:skills/start-migration/scripts/runtime.mjs (file sha256 d81228db9e4e393a215f4276c219b529f942e4cabb97bd3f77dc2f19fb46ef51) ===
+219: async function adapterRun(provider, release, options) {
+220:   const support = await import(pathToFileURL(path.join(release, 'providers/install-support.mjs')).href);
+221:   return support.adapter(provider, options);
+222: }
+223:
+224: /**
+225:  * The exact release manifest a `{store, release, pin}` triple actually resolves
+226:  * to on disk, taken from the pinned bytes and never from the store folder
+227:  * name -- the name is only *checked* against the verified manifest. The release
+228:  * adapter's own `verifyBundle` re-verifies every file before anything installs;
+229:  * this is the cheap identity read that selection needs first.
+230:  */
+231: async function pinnedManifest(store, release, pin) {
+232:   if (typeof release !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(pin ?? '')) throw new Error('Invalid runtime receipt identity');
+233:   const manifestBytes = await readFile(path.join(release, 'release-manifest.json'));
+234:   if (sha256(manifestBytes) !== pin) throw new Error('Runtime receipt manifest checksum mismatch');
+235:   const manifest = JSON.parse(manifestBytes);
+236:   const toolkit = manifest.toolkit;
+237:   if (!exactVersion(toolkit?.version) || release !== path.join(store, `${toolkit.version}-${pin.slice(7)}`)) throw new Error('Runtime receipt release path conflict');
+238:   const launcher = await readFile(path.join(release, 'providers/install-support.mjs'));
+239:   if (sha256(launcher) !== manifest.files?.['providers/install-support.mjs']) throw new Error('Runtime installer checksum mismatch');
+240:   return manifest;
+241: }
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:skills/start-migration/references/provider-compatibility.md (file sha256 1e2e562df6ba4216b898b4d09c28a48671d87998a076f14eddb141fd8c461ac7) ===
+13: All four providers receive a generated skill tree projected from the same
+14: canonical documents. `skills/` is the source the generator reads; it is not a
+15: skill path any provider is configured with. Each adapter installs its generated
+16: tree into the root its own host supports.
+28: GitHub Copilot CLI reads workspace MCP servers only from `.mcp.json` or
+29: `.github/mcp.json`, and only in a trusted folder; the Copilot adapter registers
+30: in `.vscode/mcp.json` (VS Code). Without a connected server Copilot CLI uses the
+31: CLI fallback above. Its path sandbox also needs the release store
+32: (`%LOCALAPPDATA%\artifact-migration-tools` on Windows,
+33: `~/.local/share/artifact-migration-tools` elsewhere) passed as
+34: `copilot --add-dir <store>`, because the engine runs from there.
+58: Everything except `SKILL.md` is copied byte-for-byte. `SKILL.md` is the only file
+59: permitted to differ, and only by the generated-source banner and the
+60: per-provider frontmatter projection: Claude keeps `user-invocable`,
+61: `disable-model-invocation`, `context` and `agent`; the other three drop them
+62: because their skill formats do not define them.
+70: | Provider       | User-scope skill root         | Project-scope skill root | MCP config (user / project)                                 |
+71: | -------------- | ----------------------------- | ------------------------ | ----------------------------------------------------------- |
+72: | Claude Code    | plugin root, host-assigned    | plugin root              | plugin MCP template, host-assigned                          |
+73: | Codex          | `~/.agents/skills`            | `.agents/skills`         | `~/.codex/config.toml` / `.codex/config.toml`                |
+74: | OpenCode       | `~/.config/opencode/skills`   | `.opencode/skills`       | `~/.config/opencode/opencode.json` / `opencode.json`         |
+75: | GitHub Copilot | — (none documented)           | `.github/skills`         | — / `.vscode/mcp.json`                                       |
+76:
+77: Three of these are consumer-owned files that carry unrelated entries — Codex's
+78: project `config.toml`, OpenCode's `opencode.json`, Copilot's `.vscode/mcp.json`.
+79: An adapter **merges** its one `start-migration` entry into them and preserves
+80: everything else. Overwriting a host's configuration is not installation.
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:providers/codex/skills/start-migration/references/provider-compatibility.md (file sha256 1e2e562df6ba4216b898b4d09c28a48671d87998a076f14eddb141fd8c461ac7) ===
+28: GitHub Copilot CLI reads workspace MCP servers only from `.mcp.json` or
+29: `.github/mcp.json`, and only in a trusted folder; the Copilot adapter registers
+30: in `.vscode/mcp.json` (VS Code). Without a connected server Copilot CLI uses the
+31: CLI fallback above. Its path sandbox also needs the release store
+32: (`%LOCALAPPDATA%\artifact-migration-tools` on Windows,
+33: `~/.local/share/artifact-migration-tools` elsewhere) passed as
+34: `copilot --add-dir <store>`, because the engine runs from there.
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:scripts/providers-sync.mjs (file sha256 948e4fd98fa8835194b134d4cbfee14ae9f70ea29e411a0814d68260bc9dcad9) ===
+351:   {
+352:     name: "copilot",
+353:     liveProgress: { mode: "best-effort", guarantee: "not-proven" },
+354:     wrapper: (skill, description) => ({
+355:       output: `providers/copilot/prompts/${skill}.prompt.md`,
+356:       metadata: { mode: "agent", description },
+357:       body: wrapperBody(skill, FORWARD_APPENDED),
+358:     }),
+359:     mcp: {
+360:       output: "providers/copilot/mcp.json",
+361:       render: (server) =>
+362:         renderJson({ servers: { [MCP_SERVER_NAME]: { type: "stdio", ...server } } }),
+363:     },
+364:     install: {
+365:       // Repository scope only. Copilot documents no user-global or marketplace
+366:       // skill root, and inventing one is how an installer writes somewhere the
+367:       // host will never read.
+368:       mechanism: "repository-archive",
+369:       skillRoot: { user: null, project: ".github/skills" },
+370:       mcpConfig: { user: null, project: ".vscode/mcp.json" },
+371:     },
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:scripts/skills-lock.mjs (file sha256 df4fc8fde218fdaef8a8dd6d61712ae578c71f2bb00ef5e787dbe36a727d7480) ===
+44:  * `version` *selects* a candidate release; `computedHash` *proves* that the
+45:  * release carries the skill semantics actually installed. Version equality alone
+46:  * never establishes compatibility: `skills add <repo>` installs current `main`
+47:  * under an already-published version string, so the digest is the only field
+48:  * that distinguishes those bytes from the published ones. It is the release
+49:  * binding, and it is acyclic because `computeSkillHash` excludes this file.
+100:  * miss a moved reference.
+101:  *
+102:  * `release-identity.json` is the one exclusion, and it is what makes the digest
+103:  * usable as the stamp's own release binding: the stamp carries the hash, so the
+104:  * hash cannot cover the stamp. What remains is exactly skill semantics --
+105:  * `SKILL.md`, `references/**`, `scripts/runtime.mjs` -- which is this file's
+106:  * stated subject anyway. The deliberate consequence is that a release touching
+107:  * only the engine leaves the digest stable, and that is correct: the skill
+108:  * semantics really are identical, and the version in the stamp still forces the
+109:  * engine to be the one the skill names.
+110:  */
+111: export const computeSkillHash = async (root, skillName) => {
+112:   const skillRoot = path.join(root, "skills", skillName);
+113:   const digest = createHash("sha256");
+114:   for (const relative of (await walk(skillRoot)).sort()) {
+115:     if (relative === IDENTITY_BASENAME) continue;
+116:     digest.update(relative);
+117:     digest.update("\0");
+118:     digest.update(await readFile(path.join(skillRoot, relative)));
+119:     digest.update("\0");
+120:   }
+121:   return digest.digest("hex");
+
+=== 15090145a43af1e1bcb9fbce692fafac6e06f1e9:scripts/release.mjs (file sha256 fcf9fc391ee36da4f6bc03764aa4b51cd2cb10801f098d9610272cd62c56ef5e) ===
+70: const PAYLOAD_ROOTS = [
+71:   "skills",
+72:   "packages/migration-engine/src",
+73:   "packages/migration-engine/references",
+74:   "providers",
+75: ];
+76: const PAYLOAD_FILES = [
+77:   "pnpm-lock.yaml",
+78:   "skills-lock.json",
+79:   "package.json",
+80:   "packages/migration-engine/package.json",
+290:   const { contentHash } = await contentHashOf(root);
+291:   const established = (await releasedVersions(root)).find((row) => row.version === versions.root);
+292:   const versionConflict = established && established.contentHash !== contentHash
+293:     ? `Version ${versions.root} is already established with contentHash ${established.contentHash}. This build's payload bytes hash to ${contentHash} and cannot claim it — bump the version.`
+294:     : null;
+295:   if (versionConflict) blockers.push(versionConflict);
+
+=== a2117bfd79748d1ea23f33323bbce878bfe6092e:docs/investigations/m16-copilot-20261102/p0/P0.md (file sha256 29909fed6434676a0d9ada2ff56bb9d7486a7440053f94c6c5fa2836f0038cd1) ===
+26: ## Gate result
+27:
+28: **G1 — GAP: the installed toolkit's MCP registration cannot be consumed by Copilot CLI.**
+29: - At BASE, the Copilot payload registers `start-migration` only in `.vscode/mcp.json` with the VS Code `servers` key and no `tools` or `env` fields (`providers/install-support.mjs:23`, `providers/copilot/adapter.json:31`, `providers/copilot/mcp.json`). The skill runtime re-asserts that location on every run.
+30: - Copilot CLI 1.0.105 loads MCP only from `~/.copilot/mcp-config.json`, `.mcp.json`, `.github/mcp.json` or plugins (H/sub-mcp.txt:9-12). D1 says `.vscode/mcp.json` must be migrated to `.mcp.json` (`servers`→`mcpServers`). D1 also makes `tools` **required** for local servers.
+31: - The toolkit documents this itself: "Without a connected server Copilot CLI uses the CLI fallback" (`providers/copilot/skills/start-migration/references/provider-compatibility.md:28-30`). In that fallback the engine runs over shell with **zero** MCP grants, so "exactly 9 MCP grants (no `migration_relay_decision`)" cannot hold.
+32: - The only adapter-level workaround would be harness-authored server registration (`--additional-mcp-config`). That repairs the installed toolkit, which the run contract forbids ("do not repair or modify the installed toolkit"), and it would hide a payload defect that every real Copilot CLI user hits.
+33: - Root-cause fix: change the provider payload/runtime registration (skill/receipt territory, new release candidate). That is out of P1 scope, so it goes to separate task T1.
+34: - **Owner ruling (HUMAN_ATTESTED, pasted by owner, 2026-11-02):** "G1 harness workaround (harness writing Copilot MCP config) is REJECTED. G1 remains GAP until the toolkit payload itself registers the MCP server for Copilot CLI (task T1). T1 requires a new release candidate."
+35:
+36: ## Separate tasks opened (not done here)
+37:
+38: | ID | Type | Task |
+39: |---|---|---|
+40: | T1 | release payload | The Copilot provider must register `start-migration` where Copilot CLI reads it (`.mcp.json` or `.github/mcp.json`, `mcpServers`), with `tools` = the 9 grants (excluding `migration_relay_decision`) and `env` carrying `pnpm_config_pm_on_fail`. Touches `providers/install-support.mjs`, `providers/copilot/*`, receipt and runtime. Needs a new candidate and its own review. |
+41: | T2 | infrastructure | Install `bubblewrap` ≥ 0.5.0 on the scored host. It is missing today, so Copilot's sandbox cannot run (OBS §2–3). Requires root. **Frozen until the Codex scored runs close** (see Host change freeze). |
+42: | T3 | harness scope | The Codex adapter contract (M15 hardening: `isolated()`, launcher, pinned pnpm, refusal paths) lives only on `cert/m15-codex-uidmap-20261030`. BASE has the pre-M15 runner (353 lines). P1 needs that contract on `main`, or an owner-approved base, before a matching Copilot adapter can be built. **Scheduled after the Codex verdict only.** |
+43:
+44: ## Phase 0 inputs (addendum; the PATH decision belongs to Phase 0)
+45:
+46: **Candidate lineage.** The Codex candidate `d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d` (unpublished 1.6.5) is BASE plus 3 cert commits. Every file T1 must touch is byte-identical between the two except `release-identity.json` versions. G1 therefore holds on 1.6.5 as well: Copilot cannot be certified on the current candidate under either PATH.
+47:
+48: **What T1 changes in the candidate identity.** T1 cannot be limited to Copilot-only bytes:
+49: - `providers/install-support.mjs:23` holds the Copilot MCP location. The same file is loaded by the runtime preflight for every provider, Codex included (`skills/start-migration/scripts/runtime.mjs:220`), and checksum-verified (`:238-239`).
+50: - The generator `scripts/providers-sync.mjs:360-362,370` emits `providers/copilot/mcp.json` and `adapter.json`.
+51: - The canonical `skills/start-migration/references/provider-compatibility.md:28-30,75,78` documents `.vscode/mcp.json`. It is projected into `providers/codex/skills/...`, so the Codex skill `computedHash` changes (`scripts/skills-lock.mjs:44-49,111-121`).
+52: - `skills` and `providers` are payload roots (`scripts/release.mjs:70-75`), so `contentHash` changes. A changed hash under an established version is a `versionConflict` (`scripts/release.mjs:292-293`), which forces a new version.
+53:
+54: **Contract text (`docs/agent-e2e-acceptance.md` @ d7eb28c; at 42364020 `:12`, `:18`, `:49` are unchanged, `:201`→`:204`, `:253`→`:256`):**
+55: - `:12` "Install the **exact immutable candidate release**…"
+56: - `:18` "Never repair installed skill files, runtime receipts, locks, MCP config…"
+57: - `:47-49` "Run each provider declared production-certified by this release **separately**… label its status NOT_TESTED or experimental until a later exact-SHA release qualifies it."
+58: - `:201` digest from "the release candidate's `release-manifest.json`".
+59: - `:253` "Immutable release SHA/digest, installed skill/runtime identity…"
+60:
+61: There is no evidence-reuse clause. The only reuse precedent (M15 MATRIX row 32) required "the payload contentHash is unchanged", and T1 changes it.
+62:
+63: **PATH A (T1 in a separate later candidate Y):**
+64: - Codex evidence on 1.6.5 is untouched (**NONE**), because T1 is not in 1.6.5.
+65: - On Y, **no Codex row carries over (FULL)**: the release SHA/digest, payload hash, Codex skill identity and `install-support.mjs` all differ (`:12`, `:49`, `:253`).
+66: - Y must then either label Codex NOT_TESTED (`:47-49`), or run a full Codex re-cert. The re-cert costs worst case ~12–14 runs, ~10–15 min of owner time per native run, one independent review and the OpenAI token pool, about 1–2 days.
+67:
+68: **PATH B (T1 in the E1/E2 scope):** E4 already re-certifies Codex on the E3 candidate. T1 therefore adds 0 Codex runs and about 2–4 h of S–M engineering inside E2: payload registration, generator, doc and receipt tests.
+69:
+70: **Cost difference.** PATH A + T1 costs everything in PATH B's T1 work, plus one extra candidate cycle (design, implementation, CI, review, owner-approved pin, ~0.5–1 day). On top of that it costs either a second Codex re-cert (~1–2 days) or a split release record (Codex certified on 1.6.5 only; Copilot certified on Y only).
+71:
+72: **T1 placement: recommend PATH B (joint candidate).** E4 already pays the Codex re-cert that any T1-bearing candidate requires, so T1's marginal cost there is engineering only. Under PATH A, T1 still forces a candidate Y and its own Codex decision.
+73:
+74: **Codex evidence impact of T1:** **FULL** for any candidate carrying T1. **NONE** for the existing 1.6.5 evidence.
+75:
+76: ### Host change freeze (Codex run conditions)

@@ -1,0 +1,33 @@
+{
+  "checkedAt": "2026-11-02T21:39:30.558377+00:00",
+  "searches": [
+    "/mnt/c/Users/icordoba/Videos depth 4, video extensions",
+    "/mnt/c/Users/icordoba depth 7, videos modified after 2026-10-30T00:00:00Z; pruned AppData, .codex, .copilot, .claude, node_modules, .git, amt-evidence-vault-copy",
+    "/mnt/c/Users/icordoba/OneDrive depth 7, video extensions",
+    "/mnt/c/Users/Public/Videos",
+    "/mnt/c/Users/icordoba/AppData/Local/Packages/Microsoft.ScreenSketch_8wekyb3d8bbwe and Microsoft.XboxGamingOverlay_8wekyb3d8bbwe depth 7"
+  ],
+  "limitation": "Bounded, scoped discovery; not an exhaustive proof of absence across C:. No video playback/visual certification was performed. No videos copied into Git.",
+  "files": [
+    {
+      "path": "/mnt/c/Users/icordoba/Videos/Captures/M15 Codex certification handoff - Claude y 10 p\u00e1ginas m\u00e1s - Trabajo_ Microsoft\u200b Edge 2026-10-31 18-07-32.mp4",
+      "bytes": 65480537,
+      "mtimeUtc": "2026-10-31T23:09:03.848545+00:00",
+      "sha256": "0acaa08609590d0de40bec04b9714a0c49bf1fa274b328c1f6d5b3f6dcec1552",
+      "qualification": "R6 wrong-window capture according to historical FINAL/report.md section 9; not independently viewed here"
+    },
+    {
+      "path": "/mnt/c/Users/icordoba/Videos/Captures/utmwac@22LAP5CD551B022_ _mnt_c_Users_icordoba 2026-10-31 18-05-34.mp4",
+      "bytes": 2470129,
+      "mtimeUtc": "2026-10-31T23:05:38.680832+00:00",
+      "sha256": "e3de725f435817e4d583a65f943d0685f9dd1bf63ba2a5b9cf7a09fa738494b9",
+      "qualification": "Filename/time predates R6; not a scored-session recording"
+    }
+  ],
+  "nativeRunPresence": {
+    "R6": "Wrong-window recording located; no qualifying recording",
+    "R6b": "Not located",
+    "R6c": "No run; not located",
+    "R12": "Not located; historical REC=yes is not a recording artifact"
+  }
+}

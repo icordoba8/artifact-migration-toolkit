@@ -1,0 +1,2035 @@
+{
+  "generatedAt": "2026-11-02T21:39:29.827886+00:00",
+  "scope": "Read-only historical evidence extraction. No acceptance/verifier/provider execution.",
+  "sourceRoot": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z",
+  "gitEvidenceParent": "1a9661b3aba58d7e8fe41076d5e72b3d1d87701a",
+  "historicalBase": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+  "m16FrozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+  "p0": {
+    "commit": "a2117bfd79748d1ea23f33323bbce878bfe6092e",
+    "path": "docs/investigations/m16-copilot-20261102/p0/P0.md",
+    "sha256": "29909fed6434676a0d9ada2ff56bb9d7486a7440053f94c6c5fa2836f0038cd1"
+  },
+  "patchPairs": [
+    {
+      "commit": "42364020d6db36a60327b271dc83bfbebc4daf4e",
+      "expectedAMT_PATCH_SHA256": "35d5cb6109b1c4543fededc42cee9b6e0e6d38a0f417448c21ae7ad227fbe296",
+      "observed": "35d5cb6109b1c4543fededc42cee9b6e0e6d38a0f417448c21ae7ad227fbe296",
+      "status": "OK",
+      "gitArguments": [
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-color",
+        "--no-relative",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+        "42364020d6db36a60327b271dc83bfbebc4daf4e",
+        "--"
+      ]
+    },
+    {
+      "commit": "64a1a4c88147507227ca9bd927191486f6dc28e5",
+      "expectedAMT_PATCH_SHA256": "778d1d5be16f97a0dd9a81d637cdfb3ec96e5e15cfc9e872be24ac752a488533",
+      "observed": "778d1d5be16f97a0dd9a81d637cdfb3ec96e5e15cfc9e872be24ac752a488533",
+      "status": "OK",
+      "gitArguments": [
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-color",
+        "--no-relative",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+        "64a1a4c88147507227ca9bd927191486f6dc28e5",
+        "--"
+      ]
+    },
+    {
+      "commit": "1a9661b3aba58d7e8fe41076d5e72b3d1d87701a",
+      "expectedAMT_PATCH_SHA256": "244b32d897c06b8e537cb6f3e73862453bf720bc39d96a6c543fc324282a423a",
+      "observed": "244b32d897c06b8e537cb6f3e73862453bf720bc39d96a6c543fc324282a423a",
+      "status": "OK",
+      "gitArguments": [
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-color",
+        "--no-relative",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+        "1a9661b3aba58d7e8fe41076d5e72b3d1d87701a",
+        "--"
+      ]
+    }
+  ],
+  "sourceManifestChecks": [
+    {
+      "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/s0/SHA256SUMS",
+      "sha256": "6f4c264c3e572c51d8059e7f1e25aa452a1d0d21bda59f74b3568d764e57aa2a",
+      "status": "OK",
+      "entries": 7
+    },
+    {
+      "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/s1/SHA256SUMS",
+      "sha256": "ee6601a40a1d81bff61e02edf8e5b447788e0f159309fab08cec90644d3c908d",
+      "status": "OK",
+      "entries": 17
+    },
+    {
+      "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/s1/native-fix/SHA256SUMS",
+      "sha256": "a574bdbbe9087037090c6280124d75b1102ca027afa21c4ec5d0c3f49d944450",
+      "status": "OK",
+      "entries": 6
+    },
+    {
+      "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/SHA256SUMS",
+      "sha256": "e78825971c6e7402bb4c0d15ea2228044ba0007caa4af5e8677bdca8b1c772f3",
+      "status": "OK",
+      "entries": 290
+    }
+  ],
+  "runs": [
+    {
+      "run": "R1",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/fresh/report.json",
+      "sourceSha256": "01a545c9159ece80d0d16157242ffa9fa0807ce455bec42b576b93ca7cd04372",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "E2E_COMPLETE_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "fresh",
+        "goal": "complete",
+        "startedAt": "2026-10-31T22:26:32.505Z",
+        "completedAt": "2026-10-31T22:29:03.305Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": [],
+          "progressAppearsInAgentOutput": true
+        },
+        "independentVerification": {
+          "exitCode": 0,
+          "timedOut": false,
+          "verifierSha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R1-20261031T222432Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "4880e929e9e8cf6e554fe35d88cbad785a204a731e8d4d7d4608f7922497ceb9"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R1-20261031T222432Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "3ea060ceb90671bb67ba60efcdee6fb33d5733592b1fdf365308f5eb24329309",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": true,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/command.txt",
+          "sha256": "eec561f7d1b7c1143a59e38c7dd4ff9cdc333c79a563825a47c4efdbe50cc530"
+        },
+        "launch.start": "2026-10-31T22:26:30.073Z",
+        "launch.end": "2026-10-31T22:29:03.362Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/fresh/agent.stdout.log",
+          "bytes": 278195,
+          "sha256": "6c0f591256ee819502534486de5db9511fccb4624c95d5b6efab732cd6090c39"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/fresh/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/fresh/engine-status.stdout.log",
+          "bytes": 8056,
+          "sha256": "9acca663983d67aedbd3573b410b15e0ddc9c17ce0f03e4d2e374fcdd89372f3"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/fresh/engine-status.stderr.log",
+          "bytes": 394,
+          "sha256": "0461b72fa234d79692faaf0fe849d733ea4820850494e27793a3c341c1e63c6b"
+        },
+        "independent-verify.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/fresh/independent-verify.stdout.log",
+          "bytes": 47,
+          "sha256": "0f6c2f9bd987ad8cfd9910ab0fd6259a351d35aa7a3596b0e9aad0ca517d7503"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R1/rollout-2026-10-31T17-26-33-01a19412-5809-72e3-8701-a30fe89b2c82.jsonl",
+        "sha256": "4e95c6aae01d786fa661a00c2867b6a47b1afb57838f84f25601f9b61256ca0d",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 1249942,
+          "cached_input_tokens": 1183616,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9113,
+          "reasoning_output_tokens": 903,
+          "total_tokens": 1259055
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 153.289,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R2",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/interrupt/report.json",
+      "sourceSha256": "208bd57ed0624aa9a530df842478b5e7c21681c38d3916cd7c2de8693268b67b",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "INTERRUPTED_CHECKPOINT",
+        "failure": null,
+        "provider": "codex",
+        "kind": "module",
+        "scenario": "interrupt",
+        "goal": "complete",
+        "startedAt": "2026-10-31T22:30:24.050Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": []
+        },
+        "agent": {
+          "exitCode": null,
+          "signal": "SIGKILL",
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R2-20261031T222713Z/module-official/target/.artifact-migration-acceptance.json",
+            "sha256": "c9f429781249ba1583839a3dc1b3ff038cb7634880f15f644bf3542514b41fbd"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R2-20261031T222713Z/verifiers/m14/verify.mjs",
+            "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+          }
+        },
+        "receiptSha256": "ca0757998e0c91f2e349913a12a38067fc86305a8a35472de83443f6a19fec28",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/command.txt",
+          "sha256": "07c97251203c8756630fbdde35b75da9c89ff3b18c3961ba61bc01ad69d0c394"
+        },
+        "launch.start": "2026-10-31T22:30:19.760Z",
+        "launch.end": "2026-10-31T22:32:37.929Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/interrupt/agent.stdout.log",
+          "bytes": 317839,
+          "sha256": "2308c100329e3b24e5325fcbeb863f91e064df20b49549c06e6607a814d76c89"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/interrupt/agent.stderr.log",
+          "bytes": 325,
+          "sha256": "d659e6b5e33628811e84741dabf93baa7af7a1bd0f6ddfc16c82734def31b511"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/interrupt/engine-status.stdout.log",
+          "bytes": 5100,
+          "sha256": "66bc5404877f76c06b6ddc1af6ee078362ff391bfb108f90064861cd7570c2b8"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/interrupt/engine-status.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R2/rollout-2026-10-31T17-30-24-01a19415-e0bd-7282-a970-e89eca55933f.jsonl",
+        "sha256": "6e32a1b9d1b59d7586bf408d4a399e579db513cdf5972b9f99dc5d329287fcbc",
+        "observedTaskEvents": {
+          "task_started": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 719232,
+          "cached_input_tokens": 667008,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6525,
+          "reasoning_output_tokens": 353,
+          "total_tokens": 725757
+        },
+        "refusalPointers": [
+          {
+            "line": 29,
+            "class": "Migration registry is not configured",
+            "timestamp": "2026-10-31T22:30:38.250Z"
+          },
+          {
+            "line": 37,
+            "class": "Migration registry is not configured",
+            "timestamp": "2026-10-31T22:30:41.318Z"
+          }
+        ]
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 138.169,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      },
+      "statusQualification": "Checkpoint stage only, not completion; usage is last observed before interruption."
+    },
+    {
+      "run": "R3",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/report.json",
+      "sourceSha256": "659afd11759067280615a4bf9e7b0ca564a8f726126148e5f1f652ac11020a2a",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "E2E_COMPLETE_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "module",
+        "scenario": "resume",
+        "goal": "complete",
+        "startedAt": "2026-10-31T22:33:22.047Z",
+        "completedAt": "2026-10-31T22:38:12.203Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": [],
+          "progressAppearsInAgentOutput": true
+        },
+        "independentVerification": {
+          "exitCode": 0,
+          "timedOut": false,
+          "verifierSha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R2-20261031T222713Z/module-official/target/.artifact-migration-acceptance.json",
+            "sha256": "c9f429781249ba1583839a3dc1b3ff038cb7634880f15f644bf3542514b41fbd"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R2-20261031T222713Z/verifiers/m14/verify.mjs",
+            "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+          }
+        },
+        "receiptSha256": "ca0757998e0c91f2e349913a12a38067fc86305a8a35472de83443f6a19fec28",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": true,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED",
+        "resume": {
+          "previousReportSha256": "208bd57ed0624aa9a530df842478b5e7c21681c38d3916cd7c2de8693268b67b",
+          "historyPrefixPreserved": true,
+          "completedArtifactsPreserved": true
+        }
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/command.txt",
+          "sha256": "cf997d8d07ba2159db28602732b943feae0f31fd170e5b565d56ca77042ddcef"
+        },
+        "launch.start": "2026-10-31T22:33:16.950Z",
+        "launch.end": "2026-10-31T22:38:12.250Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/agent.stdout.log",
+          "bytes": 622914,
+          "sha256": "8263245f082bd5592de687b06ca97e67d212e04f3bab80a05b83371a420bd82c"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/engine-status.stdout.log",
+          "bytes": 5018,
+          "sha256": "ba689792d9e916a613790ccdeb2fc528a7a0e78fcb5e85f48140f1a6ac2c2927"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/engine-status.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "independent-verify.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/independent-verify.stdout.log",
+          "bytes": 194,
+          "sha256": "d865b142e61134d3370828cf157bc4e4d41cdd2042065ae753038b71692b642b"
+        },
+        "verifier-result.json": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/resume/verifier-result.json",
+          "bytes": 3325,
+          "sha256": "030cb3df9ff95562208bd78d4517dd648522ce28643b8aaa2b8c40877f770894"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R3/rollout-2026-10-31T17-33-22-01a19418-97fb-7a91-8e40-d064ad9ef012.jsonl",
+        "sha256": "4462619bda0f2a2350e75ac60952bd375fdcdab37fb7e793a20964aa26c289f9",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 2443742,
+          "cached_input_tokens": 2362368,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 18169,
+          "reasoning_output_tokens": 1946,
+          "total_tokens": 2461911
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 295.3,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R4",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/live-lock/report.json",
+      "sourceSha256": "198f60ccf136b1d1bfa046fddb6ba672e79715e9bc50c2aaaa383308ae55325f",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "SAFETY_REFUSAL_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "module",
+        "scenario": "live-lock",
+        "goal": "bootstrap",
+        "startedAt": "2026-10-31T22:38:43.193Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "safety": {
+          "reviewRequired": true,
+          "unchanged": true,
+          "refusalObserved": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": []
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R4-20261031T223026Z/module-official/target/.artifact-migration-acceptance.json",
+            "sha256": "326d1a5bd154dc4dca2cebade25ca3ec6b304d28549eadd15bc372b7d990647e"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R4-20261031T223026Z/verifiers/m14/verify.mjs",
+            "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+          }
+        },
+        "receiptSha256": "41da5cfe877a1b9248e3c022c75b79df463e2038a036baff254e077f157cfc58",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 0,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED",
+        "lock": {
+          "owner": {
+            "pid": 1607892,
+            "hostname": "22LAP5CD551B022",
+            "realm": "linux:pid:[4026532221]",
+            "uuid": "f4acbbed-c751-413e-b4f2-14e1ca37d2bc",
+            "acquiredAt": "2026-10-31T22:38:43.166Z"
+          },
+          "holderAliveAfter": true
+        }
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/command.txt",
+          "sha256": "8852e380ffc5c8809ce45357e6be220a306409a152cc3dec188ec8aabe54cea8"
+        },
+        "launch.start": "2026-10-31T22:38:38.800Z",
+        "launch.end": "2026-10-31T22:40:21.946Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/live-lock/agent.stdout.log",
+          "bytes": 219568,
+          "sha256": "5246d3591f61d47bfe784e8944f50fef24f7904d7230161711c1c0c67fb6b2ef"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/live-lock/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/live-lock/engine-status.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/live-lock/engine-status.stderr.log",
+          "bytes": 215,
+          "sha256": "022e52ca09fcdf1207ee36ee9142822a73c30a506869878e8f28d48316c07198"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R4/rollout-2026-10-31T17-38-43-01a1941d-7e89-78d2-9d3a-71cf58b60591.jsonl",
+        "sha256": "718fbd0c5e6a146c639ea16278bbafe7cc70ce117a85ae2209c7f7dc828a35a0",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 655581,
+          "cached_input_tokens": 598784,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3044,
+          "reasoning_output_tokens": 301,
+          "total_tokens": 658625
+        },
+        "refusalPointers": [
+          {
+            "line": 30,
+            "class": "Migration registry is not configured",
+            "timestamp": "2026-10-31T22:38:54.984Z"
+          },
+          {
+            "line": 36,
+            "class": "Migration registry is not configured",
+            "timestamp": "2026-10-31T22:38:57.473Z"
+          }
+        ]
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 103.146,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R5",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/read-only/report.json",
+      "sourceSha256": "101a5eed8d4befdd95caa8e7eba963b09b4d00d1a2c8bc60d12375a73df70675",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "FAIL",
+        "failure": "Safety refusal not proven: require unchanged consumer, actual refusal, no timeout and no migration record",
+        "provider": "codex",
+        "kind": "module",
+        "scenario": "read-only",
+        "goal": "bootstrap",
+        "startedAt": "2026-10-31T22:40:51.296Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "safety": {
+          "reviewRequired": true,
+          "unchanged": true,
+          "refusalObserved": false
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": []
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R5-20261031T223032Z/module-official/target/.artifact-migration-acceptance.json",
+            "sha256": "ce018a4f40de449c152666083a2bb1a48ee8975f36efa61dee6843b44b2fabb0"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R5-20261031T223032Z/verifiers/m14/verify.mjs",
+            "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+          }
+        },
+        "receiptSha256": "12b134c2de1d12019efa8894242b2ed98beace2e59d55cbd700394c111ce4220",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 0,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/command.txt",
+          "sha256": "38794eb6ae18137237a141d33c38bdf771fb3b545da6f07b3db4cee9420f7be2"
+        },
+        "launch.start": "2026-10-31T22:40:48.232Z",
+        "launch.end": "2026-10-31T22:41:17.534Z",
+        "launch.exit": "exit=1"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/read-only/agent.stdout.log",
+          "bytes": 2263,
+          "sha256": "3fbb2121902f1ac022d61ec8d03ef2f47c0c9acc354dfa2b3de9c020fc99f37b"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/read-only/agent.stderr.log",
+          "bytes": 247,
+          "sha256": "b68a4b629ab4eda63ca17293a8583819cc5ba1e6cdfda0600380db602e0f459f"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/read-only/engine-status.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/read-only/engine-status.stderr.log",
+          "bytes": 215,
+          "sha256": "022e52ca09fcdf1207ee36ee9142822a73c30a506869878e8f28d48316c07198"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R5/rollout-2026-10-31T17-40-51-01a1941f-72e1-70f1-b998-d41632dfe578.jsonl",
+        "sha256": "51ecae6e53d420c3d190f24740662d7044106a71eefd3ea48710f02a3a1cde6c",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 132041,
+          "cached_input_tokens": 115328,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 712,
+          "reasoning_output_tokens": 202,
+          "total_tokens": 132753
+        },
+        "refusalPointers": [
+          {
+            "line": 18,
+            "class": "Read-only file system",
+            "timestamp": "2026-10-31T22:40:55.930Z"
+          },
+          {
+            "line": 30,
+            "class": "Read-only file system",
+            "timestamp": "2026-10-31T22:41:00.560Z"
+          },
+          {
+            "line": 45,
+            "class": "Migration registry is not configured",
+            "timestamp": "2026-10-31T22:41:10.323Z"
+          }
+        ]
+      },
+      "status": "SCORED_FAIL",
+      "operational": {
+        "wrapperElapsedSeconds": 29.302,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R6",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/report.json",
+      "sourceSha256": "a644b6439a8f57f001d74bb9d2430b0e253d783d7dd15ef425a54377b6f19c8c",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "FAIL",
+        "failure": "Engine status failed after agent invocation; logs preserved",
+        "provider": "codex",
+        "kind": "module",
+        "scenario": "fresh",
+        "goal": "complete",
+        "startedAt": "2026-10-31T23:08:08.556Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "native",
+          "operatorRequired": [
+            "screen recording",
+            "single invocation attestation",
+            "compare visible progress with engine status"
+          ]
+        },
+        "agent": {
+          "exitCode": 1,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R6-20261031T223335Z/module-official/target/.artifact-migration-acceptance.json",
+            "sha256": "c74866cac49bc7b270de71caebad945fa5d36f0fe560eb6e947d0b6c3198e713"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R6-20261031T223335Z/verifiers/m14/verify.mjs",
+            "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+          }
+        },
+        "receiptSha256": "2342b31677f57215ce84bb55f27aaff9931a02d425eec6c3ba10bdc52a355085",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 0,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "launch.start": "2026-10-31T23:08:52.396Z",
+        "launch.end": "2026-10-31T23:08:53.543Z",
+        "launch.exit": "exit=1"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/agent.stdout.log",
+          "bytes": 10158,
+          "sha256": "21dac81e7b7977bfe3070fbbbcd0155304c96af559076a04ba41dc8d09e2b7af"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/agent.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/engine-status.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/engine-status.stderr.log",
+          "bytes": 215,
+          "sha256": "022e52ca09fcdf1207ee36ee9142822a73c30a506869878e8f28d48316c07198"
+        },
+        "native.typescript": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/native.typescript",
+          "bytes": 10158,
+          "sha256": "21dac81e7b7977bfe3070fbbbcd0155304c96af559076a04ba41dc8d09e2b7af"
+        },
+        "native.timing": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6/native/native.timing",
+          "bytes": 348,
+          "sha256": "02fbc8acaac7152868f562bc5ff6f7f57b6bf3078e7c54a30e1ca09e5497ba7c"
+        }
+      },
+      "status": "INFRA_ONLY",
+      "operational": {
+        "launch1OuterElapsedSeconds": null,
+        "reason": "Outer timestamps overwritten by refused Launch 2; native PTY shows Launch 1 about one second; no model turn.",
+        "budgetMinutes": 30
+      }
+    },
+    {
+      "run": "R6b",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/report.json",
+      "sourceSha256": "c26845206476bbe4943fda131d4a2e0378e12b2cd65ec619578a0e8ea747ead3",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "FAIL",
+        "failure": "Engine status failed after agent invocation; logs preserved",
+        "provider": "codex",
+        "kind": "module",
+        "scenario": "fresh",
+        "goal": "complete",
+        "startedAt": "2026-10-31T23:59:45.411Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "native",
+          "operatorRequired": [
+            "screen recording",
+            "single invocation attestation",
+            "compare visible progress with engine status"
+          ]
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R6b-20261031T232307Z/module-official/target/.artifact-migration-acceptance.json",
+            "sha256": "f2bc492fcb644f109a10ac1260af247257316385c8a4422c1e2d6d394f18d8e5"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R6b-20261031T232307Z/verifiers/m14/verify.mjs",
+            "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7"
+          }
+        },
+        "receiptSha256": "c2cce3c53b8294da6400c47ffd735d5ea9838a1f8a1730cf061983f671c5d223",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 0,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "window/launch.start": "2026-10-31T23:59:43.131Z",
+        "window/launch.end": "2026-11-01T00:10:32.940Z",
+        "window/launch.exit": "exit=1"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/agent.stdout.log",
+          "bytes": 15019,
+          "sha256": "e87aad0c9f6d3378c6b7b1561f595eb06587b6783946c67a7c2eea53059bc485"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/agent.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/engine-status.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/engine-status.stderr.log",
+          "bytes": 215,
+          "sha256": "022e52ca09fcdf1207ee36ee9142822a73c30a506869878e8f28d48316c07198"
+        },
+        "native.typescript": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/native.typescript",
+          "bytes": 15019,
+          "sha256": "e87aad0c9f6d3378c6b7b1561f595eb06587b6783946c67a7c2eea53059bc485"
+        },
+        "native.timing": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6b/native/native.timing",
+          "bytes": 1594,
+          "sha256": "6c082e78834d71fad7a9e3dec871479b0b36090c9649dc2a5288034778db006c"
+        }
+      },
+      "status": "NOT_COUNTED",
+      "operational": {
+        "wrapperElapsedSeconds": 649.809,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      },
+      "statusQualification": "No prompt reached the model; idle TUI time is not scored execution."
+    },
+    {
+      "run": "R6c",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R6c/window/NOT_RUN",
+      "sourceSha256": "cef2a5e49034240273428317aa8144dc4ba5cc313094696d7add5152bf0b083c",
+      "status": "NOT_COUNTED",
+      "reason": "Deadline; no launch; current owner prohibits further runs",
+      "budgetMinutes": 30,
+      "operational": {
+        "wrapperElapsedSeconds": null,
+        "reason": "No launch; deadline",
+        "budgetMinutes": 30
+      }
+    },
+    {
+      "run": "R7",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/interrupt/report.json",
+      "sourceSha256": "3af4a566e491760e8bb9a5753783aedfbe6ae6ef076c0a059ab414132314d9ec",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "INTERRUPTED_CHECKPOINT",
+        "failure": null,
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "interrupt",
+        "goal": "complete",
+        "startedAt": "2026-10-31T23:27:46.778Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": []
+        },
+        "agent": {
+          "exitCode": null,
+          "signal": "SIGKILL",
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R7-20261031T223340Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "4b708e645f1f6eb3fb02a4311499f5b686cd24b860a60d072642e36e27c75ff8"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R7-20261031T223340Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "426294884000077d6437e6a110e5536a525150c0fd99e10523c9c3086f2aa39f",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/command.txt",
+          "sha256": "c9a1a1a834f8e10f1e09ba6425508b8e4dbc2aea40f8375df5e6a94f1d3d7d31"
+        },
+        "launch.start": "2026-10-31T23:27:42.488Z",
+        "launch.end": "2026-10-31T23:28:47.999Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/interrupt/agent.stdout.log",
+          "bytes": 140242,
+          "sha256": "89b6034d27e20c63b2f1fbd4d41ab9eb590b773f0d46034e1831e2e904fdebe2"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/interrupt/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/interrupt/engine-status.stdout.log",
+          "bytes": 6473,
+          "sha256": "9bd89bca5437cf3f80b01a9a1aee4f4b80b7d564c9591e6c8ae366f60f0afffc"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/interrupt/engine-status.stderr.log",
+          "bytes": 400,
+          "sha256": "f8299a5b89b33bf289858fcedb12a947beb3e625e1045587f3f6208efdf1781a"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R7/rollout-2026-10-31T18-27-46-01a1944a-68cb-7810-bfcf-bf57f2b2675c.jsonl",
+        "sha256": "3b329de8531b6f792ff53316d6ad7ea0c199acb78aab2cbe2b73057a3007356e",
+        "observedTaskEvents": {
+          "task_started": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 502662,
+          "cached_input_tokens": 460288,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 2568,
+          "reasoning_output_tokens": 126,
+          "total_tokens": 505230
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 65.511,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      },
+      "statusQualification": "Checkpoint stage only, not completion; usage is last observed before interruption."
+    },
+    {
+      "run": "R8",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/resume/report.json",
+      "sourceSha256": "f291e516e14889e654869f732f37609ef4774c6d8ffb1085bcc35a2fb0fbfdec",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "E2E_COMPLETE_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "resume",
+        "goal": "complete",
+        "startedAt": "2026-10-31T23:28:53.786Z",
+        "completedAt": "2026-10-31T23:30:55.045Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": [],
+          "progressAppearsInAgentOutput": true
+        },
+        "independentVerification": {
+          "exitCode": 0,
+          "timedOut": false,
+          "verifierSha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R7-20261031T223340Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "4b708e645f1f6eb3fb02a4311499f5b686cd24b860a60d072642e36e27c75ff8"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R7-20261031T223340Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "426294884000077d6437e6a110e5536a525150c0fd99e10523c9c3086f2aa39f",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": true,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED",
+        "resume": {
+          "previousReportSha256": "3af4a566e491760e8bb9a5753783aedfbe6ae6ef076c0a059ab414132314d9ec",
+          "historyPrefixPreserved": true,
+          "completedArtifactsPreserved": true
+        }
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/command.txt",
+          "sha256": "770d8e03a92c7481119e663a347b0620ba6e595f120266f6a971d250cc183e6e"
+        },
+        "launch.start": "2026-10-31T23:28:48.900Z",
+        "launch.end": "2026-10-31T23:30:55.090Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/resume/agent.stdout.log",
+          "bytes": 191706,
+          "sha256": "b14f1f4fc9cd9bd571c653f9e5d9416d974f879495bc27a2c29026eb6a87aa4f"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/resume/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/resume/engine-status.stdout.log",
+          "bytes": 7814,
+          "sha256": "484d51c71b7d3962c33ab6d589adc78ffe36b6d92b29c2c888ecc6eaa9a1d517"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/resume/engine-status.stderr.log",
+          "bytes": 390,
+          "sha256": "3bcd679c690677338a7baf6da897604dba00f010153beb190024ee4ccb1dc7c8"
+        },
+        "independent-verify.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/resume/independent-verify.stdout.log",
+          "bytes": 47,
+          "sha256": "0f6c2f9bd987ad8cfd9910ab0fd6259a351d35aa7a3596b0e9aad0ca517d7503"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R8/rollout-2026-10-31T18-28-53-01a1944b-6e99-7db0-8f29-41906657f2fa.jsonl",
+        "sha256": "2581b2a07d4881e09cd1fff920f3baf23d8f37493b30326ca915867aa64e1f05",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 1124247,
+          "cached_input_tokens": 1075200,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 6646,
+          "reasoning_output_tokens": 458,
+          "total_tokens": 1130893
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 126.19,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R9",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/live-lock/report.json",
+      "sourceSha256": "f47ac424e9a92c408d571d3d0bede1ed96548448f54115c6ec56fd16a6582b37",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "SAFETY_REFUSAL_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "live-lock",
+        "goal": "bootstrap",
+        "startedAt": "2026-10-31T23:31:00.260Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "safety": {
+          "reviewRequired": true,
+          "unchanged": true,
+          "refusalObserved": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": []
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R9-20261031T223346Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "e115aa6e6280afcea36d92bedfcb6a28b11ab5271f83861060f304f75671f14d"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R9-20261031T223346Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "82eafd35650d14510280cf0bc299a3c03aad13a30c340e6c2e421c14107e7afb",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 0,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED",
+        "lock": {
+          "owner": {
+            "pid": 1747015,
+            "hostname": "22LAP5CD551B022",
+            "realm": "linux:pid:[4026532221]",
+            "uuid": "8a2ea7e9-b385-4e83-8d9b-2161eaed932c",
+            "acquiredAt": "2026-10-31T23:31:00.150Z"
+          },
+          "holderAliveAfter": true
+        }
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/command.txt",
+          "sha256": "7967ac89cc692a86d75a03e634017937ce5181dca05a6c66b33ea51df4eecf7c"
+        },
+        "launch.start": "2026-10-31T23:30:55.749Z",
+        "launch.end": "2026-10-31T23:32:47.180Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/live-lock/agent.stdout.log",
+          "bytes": 114447,
+          "sha256": "c4eea386416d3755cf5c3ef5a96c16860a4d653f28775e87492f9621cc8a10db"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/live-lock/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/live-lock/engine-status.stdout.log",
+          "bytes": 393,
+          "sha256": "99fa180a0cee8d3744f8f7386cbcdfff7beb5e4daf70324d14e44e0dbc4e9276"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/live-lock/engine-status.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R9/rollout-2026-10-31T18-31-00-01a1944d-5cbe-75e3-9122-ed0699a82349.jsonl",
+        "sha256": "a603a409744cac60cd6edceb6d545ac3030c462dc1bc89c88b964e069d9b6b19",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 439806,
+          "cached_input_tokens": 410240,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 1877,
+          "reasoning_output_tokens": 247,
+          "total_tokens": 441683
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 111.431,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R10",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/realm-abandoned-lock/report.json",
+      "sourceSha256": "eaed6c68c3883af6d67398ada2da09b15254f0c608b815887e6bafc964864b4b",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "BOOTSTRAP_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "realm-abandoned-lock",
+        "goal": "bootstrap",
+        "startedAt": "2026-10-31T23:32:51.436Z",
+        "completedAt": "2026-10-31T23:35:25.584Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": [],
+          "progressAppearsInAgentOutput": true
+        },
+        "independentVerification": {
+          "exitCode": 0,
+          "timedOut": false,
+          "verifierSha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R10-20261031T223352Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "0a01ad4e92d424ed8b1323c1234c6026d7f0d341906a65acbb59485f15d8f3b1"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R10-20261031T223352Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "60a65e7c985a3c25ec1303b9be0930775790b0c864960023f1805c697d22ed46",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED",
+        "lock": {
+          "owner": {
+            "pid": 18,
+            "hostname": "22LAP5CD551B022",
+            "realm": "linux:pid:[4026535412]",
+            "uuid": "1919f106-6fca-4992-b8b7-241011448ad1",
+            "acquiredAt": "2026-10-31T23:32:51.538Z"
+          },
+          "hostRealm": "linux:pid:[4026532221]",
+          "ownerExited": true,
+          "plantedInAgentRealm": true,
+          "removalLeads": [],
+          "recovery": "RECLAIMED_IN_AGENT_REALM"
+        }
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/command.txt",
+          "sha256": "0b7918a5c509cdace4626d2e9d8ba442c430e0c4c942813e22573351838678ef"
+        },
+        "launch.start": "2026-10-31T23:32:47.873Z",
+        "launch.end": "2026-10-31T23:35:25.645Z",
+        "launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/realm-abandoned-lock/agent.stdout.log",
+          "bytes": 233111,
+          "sha256": "fe3c129e05edef26c99a2df172eafd302aece3694e2477a20d3398071509296b"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/realm-abandoned-lock/agent.stderr.log",
+          "bytes": 39,
+          "sha256": "1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/realm-abandoned-lock/engine-status.stdout.log",
+          "bytes": 7819,
+          "sha256": "380929e8fe3d877c23ccbeaf7e6dd1c1c5d15b905d4b8b42aa66a5e3b17d33c0"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/realm-abandoned-lock/engine-status.stderr.log",
+          "bytes": 390,
+          "sha256": "3bcd679c690677338a7baf6da897604dba00f010153beb190024ee4ccb1dc7c8"
+        },
+        "independent-verify.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/realm-abandoned-lock/independent-verify.stdout.log",
+          "bytes": 47,
+          "sha256": "0f6c2f9bd987ad8cfd9910ab0fd6259a351d35aa7a3596b0e9aad0ca517d7503"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R10/rollout-2026-10-31T18-32-51-01a1944f-0f54-7b80-ab0e-9ca82ad6c40f.jsonl",
+        "sha256": "25bb7fd525096e5e4351adb45996c8cff07b73b93324933d5ada0612f7c48def",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 1323792,
+          "cached_input_tokens": 1267584,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 8589,
+          "reasoning_output_tokens": 726,
+          "total_tokens": 1332381
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 157.772,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R11",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/read-only/report.json",
+      "sourceSha256": "318decd72ab4de40bdfb44073943c84cb61a37b73d456b64e0a4b7767ac5d0e1",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "FAIL",
+        "failure": "Safety refusal not proven: require unchanged consumer, actual refusal, no timeout and no migration record",
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "read-only",
+        "goal": "bootstrap",
+        "startedAt": "2026-10-31T23:35:30.325Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "safety": {
+          "reviewRequired": true,
+          "unchanged": true,
+          "refusalObserved": false
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "headless",
+          "operatorRequired": []
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R11-20261031T223357Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "984a9cb9d514d010fcf7db5f1032d5d6f4919931263796d9063bdbab4a844cc2"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R11-20261031T223357Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "3f245a3beb32b18c54154056c87962a6ab6bbeb8d0100ed5c8843a1a33201a99",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 0,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "command.txt": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/command.txt",
+          "sha256": "4ab1daff61577375793db6f22f4f9616d2703da6a98f836537c86057d823660c"
+        },
+        "launch.start": "2026-10-31T23:35:26.340Z",
+        "launch.end": "2026-10-31T23:35:59.644Z",
+        "launch.exit": "exit=1"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/read-only/agent.stdout.log",
+          "bytes": 54058,
+          "sha256": "45bb523f51bbc52f353974fc122f2373a39e674e37a5caa6ddf872b0f922cfeb"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/read-only/agent.stderr.log",
+          "bytes": 143,
+          "sha256": "52954d2b6ed18c122ae401580738d24dd7ad2ad600203ed3c55654171370dbf6"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/read-only/engine-status.stdout.log",
+          "bytes": 394,
+          "sha256": "f9757b47c03260e319b02f774b557009e209d08dc719f9c0a06b7fab570e2c65"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/read-only/engine-status.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R11/rollout-2026-10-31T18-35-30-01a19451-7bb0-7773-b091-849c838a9637.jsonl",
+        "sha256": "013b3f00557b0351d976c49df6019ac8efd271b59ecd35b07f189cbea74f421b",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 155359,
+          "cached_input_tokens": 129792,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 911,
+          "reasoning_output_tokens": 266,
+          "total_tokens": 156270
+        },
+        "refusalPointers": [
+          {
+            "line": 18,
+            "class": "Read-only file system",
+            "timestamp": "2026-10-31T23:35:35.047Z"
+          },
+          {
+            "line": 38,
+            "class": "Read-only file system",
+            "timestamp": "2026-10-31T23:35:45.336Z"
+          },
+          {
+            "line": 47,
+            "class": "ENOENT: no such file or directory, mkdir",
+            "timestamp": "2026-10-31T23:35:52.151Z"
+          }
+        ]
+      },
+      "status": "SCORED_FAIL",
+      "operational": {
+        "wrapperElapsedSeconds": 33.304,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      }
+    },
+    {
+      "run": "R12",
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/report.json",
+      "sourceSha256": "7c3f06585730a0d488303db548f36bdaaae243f2655f01e289474260bd28897b",
+      "budgetMinutes": 30,
+      "report": {
+        "verdict": "E2E_COMPLETE_PASS",
+        "failure": null,
+        "provider": "codex",
+        "kind": "artifact",
+        "scenario": "fresh",
+        "goal": "complete",
+        "startedAt": "2026-11-01T00:10:55.521Z",
+        "completedAt": "2026-11-01T00:18:50.329Z",
+        "toolkit": {
+          "name": "artifact-migration-tools",
+          "version": "1.6.5",
+          "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+          "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+        },
+        "runtime": {
+          "node": "v22.13.0",
+          "engineNode": "v22.13.0",
+          "codex": "codex-cli 0.165.0",
+          "model": "gpt-6.1-sol",
+          "reasoningEffort": "high"
+        },
+        "candidate": {
+          "expectedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "installedPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+          "independentPinRequiredForComplete": true,
+          "matchesTrustedPin": true
+        },
+        "presentation": {
+          "nativeUiCertified": false,
+          "mode": "native",
+          "operatorRequired": [
+            "screen recording",
+            "single invocation attestation",
+            "compare visible progress with engine status"
+          ],
+          "progressAppearsInAgentOutput": false
+        },
+        "independentVerification": {
+          "exitCode": 0,
+          "timedOut": false,
+          "verifierSha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+        },
+        "agent": {
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "overflow": false,
+          "interrupted": null
+        },
+        "trustedPins": {
+          "marker": {
+            "path": "/home/utmwac/amt-m15-cert-R12-20261031T223403Z/artifact/consumer/.artifact-migration-acceptance.json",
+            "sha256": "6d8f8387794dc7cc71b74c1e5473c9f287d1669e0c5a4a6c31f9a0d79b6df3c5"
+          },
+          "verifier": {
+            "path": "/home/utmwac/amt-m15-cert-R12-20261031T223403Z/verifiers/m13/verify.mjs",
+            "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221"
+          }
+        },
+        "receiptSha256": "5e3a14aa891a8feac9ad5c2839bdc30d78974299397c6ba064a58dba087be983",
+        "security": {
+          "isolation": "OS_NAMESPACE",
+          "trustedRuntimeIsolated": true,
+          "certified": false,
+          "recordContinuity": {
+            "targetDirectoryRenameEvents": 1,
+            "violations": [],
+            "assurance": "BEST_EFFORT_FILESYSTEM_EVENTS"
+          }
+        },
+        "openspecStatus": "NOT_TESTED"
+      },
+      "launchEvidence": {
+        "window/launch.start": "2026-11-01T00:10:53.376Z",
+        "window/launch.end": "2026-11-01T00:18:50.357Z",
+        "window/launch.exit": "exit=0"
+      },
+      "artifactPointers": {
+        "agent.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/agent.stdout.log",
+          "bytes": 455960,
+          "sha256": "cd089c83d09c1981f1dabbd1ef9966c333537638a740bf892d16d16b67a61c41"
+        },
+        "agent.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/agent.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "engine-status.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/engine-status.stdout.log",
+          "bytes": 7839,
+          "sha256": "93d1c1949b6ec389de98d6b2ed88ecd425a028295bc6daa643553f28e4700bdb"
+        },
+        "engine-status.stderr.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/engine-status.stderr.log",
+          "bytes": 394,
+          "sha256": "d8f3816521c8311cc303d2df4b638dca77aca4073ac911f03552449cccd23586"
+        },
+        "native.typescript": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/native.typescript",
+          "bytes": 455960,
+          "sha256": "cd089c83d09c1981f1dabbd1ef9966c333537638a740bf892d16d16b67a61c41"
+        },
+        "native.timing": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/native.timing",
+          "bytes": 66026,
+          "sha256": "0031e072f725b7391a54c6188907d5df04daf4fe0dcbc630d2df57c0379a5718"
+        },
+        "independent-verify.stdout.log": {
+          "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/native/independent-verify.stdout.log",
+          "bytes": 47,
+          "sha256": "0f6c2f9bd987ad8cfd9910ab0fd6259a351d35aa7a3596b0e9aad0ca517d7503"
+        }
+      },
+      "rollout": {
+        "path": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/runs/R12/rollout-2026-10-31T19-10-56-01a19471-eba7-7490-98f2-dbe053b73c36.jsonl",
+        "sha256": "9ae30a4e1c189906deeaeb0c936b5309aeb29b385d079c9698196f6092f5051e",
+        "observedTaskEvents": {
+          "task_started": 1,
+          "task_complete": 1
+        },
+        "lastObservedUsage": {
+          "input_tokens": 1231113,
+          "cached_input_tokens": 1168896,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7222,
+          "reasoning_output_tokens": 378,
+          "total_tokens": 1238335
+        },
+        "refusalPointers": []
+      },
+      "status": "SCORED_PASS",
+      "operational": {
+        "wrapperElapsedSeconds": 476.981,
+        "budgetMinutes": 30,
+        "withinBudget": true
+      },
+      "statusQualification": "Runner functional E2E_COMPLETE_PASS only. Row 30 remains unmet: recording not located, nativeUiCertified=false."
+    }
+  ],
+  "historicalCI": [
+    {
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/s1/ci/run-41246968597.json",
+      "fields": {
+        "headSha": "64a1a4c88147507227ca9bd927191486f6dc28e5",
+        "conclusion": "success",
+        "url": "https://github.com/icordoba8/artifact-migration-toolkit/actions/runs/41246968597"
+      }
+    },
+    {
+      "source": "/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-certification-run-20261031T2015Z/s1/native-fix/run-41253081464.json",
+      "fields": {
+        "headSha": "1a9661b3aba58d7e8fe41076d5e72b3d1d87701a",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    }
+  ],
+  "releaseCheck": {
+    "manifestPath": "/home/utmwac/amt-m15-auth4-20261031T200214Z/home/.local/share/artifact-migration-tools/1.6.5-bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6/release-manifest.json",
+    "manifestPin": "sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6",
+    "toolkit": {
+      "name": "artifact-migration-tools",
+      "version": "1.6.5",
+      "commit": "874806fc778295b6017a635f6aae51ce8c782e51",
+      "contentHash": "sha256:1f9786e285d5ec2d183a0f9f91d8f64a5a46e6100e42a5b9fab7d5394bafaaf7"
+    },
+    "verifiedManifestFiles": 1243,
+    "status": "OK"
+  },
+  "verifierChecks": [
+    {
+      "path": "/home/utmwac/amt-m15-cert-R1-20261031T222432Z/verifiers/m13/verify.mjs",
+      "sha256": "ff0b7d20fd5a11ee67627e2732051c5fb83cc2de9944d667f3a061481e86c221",
+      "status": "OK"
+    },
+    {
+      "path": "/home/utmwac/amt-m15-cert-R2-20261031T222713Z/verifiers/m14/verify.mjs",
+      "sha256": "a0055e2d9571f86d27bae315f18ea8717686efefed6e36e1a633d9ed95bc52e7",
+      "status": "OK"
+    }
+  ],
+  "binaryArchiveChecks": [
+    {
+      "path": "/home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/bin/codex",
+      "sha256": "c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5",
+      "status": "OK"
+    },
+    {
+      "path": "/home/utmwac/.nvm/versions/node/v22.13.0/bin/node",
+      "sha256": "af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8",
+      "status": "OK"
+    },
+    {
+      "path": "/home/utmwac/.cache/amt-pnpm/pnpm-11.21.0.tgz",
+      "sha512": "521705bce689924eac72f5a3587122f362689ef6571e55ba80076fd637c11132ecffada26fad4ea79c485bfddbfd3d5a2a5b05805a77e893de71ec8a6cca3bb1",
+      "status": "OK"
+    }
+  ],
+  "t1FrozenBaseComparisons": [
+    {
+      "file": "providers/install-support.mjs",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "5f90ca6d39452d8b0add5724e63b34291fd079f49bf0586a0078cfb1b6cfd9d0",
+      "byteIdentical": true
+    },
+    {
+      "file": "skills/start-migration/scripts/runtime.mjs",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "d81228db9e4e393a215f4276c219b529f942e4cabb97bd3f77dc2f19fb46ef51",
+      "byteIdentical": true
+    },
+    {
+      "file": "skills/start-migration/references/provider-compatibility.md",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "1e2e562df6ba4216b898b4d09c28a48671d87998a076f14eddb141fd8c461ac7",
+      "byteIdentical": true
+    },
+    {
+      "file": "providers/codex/skills/start-migration/references/provider-compatibility.md",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "1e2e562df6ba4216b898b4d09c28a48671d87998a076f14eddb141fd8c461ac7",
+      "byteIdentical": true
+    },
+    {
+      "file": "providers/copilot/mcp.json",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "405be9c2404fa0e20705467d03a746af3d01db7d223775449bcab6b542d37c86",
+      "byteIdentical": true
+    },
+    {
+      "file": "providers/copilot/adapter.json",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "0f0b1f8c7fee46f5cf74bc60650003ca791cc6beb5f5d378728596cb15115176",
+      "byteIdentical": true
+    },
+    {
+      "file": "scripts/providers-sync.mjs",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "948e4fd98fa8835194b134d4cbfee14ae9f70ea29e411a0814d68260bc9dcad9",
+      "byteIdentical": true
+    },
+    {
+      "file": "scripts/skills-lock.mjs",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "df4fc8fde218fdaef8a8dd6d61712ae578c71f2bb00ef5e787dbe36a727d7480",
+      "byteIdentical": true
+    },
+    {
+      "file": "scripts/release.mjs",
+      "frozenBase": "15090145a43af1e1bcb9fbce692fafac6e06f1e9",
+      "m15Base": "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "sha256": "fcf9fc391ee36da4f6bc03764aa4b51cd2cb10801f098d9610272cd62c56ef5e",
+      "byteIdentical": true
+    }
+  ],
+  "sharedDocProjectedByteIdenticallyToCodex": true,
+  "m15BaseToNativeFixPayloadSources": {
+    "status": "UNCHANGED",
+    "paths": [
+      "packages/migration-engine/src",
+      "skills",
+      "providers"
+    ],
+    "comparison": [
+      "d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d",
+      "1a9661b3aba58d7e8fe41076d5e72b3d1d87701a"
+    ]
+  }
+}

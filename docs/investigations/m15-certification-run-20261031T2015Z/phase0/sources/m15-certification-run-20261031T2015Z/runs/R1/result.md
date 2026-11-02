@@ -1,0 +1,12 @@
+# R1: artifact complete (rows 11–13, 28, 29), headless
+- Invocation: 1 (`launch.sh` → `m15-official-run.sh`, `command.txt`), exit 0, `terminal.typescript` captured. Rescues: 0 (headless `codex exec`, stdin closed).
+- Window: launch 22:26:30.073Z → end 22:29:03.362Z (runner `startedAt` 22:26:32.505Z, `completedAt` 22:29:03.305Z) ≈ **2 min 31 s / 30 min budget: WITHIN**.
+- Functional: **E2E_COMPLETE_PASS**. Engine COMPLETE at rev 8. M13 verifier `ff0b7d20…c221` (= pinned `m15-codex-certification-20261028` verifier) passed **36/36**. `security.certified: true`, OS_NAMESPACE, trustedRuntimeIsolated, record continuity 1 rename and 0 violations.
+- Tokens: input 1,249,942 (cached 1,183,616), output 9,113 (reasoning 903).
+- MCP (row 28): 1 `artifact_status` + 18 `artifact_run`, 0 errors, 0 approval refusals. Outcomes: 18 CONTINUE + 1 COMPLETE.
+- Progress (row 29): `progressAppearsInAgentOutput: true`; engine `progressChecklist` is in `fresh/engine-status.stdout.log`. History: BOOTSTRAPPED + 7 ADVANCED + COMPLETED.
+- Bootstrap (row 12): the auto bootstrap was self-confirmed by the engine (owner ruling A).
+- Decision stops: **0** (no OPERATOR_DECISION outcome; the strings matched in the log come from SKILL.md text). OpenSpec rejection: **0 observed** (row 14 not demonstrated).
+- 6 non-zero shell commands: 4 `rg` no-match. Line 13: the agent combined `--status` with `--mode` (CLI refusal); it corrected itself. Line 34: a python write before the record existed; it corrected itself. All within the one invocation; no trusted file altered (runner pre/post checks).
+- Observation: the agent recorded Ponytail Review as `SKILL_UNAVAILABLE` in the consumer (last agent message).
+- PID namespaces observed mid-run (`observed-pid-namespaces.txt`): codex and MCP server `pid:[4026533739]`, host `pid:[4026532221]`.

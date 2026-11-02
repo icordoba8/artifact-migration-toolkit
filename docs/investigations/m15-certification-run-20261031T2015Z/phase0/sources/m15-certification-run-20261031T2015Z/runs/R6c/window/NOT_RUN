@@ -1,0 +1,2 @@
+NOT_RUN: DEADLINE. No Enter and no Codex launch by 2026-11-01T01:10:00Z (owner cut-off: no new scored run after 20:10 Bogotá).
+Window stamp 2026-11-01T00:58:02.465Z. No enter.utc, no native-check, no launch.start. Window process 1961881 was stopped by Claude at 2026-11-01T01:12:47Z while it waited at the recording prompt. The 01:10Z guard was meant to stop it, but its pgrep pattern matched its own command line, so it killed itself (exit 144) and not the window. Nothing reached Codex.
