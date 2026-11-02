@@ -38,3 +38,20 @@ Host: WSL2 Ubuntu 24.04, uid 1000. Captured 2026-11-02 15:20-16:00 -05.
    sub-mcp.txt                        Copilot CLI loads MCP from ~/.copilot/mcp-config.json, .mcp.json or .github/mcp.json, plugins
    providers/copilot/skills/start-migration/references/provider-compatibility.md:28-30 states the same and that
      "Without a connected server Copilot CLI uses the CLI fallback above."
+
+5. Codex 0.165.0 bubblewrap selection (read-only; the binary was only hashed, string-scanned and run with --version)
+   Release dir .../0.165.0-x86_64-unknown-linux-musl: bin/codex sha256 c06a67fd...62d5 ("codex-cli 0.165.0"),
+     codex-resources/bwrap sha256 755c8d6a9b893905a4aabab058bd6c02c453e5e8653adb84fc08e570607f3f36 ("bubblewrap built for Codex")
+   Strings in bin/codex (offsets 0xf62a5b4, 0xf4a0800):
+     "Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. ...
+      Codex will use the bundled bubblewrap in the meantime."
+     "bubblewrap is unavailable: no system bwrap was found on PATH and no bundled codex-resources/bwrap binary
+      was found next to the Codex executable"
+     source paths linux-sandbox/src/bwrap.rs, linux-sandbox/src/bundled_bwrap.rs, sandboxing/src/bwrap.rs
+   Official doc https://developers.openai.com/codex/concepts/sandboxing#prerequisites (fetched 2026-11-02):
+     "Codex uses the first `bwrap` executable it finds on `PATH`. If no `bwrap` executable is available,
+      Codex falls back to a bundled helper"
+   M15 launcher PATH (scripts/m15-official-run.sh:31 @ 42364020 and 1a9661b) includes /usr/local/bin:/usr/bin:/bin.
+   Conclusion: today Codex runs use the bundled bwrap. Installing bubblewrap (T2) would switch them to the system bwrap.
+   No evidence that Codex 0.165.0 never uses bwrap; the opposite holds (M15 MATRIX row 7: nested bwrap shell ran).
+   Host package state: host-freeze/host-state.txt, host-freeze/dpkg-packages.tsv.

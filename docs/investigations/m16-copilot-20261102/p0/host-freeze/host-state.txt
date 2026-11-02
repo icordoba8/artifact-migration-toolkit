@@ -1,0 +1,48 @@
+# Host state at 2026-11-02T21:06:58Z (read-only probes; no credentials)
+## OS
+PRETTY_NAME="Ubuntu 24.04.3 LTS"
+VERSION_ID="24.04"
+Linux 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64
+uid=1000
+## dpkg
+packages: 716  dpkg-packages.tsv sha256: 25d77314a692697042c41c0e26688df43f3a23fb9ae79bb7b59a9d530bcee438
+## bubblewrap
+dpkg-query: no packages found matching bubblewrap
+absent  /usr/local/sbin/bwrap
+absent  /usr/local/bin/bwrap
+absent  /usr/sbin/bwrap
+absent  /usr/bin/bwrap
+absent  /sbin/bwrap
+absent  /bin/bwrap
+absent  /home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/bin/bwrap
+PRESENT /home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/codex-resources/bwrap
+## sandbox-relevant packages
+util-linux	2.39.3-9ubuntu6.6	installed
+slirp4netns	1.2.1-1build2	installed
+iptables	1.8.10-3ubuntu2	installed
+dpkg-query: no packages found matching uidmap
+apparmor	4.0.1really4.0.1-0ubuntu0.24.04.4	installed
+libseccomp2	2.5.5-1ubuntu3.1	installed
+libcap2-bin	1:2.66-5ubuntu2.4	installed
+dpkg-query: no packages found matching passt
+## kernel knobs
+user/max_user_namespaces=79961
+kernel/unprivileged_userns_clone=absent
+kernel/apparmor_restrict_unprivileged_userns=absent
+kernel/yama/ptrace_scope=1
+crw-rw-rw- 1 root root 10, 200 Nov  2 13:35 /dev/net/tun
+## change sources
+unattended-upgrades.service: enabled
+apt-daily.timer: enabled
+apt-daily-upgrade.timer: enabled
+snapd.service: enabled
+APT::Periodic: APT::Periodic::Update-Package-Lists "1"; APT::Periodic::Unattended-Upgrade "1"; 
+## pinned run binaries
+c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5  /home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/bin/codex
+codex-cli 0.165.0
+## bundled bwrap (selected by Codex 0.165.0 only when no bwrap on PATH)
+755c8d6a9b893905a4aabab058bd6c02c453e5e8653adb84fc08e570607f3f36  /home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/codex-resources/bwrap
+bubblewrap built for Codex
+## last dpkg change (dpkg.log.1)
+2026-10-30 07:50:26 upgrade libbrotli1:amd64 1.1.0-2build2 1.1.0-2ubuntu0.1
+dpkg.log (current) entries: 0
