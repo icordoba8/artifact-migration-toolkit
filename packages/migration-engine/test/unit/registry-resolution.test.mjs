@@ -594,7 +594,15 @@ test("missing and stale project configuration fail actionably", async () => {
         projectRoot: fixture.root,
         environmentPath: undefined,
       }),
-      /first setup pass --registry.*config\.startMigration\.registry/s,
+      (error) => {
+        assert.match(error.message, /first setup pass --registry.*config\.startMigration\.registry/s);
+        assert.equal(error.code, "REGISTRY_UNBOUND");
+        assert.deepEqual(
+          [error.result.outcome, error.result.status, error.result.module],
+          ["BLOCKED", "NOT_STARTED", "auth"],
+        );
+        return true;
+      },
     );
     const packageDocument = JSON.parse(
       await readFile(fixture.packagePath, "utf8"),
@@ -613,7 +621,8 @@ test("missing and stale project configuration fail actionably", async () => {
         projectRoot: fixture.root,
         environmentPath: undefined,
       }),
-      /ENOENT|no such file/i,
+      (error) => error.code === "ENOENT",
+      "a stale binding is a missing file, never a first setup",
     );
   } finally {
     await fixture.cleanup();

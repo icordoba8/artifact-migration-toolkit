@@ -323,9 +323,18 @@ installed CLI. Neither front end can attest a module-19 decision.
    and may present an engine-owned review (see Operator decisions). The runtime
    preflight registers the server in this provider's MCP configuration (see
    `provider-compatibility.md`). Read `outcome` from the tool result, not the
-   `log`. Neither MCP nor `run` bootstraps: a fresh module's `BLOCKED` names
-   the `artifact-migration-discover` call to make (see Pre-execution
-   confirmation).
+   `log`. Neither MCP nor `run` bootstraps: a fresh module's BLOCKED / not
+   started result (`outcome: "BLOCKED"`, `status: "NOT_STARTED"`, identical on
+   MCP and CLI) names in `nextCommand` the `artifact-migration-discover` call to
+   make (see Pre-execution confirmation and the migration contract's registry
+   section).
+   A JSON-RPC error carries Node's `code`, `errno`, `syscall` and `path` in
+   `error.data`; classify a refusal by `error.data.code`, never the message:
+   `EROFS`, `EACCES` or `EPERM` is a sandbox write refusal, a safety stop;
+   `ENOENT` is a missing path, never a read-only refusal; `FS_ERRNO_UNKNOWN`
+   means no syscall recovered the cause, so it is neither; `LOCK_HELD` is a
+   live lock to wait for, while `LOCK_OWNER_UNKNOWN`, `LOCK_NO_LIVENESS_TOKEN`
+   and `LOCK_PROTOCOL_1` need an operator.
 2. **Bash — the fallback when that server is not connected.**
 
    ```bash
@@ -454,7 +463,9 @@ migration state, first-setup `--registry`, persisted
 `package.json#config.startMigration.registry`, then `MIGRATION_REGISTRY_PATH`
 as an optional CI fallback. Conflicting values fail; they never silently
 override state. On first setup only, add `--registry
-<target-root>/.agents/knowledge/migrations/registry.json`.
+<target-root>/.agents/knowledge/migrations/registry.json`. With no binding at all,
+helpers return the BLOCKED / not started result, whose `nextCommand` is that
+first-setup call.
 
 ### Invocation options
 

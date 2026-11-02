@@ -95,6 +95,7 @@ export {
   renderRegistryPreview,
   validateRegistry,
   resolveModule,
+  REGISTRY_UNBOUND,
   resolveRegistryPath,
 } from "./registry.mjs";
 export {

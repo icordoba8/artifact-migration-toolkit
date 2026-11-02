@@ -1,0 +1,26 @@
+pnpm test (engine:test && engine:test:ts && providers:test), Node v26.8.2, 2026-11-02T23:59:35Z
+working tree: HEAD 42258c0 + Part B changes (this commit)
+$ pnpm engine:test && pnpm engine:test:ts && pnpm providers:test
+$ node scripts/engine-test.mjs packages/migration-engine/test/integration/direct-ledger-defaults.integration.s
+ℹ tests 35
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ tests 1178
+ℹ pass 1178
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+$ node scripts/engine-test-ts.mjs
+$ node --test --test-concurrency=1 test/providers-sync.test.mjs test/provider-installation.test.mjs test/provi
+﹣ Windows: ensure succeeds with Git GNU tar first on PATH (0.316854ms) # SKIP
+ℹ tests 202
+ℹ pass 201
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+EXIT 0
+
+pnpm providers:check: Provider outputs are synchronized (62 files).
+pnpm release:check before commit: only blocker 'working tree is not clean', versionConflict null; rerun after commit below.

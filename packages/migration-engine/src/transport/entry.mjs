@@ -10,10 +10,21 @@
  */
 
 import { isMainModule } from "../engine-paths.mjs";
+import { BLOCKED_EXIT_CODE } from "../lifecycle/index.mjs";
+import { REGISTRY_UNBOUND } from "../store/index.mjs";
 
-/** The message on stderr, nothing on stdout, and a non-zero exit code. */
+/**
+ * The message on stderr, nothing on stdout, and a non-zero exit code -- except
+ * an unbound registry, which is resolved before anything runs: its BLOCKED /
+ * NOT_STARTED document on stdout, exactly as MCP returns it, and exit 2.
+ */
 export const reportFailure = (exitCode) => (error) => {
   process.stderr.write(`${error.message}\n`);
+  if (error.code === REGISTRY_UNBOUND) {
+    process.stdout.write(`${JSON.stringify(error.result, null, 2)}\n`);
+    process.exitCode = BLOCKED_EXIT_CODE;
+    return;
+  }
   process.exitCode = exitCode;
 };
 

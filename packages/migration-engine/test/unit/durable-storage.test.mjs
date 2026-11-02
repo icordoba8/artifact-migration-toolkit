@@ -289,6 +289,42 @@ test("DR7: mkdirDurably returns once a new chain exists on every platform, and r
   assert.match(foreign.stderr, /mkdir reported '.*elsewhere' as the first directory it created/);
 });
 
+// E4: Node's recursive mkdir reports a read-only mount as ENOENT. The real
+// errno comes from a syscall, or the failure is FS_ERRNO_UNKNOWN; nothing is
+// created and nothing is guessed.
+const USERNS = process.platform === "linux" &&
+  spawnSync("unshare", ["-Urm", "true"]).status === 0 ? false : "needs unprivileged user and mount namespaces";
+test("E4: mkdirDurably reports a read-only mount as EROFS, an unrecoverable ENOENT as FS_ERRNO_UNKNOWN, creating nothing", async (t) => {
+  const root = await scratch(t);
+  const files = new URL("../../src/store/files.mjs", import.meta.url).href;
+  const report = `.catch((error) => console.log(JSON.stringify({ code: error.code, cause: error.cause?.code, path: error.path })))`;
+  await t.test("read-only bind mount", { skip: USERNS }, async () => {
+    const readOnly = path.join(root, "ro");
+    await mkdir(readOnly);
+    const run = spawnSync("unshare", ["-Urm", "sh", "-c",
+      'mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" "$1" && exec "$2" --input-type=module -e "$3"', "sh", readOnly, process.execPath,
+      `const { mkdirDurably } = await import(${JSON.stringify(files)}); await mkdirDurably(${JSON.stringify(path.join(readOnly, "a/b"))})${report};`],
+    { encoding: "utf8", timeout: 20_000 });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(JSON.parse(run.stdout), { code: "EROFS", cause: "ENOENT", path: readOnly });
+    assert.deepEqual(await readdir(readOnly), []);
+  });
+  await t.test("ENOENT that no syscall explains", async () => {
+    const writable = path.join(root, "rw");
+    await mkdir(writable);
+    const run = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import fsp from "node:fs/promises";
+      import { syncBuiltinESMExports } from "node:module";
+      fsp.mkdir = async (target) => { throw Object.assign(new Error("injected"), { code: "ENOENT", path: target }); };
+      syncBuiltinESMExports();
+      const { mkdirDurably } = await import(${JSON.stringify(files)});
+      await mkdirDurably(${JSON.stringify(path.join(writable, "a/b"))})${report};`], { encoding: "utf8", timeout: 20_000 });
+    assert.equal(run.status, 0, run.stderr);
+    assert.deepEqual(JSON.parse(run.stdout), { code: "FS_ERRNO_UNKNOWN", cause: "ENOENT" });
+    assert.deepEqual(await readdir(writable), []);
+  });
+});
+
 test("DR7: renameDurably fsyncs both directories, and copyTree flushes the copy and the entry naming it", { skip: !POSIX }, async (t) => {
   const root = await scratch(t);
   await mkdir(path.join(root, "from/nested"), { recursive: true });

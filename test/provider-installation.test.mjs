@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readlinkSync } from 'node:fs';
+import { constants as fsConstants, readlinkSync } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { adapter, digest, verifyBundle } from '../providers/install-support.mjs';
 import { buildRelease } from '../scripts/release.mjs';
 import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
@@ -581,6 +582,7 @@ async function treeOf(dir, tree = {}) {
     const file = path.join(dir, name);
     const info = await lstat(file);
     if (info.isSymbolicLink()) tree[file] = `-> ${await readlink(file)}`;
+    else if (info.isFIFO()) tree[file] = `fifo ${info.ino}`; // reading one would block
     else if (info.isDirectory()) await treeOf(file, Object.assign(tree, { [file]: 'dir' }));
     else tree[file] = await readFile(file, 'utf8');
   }
@@ -814,19 +816,95 @@ test('only ESRCH proves an installer gone: every other probe answer keeps its lo
 });
 
 test('a lock that cannot be reclaimed is refused with its path and the reason, untouched', LOCK_TIMEOUT, async () => {
-  for (const [label, owner, reason] of [
-    ['live', { pid: process.pid }, /held by pid \d+ \(install, started .+\), which is still running/],
-    ['other namespace', { realm: 'linux:pid:[1]' }, /in another PID namespace \(linux:pid:\[1\]; this process: .+\)/],
-    ['other host', { hostname: 'elsewhere.invalid' }, /on host elsewhere\.invalid/],
+  for (const [label, owner, reason, code] of [
+    ['live', { pid: process.pid }, /held by pid \d+ \(install, started .+\), which is still running/, 'LOCK_HELD'],
+    ['other namespace', { realm: 'linux:pid:[1]' }, /recorded no liveness token, in another PID namespace \(linux:pid:\[1\]; this process: .+\)/, 'LOCK_NO_LIVENESS_TOKEN'],
+    ['other host', { hostname: 'elsewhere.invalid' }, /on host elsewhere\.invalid/, 'LOCK_OWNER_UNKNOWN'],
   ]) {
     const { root, lock, options } = await lockRoot(`diagnosed ${label}`);
     await seedOwner(lock, owner);
     const before = await treeOf(root);
-    const refusal = await adapter('codex', options).then(() => assert.fail(`${label}: installed`), error => error.message);
+    const error = await adapter('codex', options).then(() => assert.fail(`${label}: installed`), error => error);
+    assert.equal(error.code, code, label);
+    const refusal = error.message;
     assert.ok(refusal.startsWith(`Installation locked; inspect interrupted installation before retrying: ${lock}: `), refusal);
     assert.match(refusal, reason, label);
     assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
   }
+});
+
+// E2: the installer mirrors the engine's liveness token.
+const TOKENS = process.platform === 'win32' ? 'Windows has no FIFOs' : false;
+const execFileAsync = promisify(execFile);
+const userns = TOKENS || await execFileAsync('unshare', ['-Urpf', 'true']).then(() => false, () => 'unprivileged user and PID namespaces are unavailable here');
+const installSupport = new URL('../providers/install-support.mjs', import.meta.url).href;
+/** An owner entry bound to a fresh FIFO nobody holds open, in another PID realm. */
+async function seedTokenOwner(lock, owner = {}) {
+  const uuid = await seedOwner(lock, { realm: 'linux:pid:[1]' });
+  const fifo = path.join(lock, `${uuid}.fifo`);
+  await execFileAsync('mkfifo', [fifo]);
+  const { dev, ino } = await lstat(fifo, { bigint: true });
+  const entry = path.join(lock, `${uuid}.json`);
+  await writeFile(entry, JSON.stringify({ ...JSON.parse(await readFile(entry, 'utf8')), fifo: { dev: String(dev), ino: String(ino) }, ...owner }));
+  return fifo;
+}
+
+test('an installer SIGKILLed in another PID namespace leaves a lock the next installer reclaims', { ...LOCK_TIMEOUT, skip: userns }, async () => {
+  const { root, lock, options } = await lockRoot('killed in another namespace');
+  // The real installer process parks once it holds the lock.
+  const script = `import { createRequire, syncBuiltinESMExports } from 'node:module';\n` +
+    `const fsp = createRequire(import.meta.url)('node:fs/promises');\n` +
+    `const options = JSON.parse(process.argv[1]);\nconst real = fsp.rename;\n` +
+    `fsp.rename = async (from, to) => { await real(from, to); if (String(to).endsWith('install.lock')) { process.stdout.write('HELD\\n'); await new Promise(() => setInterval(() => {}, 1000)); } };\n` +
+    `syncBuiltinESMExports();\nawait (await import(${JSON.stringify(installSupport)})).adapter('codex', options);\n`;
+  const child = spawn('unshare', ['-Urpf', process.execPath, '--input-type=module', '-e', script, JSON.stringify(options)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); exited.then(() => reject(new Error('the installer exited before holding the lock'))); });
+    assert.equal((await readdir(lock)).length, 2, 'the owner holds no liveness token');
+    await assert.rejects(adapter('codex', options), { code: 'LOCK_HELD' });
+    const installer = Number(await readFile(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8'));
+    assert.ok(installer > 0, 'no installer process under unshare'); // never kill(0): the whole group
+    process.kill(installer, 'SIGKILL'); // the installer itself, not the unshare wrapper
+    await exited;
+    assert.equal((await adapter('codex', options)).recoveredLock, true);
+    assert.deepEqual(await lockLeftovers(root), []);
+    await doctorOk(options);
+  } finally { child.kill('SIGKILL'); }
+});
+
+test('an install token proves its owner gone or alive; anything that is not the recorded FIFO is refused untouched', { ...LOCK_TIMEOUT, skip: TOKENS }, async () => {
+  for (const [label, seed, code] of [
+    ['a missing token', async lock => rm(await seedTokenOwner(lock)), 'LOCK_OWNER_UNKNOWN'],
+    ['a token replaced by a regular file', async lock => { const fifo = await seedTokenOwner(lock); await rm(fifo); await writeFile(fifo, ''); }, 'LOCK_OWNER_UNKNOWN'],
+    ['a token replaced by another FIFO', async (lock, root) => { const fifo = await seedTokenOwner(lock); const other = path.join(root, 'other.fifo'); await execFileAsync('mkfifo', [other]); await rename(other, fifo); }, 'LOCK_OWNER_UNKNOWN'],
+    ['a token on another host', lock => seedTokenOwner(lock, { hostname: 'elsewhere.invalid' }), 'LOCK_OWNER_UNKNOWN'],
+  ]) {
+    const { root, lock, options } = await lockRoot(`token ${label}`);
+    await seed(lock, root);
+    const before = await treeOf(root);
+    await assert.rejects(adapter('codex', options), { code, message: /^Installation locked; / }, label);
+    assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched or something was installed`);
+  }
+  const { root, lock, options } = await lockRoot('token live then dead');
+  const reader = await open(await seedTokenOwner(lock), fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    await assert.rejects(adapter('codex', options), { code: 'LOCK_HELD' }, 'a live token');
+  } finally { await reader.close(); }
+  assert.equal((await adapter('codex', options)).recoveredLock, true, 'a dead token in another PID realm');
+  assert.deepEqual(await lockLeftovers(root), []);
+});
+
+test('an install into a read-only root is refused with the kernel errno, creating nothing', { ...LOCK_TIMEOUT, skip: userns }, async () => {
+  const { options } = await lockRoot('read-only root');
+  const root = path.join(scratch, 'read-only root bare');
+  await mkdir(root);
+  const script = `await (await import(${JSON.stringify(installSupport)})).adapter('codex', JSON.parse(process.argv[1]))` +
+    `.then(() => console.log('{}'), error => console.log(JSON.stringify({ code: error.code, cause: error.cause?.code })));\n`;
+  const { stdout } = await execFileAsync('unshare', ['-Urm', 'sh', '-c', 'mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" "$1" && exec "$2" --input-type=module -e "$3" "$4"',
+    'sh', root, process.execPath, script, JSON.stringify({ ...options, root })]);
+  assert.deepEqual(JSON.parse(stdout), { code: 'EROFS', cause: 'ENOENT' });
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('an install owner entry swapped for a symlink after it was vetted is never followed', LOCK_TIMEOUT, async () => {

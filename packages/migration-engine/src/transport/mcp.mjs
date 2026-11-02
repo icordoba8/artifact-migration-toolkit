@@ -54,7 +54,7 @@ import {
   runRecordDecisionCli,
   upgradeCommandFor,
 } from "../lifecycle/index.mjs";
-import { resolveRegistryPath } from "../store/index.mjs";
+import { REGISTRY_UNBOUND, resolveRegistryPath } from "../store/index.mjs";
 import { DESIGN_SOURCES, PONYTAIL_TARGETS, WORKFLOW_VERSION } from "../formats/index.mjs";
 import { runMigration } from "./run.mjs";
 import { artifactDirective } from "./artifact.mjs";
@@ -582,6 +582,17 @@ const failure = (id, code, message) => ({
 
 const success = (id, result) => ({ jsonrpc: "2.0", id, result });
 
+// A thrown error's Node-reported fields cross as `error.data`, so a client can
+// tell EROFS from ENOENT without parsing the message. Nothing is derived.
+const internalError = (id, error) => {
+  const response = failure(id, JSON_RPC_INTERNAL_ERROR, error.message);
+  if (typeof error.code === "string") {
+    const { code, errno, syscall, path: errorPath } = error;
+    response.error.data = { code, errno, syscall, path: errorPath };
+  }
+  return response;
+};
+
 // The CLI wrappers resolve context from cwd. Serialize the whole call, including
 // elicitation and the final status read, and restore cwd even on failure.
 // This also protects direct handleMessage callers; serve already queues requests.
@@ -603,7 +614,7 @@ const callTool = (id, parameters, session) => {
       }
       return await callToolInContext(id, parameters, session);
     } catch (error) {
-      return failure(id, JSON_RPC_INTERNAL_ERROR, error.message);
+      return internalError(id, error);
     } finally {
       process.chdir(previousCwd);
     }
@@ -663,10 +674,15 @@ const callToolInContext = async (id, parameters, session) => {
     return failure(id, JSON_RPC_INVALID_REQUEST, "Unknown tool argument; decision results must come from the explicit operator review.");
   }
   try {
+    // An unbound registry is a first-setup BLOCKED result, the same document the
+    // CLI prints, never a JSON-RPC error.
     const structuredContent = await tool.call(
       arguments_,
       tool.sessionAware ? session : undefined,
-    );
+    ).catch((error) => {
+      if (error.code === REGISTRY_UNBOUND) return error.result;
+      throw error;
+    });
     const json = { type: "text", text: JSON.stringify(structuredContent, null, 2) };
     if (!PROGRESS_TOOLS.has(name)) {
       return success(id, { content: [json], structuredContent });
@@ -683,7 +699,7 @@ const callToolInContext = async (id, parameters, session) => {
       content: [...(progressText ? [{ type: "text", text: progressText }] : []), json],
     });
   } catch (error) {
-    return failure(id, JSON_RPC_INTERNAL_ERROR, error.message);
+    return internalError(id, error);
   }
 };
 

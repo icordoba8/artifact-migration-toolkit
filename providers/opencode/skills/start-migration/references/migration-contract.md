@@ -170,8 +170,8 @@ The target-owned `.agents/knowledge/migrations/registry.json` remains version
 The path is workspace-relative with `/` separators whenever the registry is in
 the workspace; the registry itself is never copied or moved. Resolution order
 is existing migration state, first-setup CLI, project configuration,
-`MIGRATION_REGISTRY_PATH` as an optional CI fallback, then an actionable error.
-Any conflicting supplied or persisted value fails. Roots inside the registry
+`MIGRATION_REGISTRY_PATH` as an optional CI fallback, then the BLOCKED / not
+started result below. Any conflicting supplied or persisted value fails. Roots inside the registry
 may be absolute, relative to the registry, or contain `${NAME}` environment
 references. Names use lowercase letters, digits, and single hyphens.
 
@@ -180,6 +180,28 @@ confirmed mapping only after `BUILD_BASELINE` validates and before advancing to
 `PLAN`. Until then, registry/context resolution falls back to that initialized
 state for status, scanning, validation, and `record-decision.mjs --pending`;
 the absent registry entry is not an error at `DISCOVERY_COMPLETENESS`.
+
+When no source binds a registry, nothing is executed or written, and every
+transport returns the same BLOCKED / not started result — the MCP tool result
+(`migration_status`, `migration_scan`, `migration_run`) and the CLI's stdout
+JSON with exit `2` (`discover-module.mjs --status`, `artifact-migration-run`):
+
+```json
+{
+  "outcome": "BLOCKED",
+  "status": "NOT_STARTED",
+  "module": "<module>",
+  "reason": "Migration registry is not configured. …",
+  "nextAction": "First setup: nothing was executed. …",
+  "nextCommand": "artifact-migration-discover <module> --target <target-module> --registry <path> --openspec-proposal-stdin"
+}
+```
+
+`--registry` names `<target-root>/.agents/knowledge/migrations/registry.json`
+when that file exists, else the placeholder `<registry.json>`. `run` and
+`migration_run` wrap the result in their usual run envelope. Neither MCP nor
+`run` bootstraps: the bootstrap is that `nextCommand`. A conflicting binding is
+still a failure, not this result.
 
 ## Version-5 lifecycle and v5.0 workflow revision
 
@@ -1060,10 +1082,10 @@ preview it just computed — including `--refresh`, `--reopen-ui`,
 `decisions/auto-decisions.ndjson`. A `READY` format upgrade is confirmed through
 that same single mechanism: the preflight computes it, the digest of its required
 input is bound into the ID and re-checked under the record lock, and no
-format-specific flag or separate confirmation exists. The carve-out is a bootstrap
-(`NOT_STARTED`): initialization pins the OpenSpec authority for the migration's
-whole life and there is no prior record to decide from, so it stays two-phase
-under either mode.
+format-specific flag or separate confirmation exists. A bootstrap
+(`NOT_STARTED`) is no exception: under `step` it is two-phase, and under `auto`
+the AUTO principal confirms the preview it just computed, as for every other
+transition, and records it in `decisions/auto-decisions.ndjson`.
 
 Either way the helper recomputes the preflight and rejects a missing or stale
 ID. Confirmation is therefore scoped to one action and cannot be reused after
@@ -1089,13 +1111,14 @@ and project-config snapshots. Confirmed execution persists the project binding
 and updates the original registry through atomic writes; preview writes
 nothing.
 
-Registration is never self-confirmed, in any mode: it persists a binding into
-the canonical project's `package.json`, which is a project-level change rather
-than a mechanical confirmation. It is therefore a stop condition for an
-autonomous loop. An unregistered mapping is detected when `BUILD_BASELINE` is
-advanced: the advance fails with exit `1` and "the migration mapping is not
-registered", having written nothing — not as a preflight blocker, so the
-preview still reports no blockers and still offers an ID.
+Registration persists a binding into the canonical project's `package.json`.
+Under `auto` the AUTO principal self-confirms it inline when `BUILD_BASELINE` is
+advanced, and records it in `decisions/auto-decisions.ndjson`; under `step` it is
+two-phase, a stop condition for the loop. An advance invoked without a mode
+detects an unregistered mapping at `BUILD_BASELINE`: it fails with exit `1` and
+"the migration mapping is not registered", having written nothing — not as a
+preflight blocker, so the preview still reports no blockers and still offers an
+ID.
 
 ## Step documents
 

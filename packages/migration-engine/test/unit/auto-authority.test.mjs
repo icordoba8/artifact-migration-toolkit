@@ -84,6 +84,23 @@ test("a bootstrap is AUTO's own decision and stays two-phase under step", () => 
   assert.equal(bootstrap("step"), false);
 });
 
+test("the contract states what AUTO owns: bootstrap and registration self-confirm, step stays two-phase", async () => {
+  const contract = (await readFile(
+    new URL("../../../../skills/start-migration/references/migration-contract.md", import.meta.url),
+    "utf8",
+  )).replace(/\s+/g, " ");
+  for (const stale of ["stays two-phase under either mode", "Registration is never self-confirmed, in any mode"]) {
+    assert.ok(!contract.includes(stale), `stale: ${stale}`);
+  }
+  for (const rule of [
+    "the AUTO principal confirms the preview it just computed",
+    "Under `auto` the AUTO principal self-confirms it inline when `BUILD_BASELINE` is advanced",
+    "under `step` it is two-phase",
+  ]) {
+    assert.ok(contract.includes(rule), `missing: ${rule}`);
+  }
+});
+
 test("the operator-only transitions are reachable under auto instead of throwing", () => {
   // These four used to throw out of argv parsing under `--mode auto`, which is
   // what made the unattended loop unable to reach them at all.

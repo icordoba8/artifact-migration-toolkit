@@ -1,10 +1,11 @@
 // Shared adapter file/config operations only. Migration rules live in the engine.
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, readlinkSync } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 
 export const digest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -15,6 +16,17 @@ const optional = file => readFile(file).catch(error => { if (error.code === 'ENO
 // The release manifest's `writerLockProtocol`; a manifest without it is protocol 1.
 const WRITER_LOCK_PROTOCOL = 2;
 const refuse = (code, message, state = {}) => Object.assign(new Error(message), { code, state: { code, ...state } });
+// ponytail: mirrors the engine's `mkdirDurably` ENOENT recovery (store/files.mjs);
+// the installer runs before any engine exists, so it cannot import it. Node
+// reports a read-only mount as ENOENT; `access(W_OK)` on the first missing
+// component's parent asks the kernel for the real refusal and creates nothing.
+const mkdirp = directory => mkdir(directory, { recursive: true }).catch(async error => {
+  if (error.code !== 'ENOENT') throw error;
+  const refusal = await access(path.dirname(error.path ?? directory), fsConstants.W_OK)
+    .then(() => null, probe => (['EROFS', 'EACCES', 'EPERM'].includes(probe.code) ? probe : null));
+  throw refusal ? Object.assign(refusal, { cause: error })
+    : Object.assign(new Error(`Cannot create '${directory}': mkdir reported ENOENT and no syscall recovered the real cause.`), { code: 'FS_ERRNO_UNKNOWN', cause: error });
+});
 const conflict = (file, message = 'Conflicting or modified MCP configuration') => refuse('INSTALL_REGISTRATION_CONFLICT', message, { file });
 const layouts = {
   claude: { project: ['skills', null, '.mcp.json', 'mcpServers'], user: ['skills', null, '.mcp.json', 'mcpServers'] },
@@ -240,7 +252,7 @@ function mergeAgents(raw, previous, server, historical, provider) {
 }
 
 async function replace(file, bytes) {
-  await mkdir(path.dirname(file), { recursive: true });
+  await mkdirp(path.dirname(file));
   const temporary = `${file}.${randomUUID()}.tmp`;
   try { await writeFile(temporary, bytes, { flag: 'wx' }); await rename(temporary, file); }
   finally { await rm(temporary, { force: true }); }
@@ -507,6 +519,8 @@ const LOCKED = 'Installation locked; inspect interrupted installation before ret
 // (EPERM: Windows will not replace an existing directory).
 const OCCUPIED = new Set(['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM']);
 const OWNER_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const TOKEN_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.fifo$/;
+const DECIMAL = /^[0-9]{1,20}$/;
 const MAX_OWNER_BYTES = 1024;
 const ignore = (...codes) => error => { if (!codes.includes(error.code)) throw error; };
 const rmdirIfEmpty = dir => rmdir(dir).catch(ignore('ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'));
@@ -518,20 +532,63 @@ const PID_REALM = (() => {
   try { return `linux:${readlinkSync('/proc/self/ns/pid')}`; } catch { return null; }
 })();
 
+// ponytail: the engine's liveness token (lifecycle/lock.mjs), mirrored because
+// the installer runs before any engine exists. `<uuid>.fifo` sits beside the
+// owner entry, which binds its dev/ino; the owner holds its only read end
+// (O_CLOEXEC: no child inherits it), so a non-blocking write-open answers ENXIO
+// once the owner is dead in any PID namespace. Without mkfifo the owner falls
+// back to the PID rule below.
+const heldTokens = new Set(); // a collected FileHandle is closed: keep it referenced
+const createToken = async file => {
+  if (process.platform === 'win32') return null;
+  let handle;
+  try {
+    await promisify(execFile)('mkfifo', ['-m', '600', file]);
+    handle = await open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW);
+    const { dev, ino } = await handle.stat({ bigint: true });
+    heldTokens.add(handle);
+    return { handle, fifo: { dev: String(dev), ino: String(ino) } };
+  } catch {
+    await handle?.close().catch(() => undefined);
+    await unlink(file).catch(() => undefined);
+    return null;
+  }
+};
+const dropToken = async token => {
+  if (!token) return;
+  heldTokens.delete(token.handle);
+  await token.handle.close().catch(() => undefined);
+};
+const probeToken = async (file, fifo) => {
+  const recorded = async () => {
+    const info = await lstat(file, { bigint: true }).catch(() => null);
+    return Boolean(info?.isFIFO() && String(info.dev) === fifo.dev && String(info.ino) === fifo.ino);
+  };
+  if (!await recorded()) return 'UNKNOWN';
+  try {
+    await (await open(file, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW)).close();
+    return 'ALIVE';
+  } catch (error) { return error.code === 'ENXIO' && await recorded() ? 'GONE' : 'UNKNOWN'; }
+};
+const unknown = reason => ({ code: 'LOCK_OWNER_UNKNOWN', reason });
+
 /**
  * Is the lock owner recorded in `file` provably dead? Null when it is;
- * otherwise why not, for the refusal to name.
+ * otherwise `{ code, reason }` for the refusal to name: LOCK_HELD (alive),
+ * LOCK_OWNER_UNKNOWN (an entry or token that proves nothing) or
+ * LOCK_NO_LIVENESS_TOKEN (a token-less owner outside this PID realm).
  *
  * Only when the entry is a regular file of bounded size, read without following
  * a symlink (O_NOFOLLOW where the OS has it, and the opened file must be the
  * lstat-vetted one everywhere), naming this `uuid`, this host and this PID
- * realm, and `kill(pid, 0)` answers ESRCH. EPERM is a live process another user
+ * realm, and `kill(pid, 0)` answers ESRCH -- or, for an owner with a token, when
+ * the token proves it gone. EPERM is a live process another user
  * owns, and every other answer -- a torn or foreign entry, another host or
  * realm, an unexpected probe error -- is ambiguous, and ambiguity fails closed:
  * reclaiming a live installer's lock would run two config writers at once.
  */
 const lockOwnerAlive = async (file, uuid) => {
-  const unreadable = 'its owner entry is unreadable or malformed';
+  const unreadable = unknown('its owner entry is unreadable or malformed');
   let handle;
   let owner;
   try {
@@ -545,21 +602,30 @@ const lockOwnerAlive = async (file, uuid) => {
     if (bytesRead > MAX_OWNER_BYTES) return unreadable;
     owner = JSON.parse(buffer.toString('utf8', 0, bytesRead));
   } catch { return unreadable; } finally { await handle?.close().catch(() => undefined); }
-  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || !Number.isInteger(owner.pid) || owner.pid <= 0) return unreadable;
+  const fifo = owner?.fifo;
+  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || !Number.isInteger(owner.pid) || owner.pid <= 0
+    || (fifo !== undefined && fifo !== null && !(DECIMAL.test(fifo?.dev) && DECIMAL.test(fifo?.ino)))) return unreadable;
   const who = `pid ${owner.pid} (${owner.action ?? 'unknown action'}, started ${owner.startedAt ?? 'at an unknown time'})`;
-  if (owner.hostname !== os.hostname()) return `it is held by ${who} on host ${owner.hostname}, which this host cannot probe`;
-  if (PID_REALM === null || owner.realm !== PID_REALM) return `it is held by ${who} in another PID namespace (${owner.realm ?? 'unrecorded'}; this process: ${PID_REALM ?? 'unknown'}), such as another sandboxed shell, where this process cannot prove the owner exited`;
-  try { process.kill(owner.pid, 0); return `it is held by ${who}, which is still running`; }
+  const running = { code: 'LOCK_HELD', reason: `it is held by ${who}, which is still running` };
+  if (owner.hostname !== os.hostname()) return unknown(`it is held by ${who} on host ${owner.hostname}, which this host cannot probe`);
+  if (fifo) {
+    const verdict = await probeToken(path.join(path.dirname(file), `${uuid}.fifo`), fifo);
+    return verdict === 'GONE' ? null : verdict === 'ALIVE' ? running
+      : unknown(`it is held by ${who}, whose liveness token is missing, replaced or unreadable, so it cannot be proven gone`);
+  }
+  if (PID_REALM === null || owner.realm !== PID_REALM) return { code: 'LOCK_NO_LIVENESS_TOKEN', reason: `it is held by ${who}, which recorded no liveness token, in another PID namespace (${owner.realm ?? 'unrecorded'}; this process: ${PID_REALM ?? 'unknown'}), such as another sandboxed shell, where this process cannot prove the owner exited` };
+  try { process.kill(owner.pid, 0); return running; }
   catch (error) {
     if (error.code === 'ESRCH') return null;
-    return `it is held by ${who}, ${error.code === 'EPERM' ? 'which is still running as another user' : `whose liveness probe answered ${error.code}`}`;
+    return error.code === 'EPERM' ? { code: 'LOCK_HELD', reason: `it is held by ${who}, which is still running as another user` }
+      : unknown(`it is held by ${who}, whose liveness probe answered ${error.code}`);
   }
 };
 
 /**
  * Frees a lock nothing provably holds: 'dead' when a dead owner was removed,
  * 'empty' when there was no owner left (a release or reclaim cut short),
- * 'legacy' for a protocol-1 `install.lock` file, `{ reason }` to fail closed. Each
+ * 'legacy' for a protocol-1 `install.lock` file, `{ code, reason }` to fail closed. Each
  * removal is keyed by identity -- the dead owner's own entry name, `rmdir` of
  * an empty directory -- so a reclaimer that lost the race removes nothing of
  * the winner's.
@@ -570,15 +636,20 @@ const reclaim = async (lock) => {
   // Written by a protocol-1 installer, which does not honour this format: never
   // ours to remove, whoever wrote it and whether or not they are alive.
   if (info.isFile()) return 'legacy';
-  if (!info.isDirectory()) return { reason: 'the lock path is not a directory' };
+  if (!info.isDirectory()) return unknown('the lock path is not a directory');
   const entries = await readdir(lock).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; });
-  if (entries.length === 0) { await rmdirIfEmpty(lock); return 'empty'; }
-  const [entry] = entries;
-  const reason = entries.length !== 1 || !OWNER_ENTRY.test(entry)
-    ? 'it does not hold exactly one owner entry'
-    : await lockOwnerAlive(path.join(lock, entry), entry.slice(0, -5));
-  if (reason) return { reason };
+  // Released or reclaimed but not yet removed: an owner entry already gone.
+  const orphan = entries.length === 1 && TOKEN_ENTRY.test(entries[0]);
+  if (orphan) await unlink(path.join(lock, entries[0])).catch(ignore('ENOENT', 'ENOTDIR'));
+  if (entries.length === 0 || orphan) { await rmdirIfEmpty(lock); return 'empty'; }
+  const entry = entries.find(name => OWNER_ENTRY.test(name));
+  const uuid = entry?.slice(0, -5);
+  const refusal = !entry || !entries.every(name => name === entry || name === `${uuid}.fifo`)
+    ? unknown('it does not hold exactly one owner entry')
+    : await lockOwnerAlive(path.join(lock, entry), uuid);
+  if (refusal) return refusal;
   await unlink(path.join(lock, entry)).catch(ignore('ENOENT', 'ENOTDIR'));
+  await unlink(path.join(lock, `${uuid}.fifo`)).catch(ignore('ENOENT', 'ENOTDIR'));
   await rmdirIfEmpty(lock);
   return 'dead';
 };
@@ -588,7 +659,7 @@ const reclaim = async (lock) => {
 export async function adapter(provider, options = {}) {
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
   const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
-  await mkdir(path.dirname(lock), { recursive: true });
+  await mkdirp(path.dirname(lock));
   // One config writer per host root. The lock is a directory holding exactly
   // its owner's `<uuid>.json`, staged complete and published by one `rename`,
   // which cannot land on a held lock -- so it never exists without saying who
@@ -603,20 +674,22 @@ export async function adapter(provider, options = {}) {
   let held = false;
   let recoveredLock = false;
   let blocked;
+  let token = null;
   try {
     await mkdir(staging);
-    await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), realm: PID_REALM, startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
+    token = await createToken(path.join(staging, `${id}.fifo`));
+    await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), realm: PID_REALM, fifo: token?.fifo ?? null, startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
     held = await claim();
     // One reclaim, then one claim: a second installer that also saw the dead
     // owner loses that claim and fails closed with the existing message.
     const freed = held ? null : await reclaim(lock);
     if (freed === 'legacy') throw refuse('INSTALL_LEGACY_LOCK', `${LOCKED}: ${lock} is a lock file from a protocol-1 release, which is never reclaimed automatically. Stop every installer and migration command on this root, old releases included, then remove it by hand (docs/lock-protocol-cutover.md).`, { lock });
     if (typeof freed === 'string') { held = await claim(); recoveredLock = held && freed === 'dead'; }
-    if (!held) blocked = freed?.reason ?? 'another installer took it first';
-  } finally { if (!held) await rm(staging, { recursive: true, force: true }); }
+    if (!held) blocked = typeof freed === 'object' && freed ? freed : { code: 'LOCK_HELD', reason: 'another installer took it first' };
+  } finally { if (!held) { await dropToken(token); await rm(staging, { recursive: true, force: true }); } }
   // Diagnosed, never bypassed: only the operator can settle an owner this
   // process cannot prove gone.
-  if (!held) throw new Error(`${LOCKED}: ${lock}: ${blocked}. If no installer or migration command is running for this root, remove that directory by hand.`);
+  if (!held) throw refuse(blocked.code, `${LOCKED}: ${lock}: ${blocked.reason}. If no installer or migration command is running for this root, remove that directory by hand.`, { lock });
   try {
     const result = await applyAdapter(provider, options);
     // Reported, not persisted: the receipt records what is installed, and a
@@ -627,6 +700,8 @@ export async function adapter(provider, options = {}) {
     // Our entry, then the directory only if that emptied it: never another
     // installer's lock, whatever happened to ours meanwhile.
     await unlink(path.join(lock, `${id}.json`)).catch(ignore('ENOENT', 'ENOTDIR'));
+    await unlink(path.join(lock, `${id}.fifo`)).catch(ignore('ENOENT', 'ENOTDIR'));
+    await dropToken(token);
     await rmdirIfEmpty(lock);
   }
 }
