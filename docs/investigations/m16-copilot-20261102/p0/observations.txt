@@ -1,0 +1,40 @@
+M16 Copilot P0 - local observations (engineering probes only; no provider run, no login, no credentials)
+Host: WSL2 Ubuntu 24.04, uid 1000. Captured 2026-11-02 15:20-16:00 -05.
+
+1. Pinned binary identity
+   gh release view v1.0.105 -R github/copilot-cli  -> published 2026-10-28T00:44:43Z
+   gh release download v1.0.105 -p SHA256SUMS.txt   -> copy: copilot-cli-v1.0.105-release-SHA256SUMS.txt
+   gh release download v1.0.105 -p copilot-linux-x64.tar.gz
+     sha256 aba1f06f27bc0447656647f76e0a4cf58b4b2a341c75ff04a750982b6aeb6bd2 (== SHA256SUMS.txt entry)
+     contents: single file `copilot`, sha256 3bd8bdc75670d7b4ec445725f6a5b9af66ee7ec49e6194646e4a40a0bc09091c
+   npm view @github/copilot-linux-x64@1.0.105 dist.integrity
+     sha512-3trlyisQQAnlNy3CvYVRDVWC/WK+0CfDId7dDwNbxTFJ9IgM3aoCPyg+QbGPBUeuYNs4sjgtTqFn5l5yfyHVDg==
+   Local npm-global SEA (~/.nvm/.../@github/copilot-linux-x64/copilot): sha256 3bd8bdc7...091c, but its
+     package.json says 1.0.91 -> the binary self-updated in place. It must not be used as the pin source.
+   `copilot --version` -> "GitHub Copilot CLI 1.0.105." (version.txt)
+   help-*.txt / sub-*.txt captured with: env -i HOME=<empty probe dir> COPILOT_AUTO_UPDATE=false copilot --no-auto-update ...
+
+2. Copilot local sandbox (MXC) host prerequisites (help-sandbox.txt "Supported hosts")
+   bwrap              MISSING   (required: bwrap >= 0.5.0 on PATH)
+   slirp4netns        /usr/bin/slirp4netns
+   unshare/nsenter    util-linux 2.39.3 (>= 2.35 required)
+   iptables/ip6tables v1.8.10 (nf_tables), both -restore binaries present
+   /dev/net/tun       crw-rw-rw- (rw for user)
+   user.max_user_namespaces 79961
+
+3. Offline native-module probe (pinned 1.0.105 package runtime.node, empty HOME, env -i, no network)
+   featureFlagsResolveTyped({isStaff:false,...,isExperimental:false}).SANDBOX -> true
+   featureFlagsResolveTyped({...,isExperimental:true}).SANDBOX            -> true
+   sandboxPlatformSupported()                                             -> false   (bwrap missing)
+   Meaning: `--sandbox` is honored for a non-staff account; this host cannot run it until bwrap is installed.
+   With `--sandbox` passed on the command line, an unsupported host makes every sandboxed shell command fail
+   (help-sandbox.txt: "If sandboxing is already on when you start a session on a host that can't run it ...
+   every sandboxed shell command and every sandboxed MCP/LSP server fails.").
+
+4. Toolkit payload at BASE vs Copilot CLI MCP sources
+   providers/install-support.mjs:23   copilot: { project: ['.github/skills', '.github/prompts', '.vscode/mcp.json', 'servers'] }
+   providers/copilot/adapter.json:31  install.mcpConfig.project = ".vscode/mcp.json"
+   providers/copilot/mcp.json         { "servers": { "start-migration": { type, command, args } } }  (no `tools`, no `env`)
+   sub-mcp.txt                        Copilot CLI loads MCP from ~/.copilot/mcp-config.json, .mcp.json or .github/mcp.json, plugins
+   providers/copilot/skills/start-migration/references/provider-compatibility.md:28-30 states the same and that
+     "Without a connected server Copilot CLI uses the CLI fallback above."

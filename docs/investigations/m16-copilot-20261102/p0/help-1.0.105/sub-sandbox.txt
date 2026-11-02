@@ -1,0 +1,13 @@
+Usage: copilot sandbox <COMMAND>
+
+Manage command sandboxing outside an interactive session.
+
+Use `copilot help sandbox` for how sandboxing works, and the interactive
+`/sandbox` command to change its settings.
+
+Commands:
+  ca  Manage the credential proxy certificate authority
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

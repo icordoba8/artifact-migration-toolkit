@@ -1,0 +1,29 @@
+Usage: copilot plugin <COMMAND>
+
+Manage plugins and plugin marketplaces.
+
+Plugins extend Copilot CLI with additional skills, agents, hooks, MCP servers,
+and LSP servers. They can be installed from plugin marketplaces, GitHub
+repositories, repository subdirectories, or direct git URLs.
+
+One marketplace is included by default:
+  awesome-copilot   github/awesome-copilot
+
+Use `copilot plugin marketplace browse <name>` to discover available plugins,
+or install directly from any GitHub repository.
+
+For more information, see:
+https://docs.github.com/copilot/concepts/agents/copilot-cli/about-cli-plugins
+
+Commands:
+  install      Install a plugin
+  uninstall    Uninstall a plugin
+  update       Update a plugin
+  list         List installed and --plugin-dir plugins
+  enable       Enable a plugin
+  disable      Disable a plugin
+  marketplace  Manage plugin marketplaces
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')

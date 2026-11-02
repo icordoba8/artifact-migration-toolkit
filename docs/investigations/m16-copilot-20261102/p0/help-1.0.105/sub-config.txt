@@ -1,0 +1,77 @@
+Usage: copilot config [OPTIONS] [key] [value]
+
+Read and change Copilot settings.
+
+Give a key to print its value, or a key and value to set it. For a list setting,
+the value is appended only if it is not already present. Reading a list prints
+one item per line; reading a group prints JSON. An unset key exits with status 1.
+
+Use --list to print key=value lines, or --list --json for machine-readable
+output. Use --rm <key> to remove a setting, or --rm <key> <value> to remove one
+item from a list. Removing an absent key or item succeeds without a change.
+
+Values must match the setting's type: on/off or true/false for booleans, a number
+for numeric settings, or an accepted choice for enums. Put -- before a value
+that starts with -. Secret values are redacted from output.
+
+Keys use dot notation, for example `footer.showQuota`. Commands use your user
+settings file (settings.json in ~/.copilot, or in $COPILOT_HOME when set) by
+default. Use --repo for the repository's .github/copilot/settings.json, or
+--local for .github/copilot/settings.local.json. Those two files accept only
+the settings a repository can override.
+
+Run `copilot help config` for the available settings.
+
+Arguments:
+  [key]
+          Setting key in dot notation
+
+  [value]
+          Value to set, append, or remove from a list with --rm
+
+Options:
+      --list
+          List settings as key=value lines
+
+      --rm
+          Remove the key, or only the given item from a list
+
+      --json
+          Output --list as JSON
+
+      --global
+          Use your user settings file (the default)
+
+      --repo
+          Use the repository's .github/copilot/settings.json
+
+      --local
+          Use the repository's
+          .github/copilot/settings.local.json
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Print a setting
+  $ copilot config theme
+
+  # Set a nested value
+  $ copilot config footer.showQuota off
+
+  # Append an item to a list
+  $ copilot config allowedUrls github.com
+
+  # Append an item that starts with a dash
+  $ copilot config powershellFlags -- -NoProfile
+
+  # Remove a key, or one list item
+  $ copilot config --rm theme
+  $ copilot config --rm allowedUrls github.com
+
+  # List repository settings as JSON
+  $ copilot config --repo --list --json
+
+Learn More:
+  Use `copilot <command> --help` for more information about a command.
+  Read the documentation at https://docs.github.com/copilot/how-tos/copilot-cli
