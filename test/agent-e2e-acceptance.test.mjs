@@ -8,7 +8,7 @@ import test, { after } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
-import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated } from "../scripts/agent-e2e-acceptance.mjs";
+import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
 import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout, decisionLedgers, ledgerChanges } from '../scripts/acceptance-evidence.mjs';
@@ -19,6 +19,23 @@ const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
 const scratch = os.tmpdir();
 process.env.TMPDIR = mkdtempSync(path.join(scratch, "agent-e2e-child-tmp-"));
 after(() => rmSync(process.env.TMPDIR, { recursive: true, force: true }));
+
+// Harness-only MCP stand-in: the branch's real 1.6.4 transport ignores --without-relay.
+// Agent lifecycle commands still use the real candidate engine.
+const FAKE_MCP = `
+import { createInterface } from 'node:readline';
+let initialized = false;
+for await (const line of createInterface({ input: process.stdin })) {
+  const message = JSON.parse(line);
+  if (message.method === 'notifications/initialized') { initialized = true; continue; }
+  const result = message.method === 'initialize'
+    ? { protocolVersion: '2025-06-18', capabilities: { tools: {} } }
+    : initialized && message.method === 'tools/list'
+      ? { tools: ${JSON.stringify(CODEX_MCP_TOOLS)}.concat(process.argv.includes('--without-relay') ? [] : ['migration_relay_decision']).map(name => ({ name })) }
+      : null;
+  console.log(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+}
+`;
 
 /** A disposable consumer with a genuinely built, verified candidate installed for opencode. */
 const installedCandidate = async (root, verifierHome = root) => {
@@ -34,6 +51,7 @@ const installedCandidate = async (root, verifierHome = root) => {
     JSON.stringify({ disposable: true, module: "auth", target: "auth", verifier,
       verifierSha256: createHash("sha256").update(verifierBytes).digest("hex") }));
   const candidate = await candidateReleaseRoot(root);
+  await writeFile(path.join(candidate, "packages/migration-engine/src/mcp-server.mjs"), FAKE_MCP);
   const staged = await buildRelease({ root: candidate, force: true });
   const manifestBytes = await readFile(path.join(staged.stagingRoot, "release-manifest.json"));
   const pin = "sha256:" + createHash("sha256").update(manifestBytes).digest("hex");
@@ -102,9 +120,9 @@ for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.F
 `;
 
 /** The E7 installed Codex entry (`--without-relay` + enabled_tools) for a receipt's release. */
-const codexEntry = (receipt, { server = 'mcp-server.mjs', tools = CODEX_MCP_TOOLS } = {}) =>
+const codexEntry = (receipt, { server = 'mcp-server.mjs', tools = CODEX_MCP_TOOLS, withoutRelay = true } = {}) =>
   '# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ' + JSON.stringify(receipt.commands['artifact-migration-discover'][0]) +
-  '\nargs = ' + JSON.stringify([path.join(receipt.release, 'packages/migration-engine/src', server), '--without-relay']) +
+  '\nargs = ' + JSON.stringify([path.join(receipt.release, 'packages/migration-engine/src', server), ...(withoutRelay ? ['--without-relay'] : [])]) +
   '\nenabled_tools = ' + JSON.stringify(tools) + '\n# END artifact-migration-tools\n';
 /** The installed candidate as a Codex consumer, driven by FAKE_CODEX with its own CODEX_HOME. */
 const codexCandidate = async (root, install = installedCandidate) => {
@@ -539,7 +557,7 @@ test("black-box acceptance refuses an unverified installed engine before startin
 test("Codex approves exactly the nine engine tools, per tool, keeps approval_policy never, and injects no tool filter", () => {
   const { argv } = commandFor("codex", "$start-migration discounts", "/consumer/target");
   const native = commandFor("codex", "$start-migration discounts", "/consumer/target", true, { command: "/node", args: ["/r/mcp-server.mjs", "--without-relay"] }).argv;
-  // E7: the installed entry's enabled_tools is the only filter, headless and native.
+  // The installed server supplies the tool surface, headless and native.
   for (const command of [argv, native]) assert.doesNotMatch(command.join(" "), /enabled_tools|disabled_tools|\.tools=|--(?:allow|deny|available|excluded)-tools?/);
   assert.ok(native.includes('mcp_servers.start-migration.args=["/r/mcp-server.mjs","--without-relay"]'));
   const overrides = argv.filter((_, i) => argv[i - 1] === "-c");
@@ -555,7 +573,7 @@ test("Codex approves exactly the nine engine tools, per tool, keeps approval_pol
   assert.deepEqual(argv.slice(0, 6), ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", "/consumer/target/.agents"]);
 });
 
-test("installed Codex and Copilot grants: exactly nine proceeds, ten refuses before the agent spawns", async () => {
+test("installed Codex and Copilot grants: effective nine proceeds, declared nine and legacy ten refuse before spawn", async () => {
   const root = await mkdtemp(path.join(scratch, "agent-e2e-grants-"));
   try {
     const { target, bin, receipt } = await installedCandidate(root);
@@ -564,24 +582,38 @@ test("installed Codex and Copilot grants: exactly nine proceeds, ten refuses bef
       await writeFile(path.join(target, `.artifact-migration-tools/${host}.json`), JSON.stringify({ ...parsed, provider: host }));
     await mkdir(path.join(target, ".codex"));
     await mkdir(path.join(target, ".github"));
-    const install = async (codex, copilot) => {
-      await writeFile(path.join(target, ".codex/config.toml"), codexEntry(parsed, { tools: codex }));
-      await writeFile(path.join(target, ".github/mcp.json"), JSON.stringify({ mcpServers: { "start-migration": { tools: copilot } } }));
+    const install = async (codex, copilot, legacy = false) => {
+      const entry = codexEntry(parsed, { withoutRelay: codex });
+      await writeFile(path.join(target, ".codex/config.toml"), legacy ? entry.replace(/^enabled_tools = .*\n/m, "") : entry);
+      await writeFile(path.join(target, ".github/mcp.json"), JSON.stringify({ mcpServers: { "start-migration": {
+        command: process.execPath, args: [path.join(parsed.release, "packages/migration-engine/src/mcp-server.mjs"), ...(copilot ? ["--without-relay"] : [])],
+        tools: legacy ? ["*"] : CODEX_MCP_TOOLS,
+      } } }));
     };
     const spawned = path.join(root, "spawned");
     await writeFile(path.join(bin, "opencode"), `#!/bin/sh\ntouch '${spawned}'\n`, { mode: 0o755 });
     const runner = (output) => spawnSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target, "--module", "auth",
       "--target", "auth", "--output", path.join(root, output), "--isolation", "none"],
     { encoding: "utf8", timeout: 60000, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
-    const ten = [...CODEX_MCP_TOOLS, "migration_relay_decision"];
-    for (const [host, codex, copilot] of [["codex", ten, CODEX_MCP_TOOLS], ["copilot", CODEX_MCP_TOOLS, ten]]) {
-      await install(codex, copilot);
-      assert.match(runner(host + "-ten").stderr, new RegExp(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are 10 `));
+    for (const legacy of [false, true]) for (const [host, codex, copilot] of [["codex", false, true], ["copilot", true, false]]) {
+      await install(codex, copilot, legacy);
+      assert.match(runner(host + "-ten-" + legacy).stderr, new RegExp(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are 10 `));
       await assert.rejects(stat(spawned), { code: "ENOENT" });
     }
-    await install(CODEX_MCP_TOOLS, CODEX_MCP_TOOLS);
+    await install(true, true);
+    // A relay-bearing .mcp.json must shadow the safe .github/mcp.json.
+    const shadow = JSON.parse(await readFile(path.join(target, ".github/mcp.json"), "utf8"));
+    shadow.mcpServers["start-migration"].args.pop();
+    await writeFile(path.join(target, ".mcp.json"), JSON.stringify(shadow));
+    assert.match(runner("shadow").stderr, /ACCEPTANCE_INSTALLED_GRANTS: installed copilot.*grants are 10/);
+    await assert.rejects(stat(spawned), { code: "ENOENT" });
+    await rm(path.join(target, ".mcp.json"));
     assert.doesNotMatch(runner("nine").stderr, /ACCEPTANCE_INSTALLED_GRANTS/);
     await stat(spawned);
+    // Probe this branch's actual legacy server too, not just the MCP stand-in.
+    shadow.mcpServers["start-migration"].args = [fileURLToPath(new URL("../packages/migration-engine/src/mcp-server.mjs", import.meta.url))];
+    await writeFile(path.join(target, ".mcp.json"), JSON.stringify(shadow));
+    assert.ok((await installedGrants(target, "copilot")).grants.includes("migration_relay_decision"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1213,7 +1245,11 @@ test('native launcher: nonce handoff, Enter to launch, one operator turn; no pro
         '--cwd', target, '--module', 'auth', '--target', 'auth', '--output', output, '--ui', 'native', ...extra].map(quote).join(' '), '/dev/null'],
       { env: { ...env, FAKE_CODEX_PROMPTS: JSON.stringify(prompts), FAKE_CODEX_CMD: cmd }, input: '\n', encoding: 'utf8', timeout: 60000 });
       // The installed entry must be exactly the verified release's MCP server, or native refuses before launch.
-      await writeFile(path.join(target, '.codex/config.toml'), codexEntry(installed, { server: 'other-server.mjs' }));
+      const foreignServer = path.join(root, 'other-server.mjs');
+      await writeFile(foreignServer, FAKE_MCP);
+      await writeFile(path.join(target, '.codex/config.toml'), codexEntry(installed, {
+        server: path.relative(path.join(installed.release, 'packages/migration-engine/src'), foreignServer),
+      }));
       assert.equal(nativeRun(path.join(root, 'foreign-entry')).status, 1);
       assert.match(JSON.parse(await readFile(path.join(root, 'foreign-entry/report.json'))).failure, /not the verified release's MCP server/);
       await writeFile(path.join(target, '.codex/config.toml'), codexEntry(installed));

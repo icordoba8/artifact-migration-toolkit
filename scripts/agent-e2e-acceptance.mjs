@@ -16,6 +16,7 @@
 import { pathToFileURL } from "node:url";
 import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, decisionLedgers, ledgerChanges } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { open, readdir, readFile, realpath, mkdir, unlink, writeFile } from "node:fs/promises";
@@ -218,7 +219,7 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
   if (provider === "opencode") return { command: "opencode",
     argv: ["run", "--standalone", "--format", "json", "--auto", ask] };
   // Codex workspace-write keeps .agents read-only, and an untrusted project skips its .codex/config.toml MCP entry.
-  // E7: the installed entry's enabled_tools is the only tool filter (preflight: exactly CODEX_MCP_TOOLS). exec never
+  // E7: preflight requires the installed server itself to expose exactly CODEX_MCP_TOOLS. exec never
   // prompts, so an MCP call needing approval is refused: approve those same tools, per tool.
   return { command: "codex",
     argv: [...(native ? ["--no-daemon"] : ["exec", "--json"]), "--sandbox", "workspace-write", "--add-dir", path.join(root, ".agents"),
@@ -236,28 +237,82 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
 export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
   "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
 
-/**
- * E7: a host's effective start-migration grants, read only from what the installer wrote. Codex: the
- * `.codex/config.toml` entry's enabled_tools minus disabled_tools. Copilot CLI: `tools` of the first of `.mcp.json`
- * and `.github/mcp.json` that registers the server (`.mcp.json` shadows). No list, or "*", is unbounded: null.
- */
-// ponytail: project config layer only; a CODEX_HOME or user config that narrows these further goes unseen.
+/** Probe the installed stdio transport, never a provider CLI or a declared tool filter. */
+const effectiveGrants = (root, server) => new Promise((resolve, reject) => {
+  if (typeof server.command !== "string" || !server.command ||
+      !Array.isArray(server.args) || !server.args.every(arg => typeof arg === "string"))
+    return reject(new Error("Unreadable installed command/args"));
+  const child = spawn(server.command, server.args, { cwd: root, env: { ...process.env, PWD: root },
+    stdio: ["pipe", "pipe", "ignore"] });
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  let grants, error, stopping = false, initialized = false, bytes = 0, escalation;
+  const stop = (caught) => {
+    if (stopping) return;
+    stopping = true;
+    error = caught;
+    child.kill("SIGTERM");
+    escalation = setTimeout(() => child.kill("SIGKILL"), 1000);
+  };
+  const timer = setTimeout(() => stop(new Error("MCP tools/list timed out")), 10000);
+  const send = message => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
+  child.on("error", stop);
+  child.stdin.on("error", stop);
+  child.stdout.on("data", chunk => {
+    bytes += chunk.length;
+    if (bytes > 1024 * 1024) stop(new Error("MCP response exceeds 1 MiB"));
+  });
+  lines.on("line", line => {
+    if (stopping) return;
+    try {
+      const message = JSON.parse(line);
+      if (message.jsonrpc !== "2.0" || message.error) throw new Error("Invalid MCP response");
+      if (message.id === 1 && !initialized) {
+        if (!message.result?.capabilities?.tools || !message.result?.protocolVersion)
+          throw new Error("MCP initialization did not advertise tools");
+        initialized = true;
+        send({ method: "notifications/initialized" });
+        send({ id: 2, method: "tools/list", params: {} });
+      } else if (message.id === 2 && initialized) {
+        // ponytail: the nine-tool server has one page; refuse pagination rather than certify a partial list.
+        if (!Array.isArray(message.result?.tools) || message.result.nextCursor !== undefined ||
+            !message.result.tools.every(tool => typeof tool?.name === "string"))
+          throw new Error("Incomplete MCP tools/list");
+        grants = message.result.tools.map(tool => tool.name);
+        stop();
+      } else if (message.id !== undefined) throw new Error("Unexpected MCP response");
+    } catch (caught) { stop(caught); }
+  });
+  child.once("close", () => {
+    clearTimeout(timer);
+    clearTimeout(escalation);
+    lines.close();
+    if (error || !grants) reject(error ?? new Error("MCP server exited before tools/list"));
+    else resolve(grants);
+  });
+  send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {},
+    clientInfo: { name: "acceptance-preflight", version: "1" } } });
+});
+
+/** Installed project registrations only; .mcp.json shadows .github/mcp.json for Copilot. */
 export async function installedGrants(root, host) {
+  let server;
   if (host === "codex") {
     const table = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
       .split("[mcp_servers.start-migration]\n")[1]?.split(/^\[/m)[0];
     if (table === undefined) return null;
     // The installer writes JSON scalars and arrays, which are valid TOML; anything else fails to parse and refuses.
     const key = (name) => { const line = table.match(new RegExp(`^${name} = (.*)$`, "m")); return line ? JSON.parse(line[1]) : undefined; };
-    const enabled = key("enabled_tools"), disabled = key("disabled_tools") ?? [];
-    return { server: { command: key("command"), args: key("args") },
-      grants: Array.isArray(enabled) ? enabled.filter((tool) => !disabled.includes(tool)) : null };
+    server = { command: key("command"), args: key("args") };
+  } else {
+    for (const file of [".mcp.json", ".github/mcp.json"]) {
+      server = JSON.parse(await readFile(path.join(root, file), "utf8").catch(error => {
+        if (error.code === "ENOENT") return "{}";
+        throw error;
+      })).mcpServers?.["start-migration"];
+      if (server) break;
+    }
   }
-  for (const file of [".mcp.json", ".github/mcp.json"]) {
-    const server = JSON.parse(await readFile(path.join(root, file), "utf8").catch(() => "{}")).mcpServers?.["start-migration"];
-    if (server) return { grants: Array.isArray(server.tools) && !server.tools.includes("*") ? server.tools : null };
-  }
-  return null;
+  return server ? { server: { command: server.command, args: server.args }, grants: await effectiveGrants(root, server) } : null;
 }
 
 /**
@@ -426,11 +481,13 @@ async function score(options, root, output, report) {
     fail("ACCEPTANCE_PRECONDITION: Status command is not the one from the verified release.");
   // E7: every installed Codex/Copilot registration grants exactly the nine relay-less tools, or nothing spawns.
   const shipped = {};
+  report.installedGrants = shipped;
   for (const host of ["codex", "copilot"]) {
     if (!(await exists(path.join(root, ".artifact-migration-tools", host + ".json")))) continue;
     shipped[host] = await installedGrants(root, host).catch(() => null);
     const grants = shipped[host]?.grants;
-    if (!Array.isArray(grants) || new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
+    if (!Array.isArray(grants) || grants.length !== CODEX_MCP_TOOLS.length ||
+        new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
       fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
         (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
         ", not exactly the nine without migration_relay_decision");
