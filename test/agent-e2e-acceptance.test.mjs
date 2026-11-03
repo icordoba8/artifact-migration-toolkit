@@ -388,6 +388,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
         attempt("dependency", `echo 'export default 0;' > '${dependency}'`),
         attempt("report", `echo forged > '${output}/report.json'`),
         attempt("pnpm", `echo forged > '${pnpmDir}/pnpm'`),
+        attempt("observer", `: >> '${fileURLToPath(new URL('../scripts/ledger-trace.py', import.meta.url))}'`),
         attempt("remount", `mount -o remount,bind,rw '${release}'`),
         // The agent's own identity, and the nested map a provider sandbox (bubblewrap) makes:
         // first its own UID as root, then back to that UID one level deeper.
@@ -403,7 +404,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
       // The fake agent creates no record, so the run fails afterwards -- but not on a tamper check.
       (error) => !/modified|Agent left/.test(String(error.stderr)));
       assert.deepEqual((await readFile(path.join(target, "observed"), "utf8")).trim().split("\n"),
-        ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "pnpm=DENIED", "remount=DENIED"]);
+        ["receipt=DENIED", "engine=DENIED", "verifier=DENIED", "dependency=DENIED", "report=DENIED", "pnpm=DENIED", "observer=DENIED", "remount=DENIED"]);
       // ponytail: map-root-user would read "uid_map=0 <uid> 1" and nested=REFUSED (EPERM without CAP_SETFCAP).
       assert.deepEqual((await readFile(path.join(target, "identity"), "utf8")).trim().split("\n"),
         [`uid_map=${uid} ${uid} 1`, `gid_map=${gid} ${gid} 1`, ...["Inh", "Prm", "Eff", "Bnd", "Amb"]

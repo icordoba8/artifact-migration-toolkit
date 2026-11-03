@@ -13,7 +13,7 @@
  * hosts without unprivileged namespaces; such a run is functional evidence
  * only and its report says it is not security-certified.
  */
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -611,11 +611,12 @@ async function score(options, root, output, report) {
   const broad = writable.some((dir) => dir === verifierDir || dir.startsWith(path.join(verifierDir, path.sep)));
   const verifierModules = await realpath(path.join(verifierDir, "node_modules")).catch(() => null);
   const sealedVerifier = broad ? [verifier, verifierModules].filter(Boolean) : [verifierDir];
+  const harnessScripts = path.dirname(fileURLToPath(import.meta.url));
   // AMT_PNPM_DIR is the official launcher's per-run pinned pnpm (scripts/m15-official-run.sh).
   const sealedRegistrations = [...Object.values(shipped).map(entry => entry.server.command),
     ...[...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
       path.dirname(file) === root ? [file] : [path.dirname(file), file])];
-  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
+  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), harnessScripts, installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],

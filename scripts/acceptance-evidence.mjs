@@ -99,7 +99,11 @@ export const ledgerTraced = ({ command, argv }, trace, { strace = process.env.LE
 export const ledgerTraceVerdict = (trace, rootPid, { python = 'python3' } = {}) => {
   const run = spawnSync(python, [fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), trace, String(rootPid)], { encoding: 'utf8', timeout: 120_000 });
   let violations;
-  try { violations = JSON.parse(run.stdout).violations; } catch { violations = ['syscall gate failed: ' + (run.error?.message ?? run.stderr)]; }
+  try {
+    violations = JSON.parse(run.stdout).violations;
+    if (!Array.isArray(violations) || !violations.every(value => typeof value === 'string'))
+      throw new Error('invalid syscall observer report');
+  } catch (error) { violations = ['syscall gate failed: ' + (run.error?.message ?? (run.stderr || error.message))]; }
   if (run.status !== (violations.length ? 1 : 0)) violations = [...violations, 'syscall gate exited ' + (run.status ?? run.signal)];
   return violations.length ? { code: violations.some(v => v.startsWith('RELAY_IN_SCORED_RUN')) ? 'RELAY_IN_SCORED_RUN' : 'LEDGER_TAMPER', reasons: violations.map(v => 'syscall gate: ' + v) } : null;
 };

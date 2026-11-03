@@ -357,7 +357,8 @@ REC=yes stay three separate evidence types.
 
 Relay detection (A9). Before spawning the provider, the runner starts a Linux inotify observer in a
 separate host process, outside the agent's PID and mount namespaces. Linux x86-64, Python 3 and
-strace with `--seccomp-bpf`, `--pidns-translation` and `--kill-on-exit` are required. The observer
+strace with `--seccomp-bpf`, `--pidns-translation` and `--kill-on-exit` are required. Harness helper scripts
+are mounted read-only too, so the provider cannot replace the post-run syscall verifier. The observer
 watches the ledger files, their directories and ancestors under `.agents/knowledge/migrations` until
 after provider exit, for both headless and native runs. It reads no-follow, checks inode identity and
 requires the final bytes to be the original prefix plus complete, non-relay appended lines.
