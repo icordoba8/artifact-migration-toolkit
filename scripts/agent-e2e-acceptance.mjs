@@ -30,7 +30,7 @@ const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];
-    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation", "--kind", "--source", "--source-root", "--artifact-target", "--scenario", "--resume-from", "--ui", "--code-source", "--not-after", "--rerun-of"].includes(name) || !argv[i + 1] || name in options)
+    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation", "--kind", "--source", "--source-root", "--artifact-target", "--scenario", "--resume-from", "--ui", "--code-source", "--scoring", "--not-after", "--rerun-of"].includes(name) || !argv[i + 1] || name in options)
       fail("Expected unique --provider, --cwd, --module, --target, --output and known optional flags, each with a value");
     options[name] = argv[i + 1];
   }
@@ -58,8 +58,12 @@ const argsOf = (argv) => {
   // G1: a refusal is read from the provider's own tool-result record; Codex's rollout is the only adapter (Copilot is P1).
   if (["read-only", "live-lock", "abandoned-lock"].includes(scenario) && options["--provider"] !== "codex")
     fail("Refusal scenarios require --provider codex: refusals are scored from its rollout tool results, never from prose");
-  const codeSource = options["--code-source"] ?? "any";
+  const scoring = options["--scoring"] ?? "scored";
+  if (!["scored", "diagnostic"].includes(scoring)) fail("--scoring must be scored or diagnostic");
+  const codeSource = options["--code-source"] ?? "structured";
   if (!["any", "structured"].includes(codeSource)) fail("--code-source must be any or structured");
+  if (scoring === "scored" && codeSource !== "structured")
+    fail("Scored runs require structured codes; template fallback requires --scoring diagnostic");
   const notAfter = options["--not-after"] ?? null;
   if (notAfter !== null && (!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?Z$/.test(notAfter) || Number.isNaN(Date.parse(notAfter))))
     fail("--not-after must be an ISO-8601 UTC time ending in Z");
@@ -79,7 +83,7 @@ const argsOf = (argv) => {
     target: options["--target"], goal, expectedPin, isolation, kind, scenario, ui, source: options["--source"],
     sourceRoot: options["--source-root"] ? path.resolve(options["--source-root"]) : null, artifactTarget: options["--artifact-target"],
     resumeFrom: options["--resume-from"] ? path.resolve(options["--resume-from"]) : null, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000,
-    codeSource, notAfter, rerunOf: options["--rerun-of"] ? path.resolve(options["--rerun-of"]) : null };
+    scoring, codeSource, notAfter, rerunOf: options["--rerun-of"] ? path.resolve(options["--rerun-of"]) : null };
 };
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
@@ -397,7 +401,7 @@ async function main() {
   // From here on every outcome -- a refusal, a tamper finding, a missing status
   // -- leaves a report.json: an absent report must never be read as a pass.
   const report = { schemaVersion: 1, provider: options.provider, module: options.module, target: options.target,
-    goal: options.goal, kind: options.kind, scenario: options.scenario, ui: options.ui, root, verdict: "FAIL", failure: null };
+    goal: options.goal, kind: options.kind, scenario: options.scenario, ui: options.ui, scoring: options.scoring, root, verdict: "FAIL", failure: null };
   let error = null;
   try {
     await score(options, root, output, report);
@@ -407,6 +411,10 @@ async function main() {
     if (report.security) report.security.certified = false;
     report.verdict = "FAIL";
   }
+  if (options.scoring === "diagnostic") {
+    if (report.verdict !== "FAIL") report.verdict = "DIAGNOSTIC_ONLY";
+    if (report.security) report.security.certified = false;
+  }
   // A4: only infrastructure outcomes may be rerun, once, on a fresh consumer. A FAIL (a rescue turn included) never.
   report.rerunEligible = ["NATIVE_NO_PROMPT", "NOT_RUN"].includes(report.verdict) && !report.rerunOf;
   const reportPath = path.join(output, "report.json");
@@ -415,7 +423,7 @@ async function main() {
   process.stdout.write(JSON.stringify({ output, report: reportPath, verdict: report.verdict, currentStep: report.engine?.currentStep,
     progressDisplayed: report.presentation?.progressAppearsInAgentOutput }) + "\n");
   if (error) throw error;
-  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS", "INTERRUPTED_CHECKPOINT", "SAFETY_REFUSAL_PASS"].includes(report.verdict)) process.exitCode = 1;
+  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS", "INTERRUPTED_CHECKPOINT", "SAFETY_REFUSAL_PASS", "DIAGNOSTIC_ONLY"].includes(report.verdict)) process.exitCode = 1;
 }
 
 async function score(options, root, output, report) {
@@ -425,7 +433,7 @@ async function score(options, root, output, report) {
     const priorBytes = await readFile(options.rerunOf);
     const prior = JSON.parse(priorBytes);
     if (prior.rerunEligible !== true || prior.rerunOf || prior.root === root ||
-        ["provider", "module", "target", "goal", "kind", "scenario", "ui"].some(key => prior[key] !== report[key]))
+        ["provider", "module", "target", "goal", "kind", "scenario", "ui", "scoring"].some(key => prior[key] !== report[key]))
       fail("ACCEPTANCE_PRECONDITION: --rerun-of needs a rerun-eligible report (NATIVE_NO_PROMPT or NOT_RUN) that is not itself a rerun, " +
         "for the same invocation on a different, fresh consumer");
     report.rerunOf = { report: options.rerunOf, sha256: sha256(priorBytes), verdict: prior.verdict };
@@ -543,7 +551,7 @@ async function score(options, root, output, report) {
   const saved = savedBytes === null ? null : JSON.parse(savedBytes);
   if (options.resumeFrom && (!saved || typeof saved !== "object")) fail("Resume report must be an interruption report object");
   if (saved) {
-    if (saved.verdict !== "INTERRUPTED_CHECKPOINT" || saved.root !== root || saved.kind !== options.kind || saved.provider !== options.provider ||
+    if (saved.verdict !== "INTERRUPTED_CHECKPOINT" || saved.scoring !== options.scoring || saved.root !== root || saved.kind !== options.kind || saved.provider !== options.provider ||
         saved.invocation !== invocation || saved.candidate?.installedPin !== installed.pin ||
         saved.security?.isolation !== (options.isolation === "os" ? "OS_NAMESPACE" : "NONE") || !saved.checkpoint)
       fail("ACCEPTANCE_PRECONDITION: Resume report does not bind this interrupted consumer");

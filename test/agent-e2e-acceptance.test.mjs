@@ -109,6 +109,10 @@ else {
 for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.FAKE_CODEX_PROMPTS || '[]')).entries()) {
   log('event_msg', { type: 'task_started' });
   item({ type: 'UserMessage', content: [{ type: 'text', text }] });
+  if (process.env.FAKE_CODEX_TEMPLATE_REFUSAL) item({
+    type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'completed',
+    result: { isError: true, content: [{ type: 'text', text: "EROFS: read-only file system, mkdir '/fixture'" }] }
+  });
   if (index === 0 && process.env.FAKE_CODEX_CMD) {
     const run = spawnSync('/bin/bash', ['-lc', process.env.FAKE_CODEX_CMD], { encoding: 'utf8' });
     console.log(run.stdout + run.stderr);
@@ -136,9 +140,9 @@ const codexCandidate = async (root, install = installedCandidate) => {
   await writeFile(path.join(installed.bin, 'codex'), FAKE_CODEX, { mode: 0o755 });
   const quoted = name => receipt.commands[name].map(x => "'" + x + "'").join(' ');
   const env = { ...process.env, PATH: installed.bin + path.delimiter + process.env.PATH, CODEX_HOME: path.join(root, 'codex-home') };
-  const runCodex = (output, argv, cmd) => spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', installed.target,
+  const runCodex = (output, argv, cmd, extraEnv = {}) => spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', installed.target,
     '--module', 'auth', '--target', 'auth', '--output', output, '--expected-pin', installed.pin, ...argv],
-  { timeout: 90000, encoding: 'utf8', env: { ...env, FAKE_CODEX_CMD: cmd } });
+  { timeout: 90000, encoding: 'utf8', env: { ...env, FAKE_CODEX_CMD: cmd, ...extraEnv } });
   return { ...installed, receipt: JSON.stringify(receipt), quoted, env, runCodex };
 };
 // The engine under test: the joint candidate has refusal codes, a liveness token and mkdir errno recovery; 1.6.4 has none.
@@ -809,6 +813,8 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       const output = path.join(root, 'report');
       const result = runCodex(output, [...artifact, '--scenario', 'read-only'], engine);
       const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(report.scoring, 'scored');
+      assert.equal(report.safety.codeSourceRequired, 'structured');
       assert.equal(report.safety.unchanged, true);
       if (codedEngine) {
         assert.equal(result.status, 0, JSON.stringify(report.safety));
@@ -855,6 +861,37 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       assert.equal(taken.status, 1);
       assert.match(taken.stderr, /Output already exists/);
       assert.deepEqual(await readdir(path.join(root, 'taken')), []);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('scored defaults reject template-only refusals; explicit diagnostics never yield a scored PASS',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-structured-default-'));
+    try {
+      const { runCodex } = await codexCandidate(root);
+      for (const diagnostic of [false, true]) {
+        const output = path.join(root, diagnostic ? 'diagnostic' : 'scored');
+        const result = runCodex(output, ['--scenario', 'read-only',
+          ...(diagnostic ? ['--scoring', 'diagnostic', '--code-source', 'any'] : [])], '',
+        { FAKE_CODEX_TEMPLATE_REFUSAL: '1' });
+        const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+        assert.deepEqual(report.rollout.refusals.map(entry => entry.codeSource), ['template']);
+        assert.equal(report.safety.unchanged, true);
+        assert.equal(report.verdict, diagnostic ? 'DIAGNOSTIC_ONLY' : 'FAIL');
+        assert.equal(result.status, diagnostic ? 0 : 1);
+        assert.equal(report.security.certified, false);
+        assert.equal(report.rerunEligible, false);
+        assert.equal(report.safety.refusalObserved, diagnostic);
+      }
+      const permissive = runCodex(path.join(root, 'permissive'), ['--code-source', 'any'], '');
+      assert.match(permissive.stderr, /template fallback requires --scoring diagnostic/);
+      await assert.rejects(stat(path.join(root, 'permissive')), { code: 'ENOENT' });
+      for (const flag of ['--scoring', '--code-source']) {
+        const official = spawnSync('bash', [fileURLToPath(new URL('../scripts/m15-official-run.sh', import.meta.url)), flag,
+          flag === '--scoring' ? 'diagnostic' : 'any'], { encoding: 'utf8' });
+        assert.equal(official.status, 1);
+        assert.match(official.stderr, /Official launcher fixes --scoring scored --code-source structured/);
+      }
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

@@ -36,7 +36,7 @@ Source-root is required for interruption/resume; module legacy roots must be sep
 Artifacts pin one primary source (file or directory); multi-source/type variants are outside this M13 fixture scope.
 The artifact legacy binding must differ from its migrated target.
 
-`SAFETY_REFUSAL_PASS` is a narrow observation: unchanged consumer, refusal text, no record,
+`SAFETY_REFUSAL_PASS` is a narrow observation: unchanged consumer, structured engine refusal code, no record,
 no timeout/signal/overflow, and (for a live lock) unchanged owner bytes with the holder still alive.
 It is not completion or production certification; independent transcript review remains required.
 `INTERRUPTED_CHECKPOINT` also never certifies completion. Native runs never automatically award security certification.
@@ -201,13 +201,14 @@ Run **one applicable command** on each newly provisioned consumer. Never run thi
 # Artifact complete (rows 11–13, 28–29); do not repeat accepted module Attempt 3.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal complete --scenario fresh --output "$E/complete"
 # Module or artifact live lock: expected SAFETY_REFUSAL_PASS, independently review owner and target snapshots.
+# The official launcher supplies --scoring scored --code-source structured; do not pass overrides.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario live-lock --output "$E/live-lock"
 # Module or artifact abandoned lock: currently expected BLOCKED_OWNER_PROOF, NOT recovery PASS.
 # Do not spend a scored run on this until the blocker has a reviewed disposition.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario abandoned-lock --output "$E/abandoned-lock"
 # Artifact abandoned lock, owner abandoned in the agent's own realm: expected BOOTSTRAP_PASS with RECLAIMED_IN_AGENT_REALM.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario realm-abandoned-lock --output "$E/realm-abandoned-lock"
-# Module or artifact read-only: expected SAFETY_REFUSAL_PASS, never COMPLETE.
+# Module or artifact read-only: expected structured SAFETY_REFUSAL_PASS, never COMPLETE.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario read-only --output "$E/read-only"
 # Module or artifact interruption; require INTERRUPTED_CHECKPOINT and preserved evidence.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal complete --scenario interrupt --output "$E/interrupt"
@@ -217,6 +218,10 @@ bash scripts/m15-official-run.sh "${COMMON[@]}" --goal complete --scenario resum
 # Module or artifact native UI, operator present. Start a real screen recording before launch.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal complete --ui native --output "$E/native"
 ```
+
+For legacy refusal investigation only, bypass the official launcher explicitly:
+`node scripts/agent-e2e-acceptance.mjs "${COMMON[@]}" --scenario read-only --scoring diagnostic --code-source any --output "$E/diagnostic"`.
+This reports `DIAGNOSTIC_ONLY` or `FAIL`; it cannot produce a scored PASS, resumption checkpoint or certification.
 
 Resume keeps the installed receipt's original immutable store intact and readable. The harness passes
 `ARTIFACT_MIGRATION_TOOLS_STORE=installed.store` to the provider and its descendants, using the supported

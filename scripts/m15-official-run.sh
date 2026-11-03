@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Invocation only: the operator provisions and authenticates a disposable profile separately.
 set -euo pipefail
+# The official entry point cannot be switched into a permissive diagnostic run.
+for arg in "$@"; do
+  case "$arg" in
+    --scoring|--code-source) echo 'Official launcher fixes --scoring scored --code-source structured; use the runner directly for diagnostics.' >&2; exit 1 ;;
+  esac
+done
 AMT_CODEX=/home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/bin/codex
 AMT_NODE=/home/utmwac/.nvm/versions/node/v22.13.0/bin/node
 AMT_REPO=$(cd -- "$(dirname -- "$0")/.." && pwd)
@@ -39,4 +45,4 @@ env -i PATH="$AMT_PNPM_RUN/bin:$(dirname "$AMT_CODEX"):$(dirname "$AMT_NODE"):/u
   COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_INTEGRITY_KEYS="$AMT_COREPACK_KEYS" COREPACK_ENABLE_NETWORK=0 \
   pnpm_config_pm_on_fail=error AMT_PNPM_DIR="$AMT_PNPM_RUN" \
   AMT_BASE="$AMT_BASE" AMT_HARNESS_COMMIT="$AMT_HARNESS_COMMIT" AMT_PATCH_SHA256="$AMT_PATCH_SHA256" \
-  "$AMT_NODE" "$AMT_REPO/scripts/agent-e2e-acceptance.mjs" "$@"
+  "$AMT_NODE" "$AMT_REPO/scripts/agent-e2e-acceptance.mjs" "$@" --scoring scored --code-source structured

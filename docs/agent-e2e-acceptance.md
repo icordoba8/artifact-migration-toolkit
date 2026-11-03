@@ -315,11 +315,14 @@ read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.json
 `thread.started` id (headless) or by consumer cwd and launch window (native), copied to
 `codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call, or a
 non-zero shell call whose argv is a receipt-installed engine command (no pipes, lists or substitutions). Agent
-prose, an `echo` of an engine message and provider sandbox lines never count. A structured engine code wins;
-the engine's exact message templates are the fallback (`codeSource: "template"`). Accepted codes:
+prose, an `echo` of an engine message and provider sandbox lines never count. Scored runs default to
+`--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
 `read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
-`ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted. `--code-source
-structured` requires a structured code (scored runs on the joint candidate).
+`ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.
+Template-classified refusals remain visible in the rollout but never satisfy scored refusal checks.
+Only a direct runner invocation with `--scoring diagnostic --code-source any` permits template fallback.
+Such a run reports `DIAGNOSTIC_ONLY` (or `FAIL`), never a scored PASS, checkpoint or security certification.
+The official launcher fixes both scored/structured flags itself and refuses caller overrides.
 
 Abandoned lock (G4). The trusted holder must be the lock's single owner entry in its own PID namespace; it is
 killed with `SIGKILL`. PASS (`lock.recovery: "RECLAIMED_ACROSS_REALM"`) requires the dead owner's entry and
