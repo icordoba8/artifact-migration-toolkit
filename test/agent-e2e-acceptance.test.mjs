@@ -669,6 +669,70 @@ test("the runner fails visibly on bad arguments run directly or through a symlin
   }
 });
 
+test("headless refuses substitute MCP servers before probing and detects changed registrations after the run", async () => {
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-transport-"));
+  try {
+    const { target, bin, receipt } = await installedCandidate(root);
+    const parsed = JSON.parse(receipt);
+    await mkdir(path.join(target, ".codex"));
+    await mkdir(path.join(target, ".github"));
+    const codexFile = path.join(target, ".codex/config.toml");
+    const copilotFile = path.join(target, ".github/mcp.json");
+    const shadowFile = path.join(target, ".mcp.json");
+    for (const host of ["codex", "copilot"])
+      await writeFile(path.join(target, `.artifact-migration-tools/${host}.json`), JSON.stringify({ ...parsed, provider: host }));
+    const configs = new Map([
+      [codexFile, codexEntry(parsed)],
+      [copilotFile, JSON.stringify({ mcpServers: { "start-migration": {
+        command: process.execPath, args: [path.join(parsed.release, "packages/migration-engine/src/mcp-server.mjs"), "--without-relay"],
+        tools: CODEX_MCP_TOOLS,
+      } } })],
+    ]);
+    const restore = async () => { for (const [file, bytes] of configs) await writeFile(file, bytes); };
+    const started = path.join(root, "started");
+    await writeFile(path.join(bin, "opencode"), `#!/bin/sh\ntouch '${started}'\n`, { mode: 0o755 });
+    const runner = (name, isolation = "none") => spawnSync(process.execPath, [script.pathname, "--provider", "opencode",
+      "--cwd", target, "--module", "auth", "--target", "auth", "--output", path.join(root, name), "--isolation", isolation],
+    { encoding: "utf8", timeout: 60000, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+    const foreign = path.join(root, "foreign.mjs");
+    await writeFile(foreign, `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(started)}, 'probed');\n` + FAKE_MCP);
+    for (const host of ["codex", "copilot"]) {
+      await restore();
+      if (host === "codex") await writeFile(codexFile, codexEntry(parsed, {
+        server: path.relative(path.join(parsed.release, "packages/migration-engine/src"), foreign),
+      }));
+      else {
+        const config = JSON.parse(configs.get(copilotFile));
+        config.mcpServers["start-migration"].args[0] = foreign;
+        await writeFile(copilotFile, JSON.stringify(config));
+      }
+      assert.match(runner("foreign-" + host).stderr, /not the verified release's MCP server/);
+      await assert.rejects(stat(started), { code: "ENOENT" });
+    }
+    for (const [i, file] of [codexFile, copilotFile, shadowFile].entries()) {
+      await restore();
+      await writeFile(path.join(bin, "opencode"), `#!/bin/sh\nprintf changed >> '${file}'\n`, { mode: 0o755 });
+      assert.match(runner("changed-" + i).stderr, /ACCEPTANCE_REGISTRATION_CHANGED/);
+      const report = JSON.parse(await readFile(path.join(root, "changed-" + i, "report.json")));
+      assert.equal(report.verdict, "FAIL");
+      assert.equal(report.rerunEligible, false);
+    }
+    await rm(shadowFile);
+    if (isolationAvailable) {
+      await restore();
+      await writeFile(path.join(bin, "opencode"), '#!/bin/sh\n' + [codexFile, copilotFile].map(file =>
+        `(printf changed >> '${file}') 2>/dev/null && echo WRITABLE || echo DENIED`).join('\n') + '\n', { mode: 0o755 });
+      runner("sealed", "os");
+      assert.equal(await readFile(path.join(root, "sealed/agent.stdout.log"), "utf8"), "DENIED\nDENIED\n");
+      const report = JSON.parse(await readFile(path.join(root, "sealed/report.json")));
+      for (const [file, bytes] of configs) {
+        assert.ok(report.security.readOnly.includes(file));
+        assert.equal(await readFile(file, "utf8"), bytes);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('artifact acceptance uses the installed artifact CLI and independent verifier pin', async () => {
   const root = await mkdtemp(path.join(scratch, 'agent-e2e-artifact-'));
   try {

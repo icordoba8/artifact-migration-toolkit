@@ -298,7 +298,7 @@ const advertisedGrants = (root, server) => new Promise((resolve, reject) => {
 });
 
 /** Installed project registrations only; .mcp.json shadows .github/mcp.json for Copilot. */
-export async function installedGrants(root, host) {
+export async function installedGrants(root, host, verifiedTransport = null) {
   let server;
   if (host === "codex") {
     const tables = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
@@ -323,6 +323,13 @@ export async function installedGrants(root, host) {
     }
   }
   if (!server) return null;
+  if (verifiedTransport && (server.command !== verifiedTransport.command ||
+      !Array.isArray(server.args) || ![1, 2].includes(server.args.length) ||
+      (server.args.length === 2 && server.args[1] !== "--without-relay") ||
+      typeof server.args[0] !== "string" ||
+      await realpath(path.resolve(root, server.args[0])).catch(() => null) !== verifiedTransport.entry ||
+      (server.env && Object.keys(server.env).length)))
+    fail(`ACCEPTANCE_PRECONDITION: installed ${host} start-migration entry is not the verified release's MCP server`);
   const enabled = host === "codex" ? server.enabled_tools : server.tools;
   const disabled = host === "codex" ? server.disabled_tools : undefined;
   if (host === "copilot" && enabled === undefined) fail("Missing installed Copilot tools filter");
@@ -509,9 +516,20 @@ async function score(options, root, output, report) {
   // E7: every installed Codex/Copilot registration grants exactly the nine relay-less tools, or nothing spawns.
   const shipped = {};
   report.installedGrants = shipped;
+  const registrations = new Map();
+  const registrationBytes = file => readFile(file).catch(error => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   for (const host of ["codex", "copilot"]) {
     if (!(await exists(path.join(root, ".artifact-migration-tools", host + ".json")))) continue;
-    shipped[host] = await installedGrants(root, host).catch(() => null);
+    for (const relative of host === "codex" ? [".codex/config.toml"] : [".mcp.json", ".github/mcp.json"]) {
+      const file = path.join(root, relative);
+      registrations.set(file, await registrationBytes(file));
+    }
+    shipped[host] = await installedGrants(root, host, {
+      command: cli[0], entry: await realpath(path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs")),
+    }).catch(error => fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} registration refused: ${error.message}`));
     for (const grants of [shipped[host]?.advertised, shipped[host]?.grants]) {
       if (!Array.isArray(grants) || grants.length !== CODEX_MCP_TOOLS.length ||
           new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
@@ -520,19 +538,15 @@ async function score(options, root, output, report) {
           ", not exactly the nine without migration_relay_decision (server surface and effective provider grants must both match)");
     }
   }
-  // Native Codex restates the installed MCP entry verbatim; it must launch the verified release's MCP server.
-  let mcpServer = null;
-  if (native) {
-    mcpServer = shipped.codex.server;
-    if (mcpServer.command !== cli[0] || !Array.isArray(mcpServer.args) ||
-        mcpServer.args[0] !== path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs"))
-      fail("ACCEPTANCE_PRECONDITION: installed Codex start-migration entry is not the verified release's MCP server");
-  }
+  // Both UIs are bound before tools/list is probed; native only restates the verified installed transport.
+  const mcpServer = shipped.codex?.server ?? null;
   const invocationCommand = commandFor(options.provider, invocation, root, native, mcpServer);
   report.trusted = {
     marker: { path: markerPath, sha256: sha256(markerBytes) },
     receipt: { path: receiptPath, sha256: sha256(receiptBytes), store: installed.store, release: installed.release },
     verifier: { path: verifier, sha256: verifierSha256 },
+    ...(registrations.size ? { registrations: Object.fromEntries([...registrations].map(([file, bytes]) =>
+      [file, bytes === null ? null : sha256(bytes)])) } : {}),
   };
   const artifactApi = options.kind === "artifact" ? await import(pathToFileURL(path.join(installed.release,
     "packages/migration-engine/src/artifact/artifact-migration.mjs"))) : null;
@@ -591,7 +605,9 @@ async function score(options, root, output, report) {
   const verifierModules = await realpath(path.join(verifierDir, "node_modules")).catch(() => null);
   const sealedVerifier = broad ? [verifier, verifierModules].filter(Boolean) : [verifierDir];
   // AMT_PNPM_DIR is the official launcher's per-run pinned pnpm (scripts/m15-official-run.sh).
-  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), installed.store, ...sealedVerifier, receiptPath, markerPath, skills, output]
+  const sealedRegistrations = [...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
+    path.dirname(file) === root ? [file] : [path.dirname(file), file]);
+  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],
@@ -756,6 +772,11 @@ async function score(options, root, output, report) {
       fail("Agent modified the installed skills (transcripts preserved)");
     if (!receiptBytes.equals(await readFile(receiptPath)))
       fail("Agent modified the installed runtime receipt (transcripts preserved)");
+    for (const [file, before] of registrations) {
+      const after = await registrationBytes(file);
+      if (before === null ? after !== null : after === null || !before.equals(after))
+        fail("ACCEPTANCE_REGISTRATION_CHANGED: installed MCP registration changed during the run: " + file);
+    }
     try {
       await verifyBundle(installed.release, installed.pin);
     } catch (error) {

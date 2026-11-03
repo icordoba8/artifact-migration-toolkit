@@ -89,6 +89,14 @@ requires a provider-specific receipt at
 fails with `ACCEPTANCE_PRECONDITION` rather than a raw filesystem error.
 It independently verifies the receipt's selected release against the pinned
 manifest and checks that the discover command is the binary from that bundle.
+For headless and native runs alike, each installed Codex/Copilot MCP transport must
+use that receipt's Node command and resolve to the verified release's `mcp-server.mjs`,
+with no wrapper, foreign entry, extra arguments or environment override. This binding
+is checked before probing the server, so a substitute server is never executed.
+Existing registration files (and their `.codex`/`.github` parent directories) are
+read-only inside the sandbox. Their exact bytes and the absence of alternate Copilot
+registration files are pinned and checked again after the run; any change fails with
+`ACCEPTANCE_REGISTRATION_CHANGED`.
 After the agent returns, it re-verifies the same release to detect on-disk
 toolkit tampering. Installing a candidate only *during* the scored invocation
 is insufficient for this harness; the installation flow requires a separate
