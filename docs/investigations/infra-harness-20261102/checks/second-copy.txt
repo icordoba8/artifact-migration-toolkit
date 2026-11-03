@@ -1,0 +1,25 @@
+second copy of docs/investigations/infra-harness-20261102 (agent-run, AGENT_OBSERVED; not owner evidence)
+destination: /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy
+written: 2026-11-03T13:35:20Z
+supersedes: amt-infra-harness-20261102-evidence-r3.tar (6d1863ec…82aa, left in place; TAP logs rerun with the TMPDIR output guard; credential cleanup records added)
+$ cat amt-infra-harness-20261102-evidence-r4.tar.sha256
+70de988d338177e8d386d114df0eb8a38ed1e12f18a5aa0ab5fb7adda856c501  amt-infra-harness-20261102-evidence-r4.tar
+$ (cd /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy && sha256sum -c amt-infra-harness-20261102-evidence-r4.tar.sha256)
+amt-infra-harness-20261102-evidence-r4.tar: OK
+exit=0
+$ tar -xf /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/amt-infra-harness-20261102-evidence-r4.tar -C <scratch> && cd <scratch>/infra-harness-20261102 && sha256sum -c SHA256SUMS
+./checks/engine-targets.txt: OK
+./checks/local-vault-login-logs-removed.txt: OK
+./checks/m15-certification-final-inventory.txt: OK
+./checks/prior-attempt-19-19/dependency-restore.txt: OK
+./checks/prior-attempt-19-19/t3-node2213-tests.txt: OK
+./checks/prior-attempt-19-19/t3-tests.txt: OK
+./checks/s2-harness-engine-1.6.4-node22.13.0.tap: OK
+./checks/s2-harness-joint-2782612-node22.13.0.tap: OK
+./checks/t3-harness-node22.13.0.tap: OK
+./checks/vault-restricted-classification.txt: OK
+./model-log.md: OK
+./owner-blocks.md: OK
+./plan.md: OK
+./scoring-changes.md: OK
+exit=0

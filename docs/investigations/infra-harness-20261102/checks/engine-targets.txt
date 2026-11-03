@@ -1,0 +1,15 @@
+Engine targets for the Stage 2 harness tests (A7). Node v22.13.0 for both.
+
+joint candidate: toolkit/engine/joint-candidate-20261102
+  head (frozen at 2026-11-03T01:21:25Z, unchanged at 01:51:17Z and 01:55:25Z): 2782612c1f1796316233995a350712bc8a508fc3
+  version: 1.6.5 (not 1.6.6: no 1.6.6 / E6 commit had been pushed at completion time)
+  contentHash (scripts/release.mjs contentHashOf over `git archive` of the head): sha256:e9421f62b6aa2ae3fbdccd5e74bb6ff41e2e16b6c174ac320ff7e7d030335624
+  tree: detached worktree of the head, plus this branch's harness files overlaid (no file overlaps the joint diff from BASE)
+  result: s2-harness-joint-2782612-node22.13.0.tap: 37 tests, 37 pass, 0 skip
+
+infra branch engine: 1.6.4 (released contentHash sha256:9169b0aae6b24649718b4d4d4d5331798b557848faa666b085b5582b5d87cd22)
+  result: s2-harness-engine-1.6.4-node22.13.0.tap: 37 tests, 37 pass, 0 skip
+
+Both are engine-aware where the engines differ. On 1.6.4, read-only fails (raw ENOENT), live-lock fails
+(LOCK_OWNER_UNPROVEN), and abandoned-lock is BLOCKED_OWNER_PROOF. On joint, read-only passes (EROFS, template),
+live-lock passes (LOCK_HELD), and abandoned-lock is RECLAIMED_ACROSS_REALM.
