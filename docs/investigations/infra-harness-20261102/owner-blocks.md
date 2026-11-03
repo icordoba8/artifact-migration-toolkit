@@ -51,7 +51,10 @@ left that only you can do:
    `amt-evidence-vault.files.sha256`, all removed 2026-11-03; and of
    `amt-evidence-vault-sanitized-20261103.tar` (`620bf3b7…cc2c`) with its
    `.tar.sha256`, `.files.sha256` and `.restricted-inventory.tsv`, removed
-   2026-11-03T13:34Z because its manifests held hashes of the login logs.
+   2026-11-03T13:34Z because its manifests held hashes of the login logs; and
+   of `m15-certification-run-20261031T2015Z.tar` (`a1ee9706…c406`), removed
+   2026-11-03T14:03:55Z because it held `runs/login-record.txt` and that
+   member's hash in `runs/SHA256SUMS`.
 
 ```text
 V1 HOMES: auth-20261030T1715Z, auth2-20261030T1750Z, codex-recovery-20261030T125104Z
@@ -70,8 +73,9 @@ Filled in by the agent from commands it ran itself. This is not owner evidence.
   `/mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/`. The agent ran
   `sha256sum -c` on the three `.tar.sha256` files there, and all reported `OK`:
   - `amt-evidence-vault.tar` `d672d593…20fd`
-  - `m15-certification-final-20261101T0100Z.tar` `3e3d56d6…c406`
-  - `m15-certification-run-20261031T2015Z.tar` `a1ee9706…6d6f4ce`
+  - `m15-certification-final-20261101T0100Z.tar` `3e3d56d6…f4ce`
+  - `m15-certification-run-20261031T2015Z.tar` `a1ee9706…c406` (suffixes of
+    these two corrected 2026-11-03; they were swapped)
 - **This directory's copy.** The agent wrote
   `amt-infra-harness-20261102-evidence.tar` (this directory, `SHA256SUMS`
   included) and its `.sha256` to the same destination. It ran `sha256sum -c`
@@ -104,8 +108,12 @@ Filled in by the agent from commands it ran itself. This is not owner evidence.
     no credential-class names.
   - `m15-certification-final-20261101T0100Z.tar`: clean by name
     (`checks/m15-certification-final-inventory.txt`).
-  - Still open (owner): `m15-certification-run-20261031T2015Z.tar` holds
-    `runs/login-record.txt` (260 bytes). Classifying it would require reading
-    it, so it was not touched.
+  - `m15-certification-run-20261031T2015Z.tar`: by your fail-closed decision,
+    `runs/login-record.txt` (260 bytes) is credential material; never read.
+    Replaced by `m15-certification-run-20261031T2015Z-sanitized-20261103.tar`
+    (`95f8cb6f…431f`) without it; `runs/SHA256SUMS` line 281 scrubbed via
+    `SHA256SUMS.r2` + `MANIFESTS.SUPERSEDED.txt`. `sha256sum -c` OK, per-file
+    370 OK / 0 mismatch. The old tar is SUPERSEDED, removed, and in step 2
+    (`checks/m15-certification-run-sanitized.txt`).
 - OneDrive sync status, and receipt off this device, are not observable here.
   They are the I12 block above.
