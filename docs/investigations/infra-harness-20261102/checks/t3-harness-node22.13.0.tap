@@ -1,0 +1,170 @@
+TAP version 13
+# Subtest: black-box acceptance refuses incomplete and invalid invocations
+ok 1 - black-box acceptance refuses incomplete and invalid invocations
+  ---
+  duration_ms: 92.10584
+  ...
+# Subtest: complete acceptance requires a pin from outside the consumer
+ok 2 - complete acceptance requires a pin from outside the consumer
+  ---
+  duration_ms: 58.848555
+  ...
+# Subtest: black-box acceptance requires an explicitly disposable consumer
+ok 3 - black-box acceptance requires an explicitly disposable consumer
+  ---
+  duration_ms: 78.486917
+  ...
+# Subtest: black-box acceptance reports a missing installed runtime receipt
+ok 4 - black-box acceptance reports a missing installed runtime receipt
+  ---
+  duration_ms: 39.01743
+  ...
+# Subtest: black-box acceptance refuses a changed independent verifier before agent execution
+ok 5 - black-box acceptance refuses a changed independent verifier before agent execution
+  ---
+  duration_ms: 39.314068
+  ...
+# Subtest: without OS isolation, a rewritten receipt or engine bundle is still caught after the run
+ok 6 - without OS isolation, a rewritten receipt or engine bundle is still caught after the run
+  ---
+  duration_ms: 8360.668096
+  ...
+# Subtest: an agent that leaves no readable engine status still gets a fail-closed report
+ok 7 - an agent that leaves no readable engine status still gets a fail-closed report
+  ---
+  duration_ms: 8180.941875
+  ...
+# Subtest: ordinary first-time record directory creation is not a replacement event
+ok 8 - ordinary first-time record directory creation is not a replacement event
+  ---
+  duration_ms: 7715.037162
+  ...
+# Subtest: record deletion and recreation is detected by a trusted observer and never certified
+ok 9 - record deletion and recreation is detected by a trusted observer and never certified
+  ---
+  duration_ms: 5892.278238
+  ...
+# Subtest: under OS isolation the agent cannot write the runtime, receipt, verifier or report, and nothing it starts outlives it
+ok 10 - under OS isolation the agent cannot write the runtime, receipt, verifier or report, and nothing it starts outlives it
+  ---
+  duration_ms: 9515.529956
+  ...
+# Subtest: OS-isolated agent deleting and recreating its migration record cannot obtain certification
+ok 11 - OS-isolated agent deleting and recreating its migration record cannot obtain certification
+  ---
+  duration_ms: 5453.575192
+  ...
+# Subtest: under OS isolation a verifier in a broad directory (an ancestor of HOME) seals its script and node_modules, not HOME
+ok 12 - under OS isolation a verifier in a broad directory (an ancestor of HOME) seals its script and node_modules, not HOME
+  ---
+  duration_ms: 8631.719766
+  ...
+# Subtest: OS isolation refuses a UID-0 runner before the provider starts
+ok 13 - OS isolation refuses a UID-0 runner before the provider starts
+  ---
+  duration_ms: 6411.624338
+  ...
+# Subtest: OS isolation refuses an effective UID 0 with a non-root real UID before the provider starts
+ok 14 - OS isolation refuses an effective UID 0 with a non-root real UID before the provider starts
+  ---
+  duration_ms: 7234.906053
+  ...
+# Subtest: black-box acceptance refuses an unverified installed engine before starting the agent
+ok 15 - black-box acceptance refuses an unverified installed engine before starting the agent
+  ---
+  duration_ms: 94.88312
+  ...
+# Subtest: Codex approves exactly the nine engine tools, per tool, and keeps approval_policy never
+ok 16 - Codex approves exactly the nine engine tools, per tool, and keeps approval_policy never
+  ---
+  duration_ms: 1.429447
+  ...
+# Subtest: the runner fails visibly on bad arguments run directly or through a symlink, and importing it runs nothing
+ok 17 - the runner fails visibly on bad arguments run directly or through a symlink, and importing it runs nothing
+  ---
+  duration_ms: 165.025389
+  ...
+# Subtest: artifact acceptance uses the installed artifact CLI and independent verifier pin
+ok 18 - artifact acceptance uses the installed artifact CLI and independent verifier pin
+  ---
+  duration_ms: 9988.166805
+  ...
+# Subtest: read-only consumer is sealed and unchanged
+ok 19 - read-only consumer is sealed and unchanged
+  ---
+  duration_ms: 7295.931163
+  ...
+# Subtest: live and abandoned scenarios retain genuine owner proof across PID isolation
+ok 20 - live and abandoned scenarios retain genuine owner proof across PID isolation
+  ---
+  duration_ms: 15839.397979
+  ...
+# Subtest: realm-abandoned-lock: an owner abandoned in the agent realm is reclaimed there, never across namespaces or by hand
+ok 21 - realm-abandoned-lock: an owner abandoned in the agent realm is reclaimed there, never across namespaces or by hand
+  ---
+  duration_ms: 49586.367275
+  ...
+# Subtest: checkpoint waits for committed state and preserves history, integrity and frozen bytes
+ok 22 - checkpoint waits for committed state and preserves history, integrity and frozen bytes
+  ---
+  duration_ms: 28.948976
+  ...
+# Subtest: snapshot notices empty-directory, mode and symlink mutations
+ok 23 - snapshot notices empty-directory, mode and symlink mutations
+  ---
+  duration_ms: 9.965281
+  ...
+# Subtest: real lock owner survives contention and only same-realm proven death allows recovery
+ok 24 - real lock owner survives contention and only same-realm proven death allows recovery
+  ---
+  duration_ms: 111.45181
+  ...
+# Subtest: interruption kills a provider only after the trusted checkpoint predicate and errors fail closed
+ok 25 - interruption kills a provider only after the trusted checkpoint predicate and errors fail closed
+  ---
+  duration_ms: 164.491445
+  ...
+# Subtest: complete acceptance fails for each independent-verifier and agent failure control
+ok 26 - complete acceptance fails for each independent-verifier and agent failure control
+  ---
+  duration_ms: 0.466817
+  ...
+# Subtest: native and headless launches share exact permissions; prose cannot certify OpenSpec correction
+ok 27 - native and headless launches share exact permissions; prose cannot certify OpenSpec correction
+  ---
+  duration_ms: 1.095138
+  ...
+# Subtest: artifact resume preserves store and trusted identities; pending replayable journals refuse without launch or mutation
+ok 28 - artifact resume preserves store and trusted identities; pending replayable journals refuse without launch or mutation
+  ---
+  duration_ms: 40916.352354
+  ...
+# Subtest: native launcher records a real PTY without awarding native UI acceptance
+ok 29 - native launcher records a real PTY without awarding native UI acceptance
+  ---
+  duration_ms: 10558.875005
+  ...
+# Subtest: official launcher binds external committed-harness pins and a clean tree; complete patch survives staging and commit
+ok 30 - official launcher binds external committed-harness pins and a clean tree; complete patch survives staging and commit
+  ---
+  duration_ms: 1535.69754
+  ...
+# Subtest: official launcher puts only the verified pinned pnpm first on PATH; a missing or altered tarball refuses
+ok 31 - official launcher puts only the verified pinned pnpm first on PATH; a missing or altered tarball refuses
+  ---
+  duration_ms: 33.613999
+  ...
+# Subtest: the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx, and refuses a target pinning another pnpm
+ok 32 - the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx, and refuses a target pinning another pnpm
+  ---
+  duration_ms: 1127.615181
+  ...
+1..32
+# tests 32
+# suites 0
+# pass 32
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 205379.371711
