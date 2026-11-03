@@ -9,6 +9,7 @@
 //   control   unfiltered 1.6.4-shaped config, no filter anywhere
 // Usage: node <this file> <harness worktree>   (e.g. ~/amt-infra-harness)
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -83,6 +84,8 @@ const grantsSeen = async (config, dropEnabledTools) => {
 };
 
 const version = spawnSync("codex", ["--version"], { encoding: "utf8" }).stdout.trim();
+const codexBin = await realpath(spawnSync("sh", ["-c", "command -v codex"], { encoding: "utf8" }).stdout.trim());
+console.log(`codex binary ${codexBin} sha256 ${createHash("sha256").update(await readFile(codexBin)).digest("hex")}`);
 const runs = [
   ["harness argv (enabled_tools) on unfiltered config", await grantsSeen(unfiltered, false), 9],
   ["shipped config.toml, no command-line filter", await grantsSeen(shipped, true), 9],
