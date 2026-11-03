@@ -34,6 +34,12 @@ const layouts = {
   opencode: { project: ['.opencode/skills', '.opencode/commands', 'opencode.json', 'mcp.servers'], user: ['.config/opencode/skills', '.config/opencode/commands', '.config/opencode/opencode.json', 'mcp.servers'] },
   copilot: { project: ['.github/skills', '.github/prompts', '.vscode/mcp.json', 'servers'] },
 };
+// T1. VS Code reads only `.vscode/mcp.json`; Copilot CLI reads `.mcp.json` or
+// `.github/mcp.json` (trusted folder) and ignores `.vscode`. So Copilot owns a
+// second registration, and both launch `--without-relay`: 9 tools, never the relay.
+export const COPILOT_MCP_TOOLS = ['artifact_status', 'artifact_run', 'migration_status', 'migration_scan', 'migration_evidence_binding', 'migration_prefill', 'migration_capture', 'migration_pending_decisions', 'migration_run'];
+export const copilotCliEntry = server => ({ ...server, tools: COPILOT_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
+const copilotCli = [null, null, '.github/mcp.json', 'mcpServers'];
 
 // Validate every component, including existing ancestors of the selected root.
 export async function safePath(root, relative = '') {
@@ -115,9 +121,12 @@ const serversIn = (config, key) => {
 };
 const serverFor = (provider, release, legacy = false) => {
   const launch = { command: process.execPath, args: [path.join(release, 'packages/migration-engine/src/mcp-server.mjs')] };
+  if (provider === 'copilot' && !legacy) launch.args.push('--without-relay');
   return provider === 'opencode' ? opencodeServer([launch.command, ...launch.args], legacy)
     : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
 };
+// Copilot requires `tools` for a local server and builds its environment from `env`.
+const copilotCliServer = release => copilotCliEntry(serverFor('copilot', release));
 
 async function historicalTemplateMatches(release, provider, layout, adapter) {
   const template = await readFile(await safePath(release, `providers/${provider}/${adapter.mcpTemplate}`), 'utf8');
@@ -131,7 +140,13 @@ async function historicalTemplateMatches(release, provider, layout, adapter) {
     return same(parsed?.mcp?.servers?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], false)) ||
       same(parsed?.mcp?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], true));
   }
-  return same(parsed?.[layout[3]]?.['start-migration'], provider === 'copilot' ? { type: 'stdio', ...launch } : launch);
+  if (provider === 'copilot') {
+    const relayless = { type: 'stdio', command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'] };
+    return same(parsed?.servers?.['start-migration'], { type: 'stdio', ...launch }) ||
+      (same(parsed?.servers?.['start-migration'], relayless) &&
+        same(parsed?.mcpServers?.['start-migration'], copilotCliEntry(relayless)));
+  }
+  return same(parsed?.[layout[3]]?.['start-migration'], launch);
 }
 
 async function historicalOwned(receipt, provider, layout) {
@@ -148,7 +163,7 @@ async function historicalOwned(receipt, provider, layout) {
       if (adapter.provider !== provider || !same(adapter.toolkit, manifest.toolkit) ||
           !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
-    for (const legacy of provider === 'opencode' ? [false, true] : [false]) {
+    for (const legacy of ['opencode', 'copilot'].includes(provider) ? [false, true] : [false]) {
       owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release), release: item.release, pin: item.pin, manifest });
     }
   }
@@ -291,6 +306,7 @@ async function validateSelection(receipt, provider, layout) {
   if (!server) throw new Error('Installation MCP selection conflict');
   const owned = mergeConfig(null, layout, null, server).owned;
   if (!same(receipt.configOwned, owned) && !(typeof owned === 'string' && receipt.configOwned === `\n${owned}`)) throw new Error('Invalid configuration ownership');
+  if (receipt.cliConfigOwned !== undefined && !same(receipt.cliConfigOwned, copilotCliServer(receipt.release))) throw new Error('Invalid configuration ownership');
   const source = JSON.parse(await readFile(path.join(receipt.release, `providers/${provider}/adapter.json`)));
   const expectedFiles = (receipt.mode === 'runtime' ? [] : source.files).flatMap(relative => {
     if (relative.startsWith('skills/')) return [`${layout[0]}/${relative.slice(7)}`];
@@ -350,7 +366,7 @@ async function adoptRegistration(provider, layout, store, current, rawConfig, ra
   const names = await readdir(store).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   const releases = names.filter(name => /^\d+\.\d+\.\d+-[a-f0-9]{64}$/.test(name)).map(name => ({ release: path.join(store, name), pin: `sha256:${name.slice(-64)}` }));
   const candidates = [
-    ...(provider === 'opencode' ? [false, true] : [false]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
+    ...(['opencode', 'copilot'].includes(provider) ? [false, true] : [false]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
     ...await historicalOwned({ ...current, store, releases }, provider, layout),
   ];
   const parse = raw => { try { return JSON.parse(raw); } catch { return null; } };
@@ -388,6 +404,12 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const rawConfig = await optional(configFile);
   const agentsFile = scope === 'project' ? await safePath(root, '.agents/mcp.json') : null;
   const rawAgents = agentsFile ? await optional(agentsFile) : null;
+  const cliFile = provider === 'copilot' ? await safePath(root, copilotCli[2]) : null;
+  const rawCli = cliFile ? await optional(cliFile) : null;
+  // Copilot CLI lets a root `.mcp.json` entry of the same name shadow ours, with every tool.
+  if (cliFile && action !== 'remove' && /"start-migration"\s*:/.test((await optional(await safePath(root, '.mcp.json')))?.toString() ?? '')) {
+    throw conflict('.mcp.json', "Conflicting MCP configuration: '.mcp.json' registers 'start-migration', which Copilot CLI loads instead of '.github/mcp.json' with every tool, the relay included. Remove that entry or install Copilot in another root.");
+  }
   for (const [relative, hash] of Object.entries(previous?.files ?? {})) {
     if (!ownedPath(relative, provider, layout)) throw new Error(`Invalid ownership manifest: ${relative}`);
     if (digest(await readFile(await safePath(root, relative))) !== hash) throw new Error(`Owned file modified: ${relative}`);
@@ -402,18 +424,21 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     // have rejected conflicts; leave unrelated configuration untouched.
     const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp, historical);
     const agents = mergeAgents(rawAgents, previous, previous.release, history, provider);
+    const cli = previous.cliConfigOwned ? mergeConfig(rawCli, copilotCli, previous.cliConfigOwned, previous.cliConfigOwned) : null;
     let mcpRepair = null;
-    if (merged.missing || merged.stale || agents) {
+    if (merged.missing || merged.stale || agents || cli?.missing) {
       try {
         if (agents) await replace(agentsFile, agents);
+        if (cli?.missing) await replace(cliFile, cli.bytes);
         if (merged.missing || merged.stale) await replace(configFile, merged.bytes);
       } catch (error) {
         if (agents) await replace(agentsFile, rawAgents);
+        if (cli?.missing) { if (rawCli) await replace(cliFile, rawCli); else await rm(cliFile, { force: true }); }
         throw error;
       }
       // A host that cannot load an MCP server mid-process needs a restart. The
       // runtime still succeeds: this invocation continues on absolute CLI paths.
-      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: merged.missing || merged.stale ? configFile : agentsFile, restartRequired: true };
+      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: merged.missing || merged.stale ? configFile : cli?.missing ? cliFile : agentsFile, restartRequired: true };
     }
     const servers = layout[3] ? serversIn(JSON.parse(merged.bytes), layout[3]) : { 'start-migration': previous.mcp };
     return { ...previous, outcome: 'OK', mcpRepair, mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
@@ -477,9 +502,12 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const merged = mergeConfig(rawConfig, layout, previous?.configOwned ?? adopted?.native, server, historical);
   const agents = mergeAgents(rawAgents, previous ?? adopted, receipt?.release, history, provider);
   if (receipt) receipt.configOwned = merged.owned;
+  // A legacy (<=1.6.5) receipt owns no `.github` entry; an adopted registration owns its release's.
+  const cli = cliFile && (receipt || previous?.cliConfigOwned) ? mergeConfig(rawCli, copilotCli, previous ? previous.cliConfigOwned : adopted && copilotCliServer(adopted.release), receipt && copilotCliServer(receipt.release)) : null;
+  if (receipt && cli) receipt.cliConfigOwned = cli.owned;
   const owned = previous?.files ?? adopted?.files ?? {};
   const backups = new Map();
-  for (const relative of new Set([...Object.keys(owned), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `.artifact-migration-tools/${provider}.json`])) {
+  for (const relative of new Set([...Object.keys(owned), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), ...(cli ? [copilotCli[2]] : []), `.artifact-migration-tools/${provider}.json`])) {
     const file = await safePath(root, relative);
     const bytes = await optional(file);
     if (writes.has(relative) && bytes && !owned[relative]) throw refuse('INSTALL_UNOWNED_FILE', `Unowned file exists: ${relative}`, { file: relative });
@@ -504,6 +532,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     for (const relative of Object.keys(owned)) if (!writes.has(relative)) await rm(await safePath(root, relative));
     for (const [relative, bytes] of writes) await replace(await safePath(root, relative), bytes);
     await replace(configFile, merged.bytes);
+    if (cli && (rawCli || receipt)) await replace(cliFile, cli.bytes);
     if (agents) await replace(agentsFile, agents);
     if (receipt) await replace(receiptFile, Buffer.from(json(receipt)));
     else await rm(receiptFile);

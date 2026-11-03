@@ -25,13 +25,26 @@ next explicit answer relayed through `migration_relay_decision` or, without MCP,
 which calls the same engine function. No provider adds, removes or reinterprets
 a decision rule.
 
-GitHub Copilot CLI reads workspace MCP servers only from `.mcp.json` or
-`.github/mcp.json`, and only in a trusted folder; the Copilot adapter registers
-in `.vscode/mcp.json` (VS Code). Without a connected server Copilot CLI uses the
-CLI fallback above. Its path sandbox also needs the release store
-(`%LOCALAPPDATA%\artifact-migration-tools` on Windows,
-`~/.local/share/artifact-migration-tools` elsewhere) passed as
-`copilot --add-dir <store>`, because the engine runs from there.
+The Copilot adapter registers the same server twice, one file per client:
+`.vscode/mcp.json` (`servers`, read by VS Code) and `.github/mcp.json`
+(`mcpServers`, read by Copilot CLI with an explicit nine-tool `tools` list).
+Both launch it with `--without-relay`, so `migration_relay_decision` is not
+registered and a call to it is refused by name; on Copilot the operator relays
+an `OPERATOR_DECISION` answer by running
+`artifact-migration-decision <module> --relay <reference> --decision APPROVE|REJECT`
+in their own terminal. A root `.mcp.json` that names `start-migration` would
+shadow `.github/mcp.json` with every tool, so install, update and doctor refuse
+it (`INSTALL_REGISTRATION_CONFLICT`, file `.mcp.json`).
+
+Copilot CLI loads workspace MCP only in a trusted folder. Trusting the consumer
+root is a user step done **once, before the first migration session**, in one
+of the documented ways: accept the trust prompt on a first `copilot` launch in
+the consumer root and exit; add the root to `trustedFolders` in
+`$COPILOT_HOME/config.json`; or, for one prompt-mode session,
+`copilot --trust-folder -p …`. The payload never writes trust. The MCP server
+needs no `--add-dir`; pass `--add-dir <consumer root>` only when Copilot starts
+outside the consumer, and never for the release store (Copilot also loads that
+directory's `.github/skills` and `.github/agents` as trusted configuration).
 
 Provider wrappers contain no workflow logic. They load the generated skill and
 forward invocation text, preventing four copies of the workflow from drifting.
@@ -72,10 +85,11 @@ it rather than pick somewhere plausible.
 | Claude Code    | plugin root, host-assigned    | plugin root              | plugin MCP template, host-assigned                          |
 | Codex          | `~/.agents/skills`            | `.agents/skills`         | `~/.codex/config.toml` / `.codex/config.toml`                |
 | OpenCode       | `~/.config/opencode/skills`   | `.opencode/skills`       | `~/.config/opencode/opencode.json` / `opencode.json`         |
-| GitHub Copilot | — (none documented)           | `.github/skills`         | — / `.vscode/mcp.json`                                       |
+| GitHub Copilot | — (none documented)           | `.github/skills`         | — / `.vscode/mcp.json` and `.github/mcp.json`                |
 
 Three of these are consumer-owned files that carry unrelated entries — Codex's
-project `config.toml`, OpenCode's `opencode.json`, Copilot's `.vscode/mcp.json`.
+project `config.toml`, OpenCode's `opencode.json`, Copilot's `.vscode/mcp.json`
+and `.github/mcp.json`.
 An adapter **merges** its one `start-migration` entry into them and preserves
 everything else. Overwriting a host's configuration is not installation.
 

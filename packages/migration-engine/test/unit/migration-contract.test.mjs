@@ -3257,6 +3257,60 @@ test("E2: an engine SIGKILLed in another PID namespace leaves a lock the next wr
   }
 });
 
+// E6: a coded refusal crosses both transports with its code intact -- MCP as an
+// isError result whose structuredContent is {code, errno, syscall, path}, the
+// run CLI as its FAILED --json document with a non-zero exit. BLOCKED /
+// NOT_STARTED (an unbound registry) is a result, not a refusal: mcp-server's E1 test.
+test("E6: lock and filesystem refusals reach MCP and the CLI with their code", { skip: TOKENS }, async (t) => {
+  const both = async (fixture, code) => {
+    const mcp = await rpc(fixture, runCall(1), createSession());
+    assert.equal(mcp.result?.isError, true, `${code}: ${JSON.stringify(mcp)}`);
+    assert.equal(mcp.result.structuredContent.code, code);
+    assert.match(mcp.result.content.at(-1).text, new RegExp(`"code": "${code}"`));
+    const cli = await runCli(fixture, () => runMigration(["auth", "--json"]));
+    assert.notEqual(cli.exitCode ?? 0, 0, code);
+    assert.equal(JSON.parse(cli.stdout).code, code);
+    return mcp.result.structuredContent;
+  };
+  const locks = [
+    ["LOCK_HELD", (lock) => seedOwner(lock, { pid: process.pid })],
+    ["LOCK_NO_LIVENESS_TOKEN", (lock) => seedOwner(lock, { realm: FOREIGN_REALM })],
+    ["LOCK_OWNER_UNKNOWN", (lock) => seedTokenOwner(lock, { hostname: `${os.hostname()}-elsewhere` })],
+  ];
+  const now = Date.now;
+  for (const [code, seed] of locks) {
+    const fixture = await createFixture();
+    try {
+      await initialize(fixture);
+      await seed(lockPathFor(fixture.targetRoot, "auth"));
+      // Every lock refusal first waits out the 30 s deadline; a clock that
+      // jumps past it on every read keeps the real code path and none of the wait.
+      let clock = now();
+      Date.now = () => (clock += 31_000);
+      try { await both(fixture, code); } finally { Date.now = now; }
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+  const lockDirectory = (file) => file.endsWith(`${path.sep}locks`) || file.includes(`${path.sep}locks${path.sep}`);
+  let injected = null;
+  await traceFs(t, async (op, file) => {
+    if (injected && op === "mkdir" && lockDirectory(file)) throw Object.assign(ioError(injected), { syscall: "mkdir", path: file });
+  });
+  for (const [errno, code] of [["EROFS", "EROFS"], ["EACCES", "EACCES"], ["EPERM", "EPERM"], ["ENOENT", "FS_ERRNO_UNKNOWN"]]) {
+    const fixture = await createFixture();
+    try {
+      await initialize(fixture);
+      injected = errno;
+      const refusal = await both(fixture, code);
+      if (code !== "FS_ERRNO_UNKNOWN") assert.equal(refusal.syscall, "mkdir", code);
+    } finally {
+      injected = null;
+      await fixture.cleanup();
+    }
+  }
+});
+
 test("E2: a child that outlives the lock owner does not keep the lock alive; the token is close-on-exec", { skip: TOKENS }, async () => {
   const { root, lock, cleanup } = await lockRoot();
   const after = `const { spawn } = await import("node:child_process");\n` +

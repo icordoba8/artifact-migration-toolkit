@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -38,6 +38,7 @@ import {
   runProvidersSync,
 } from "../scripts/providers-sync.mjs";
 import { payloadPaths, releaseCheck } from "../scripts/release.mjs";
+import { COPILOT_MCP_TOOLS } from "../providers/install-support.mjs";
 import {
   IDENTITY_BASENAME,
   canonicalSkillNames,
@@ -332,13 +333,23 @@ test("every MCP template launches the installed engine through a placeholder, ne
 
   const templates = {
     "providers/claude/.mcp.json": (parsed) => parsed.mcpServers["start-migration"],
-    "providers/copilot/mcp.json": (parsed) => parsed.servers["start-migration"],
   };
   for (const [relative, select] of Object.entries(templates)) {
     const server = select(JSON.parse(await readText(root, relative)));
     assert.equal(server.command, "node");
     assert.deepEqual(server.args, [ENGINE_MCP_ENTRY_PLACEHOLDER]);
   }
+  // T1: Copilot's VS Code and Copilot CLI registrations, both without the relay;
+  // the CLI allowlist is exactly the server's --without-relay tools/list.
+  const copilot = JSON.parse(await readText(root, "providers/copilot/mcp.json"));
+  const relayless = { type: "stdio", command: "node", args: [ENGINE_MCP_ENTRY_PLACEHOLDER, "--without-relay"] };
+  assert.deepEqual(copilot.servers["start-migration"], relayless);
+  assert.deepEqual(copilot.mcpServers["start-migration"], { ...relayless, tools: COPILOT_MCP_TOOLS, env: { pnpm_config_pm_on_fail: "error" } });
+  const listed = spawnSync(process.execPath, [fileURLToPath(new URL("../packages/migration-engine/src/mcp-server.mjs", import.meta.url)), "--without-relay"], {
+    encoding: "utf8",
+    input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`,
+  });
+  assert.deepEqual(JSON.parse(listed.stdout).result.tools.map((tool) => tool.name), COPILOT_MCP_TOOLS);
   const fragment = JSON.parse(await readText(root, "providers/opencode/opencode.fragment.json"));
   assert.deepEqual(fragment.mcp.servers["start-migration"], {
     type: "local",

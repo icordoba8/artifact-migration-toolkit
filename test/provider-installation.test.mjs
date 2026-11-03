@@ -10,7 +10,7 @@ import path from 'node:path';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { adapter, digest, verifyBundle } from '../providers/install-support.mjs';
+import { adapter, COPILOT_MCP_TOOLS, digest, verifyBundle } from '../providers/install-support.mjs';
 import { buildRelease } from '../scripts/release.mjs';
 import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
 import { createUnstampedRecord } from '../packages/migration-engine/test/support/consumer-fixture.mjs';
@@ -88,15 +88,15 @@ const advance = async (receipt, cwd) => {
   const id = preview.output.match(/Confirmation ID: ([0-9a-f]+)/)?.[1];
   return id ? run(receipt, 'artifact-migration-advance', ['auth', '--confirm-advance', id], cwd) : preview;
 };
-async function mcpStatus(receipt, cwd) {
-  const [command, ...args] = Array.isArray(receipt.mcp.command) ? receipt.mcp.command : [receipt.mcp.command, ...receipt.mcp.args];
+async function mcpStatus(receipt, cwd, request = { method: 'tools/call', params: { name: 'migration_status', arguments: { module: 'auth' } } }, server = receipt.mcp) {
+  const [command, ...args] = Array.isArray(server.command) ? server.command : [server.command, ...server.args];
   const id = childId++;
   const inputPath = path.join(scratch, `child-${id}.stdin`);
   const outputPath = path.join(scratch, `child-${id}.stdout`);
   const errorPath = path.join(scratch, `child-${id}.stderr`);
   await writeFile(inputPath,
     `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'provider-acceptance', version: '1' } } })}\n` +
-    `${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'migration_status', arguments: { module: 'auth' } } })}\n`);
+    `${JSON.stringify({ jsonrpc: '2.0', id: 2, ...request })}\n`);
   const input = await open(inputPath, 'r');
   const output = await open(outputPath, 'w');
   const errors = await open(errorPath, 'w');
@@ -243,6 +243,75 @@ test('R-W9-a / R-W9-c: installed MCP is launchable; doctor preserves and reports
   assert.ok(!(await mcpStatus(installed, consumer.root)).result.isError);
   await adapter('copilot', { ...options, action: 'remove' });
   assert.deepEqual(JSON.parse(await readFile(config)), { servers: { playwright: browser, figma }, inputs: [{ id: 'preserved' }] });
+});
+
+test('T1: Copilot registers nine tools without the relay by default, on install and on upgrade from a <=1.6.5 receipt', async t => {
+  const b = await bundles();
+  const consumer = await createUnstampedRecord({ prefix: 'copilot T1 ' });
+  t.after(() => consumer.cleanup());
+  const options = { scope: 'project', root: consumer.root, store: path.join(scratch, 'T1 store'), bundle: b.first, pin: b.pin };
+  const vscode = path.join(consumer.root, '.vscode/mcp.json');
+  const cli = path.join(consumer.root, '.github/mcp.json');
+  const receiptFile = path.join(consumer.root, '.artifact-migration-tools/copilot.json');
+  const toolsOf = async (receipt, server) => (await mcpStatus(receipt, consumer.root, { method: 'tools/list' }, server)).result.tools.map(tool => tool.name);
+  const expectNine = async receipt => {
+    const registered = JSON.parse(await readFile(cli, 'utf8')).mcpServers['start-migration'];
+    assert.deepEqual(registered, { ...receipt.mcp, tools: COPILOT_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
+    assert.equal(registered.args.at(-1), '--without-relay');
+    assert.deepEqual(JSON.parse(await readFile(vscode, 'utf8')).servers['start-migration'], receipt.mcp);
+    assert.deepEqual(await toolsOf(receipt, registered), COPILOT_MCP_TOOLS);
+    assert.equal(COPILOT_MCP_TOOLS.length, 9);
+    assert.ok(!COPILOT_MCP_TOOLS.includes('migration_relay_decision'));
+  };
+  await expectNine(await adapter('copilot', options));
+
+  // A <=1.6.5 receipt: the relay-carrying `.vscode` entry and no `.github` registration.
+  const legacy = JSON.parse(await readFile(receiptFile, 'utf8'));
+  legacy.mcp = { ...legacy.mcp, args: legacy.mcp.args.slice(0, 1) };
+  legacy.configOwned = legacy.mcp;
+  delete legacy.cliConfigOwned;
+  await writeFile(receiptFile, JSON.stringify(legacy, null, 2));
+  await writeFile(vscode, JSON.stringify({ servers: { 'start-migration': legacy.mcp } }));
+  await rm(cli);
+  assert.equal((await toolsOf(legacy, legacy.mcp)).length, 10);
+  await expectNine(await adapter('copilot', { ...options, action: 'update', bundle: b.second, pin: b.nextPin }));
+
+  // Doctor repairs a removed `.github` registration; remove takes only ours.
+  const current = JSON.parse(await readFile(receiptFile, 'utf8'));
+  await writeFile(cli, JSON.stringify({ mcpServers: { other: { type: 'http', url: 'https://example.invalid/mcp' } } }));
+  await adapter('copilot', { ...options, action: 'doctor', bundle: b.second, pin: b.nextPin });
+  await expectNine(current);
+  await adapter('copilot', { ...options, action: 'remove' });
+  assert.deepEqual(JSON.parse(await readFile(cli, 'utf8')), { mcpServers: { other: { type: 'http', url: 'https://example.invalid/mcp' } } });
+});
+
+test('T1: a root .mcp.json start-migration entry shadows .github/mcp.json and is refused naming the file', async () => {
+  const b = await bundles();
+  const root = path.join(scratch, 'T1 shadow root');
+  const options = { scope: 'project', root, store: path.join(scratch, 'T1 shadow store'), bundle: b.first, pin: b.pin };
+  await mkdir(root, { recursive: true });
+  const shadow = JSON.stringify({ mcpServers: { 'start-migration': { command: 'node', args: ['x'] } } });
+  await writeFile(path.join(root, '.mcp.json'), shadow);
+  const refused = { code: 'INSTALL_REGISTRATION_CONFLICT', message: /'\.mcp\.json' registers 'start-migration'/ };
+  await assert.rejects(adapter('copilot', options), error => { assert.equal(error.state?.file, '.mcp.json'); return true; });
+  await assert.rejects(adapter('copilot', options), refused);
+  for (const file of ['.vscode', '.github', '.artifact-migration-tools/copilot.json']) await assert.rejects(lstat(path.join(root, file)), { code: 'ENOENT' });
+  await writeFile(path.join(root, '.mcp.json'), '{}');
+  await adapter('copilot', options);
+  await writeFile(path.join(root, '.mcp.json'), shadow);
+  for (const action of ['update', 'doctor']) await assert.rejects(adapter('copilot', { ...options, action }), refused);
+  await writeFile(path.join(root, '.mcp.json'), '{}');
+  // A tampered `.github` entry is a conflict for doctor; a foreign one for a fresh install.
+  const cli = path.join(root, '.github/mcp.json');
+  const owned = await readFile(cli, 'utf8');
+  const foreign = JSON.stringify({ mcpServers: { 'start-migration': { type: 'stdio', command: 'node', args: ['x'], tools: ['*'] } } });
+  await writeFile(cli, foreign);
+  await assert.rejects(adapter('copilot', { ...options, action: 'doctor' }), { code: 'INSTALL_REGISTRATION_CONFLICT' });
+  await writeFile(cli, owned);
+  await adapter('copilot', { ...options, action: 'remove' });
+  await writeFile(cli, foreign);
+  await assert.rejects(adapter('copilot', options), { code: 'INSTALL_REGISTRATION_CONFLICT' });
+  assert.equal(await readFile(cli, 'utf8'), foreign);
 });
 
 test('ownership, checksums, symlinks and config conflicts fail closed', async () => {

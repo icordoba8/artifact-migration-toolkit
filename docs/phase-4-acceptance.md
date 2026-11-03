@@ -54,7 +54,7 @@ its host can load that plugin root. This does not register or publish a marketpl
 | Claude | user/project plugin roots | `skills/` in plugin root | native user-invocable skills | plugin `.mcp.json` |
 | Codex | user/project | `.agents/skills` | `.codex/prompts` | `.codex/config.toml` |
 | OpenCode | user/project | `.config/opencode/skills` / `.opencode/skills` | corresponding `commands/` | user `opencode.json` / project `opencode.json` |
-| Copilot | project | `.github/skills` | `.github/prompts/*.prompt.md` | `.vscode/mcp.json` |
+| Copilot | project | `.github/skills` | `.github/prompts/*.prompt.md` | `.vscode/mcp.json` and `.github/mcp.json` (1.6.6+) |
 
 Host layouts follow [Claude plugin documentation](https://code.claude.com/docs/en/plugins-reference),
 [Codex MCP configuration](https://developers.openai.com/codex/mcp/),

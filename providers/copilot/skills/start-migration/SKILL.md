@@ -329,8 +329,10 @@ installed CLI. Neither front end can attest a module-19 decision.
    MCP and CLI) names in `nextCommand` the `artifact-migration-discover` call to
    make (see Pre-execution confirmation and the migration contract's registry
    section).
-   A JSON-RPC error carries Node's `code`, `errno`, `syscall` and `path` in
-   `error.data`; classify a refusal by `error.data.code`, never the message:
+   A refusal is a tool result with `isError: true` whose `structuredContent`
+   carries `code`, `errno`, `syscall` and `path` (the CLI prints the same JSON
+   and exits non-zero; `run` in its `--json` document); classify it by
+   `structuredContent.code`, never the message:
    `EROFS`, `EACCES` or `EPERM` is a sandbox write refusal, a safety stop;
    `ENOENT` is a missing path, never a read-only refusal; `FS_ERRNO_UNKNOWN`
    means no syscall recovered the cause, so it is neither; `LOCK_HELD` is a

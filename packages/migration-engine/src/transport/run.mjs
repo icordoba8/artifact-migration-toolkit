@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { assertOptionCombination } from "./arguments.mjs";
+import { refusalOf } from "./entry.mjs";
 import {
   approveWithOperator,
   authoringRequest,
@@ -584,6 +585,6 @@ export const runMigration = async (
     if (error.code === REGISTRY_UNBOUND) return finish("BLOCKED", error.result);
     // Never downgraded to BLOCKED otherwise: exit 2 promises nothing was
     // executed, and a throw from inside the advance cannot promise that.
-    return finish("FAILED", { reason: error.message });
+    return finish("FAILED", { reason: error.message, ...refusalOf(error) });
   }
 };

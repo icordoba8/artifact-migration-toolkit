@@ -452,6 +452,12 @@ for (const source of NAMES) {
       const sourceReceipt = await readReceipt(root, source);
       const sourceConfig = await readConfig(root, source);
       await assert.rejects(stat(receiptFile(root, destination)), { code: 'ENOENT' });
+      // T1: Claude's root `.mcp.json` entry would shadow Copilot's `.github/mcp.json`.
+      if (source === 'claude' && destination === 'copilot') {
+        await assert.rejects(ensureRuntime({ provider: destination, root, store }, OFFLINE), error => error.code === 'INSTALL_REGISTRATION_CONFLICT' && error.state.file === '.mcp.json');
+        await assert.rejects(stat(receiptFile(root, destination)), { code: 'ENOENT' });
+        return;
+      }
 
       // Every network path throws. Reaching the assertions below is the proof.
       const reused = await ensureRuntime({ provider: destination, root, store }, OFFLINE);
@@ -505,8 +511,9 @@ test('D1: three agreeing siblings let a fourth provider install entirely offline
   const root = await seedConsumer('siblings agree');
   const store = sharedStore(root);
   // One network install for the whole consumer; every later provider reuses it.
-  await install('claude', root, store, first);
-  for (const provider of ['codex', 'opencode', 'copilot']) {
+  // Claude last: its `.mcp.json` entry would make a later Copilot install refuse (T1).
+  await install('codex', root, store, first);
+  for (const provider of ['opencode', 'copilot', 'claude']) {
     const reused = await ensureRuntime({ provider, root, store }, OFFLINE);
     assert.equal(reused.bootstrapped, true);
     assert.ok(NAMES.includes(reused.reusedFrom), `${provider}: no sibling reported`);
@@ -527,25 +534,25 @@ test('D1b: siblings that agree with each other but do not satisfy the requiremen
   const { first, second } = await fixtures();
   const root = await seedConsumer('siblings agree wrongly');
   const store = sharedStore(root);
-  await install('claude', root, store, first);
-  for (const provider of ['codex', 'opencode']) {
+  await install('codex', root, store, first);
+  for (const provider of ['opencode', 'copilot']) {
     assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).bootstrapped, true);
   }
   // All three agree on `first`. The skill now requires `second`, which no
   // sibling has and the store does not hold.
   await requiring(second.version);
-  const error = await ensureRuntime({ provider: 'copilot', root, store }, OFFLINE).then(() => null, e => e);
+  const error = await ensureRuntime({ provider: 'claude', root, store }, OFFLINE).then(() => null, e => e);
   assert.doesNotMatch(error.message, /disagree/i, 'agreement among siblings is not the question');
   assert.match(error.message, /network used/);
-  await assert.rejects(stat(receiptFile(root, 'copilot')), { code: 'ENOENT' });
+  await assert.rejects(stat(receiptFile(root, 'claude')), { code: 'ENOENT' });
 
   // Given the network, it installs the required release and does not adopt the
   // three agreeing siblings' older one.
-  const installed = await install('copilot', root, store, second);
+  const installed = await install('claude', root, store, second);
   assert.equal(installed.toolkit.version, second.version);
   assert.equal(installed.reusedFrom, undefined);
   // And the stale siblings are untouched until each converges on its own.
-  assert.equal((await readReceipt(root, 'claude')).toolkit.version, first.version);
+  assert.equal((await readReceipt(root, 'codex')).toolkit.version, first.version);
 });
 
 test('a provider configuration regenerated from scratch is repaired without adopting anything else', async () => {
@@ -588,21 +595,21 @@ test('D2a: siblings on different releases are not candidates and do not block a 
   const { first, second } = await fixtures();
   const root = await seedConsumer('siblings differ');
   const store = sharedStore(root);
-  await install('claude', root, store, first);
+  await install('copilot', root, store, first);
   // An explicit exact version never adopts the sibling's, so this really installs a second identity.
   await install('codex', root, store, second, { version: second.version });
-  assert.notEqual((await readReceipt(root, 'claude')).pin, (await readReceipt(root, 'codex')).pin);
+  assert.notEqual((await readReceipt(root, 'copilot')).pin, (await readReceipt(root, 'codex')).pin);
 
   // The requirement names `first`, which exactly one sibling happens to carry.
   await requiring(first.version);
   const reused = await ensureRuntime({ provider: 'opencode', root, store }, OFFLINE);
-  assert.equal(reused.reusedFrom, 'claude');
-  assert.deepEqual(identityOf(await readReceipt(root, 'opencode')), identityOf(await readReceipt(root, 'claude')));
+  assert.equal(reused.reusedFrom, 'copilot');
+  assert.deepEqual(identityOf(await readReceipt(root, 'opencode')), identityOf(await readReceipt(root, 'copilot')));
 
   // And a requirement neither sibling satisfies is met from the store, still
   // offline, still without any complaint about the siblings disagreeing.
   await requiring(second.version);
-  const converged = await ensureRuntime({ provider: 'copilot', root, store }, OFFLINE);
+  const converged = await ensureRuntime({ provider: 'claude', root, store }, OFFLINE);
   assert.equal(converged.toolkit.version, second.version);
   assert.equal(converged.network, false);
 });
@@ -789,7 +796,8 @@ test('T13: tampering is refused at every boundary, including a hand-edited recei
 // --- E. explicit version ----------------------------------------------------
 
 for (const destination of NAMES) {
-  const [siblingA, siblingB] = NAMES.filter(name => name !== destination);
+  // A Claude sibling's `.mcp.json` entry is refused by Copilot (T1).
+  const [siblingA, siblingB] = NAMES.filter(name => name !== destination && !(destination === 'copilot' && name === 'claude'));
   test(`E/${destination}: an exact version is never satisfied by a sibling on another version`, async () => {
     const { first, second } = await fixtures();
     const root = await seedConsumer(`exact version ${destination}`);

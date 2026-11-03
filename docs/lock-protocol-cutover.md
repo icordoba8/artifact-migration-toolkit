@@ -27,7 +27,7 @@ and the release installer `providers/install-support.mjs`):
   `exec` a protocol-1 release (`INSTALL_LOCK_PROTOCOL_UNSUPPORTED`). A root on
   protocol 1 can still be updated to protocol 2.
 - A protocol-1 lock file is never reclaimed automatically, alive or dead.
-- From 1.6.5 an owner also holds a liveness token, `<uuid>.fifo`, beside its
+- From 1.6.6 an owner also holds a liveness token, `<uuid>.fifo`, beside its
   entry, which records the FIFO's `dev`/`ino`. The owner holds the FIFO's only
   read end (close-on-exec, so no child it spawns keeps it), and the kernel
   closes it when the owner dies, in any PID namespace. Such an owner is
@@ -35,7 +35,7 @@ and the release installer `providers/install-support.mjs`):
   answers ENXIO. A missing, replaced or remote FIFO proves nothing
   (`LOCK_OWNER_UNKNOWN`).
 - An owner entry without a token (no `mkfifo`: Windows, FIFO-less filesystems;
-  or a lock written before 1.6.5) is reclaimed automatically only if it is a
+  or a lock written before 1.6.6) is reclaimed automatically only if it is a
   valid regular file (no symlink) recorded on this host, in this PID realm, and
   the PID probe answers ESRCH. Outside this realm it fails closed with
   `LOCK_NO_LIVENESS_TOKEN`. Anything else fails closed.
@@ -79,7 +79,7 @@ Do this once per consumer root. Do not touch roots you are not cutting over.
    `<root>/.artifact-migration-tools/<provider>.json` (`toolkit.version`,
    `release`). Record every MCP registration that points at a store release
    (`.mcp.json`, `.codex/config.toml`, `opencode.json`, `.vscode/mcp.json`,
-   `.agents/mcp.json`).
+   `.github/mcp.json`, `.agents/mcp.json`).
 2. **Stop every writer, in every namespace that can reach the root.** Close
    Claude Code, Codex, OpenCode and Copilot sessions on the root, including
    unattended ones (`--permission-mode auto`, `--approve-for-me`). Closing a

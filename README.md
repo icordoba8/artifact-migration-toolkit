@@ -377,6 +377,14 @@ toolkit, expose generated skill documents and thin command surfaces, and render
 provider-specific MCP launch configuration. **No provider may implement
 migration transitions, decisions, validation, record mutation, or recovery.**
 
+GitHub Copilot CLI loads the project MCP server (`.github/mcp.json`) only in a
+trusted folder. Trust the consumer root once, **before** the first migration
+session — accept the trust prompt of a first `copilot` launch there and exit,
+add the root to `trustedFolders` in `$COPILOT_HOME/config.json`, or pass
+`--trust-folder` to a single `copilot -p` run. Use `--add-dir` only for the
+consumer workspace, never for the release store
+(`skills/start-migration/references/provider-compatibility.md`).
+
 ```bash
 pnpm providers:sync    # regenerate all four trees and the ownership manifest
 pnpm providers:check   # verify they regenerate byte-identically; writes nothing

@@ -58,6 +58,7 @@ import { REGISTRY_UNBOUND, resolveRegistryPath } from "../store/index.mjs";
 import { DESIGN_SOURCES, PONYTAIL_TARGETS, WORKFLOW_VERSION } from "../formats/index.mjs";
 import { runMigration } from "./run.mjs";
 import { artifactDirective } from "./artifact.mjs";
+import { refusalOf } from "./entry.mjs";
 
 const SERVER_NAME = "start-migration";
 
@@ -280,9 +281,10 @@ const runArguments = ({
  * every direct `handleMessage` caller (the tests included) is D6-4 by
  * construction.
  */
-export const createSession = ({ request = null } = {}) => ({
+export const createSession = ({ request = null, withoutRelay = false } = {}) => ({
   request,
   elicitation: false,
+  withoutRelay,
 });
 
 /**
@@ -416,6 +418,7 @@ const runTool = async (arguments_, session) => {
     outcome: result.outcome,
     exitCode: exitCodeFor(result.outcome),
     reason: result.reason ?? null,
+    ...refusalOf(result),
     request: result.request ?? null,
     progress: result.progress ?? null,
     progressChecklist: result.progressChecklist ?? null,
@@ -582,15 +585,17 @@ const failure = (id, code, message) => ({
 
 const success = (id, result) => ({ jsonrpc: "2.0", id, result });
 
-// A thrown error's Node-reported fields cross as `error.data`, so a client can
-// tell EROFS from ENOENT without parsing the message. Nothing is derived.
-const internalError = (id, error) => {
-  const response = failure(id, JSON_RPC_INTERNAL_ERROR, error.message);
-  if (typeof error.code === "string") {
-    const { code, errno, syscall, path: errorPath } = error;
-    response.error.data = { code, errno, syscall, path: errorPath };
-  }
-  return response;
+// E6. A coded refusal is a tool result the agent can read and act on, the
+// code in the text too; only an uncoded fault stays a JSON-RPC error.
+const errorResult = (id, error) => {
+  const structuredContent = refusalOf(error);
+  return structuredContent
+    ? success(id, {
+        isError: true,
+        content: [{ type: "text", text: error.message.startsWith(structuredContent.code) ? error.message : `${structuredContent.code}: ${error.message}` }],
+        structuredContent,
+      })
+    : failure(id, JSON_RPC_INTERNAL_ERROR, error.message);
 };
 
 // The CLI wrappers resolve context from cwd. Serialize the whole call, including
@@ -614,7 +619,7 @@ const callTool = (id, parameters, session) => {
       }
       return await callToolInContext(id, parameters, session);
     } catch (error) {
-      return internalError(id, error);
+      return errorResult(id, error);
     } finally {
       process.chdir(previousCwd);
     }
@@ -661,6 +666,13 @@ const callToolInContext = async (id, parameters, session) => {
     );
   }
   const tool = TOOLS_BY_NAME.get(name);
+  if (session.withoutRelay && name === RELAY_TOOL) {
+    return failure(
+      id,
+      JSON_RPC_METHOD_NOT_FOUND,
+      `'${RELAY_TOOL}' is not registered on this server (--without-relay). Relay the operator's explicit answer with: artifact-migration-decision ${module} --relay <reference> --decision APPROVE|REJECT`,
+    );
+  }
   if (!tool) {
     return failure(id, JSON_RPC_METHOD_NOT_FOUND, `Unknown tool '${name}'.`);
   }
@@ -684,6 +696,9 @@ const callToolInContext = async (id, parameters, session) => {
       throw error;
     });
     const json = { type: "text", text: JSON.stringify(structuredContent, null, 2) };
+    // `migration_run` reports a coded refusal as its FAILED document.
+    const refused = structuredContent?.outcome === "FAILED" ? refusalOf(structuredContent) : null;
+    if (refused) return success(id, { isError: true, content: [json], structuredContent: refused });
     if (!PROGRESS_TOOLS.has(name)) {
       return success(id, { content: [json], structuredContent });
     }
@@ -699,7 +714,7 @@ const callToolInContext = async (id, parameters, session) => {
       content: [...(progressText ? [{ type: "text", text: progressText }] : []), json],
     });
   } catch (error) {
-    return internalError(id, error);
+    return errorResult(id, error);
   }
 };
 
@@ -734,7 +749,9 @@ export const handleMessage = async (message, session = createSession()) => {
   }
   if (method === "ping") return success(id, {});
   if (method === "tools/list")
-    return success(id, { tools: TOOLS.map(descriptorOf) });
+    return success(id, {
+      tools: TOOLS.filter((tool) => !(session.withoutRelay && tool.name === RELAY_TOOL)).map(descriptorOf),
+    });
   if (method === "tools/call") return await callTool(id, params, session);
   return failure(id, JSON_RPC_METHOD_NOT_FOUND, `Unknown method '${method}'.`);
 };
@@ -776,6 +793,7 @@ const answeredId = (line, pending) => {
 export const serve = ({
   input = process.stdin,
   output = process.stdout,
+  withoutRelay = false,
 } = {}) => {
   const lines = readline.createInterface({
     input,
@@ -804,7 +822,7 @@ export const serve = ({
         reject(error);
       }
     });
-  const session = createSession({ request });
+  const session = createSession({ request, withoutRelay });
   let chain = Promise.resolve();
   lines.on("line", (line) => {
     const answer = answeredId(line, pending);

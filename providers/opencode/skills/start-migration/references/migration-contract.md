@@ -203,6 +203,15 @@ when that file exists, else the placeholder `<registry.json>`. `run` and
 `run` bootstraps: the bootstrap is that `nextCommand`. A conflicting binding is
 still a failure, not this result.
 
+A coded refusal (a lock code such as `LOCK_HELD`, `LOCK_OWNER_UNKNOWN` or
+`LOCK_NO_LIVENESS_TOKEN`, a filesystem errno such as `EROFS`, `EACCES`, `EPERM`
+or `ENOENT`, or `FS_ERRNO_UNKNOWN`) is the same document on every transport:
+`{ "code", "errno", "syscall", "path" }`. MCP returns it as a tool result with
+`isError: true`, that document as `structuredContent` and the code in the
+text; the CLI prints it as stdout JSON and exits non-zero (`run` only in
+its `--json` FAILED document). JSON-RPC `-32603` is reserved for uncoded
+internal faults.
+
 ## Version-5 lifecycle and v5.0 workflow revision
 
 The engine's `formats/` module is the single authority for the three version
