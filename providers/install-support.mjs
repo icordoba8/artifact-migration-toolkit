@@ -37,8 +37,10 @@ const layouts = {
 // T1. VS Code reads only `.vscode/mcp.json`; Copilot CLI reads `.mcp.json` or
 // `.github/mcp.json` (trusted folder) and ignores `.vscode`. So Copilot owns a
 // second registration, and both launch `--without-relay`: 9 tools, never the relay.
-export const COPILOT_MCP_TOOLS = ['artifact_status', 'artifact_run', 'migration_status', 'migration_scan', 'migration_evidence_binding', 'migration_prefill', 'migration_capture', 'migration_pending_decisions', 'migration_run'];
-export const copilotCliEntry = server => ({ ...server, tools: COPILOT_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
+// E7. Codex's registration launches `--without-relay` too and grants the same
+// nine through `enabled_tools`. The relay is CLI-only on both hosts.
+export const RELAYLESS_MCP_TOOLS = ['artifact_status', 'artifact_run', 'migration_status', 'migration_scan', 'migration_evidence_binding', 'migration_prefill', 'migration_capture', 'migration_pending_decisions', 'migration_run'];
+export const copilotCliEntry = server => ({ ...server, tools: RELAYLESS_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
 const copilotCli = [null, null, '.github/mcp.json', 'mcpServers'];
 
 // Validate every component, including existing ancestors of the selected root.
@@ -119,12 +121,17 @@ const serversIn = (config, key) => {
   const { [nested]: servers, ...legacy } = config[outer] ?? {};
   return { ...legacy, ...servers };
 };
+// `legacy` for Codex and Copilot is the <=1.6.5 relay-carrying registration, accepted only so it can converge.
 const serverFor = (provider, release, legacy = false) => {
   const launch = { command: process.execPath, args: [path.join(release, 'packages/migration-engine/src/mcp-server.mjs')] };
-  if (provider === 'copilot' && !legacy) launch.args.push('--without-relay');
+  if (['copilot', 'codex'].includes(provider) && !legacy) launch.args.push('--without-relay');
   return provider === 'opencode' ? opencodeServer([launch.command, ...launch.args], legacy)
-    : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
+    : provider === 'copilot' ? { type: 'stdio', ...launch }
+      : provider === 'codex' && !legacy ? { ...launch, enabled_tools: RELAYLESS_MCP_TOOLS } : launch;
 };
+// The body of the owned `[mcp_servers.start-migration]` table; JSON arrays and strings are valid TOML.
+export const codexToml = server => `command = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n` +
+  (server.enabled_tools ? `enabled_tools = ${JSON.stringify(server.enabled_tools)}\n` : '');
 // Copilot requires `tools` for a local server and builds its environment from `env`.
 const copilotCliServer = release => copilotCliEntry(serverFor('copilot', release));
 
@@ -132,7 +139,8 @@ async function historicalTemplateMatches(release, provider, layout, adapter) {
   const template = await readFile(await safePath(release, `providers/${provider}/${adapter.mcpTemplate}`), 'utf8');
   if (layout[3] === null) {
     const sections = template.split('[mcp_servers.start-migration]\n');
-    return sections.length === 2 && sections[1].trim() === 'command = "node"\nargs = ["{{ENGINE_MCP_ENTRY}}"]';
+    return sections.length === 2 && [codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] }),
+      codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'], enabled_tools: RELAYLESS_MCP_TOOLS })].includes(`${sections[1].trim()}\n`);
   }
   const parsed = JSON.parse(template);
   const launch = { command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] };
@@ -163,7 +171,7 @@ async function historicalOwned(receipt, provider, layout) {
       if (adapter.provider !== provider || !same(adapter.toolkit, manifest.toolkit) ||
           !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
-    for (const legacy of ['opencode', 'copilot'].includes(provider) ? [false, true] : [false]) {
+    for (const legacy of provider === 'claude' ? [false] : [false, true]) {
       owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release), release: item.release, pin: item.pin, manifest });
     }
   }
@@ -203,7 +211,7 @@ function mergeConfig(raw, layout, previous, server, historical = []) {
     }
     if (/start-migration|BEGIN artifact-migration-tools|END artifact-migration-tools/.test(text)) throw conflict(layout[2], 'Conflicting MCP configuration');
     const separator = text && !text.endsWith('\n') ? '\n' : '';
-    const fresh = server ? `${begin}[mcp_servers.start-migration]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n${end}` : null;
+    const fresh = server ? `${begin}[mcp_servers.start-migration]\n${codexToml(server)}${end}` : null;
     // Restoring re-emits the receipt's own bytes, so the repair adds nothing of
     // its own and the next validation matches exactly. A merge that genuinely
     // changes the registration (update/rollback) writes the new block instead
@@ -366,7 +374,7 @@ async function adoptRegistration(provider, layout, store, current, rawConfig, ra
   const names = await readdir(store).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   const releases = names.filter(name => /^\d+\.\d+\.\d+-[a-f0-9]{64}$/.test(name)).map(name => ({ release: path.join(store, name), pin: `sha256:${name.slice(-64)}` }));
   const candidates = [
-    ...(['opencode', 'copilot'].includes(provider) ? [false, true] : [false]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
+    ...(provider === 'claude' ? [false] : [false, true]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
     ...await historicalOwned({ ...current, store, releases }, provider, layout),
   ];
   const parse = raw => { try { return JSON.parse(raw); } catch { return null; } };

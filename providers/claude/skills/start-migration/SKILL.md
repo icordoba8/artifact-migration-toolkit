@@ -367,9 +367,11 @@ module 19, when `operatorApproval.blocked` is null:
 2. Only when the user's next message is an explicit `APPROVE` or `REJECT`, call
    the MCP tool `migration_relay_decision` with `module`, `cwd`,
    `reference` = `operatorApproval.reference` unchanged, and `decision` = that
-   answer. Without MCP, run the same relay through the CLI from the same
+   answer. Without that tool, run the same relay through the CLI from the same
    working directory:
    `artifact-migration-decision <module> --relay <operatorApproval.reference> --decision <APPROVE|REJECT>`.
+   The MCP relay tool is not granted by default on Codex or GitHub Copilot;
+   there the relay is CLI-only.
    Anything else relays nothing; show the review again if asked.
 3. Then call `migration_run` (or `artifact-migration-run <module> --json`)
    again; it resumes normally.

@@ -34,7 +34,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { copilotCliEntry } from "../providers/install-support.mjs";
+import { codexToml, copilotCliEntry, RELAYLESS_MCP_TOOLS } from "../providers/install-support.mjs";
 
 const defaultRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -301,8 +301,9 @@ const providers = [
     }),
     mcp: {
       output: "providers/codex/config.toml",
+      // E7: relay-less like Copilot, with the nine tools granted by `enabled_tools`.
       render: (server) =>
-        `# ${generatedNotice}\n\n[mcp_servers.${MCP_SERVER_NAME}]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n`,
+        `# ${generatedNotice}\n\n[mcp_servers.${MCP_SERVER_NAME}]\n${codexToml({ ...server, args: [...server.args, "--without-relay"], enabled_tools: RELAYLESS_MCP_TOOLS })}`,
     },
     install: {
       mechanism: "agent-skills-directory",

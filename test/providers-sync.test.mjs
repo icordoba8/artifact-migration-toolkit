@@ -38,7 +38,7 @@ import {
   runProvidersSync,
 } from "../scripts/providers-sync.mjs";
 import { payloadPaths, releaseCheck } from "../scripts/release.mjs";
-import { COPILOT_MCP_TOOLS } from "../providers/install-support.mjs";
+import { RELAYLESS_MCP_TOOLS } from "../providers/install-support.mjs";
 import {
   IDENTITY_BASENAME,
   canonicalSkillNames,
@@ -344,12 +344,12 @@ test("every MCP template launches the installed engine through a placeholder, ne
   const copilot = JSON.parse(await readText(root, "providers/copilot/mcp.json"));
   const relayless = { type: "stdio", command: "node", args: [ENGINE_MCP_ENTRY_PLACEHOLDER, "--without-relay"] };
   assert.deepEqual(copilot.servers["start-migration"], relayless);
-  assert.deepEqual(copilot.mcpServers["start-migration"], { ...relayless, tools: COPILOT_MCP_TOOLS, env: { pnpm_config_pm_on_fail: "error" } });
+  assert.deepEqual(copilot.mcpServers["start-migration"], { ...relayless, tools: RELAYLESS_MCP_TOOLS, env: { pnpm_config_pm_on_fail: "error" } });
   const listed = spawnSync(process.execPath, [fileURLToPath(new URL("../packages/migration-engine/src/mcp-server.mjs", import.meta.url)), "--without-relay"], {
     encoding: "utf8",
     input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`,
   });
-  assert.deepEqual(JSON.parse(listed.stdout).result.tools.map((tool) => tool.name), COPILOT_MCP_TOOLS);
+  assert.deepEqual(JSON.parse(listed.stdout).result.tools.map((tool) => tool.name), RELAYLESS_MCP_TOOLS);
   const fragment = JSON.parse(await readText(root, "providers/opencode/opencode.fragment.json"));
   assert.deepEqual(fragment.mcp.servers["start-migration"], {
     type: "local",
@@ -362,7 +362,9 @@ test("every MCP template launches the installed engine through a placeholder, ne
 
   const toml = await readText(root, "providers/codex/config.toml");
   assert.match(toml, /^\[mcp_servers\.start-migration\]$/m);
-  assert.match(toml, /^args = \["\{\{ENGINE_MCP_ENTRY\}\}"\]$/m);
+  // E7: Codex ships relay-less too, granting the same nine through enabled_tools.
+  assert.ok(toml.includes(`\nargs = ${JSON.stringify([ENGINE_MCP_ENTRY_PLACEHOLDER, "--without-relay"])}\n`));
+  assert.ok(toml.includes(`\nenabled_tools = ${JSON.stringify(RELAYLESS_MCP_TOOLS)}\n`));
 
   // No template, and no generated document, may name a consumer-relative
   // engine root. That is the registration extraction exists to delete.

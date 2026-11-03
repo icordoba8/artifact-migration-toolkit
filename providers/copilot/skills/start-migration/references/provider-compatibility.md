@@ -20,10 +20,17 @@ delegated children. All four providers use the same engine-owned `STANDARD_LOCAL
 policy, candidate-bound review and relay, exactly as `SKILL.md` *Operator
 decisions* states: elicitation through `migration_run` / `artifact_run` when the
 host renders it; otherwise, for a module-19 `OPERATOR_DECISION`, the user's
-next explicit answer relayed through `migration_relay_decision` or, without MCP,
-`artifact-migration-decision <module> --relay <reference> --decision APPROVE|REJECT`,
+next explicit answer relayed through `migration_relay_decision` or, without that
+tool, `artifact-migration-decision <module> --relay <reference> --decision APPROVE|REJECT`,
 which calls the same engine function. No provider adds, removes or reinterprets
-a decision rule.
+a decision rule. The MCP relay tool is not granted by default for Codex or
+GitHub Copilot: on both, the relay is CLI-only.
+
+The Codex adapter's registration (`.codex/config.toml`, project or user)
+launches the server with `--without-relay` and grants exactly the nine
+remaining tools through `enabled_tools`, on install and on update from an
+earlier release, with no flag. `migration_relay_decision` is neither listed
+nor granted, and a call to it is refused by name.
 
 The Copilot adapter registers the same server twice, one file per client:
 `.vscode/mcp.json` (`servers`, read by VS Code) and `.github/mcp.json`
