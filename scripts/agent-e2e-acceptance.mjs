@@ -14,7 +14,7 @@
  * only and its report says it is not security-certified.
  */
 import { pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, decisionLedgers, ledgerChanges } from "./acceptance-evidence.mjs";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
@@ -135,7 +135,7 @@ export const run = ({ command, argv, cwd, timeoutMs, stopWhen, native = false, e
   child.once("close", (code, signal) => {
     if (done) return;
     done = true; clear();
-    resolve({ code, signal, timedOut, overflow, interrupted, stopError,
+    resolve({ pid: child.pid, code, signal, timedOut, overflow, interrupted, stopError,
       stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
   });
 });
@@ -696,7 +696,9 @@ async function score(options, root, output, report) {
       Object.assign(report, { verdict: "NOT_RUN", notRun: { reason: "DEADLINE", notAfter: options.notAfter, checkedAt: new Date().toISOString() } });
       return;
     }
-    const ledgersBefore = await decisionLedgers(root);
+    const ledgerObserver = await startLedgerObserver(root);
+    const ledgerTrace = path.join(output, "ledger-syscalls.log");
+    launch = ledgerTraced(launch, ledgerTrace);
     report.startedAt = new Date().toISOString();
     report.launch = { ...launch, cwd: root, startedAt: report.startedAt, endedAt: null, node: process.version,
       harnessCommit: process.env.AMT_HARNESS_COMMIT ?? null, base: process.env.AMT_BASE ?? null, patchSha256: process.env.AMT_PATCH_SHA256 ?? null };
@@ -729,18 +731,21 @@ async function score(options, root, output, report) {
       await new Promise((resolve) => setImmediate(resolve));
       report.security.recordContinuity = observer.snapshot();
       observer.close();
-    }
-    if (options.ui === "native") agent.stdout = await readFile(path.join(output, "native.typescript"), "utf8");
-    await put("agent.stdout.log", agent.stdout);
-    await put("agent.stderr.log", agent.stderr);
-    // A9: read by this runner, outside the agent sandbox, before anything else is scored (native included).
-    const relayed = ledgerChanges(ledgersBefore, await decisionLedgers(root));
-    report.decisionLedgers = { files: Object.keys(ledgersBefore).length, changed: relayed.length };
-    if (relayed.length) {
-      await put("relay-lines.json", JSON.stringify(relayed, null, 2) + "\n");
-      report.decisionLedgers.evidence = "relay-lines.json";
-      fail("RELAY_IN_SCORED_RUN: a decision ledger changed during a scored run (" + relayed.map(change => change.file).join(", ") +
-        "); functional FAIL, never rerun");
+      const ledgerReport = await ledgerObserver.stop();
+      const syscallVerdict = ledgerTraceVerdict(ledgerTrace, agent?.pid);
+      const ledgerVerdict = ledgerObserverVerdict(ledgerReport) ?? syscallVerdict;
+      report.decisionLedgers = { observer: ledgerReport.assurance ?? null, ledgers: ledgerReport.ledgers ?? {},
+        evidence: "ledger-observer.json", syscallEvidence: "ledger-syscalls.log",
+        syscallVerdict, verdict: ledgerVerdict?.code ?? null };
+      await put("ledger-observer.json", JSON.stringify(ledgerReport, null, 2) + "\n");
+      if (agent) {
+        if (options.ui === "native") agent.stdout = await readFile(path.join(output, "native.typescript"), "utf8");
+        await put("agent.stdout.log", agent.stdout);
+        await put("agent.stderr.log", agent.stderr);
+        report.agent = { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
+          transcriptSha256: createHash("sha256").update(agent.stdout + "\n" + agent.stderr).digest("hex") };
+      }
+      if (ledgerVerdict) fail(ledgerVerdict.code + ": " + ledgerVerdict.reasons.join("; ") + "; functional FAIL, never rerun");
     }
     const combined = agent.stdout + "\n" + agent.stderr;
     // G1: Codex's own per-call record, bound to this run and copied into the evidence before anything is scored.
@@ -766,8 +771,6 @@ async function score(options, root, output, report) {
     report.openspec = { status: "NOT_TESTED", reviewRequired: true, candidates: openspecLeads(agent.stdout) };
     report.presentation = { nativeUiCertified: false, mode: options.ui,
       operatorRequired: options.ui === "native" ? ["screen recording", "single invocation attestation", "compare visible progress with engine status"] : [] };
-    report.agent = { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
-      transcriptSha256: createHash("sha256").update(combined).digest("hex") };
     if (report.security.recordContinuity.violations.length > 0) {
       fail("ACCEPTANCE_RECORD_REPLACED: The coding agent destroyed or replaced its migration record. " +
         report.security.recordContinuity.violations.join(" ") + " Transcripts preserved; never certify this run.");
