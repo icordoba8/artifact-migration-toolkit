@@ -1,0 +1,25 @@
+vault restricted/ classification (agent-run, AGENT_OBSERVED; owner decision HUMAN_ATTESTED: codex-login.log = credential material, fail-closed)
+source: /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/amt-evidence-vault.tar, member m15-20261030T2045Z/restricted/
+method: tar headers (name, type, size) and in-process SHA-256 while copying; no file contents opened, printed or copied out
+entries: 10146 (7618 files, 2528 dirs, 0 symlinks, 0 other)
+named credential classes (auth.json, tokens, credential hashes, keys, cookies): none
+credential-class by owner decision: 3 x codex/log/codex-login.log (never read, never hashed, removed)
+not credentials by name: 3 x 45-byte .npmrc and token/secret-named docs in a public Codex plugin template cache
+
+SUPERSEDED 2026-11-03T03:27:45Z (agent-run, AGENT_OBSERVED; owner decision HUMAN_ATTESTED: login logs treated as credential material, fail-closed)
+superseded: amt-evidence-vault.tar sha256 d672d59326ac2b29719f397735c8ad9955a1d0561c2bb97d78b04de92bd620fd size 481044480
+superseded: amt-evidence-vault.files.sha256 (7631 lines; 3 lines for the removed members not carried forward)
+removed members (never read): 3 x restricted/tmp/*/codex/log/codex-login.log (auth-20261030T1715Z, auth2-20261030T1750Z, codex-recovery-20261030T125104Z)
+replacement: amt-evidence-vault-sanitized-20261103.tar sha256 620bf3b77d41c07fcdcc92c688d0e3b2c937fc625be58d479bfba11c94bccc2c
+verified before removal: sha256sum -c amt-evidence-vault-sanitized-20261103.tar.sha256 OK; names = old minus 3; per-file 7628 OK 0 FAILED
+
+$ (cd /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy && sha256sum -c amt-evidence-vault-sanitized-20261103.tar.sha256)
+amt-evidence-vault-sanitized-20261103.tar: OK
+amt-evidence-vault-sanitized-20261103.restricted-inventory.tsv: OK
+amt-evidence-vault-sanitized-20261103.files.sha256: OK
+exit=0
+$ cat amt-evidence-vault-sanitized-20261103.tar.sha256
+620bf3b77d41c07fcdcc92c688d0e3b2c937fc625be58d479bfba11c94bccc2c  amt-evidence-vault-sanitized-20261103.tar
+6852433c137becb38ed4012f496999acc916f7fc98affc77afd5bde1873ad8b9  amt-evidence-vault-sanitized-20261103.restricted-inventory.tsv
+e89e981601354bed81c26da9437150764c4a45687d6d842a5997c7660cfc72d2  amt-evidence-vault-sanitized-20261103.files.sha256
+out of scope, open: local source /home/utmwac/amt-evidence-vault still holds the 3 logs (separate task)

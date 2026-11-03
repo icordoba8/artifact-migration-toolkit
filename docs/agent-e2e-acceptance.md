@@ -328,6 +328,13 @@ cover the launch window is `UNBOUND` and never counts for a native row; a `BOUND
 review (nonce visible, terminal window, single invocation). PTY typescript, recording and the operator's
 REC=yes stay three separate evidence types.
 
+Relay detection (A9). Immediately before the agent starts and right after it exits, the runner reads every
+`decisions/operator-decisions.ndjson` under the consumer's `.agents/knowledge/migrations`. It reads from the
+host, outside the agent sandbox, and never follows a symlink or opens a FIFO. This applies to headless and
+native runs alike. If any ledger line was added, rewritten or removed, the run fails with
+`RELAY_IN_SCORED_RUN`. This is a functional FAIL, never rerun, and the changed lines are copied into
+`relay-lines.json`. The engine's own `auto-decisions.ndjson` is not a human ledger and is not checked.
+
 These capabilities do not supply missing certification evidence. The native launcher captures terminal
 output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
 review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery needs an engine with a

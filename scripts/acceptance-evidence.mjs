@@ -1,6 +1,6 @@
 /** Trusted-side evidence only. Never repairs a consumer or awards human acceptance. */
 import { createHash } from 'node:crypto';
-import { readlinkSync } from 'node:fs';
+import { constants, readlinkSync } from 'node:fs';
 import { lstat, readdir, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -29,6 +29,30 @@ export async function snapshotTree(root) {
   return entries;
 }
 export const sameTree = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * A9: every human/relay decision ledger in the consumer, read host-side. snapshotTree never follows a symlink
+ * or opens a FIFO; an entry under the ledger name that is not a regular file stands in as one line.
+ */
+export async function decisionLedgers(root) {
+  const base = path.join(root, '.agents/knowledge/migrations');
+  const ledgers = {};
+  if (!await exists(base)) return ledgers;
+  for (const [name, item] of Object.entries(await snapshotTree(base))) {
+    if (path.basename(name) !== 'operator-decisions.ndjson') continue;
+    ledgers[name] = item.sha256
+      ? (await readFile(path.join(base, name), { encoding: 'utf8', flag: constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK })).split('\n').filter(Boolean)
+      : ['<not a regular file: ' + JSON.stringify(item) + '>'];
+  }
+  return ledgers;
+}
+/** Each ledger whose lines differ, with its lines from the first difference on (none for a truncation or removal). */
+export const ledgerChanges = (before, after) => [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().flatMap(file => {
+  const was = before[file] ?? [], now = after[file] ?? [];
+  if (sameTree(was, now)) return [];
+  const at = now.findIndex((line, i) => line !== was[i]);
+  return [{ file, lines: at < 0 ? [] : now.slice(at) }];
+});
 
 export const pendingTransaction = async record => await exists(path.join(record, 'transaction.json')) || await exists(path.join(record, 'advance.journal'));
 

@@ -10,7 +10,7 @@ import { buildRelease } from "../scripts/release.mjs";
 import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
-import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout } from '../scripts/acceptance-evidence.mjs';
+import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout, decisionLedgers, ledgerChanges } from '../scripts/acceptance-evidence.mjs';
 import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src/lifecycle/index.mjs';
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
@@ -567,15 +567,17 @@ test("the runner fails visibly on bad arguments run directly or through a symlin
 test('artifact acceptance uses the installed artifact CLI and independent verifier pin', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-artifact-'));
   try {
-    const { target, bin, receipt, verifier } = await installedArtifactCandidate(root);
-    const cli = JSON.parse(receipt).commands['artifact-migrate'];
-    await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\nexec ' + cli.map(x => "'" + x + "'").join(' ') +
-      " legacy/source.js --target src/result.js --mode auto --json\n", { mode: 0o755 });
+    const consumer = await installedArtifactCandidate(root), { target, verifier } = consumer;
+    // The fake agent runs the installed artifact CLI, then any extra shell.
+    const artifactRun = async ({ target, bin, receipt }, output, extra = '') => {
+      await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\n' + JSON.parse(receipt).commands['artifact-migrate'].map(x => "'" + x + "'").join(' ') +
+        ' legacy/source.js --target src/result.js --mode auto --json\n' + extra, { mode: 0o755 });
+      return spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth', '--target', 'auth',
+        '--output', output, '--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target, '--artifact-target', 'src/result.js',
+        '--isolation', 'none'], { encoding: 'utf8', timeout: 60000, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+    };
     const output = path.join(root, 'reports');
-    execFileSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
-      '--target', 'auth', '--output', output, '--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target,
-      '--artifact-target', 'src/result.js', '--isolation', 'none'],
-    { timeout: 60000, stdio: 'pipe', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+    await artifactRun(consumer, output);
     const report = JSON.parse(await readFile(path.join(output, 'report.json')));
     assert.equal(report.verdict, 'BOOTSTRAP_PASS');
     assert.match(report.record, /artifacts\/source-/);
@@ -586,10 +588,19 @@ test('artifact acceptance uses the installed artifact CLI and independent verifi
     assert.equal(report.independentVerification, null); // Bootstrap must not call the verifier or claim completion.
     assert.equal(report.presentation.nativeUiCertified, false);
     assert.equal(report.openspec.status, 'NOT_TESTED');
+    assert.equal(report.decisionLedgers.changed, 0); // A9: no new line, verdict unaffected.
+    // A9: a decision line forged by plain file I/O during a scored run is a functional FAIL, never rerun.
+    const forgedRun = await artifactRun(await installedArtifactCandidate(path.join(root, 'forged')), path.join(root, 'forged-report'),
+      'for d in .agents/knowledge/migrations/artifacts/*/; do mkdir -p "$d/decisions"; ' +
+      'echo \'{"id":"DEC-forged","decision":"APPROVE"}\' >> "$d/decisions/operator-decisions.ndjson"; done\n');
+    const forgedReport = JSON.parse(await readFile(path.join(root, 'forged-report/report.json')));
+    assert.equal(forgedRun.status, 1);
+    assert.equal(forgedReport.verdict, 'FAIL');
+    assert.match(forgedReport.failure, /^RELAY_IN_SCORED_RUN/);
+    assert.equal(forgedReport.rerunEligible, false);
+    assert.match(await readFile(path.join(root, 'forged-report/relay-lines.json'), 'utf8'), /DEC-forged/);
     await writeFile(verifier, 'process.exit(1);');
-    const second = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
-      '--target', 'auth', '--output', path.join(root, 'second'), '--kind', 'artifact', '--source', 'legacy/source.js',
-      '--source-root', target, '--artifact-target', 'src/result.js', '--isolation', 'none'], { encoding: 'utf8' });
+    const second = await artifactRun(consumer, path.join(root, 'second'));
     assert.match(second.stderr, /verifier digest does not match/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -911,6 +922,18 @@ test('snapshot notices empty-directory, mode and symlink mutations', async () =>
     const fifo = await snapshotTree(root);
     assert.equal(fifo['owner.fifo'].type, 'fifo');
     assert.equal(fifo['owner.fifo'].sha256, undefined);
+    // A9: a ledger planted as a symlink is a change by type; its target is never read.
+    const decisions = path.join(root, '.agents/knowledge/migrations/modules/auth/decisions');
+    await mkdir(decisions, { recursive: true });
+    await writeFile(path.join(root, 'outside-secret'), 'NOT-A-LEDGER-LINE\n');
+    await symlink(path.join(root, 'outside-secret'), path.join(decisions, 'operator-decisions.ndjson'));
+    const planted = await decisionLedgers(root);
+    assert.doesNotMatch(JSON.stringify(planted), /NOT-A-LEDGER-LINE/);
+    assert.equal(ledgerChanges({}, planted).length, 1);
+    // Truncation and a replayed identical line are changes too.
+    assert.deepEqual(ledgerChanges({ l: ['a', 'b'] }, { l: ['a'] }), [{ file: 'l', lines: [] }]);
+    assert.deepEqual(ledgerChanges({ l: ['a'] }, { l: ['a', 'a'] }), [{ file: 'l', lines: ['a'] }]);
+    assert.deepEqual(ledgerChanges({ l: ['a'] }, { l: ['a'] }), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -1138,9 +1161,9 @@ test('native launcher: nonce handoff, Enter to launch, one operator turn; no pro
       const { target, receipt, env } = await codexCandidate(root);
       const installed = JSON.parse(receipt);
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-      const nativeRun = (output, prompts = [], extra = []) => spawnSync('script', ['--quiet', '--return', '--command', [process.execPath, script.pathname, '--provider', 'codex',
+      const nativeRun = (output, prompts = [], extra = [], cmd = '') => spawnSync('script', ['--quiet', '--return', '--command', [process.execPath, script.pathname, '--provider', 'codex',
         '--cwd', target, '--module', 'auth', '--target', 'auth', '--output', output, '--ui', 'native', ...extra].map(quote).join(' '), '/dev/null'],
-      { env: { ...env, FAKE_CODEX_PROMPTS: JSON.stringify(prompts) }, input: '\n', encoding: 'utf8', timeout: 60000 });
+      { env: { ...env, FAKE_CODEX_PROMPTS: JSON.stringify(prompts), FAKE_CODEX_CMD: cmd }, input: '\n', encoding: 'utf8', timeout: 60000 });
       // The installed entry must be exactly the verified release's MCP server, or native refuses before launch.
       const entry = server => '# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ' + JSON.stringify(installed.commands['artifact-migration-discover'][0]) +
         '\nargs = ' + JSON.stringify([path.join(installed.release, 'packages/migration-engine/src', server)]) + '\n# END artifact-migration-tools\n';
@@ -1186,6 +1209,13 @@ test('native launcher: nonce handoff, Enter to launch, one operator turn; no pro
       assert.equal(rescued.status, 1);
       assert.match(rescuedReport.failure, /ACCEPTANCE_NATIVE_TURNS/);
       assert.equal(rescuedReport.rerunEligible, false);
+      // A9 native: a relay line forged by plain file I/O in the one valid turn still fails, and is never rerun.
+      const ledgerDir = '.agents/knowledge/migrations/modules/auth/decisions';
+      nativeRun(path.join(root, 'relayed'), [idleReport.invocation], [], `mkdir -p ${ledgerDir} && echo '{"id":"DEC-relayed"}' >> ${ledgerDir}/operator-decisions.ndjson`);
+      const relayedReport = JSON.parse(await readFile(path.join(root, 'relayed/report.json')));
+      assert.match(relayedReport.failure, /^RELAY_IN_SCORED_RUN/);
+      assert.equal(relayedReport.rerunEligible, false);
+      assert.match(await readFile(path.join(root, 'relayed/relay-lines.json'), 'utf8'), /DEC-relayed/);
       await writeFile(path.join(installed.store, '..', 'bin', 'codex'), '#!/bin/sh\necho codex-cli 0.166.0\n', { mode: 0o755 });
       const drift = spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', target, '--module', 'auth',
         '--target', 'auth', '--output', path.join(root, 'version-drift')], { env, encoding: 'utf8', timeout: 60000 });

@@ -1,13 +1,13 @@
 second copy of docs/investigations/infra-harness-20261102 (agent-run, AGENT_OBSERVED; not owner evidence)
 destination: /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy
-written: 2026-11-03T02:02:15Z
-supersedes: amt-infra-harness-20261102-evidence.tar (146d06fc…7d15, left in place; TAP logs rerun after added race/sigil assertions)
-$ cat amt-infra-harness-20261102-evidence-r2.tar.sha256
-320da9e11cbe88be0ccc3858c7284c30245a244396fe38a5a20cc0bc66f82884  amt-infra-harness-20261102-evidence-r2.tar
-$ (cd /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy && sha256sum -c amt-infra-harness-20261102-evidence-r2.tar.sha256)
-amt-infra-harness-20261102-evidence-r2.tar: OK
+written: 2026-11-03T12:51:57Z
+supersedes: amt-infra-harness-20261102-evidence-r2.tar (320da9e1…2884, left in place; TAP logs rerun after A9 relay detection; owner-blocks V1, vault classification and model-log row added)
+$ cat amt-infra-harness-20261102-evidence-r3.tar.sha256
+6d1863ec7428e3bdaf956c27284dd0b15eb7a9239b066d676153420bf82282aa  amt-infra-harness-20261102-evidence-r3.tar
+$ (cd /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy && sha256sum -c amt-infra-harness-20261102-evidence-r3.tar.sha256)
+amt-infra-harness-20261102-evidence-r3.tar: OK
 exit=0
-$ tar -xf /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/amt-infra-harness-20261102-evidence-r2.tar -C <scratch> && cd <scratch>/infra-harness-20261102 && sha256sum -c SHA256SUMS
+$ tar -xf /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/amt-infra-harness-20261102-evidence-r3.tar -C <scratch> && cd <scratch>/infra-harness-20261102 && sha256sum -c SHA256SUMS
 ./checks/engine-targets.txt: OK
 ./checks/prior-attempt-19-19/dependency-restore.txt: OK
 ./checks/prior-attempt-19-19/t3-node2213-tests.txt: OK
@@ -15,6 +15,7 @@ $ tar -xf /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/amt-infra-harne
 ./checks/s2-harness-engine-1.6.4-node22.13.0.tap: OK
 ./checks/s2-harness-joint-2782612-node22.13.0.tap: OK
 ./checks/t3-harness-node22.13.0.tap: OK
+./checks/vault-restricted-classification.txt: OK
 ./model-log.md: OK
 ./owner-blocks.md: OK
 ./plan.md: OK

@@ -34,6 +34,31 @@ I12 OFF_DEVICE_RECEIPT: <where the copy is seen off this device (e.g. OneDrive w
 I12 ATTESTATION: HUMAN_ATTESTED by <name>, <UTC time>
 ```
 
+## V1 — Codex login revocation and recycle-bin purge (vault `restricted/`)
+
+By your fail-closed decision, three `codex/log/codex-login.log` files in the
+old vault tar count as credential material. The agent removed them from the
+OneDrive copy without reading them (see "Agent-observed" below). Two things are
+left that only you can do:
+
+1. **Provider-side revocation** of the Codex logins used by the homes
+   `auth-20261030T1715Z`, `auth2-20261030T1750Z` and
+   `codex-recovery-20261030T125104Z`. Use ChatGPT → Settings → Security → "Log
+   out of all devices". If an API key was used, revoke it in the OpenAI
+   platform console instead.
+2. **Purge the OneDrive recycle bin**, including the second-stage recycle bin,
+   of `amt-evidence-vault.tar`, `amt-evidence-vault.tar.sha256` and
+   `amt-evidence-vault.files.sha256`, all removed 2026-11-03.
+
+```text
+V1 HOMES: auth-20261030T1715Z, auth2-20261030T1750Z, codex-recovery-20261030T125104Z
+V1 REVOKED_AT: <UTC time of provider-side sign-out / key revocation>
+V1 REVOKE_METHOD: <"Log out of all devices" | API key revoked in platform console | ...>
+V1 REVOKE_CONFIRMATION: <what the provider showed that confirms it, no secrets>
+V1 RECYCLE_BIN_PURGED_AT: <UTC time; first and second stage>
+V1 ATTESTATION: HUMAN_ATTESTED by <name>, <UTC time>
+```
+
 ## Agent-observed (A6)
 
 Filled in by the agent from commands it ran itself. This is not owner evidence.
@@ -50,11 +75,21 @@ Filled in by the agent from commands it ran itself. This is not owner evidence.
   there on the tar, and on `SHA256SUMS` inside a scratch extraction of that copy.
   The outputs are in `checks/second-copy.txt`. That file is not listed in
   `SHA256SUMS` because it records the copy of `SHA256SUMS`.
-- **Risk for the owner.** The pre-existing `amt-evidence-vault.tar` (written
-  2026-10-31, before this session) contains
-  `m15-20261030T2045Z/restricted/` (10,146 entries; listed by name only, never
-  opened; no entry is named `auth.json`). It sits in a cloud-synced folder.
-  Whether that subtree may stay there is an owner decision; the agent did not
-  alter or delete it.
+- **Vault `restricted/` outcome (2026-11-03).** The agent inventoried
+  `m15-20261030T2045Z/restricted/` in the old `amt-evidence-vault.tar` from tar
+  headers plus in-process SHA-256; no contents were opened. It found 10,146
+  entries (7,618 files, 2,528 dirs) and no `auth.json`, token, key or cookie by
+  name. By your fail-closed decision, 3 × `codex/log/codex-login.log` count as
+  credential material; they were never read or hashed. The agent wrote
+  `amt-evidence-vault-sanitized-20261103.tar` (`620bf3b7…cc2c`) without them
+  and verified it: `sha256sum -c` OK, names = old minus 3, per-file 7,628 OK /
+  0 failed. It then removed the old tar, `.tar.sha256` and `.files.sha256`.
+  Their hashes are in `amt-evidence-vault.SUPERSEDED.txt` in the vault. Record:
+  `checks/vault-restricted-classification.txt`. Revocation and recycle-bin
+  purge are block V1 above.
+  - Still open (separate task): the local source `/home/utmwac/amt-evidence-vault`
+    still holds the 3 logs.
+  - Still open: the name screen of `m15-certification-final-20261101T0100Z.tar`
+    had 1 match; that tar was not inventoried.
 - OneDrive sync status, and receipt off this device, are not observable here.
   They are the I12 block above.

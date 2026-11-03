@@ -14,7 +14,7 @@
  * only and its report says it is not security-certified.
  */
 import { pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson } from "./acceptance-evidence.mjs";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, decisionLedgers, ledgerChanges } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
@@ -550,6 +550,7 @@ async function score(options, root, output, report) {
       Object.assign(report, { verdict: "NOT_RUN", notRun: { reason: "DEADLINE", notAfter: options.notAfter, checkedAt: new Date().toISOString() } });
       return;
     }
+    const ledgersBefore = await decisionLedgers(root);
     report.startedAt = new Date().toISOString();
     report.launch = { ...launch, cwd: root, startedAt: report.startedAt, endedAt: null, node: process.version,
       harnessCommit: process.env.AMT_HARNESS_COMMIT ?? null, base: process.env.AMT_BASE ?? null, patchSha256: process.env.AMT_PATCH_SHA256 ?? null };
@@ -586,6 +587,15 @@ async function score(options, root, output, report) {
     if (options.ui === "native") agent.stdout = await readFile(path.join(output, "native.typescript"), "utf8");
     await put("agent.stdout.log", agent.stdout);
     await put("agent.stderr.log", agent.stderr);
+    // A9: read by this runner, outside the agent sandbox, before anything else is scored (native included).
+    const relayed = ledgerChanges(ledgersBefore, await decisionLedgers(root));
+    report.decisionLedgers = { files: Object.keys(ledgersBefore).length, changed: relayed.length };
+    if (relayed.length) {
+      await put("relay-lines.json", JSON.stringify(relayed, null, 2) + "\n");
+      report.decisionLedgers.evidence = "relay-lines.json";
+      fail("RELAY_IN_SCORED_RUN: a decision ledger changed during a scored run (" + relayed.map(change => change.file).join(", ") +
+        "); functional FAIL, never rerun");
+    }
     const combined = agent.stdout + "\n" + agent.stderr;
     // G1: Codex's own per-call record, bound to this run and copied into the evidence before anything is scored.
     let rollout = null, rolloutText = "";
