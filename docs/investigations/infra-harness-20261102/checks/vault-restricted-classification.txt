@@ -1,0 +1,44 @@
+vault restricted/ classification (agent-run, AGENT_OBSERVED; owner decision HUMAN_ATTESTED: codex-login.log = credential material, fail-closed)
+source: /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/amt-evidence-vault.tar, member m15-20261030T2045Z/restricted/
+method: tar headers (name, type, size) and in-process SHA-256 while copying; no file contents opened, printed or copied out
+entries: 10146 (7618 files, 2528 dirs, 0 symlinks, 0 other)
+named credential classes (auth.json, tokens, credential hashes, keys, cookies): none
+credential-class by owner decision: 3 x codex/log/codex-login.log (never read, never hashed, removed)
+not credentials by name: 3 x 45-byte .npmrc and token/secret-named docs in a public Codex plugin template cache
+
+SUPERSEDED 2026-11-03T03:27:45Z (agent-run, AGENT_OBSERVED; owner decision HUMAN_ATTESTED: login logs treated as credential material, fail-closed)
+superseded: amt-evidence-vault.tar sha256 d672d59326ac2b29719f397735c8ad9955a1d0561c2bb97d78b04de92bd620fd size 481044480
+superseded: amt-evidence-vault.files.sha256 (7631 lines; 3 lines for the removed members not carried forward)
+removed members (never read): 3 x restricted/tmp/*/codex/log/codex-login.log (auth-20261030T1715Z, auth2-20261030T1750Z, codex-recovery-20261030T125104Z)
+replacement: amt-evidence-vault-sanitized-20261103.tar sha256 620bf3b77d41c07fcdcc92c688d0e3b2c937fc625be58d479bfba11c94bccc2c
+verified before removal: sha256sum -c amt-evidence-vault-sanitized-20261103.tar.sha256 OK; names = old minus 3; per-file 7628 OK 0 FAILED
+
+$ (cd /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy && sha256sum -c amt-evidence-vault-sanitized-20261103.tar.sha256)
+amt-evidence-vault-sanitized-20261103.tar: OK
+amt-evidence-vault-sanitized-20261103.restricted-inventory.tsv: OK
+amt-evidence-vault-sanitized-20261103.files.sha256: OK
+exit=0
+$ cat amt-evidence-vault-sanitized-20261103.tar.sha256
+620bf3b77d41c07fcdcc92c688d0e3b2c937fc625be58d479bfba11c94bccc2c  amt-evidence-vault-sanitized-20261103.tar
+6852433c137becb38ed4012f496999acc916f7fc98affc77afd5bde1873ad8b9  amt-evidence-vault-sanitized-20261103.restricted-inventory.tsv
+e89e981601354bed81c26da9437150764c4a45687d6d842a5997c7660cfc72d2  amt-evidence-vault-sanitized-20261103.files.sha256
+local source /home/utmwac/amt-evidence-vault: 3 logs removed 2026-11-03T13:21:20Z (checks/local-vault-login-logs-removed.txt)
+
+SUPERSEDED 2026-11-03T13:34:02Z (agent-run, AGENT_OBSERVED; owner decision HUMAN_ATTESTED 2026-11-03: credential-file hashes are credential hashes; scrub)
+reason: members m15-20261030T2045Z/manifests/{source-before,source-after,vault-copy}.sha256 each held 3 codex-login.log hash lines (lines 9, 639, 4384); values not recorded
+superseded: amt-evidence-vault-sanitized-20261103.tar sha256 620bf3b77d41c07fcdcc92c688d0e3b2c937fc625be58d479bfba11c94bccc2c size 481034240
+superseded: amt-evidence-vault-sanitized-20261103.tar.sha256 sha256 31e9c01ae78dbcfe56bdb4b0271bfd795007d4b69ec12caf3e116f003daa1810 size 354
+superseded: amt-evidence-vault-sanitized-20261103.files.sha256 sha256 e89e981601354bed81c26da9437150764c4a45687d6d842a5997c7660cfc72d2 size 2103769
+superseded: amt-evidence-vault-sanitized-20261103.restricted-inventory.tsv sha256 6852433c137becb38ed4012f496999acc916f7fc98affc77afd5bde1873ad8b9 size 2781104
+replacement: amt-evidence-vault-sanitized-20261103-r2.tar sha256 876b1678a0d610637e046b4a38afcff1d2e3250fffcdc3dd158c9870b0cfcad3; manifests replaced by *.r2.sha256 + MANIFESTS.SUPERSEDED.txt (same as local vault)
+verified before removal: sha256sum -c amt-evidence-vault-sanitized-20261103-r2.tar.sha256 OK; names = old - 3 + 4; per-file 7629 OK 0 FAILED; credential-hash hits in tar and companions 0
+
+local vault manifests (MANIFESTS.SUPERSEDED.txt, AGENT_OBSERVED):
+  superseded: source-before.sha256 sha256 37c22541dac1f417e550e647eb987bad0cef53e2fd5bb7a6b944b92ba7f540e8 size 1827072 lines 7607
+  replacement: source-before.r2.sha256 sha256 5e956fa689888b9872e90a93aa840d6ee98eadc61b4fa9564d5207141ff7ddfb size 1826699 lines 7604; verified = old minus the 3 lines above, 0 'codex/log/codex-login.log' entries
+  superseded: source-after.sha256 sha256 37c22541dac1f417e550e647eb987bad0cef53e2fd5bb7a6b944b92ba7f540e8 size 1827072 lines 7607
+  replacement: source-after.r2.sha256 sha256 5e956fa689888b9872e90a93aa840d6ee98eadc61b4fa9564d5207141ff7ddfb size 1826699 lines 7604; verified = old minus the 3 lines above, 0 'codex/log/codex-login.log' entries
+  superseded: vault-copy.sha256 sha256 37c22541dac1f417e550e647eb987bad0cef53e2fd5bb7a6b944b92ba7f540e8 size 1827072 lines 7607
+  replacement: vault-copy.r2.sha256 sha256 5e956fa689888b9872e90a93aa840d6ee98eadc61b4fa9564d5207141ff7ddfb size 1826699 lines 7604; verified = old minus the 3 lines above, 0 'codex/log/codex-login.log' entries
+  re-verify (README.md:19 superseded): cd restricted/tmp && sha256sum -c --quiet ../../manifests/vault-copy.r2.sha256 -> exit 0 at 2026-11-03T13:31:23Z (7604 files OK)
+  removed entries: lines 9, 639, 4384 of each (the 3 codex-login.log members; hash values not recorded)
