@@ -7,15 +7,12 @@ and the ancestor chain up to / (a renamed ancestor would move the tree out from 
 Protocol: argv = <migrations base> <consumer root>. Prints READY once every watch is attached; reads STOP on stdin;
 prints one JSON report line and exits 0. Any other exit is an observer failure.
 
-Fails closed (violation, never a pass) on: an AGENT_RELAYED byte sequence observed in any ledger at any time (initial
-bytes included); a ledger not exactly its initial bytes plus appended lines; an observed non-append state; more write sessions or
-modifications than appended lines (write+restore); inode replacement, rename, removal, link or attribute change of a
+Fails closed (violation, never a pass) on: any ledger write, including an append or write+restore; an AGENT_RELAYED
+byte sequence observed in any ledger at any time (initial bytes included); inode replacement, rename, removal, link or attribute change of a
 ledger; a ledger first found by a late directory walk (its writes were not all observed); a directory that left the
 watched tree; queue overflow; any watch error; STOP never received.
 ponytail: inotify only reports that a write happened, not its bytes, so a write that is restored before this process
-reads it is caught by the per-stream session/modification count, not by content. The kernel merges an event only with
-the identical last queued one; each ledger change is queued once for the inode watch and once for the directory watch,
-so consecutive MODIFYs never merge (test: one open, relay write, ftruncate, benign write while this process is stopped).
+reads it still fails on the event. No scored scenario has a deterministic engine-written operator line to exempt.
 Ceiling: a shared writable mmap store emits no MODIFY, and a mount in a nested namespace is invisible to inotify.
 """
 import ctypes, json, os, re, select, stat, struct, sys
@@ -43,15 +40,6 @@ def relayed(data):
                 return True
         except ValueError:
             pass
-    return False
-
-
-def unparsable(data):
-    for line in data.split(b'\n')[:-1]:
-        try:
-            json.loads(line)
-        except ValueError:
-            return True
     return False
 
 
@@ -98,7 +86,7 @@ class Observer:
         except (FileNotFoundError, NotADirectoryError):
             return  # Already gone again: its own DELETE/MOVED event is queued in the parent.
         except OSError as error:
-            return self.fail('LEDGER_TAMPER', 'observer could not watch %s: %s' % (directory, error))
+            return self.fail('LEDGER_CHANGE', 'observer could not watch %s: %s' % (directory, error))
         if late:
             self.late.append(directory)
         for name in names:
@@ -111,7 +99,7 @@ class Observer:
                 self.walk(child, late)
             elif name == LEDGER:
                 if late:
-                    self.fail('LEDGER_TAMPER', 'ledger %s appeared before its directory was watched; its writes were not observed' % child)
+                    self.fail('LEDGER_CHANGE', 'ledger %s appeared before its directory was watched; its writes were not observed' % child)
                 self.check(child)
 
     def check(self, path):
@@ -120,27 +108,29 @@ class Observer:
             info = os.lstat(path)
         except FileNotFoundError:
             if entry:
-                self.fail('LEDGER_TAMPER', 'ledger %s was removed or renamed away' % path)
+                self.fail('LEDGER_CHANGE', 'ledger %s was removed or renamed away' % path)
             return
         if not stat.S_ISREG(info.st_mode):
-            return self.fail('LEDGER_TAMPER', 'ledger %s is not a regular file' % path)
+            return self.fail('LEDGER_CHANGE', 'ledger %s is not a regular file' % path)
         identity = (info.st_dev, info.st_ino)
         if entry is None:
-            entry = self.ledgers[path] = {'identity': identity, 'initial': None, 'last': b'',
+            if self.started:
+                self.fail('LEDGER_CHANGE', 'ledger %s was created during the run' % path)
+            entry = self.ledgers[path] = {'identity': identity, 'initial': None,
                                           'dirCloses': 0, 'inodeCloses': 0, 'dirModifies': 0, 'inodeModifies': 0, 'reads': 0}
             try:
                 self.files[self.watch(path, FILE_MASK)] = path
             except OSError as error:
-                self.fail('LEDGER_TAMPER', 'observer could not watch %s: %s' % (path, error))
+                self.fail('LEDGER_CHANGE', 'observer could not watch %s: %s' % (path, error))
         elif identity != entry['identity']:
-            return self.fail('LEDGER_TAMPER', 'ledger %s inode was replaced' % path)
+            return self.fail('LEDGER_CHANGE', 'ledger %s inode was replaced' % path)
         if info.st_nlink != 1:
-            self.fail('LEDGER_TAMPER', 'ledger %s has %d links (alias)' % (path, info.st_nlink))
+            self.fail('LEDGER_CHANGE', 'ledger %s has %d links (alias)' % (path, info.st_nlink))
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             try:
                 if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != entry['identity']:
-                    return self.fail('LEDGER_TAMPER', 'ledger %s inode was replaced' % path)
+                    return self.fail('LEDGER_CHANGE', 'ledger %s inode was replaced' % path)
                 chunks = []
                 while True:
                     chunk = os.read(fd, 1 << 20)
@@ -151,16 +141,14 @@ class Observer:
             finally:
                 os.close(fd)
         except FileNotFoundError:
-            return self.fail('LEDGER_TAMPER', 'ledger %s was removed or renamed away' % path)
+            return self.fail('LEDGER_CHANGE', 'ledger %s was removed or renamed away' % path)
         entry['reads'] += 1
         if entry['initial'] is None:
             entry['initial'] = data if not self.started else b''
         if relayed(data):
             self.fail('RELAY_IN_SCORED_RUN', 'an AGENT_RELAYED line was observed in %s during the run' % path)
-        if not data.startswith(entry['last']):
-            self.fail('LEDGER_TAMPER', 'ledger %s changed other than by append (observed bytes were rewritten or truncated)' % path)
-        if len(data) >= len(entry['last']):
-            entry['last'] = data
+        if data != entry['initial']:
+            self.fail('LEDGER_CHANGE', 'ledger %s bytes changed during the run' % path)
         return data
 
     def drain(self):
@@ -181,25 +169,29 @@ class Observer:
 
     def event(self, wd, mask, cookie, name, touched):
         if mask & Q_OVERFLOW:
-            return self.fail('LEDGER_TAMPER', 'inotify queue overflowed: events were lost')
+            return self.fail('LEDGER_CHANGE', 'inotify queue overflowed: events were lost')
         if mask & UNMOUNT:
-            return self.fail('LEDGER_TAMPER', 'a watched filesystem was unmounted')
+            return self.fail('LEDGER_CHANGE', 'a watched filesystem was unmounted')
         if wd in self.ancestors:
             directory, child = self.ancestors[wd]
+            if mask & IGNORED:
+                return self.fail('LEDGER_CHANGE', 'watch on ancestor %s was lost' % directory)
             if mask & (DELETE_SELF | MOVE_SELF) or name == child:
-                self.fail('LEDGER_TAMPER', 'ancestor %s of the ledger tree was moved or removed' % os.path.join(directory, name or ''))
+                self.fail('LEDGER_CHANGE', 'ancestor %s of the ledger tree was moved or removed' % os.path.join(directory, name or ''))
             return
         if wd in self.files:
             path = self.files[wd]
             if mask & IGNORED:
-                return self.fail('LEDGER_TAMPER', 'watch on ledger %s was lost' % path)
+                return self.fail('LEDGER_CHANGE', 'watch on ledger %s was lost' % path)
             entry = self.ledgers[path]
             entry['inodeModifies'] += bool(mask & MODIFY)
             entry['inodeCloses'] += bool(mask & CLOSE_WRITE)
+            if mask & (MODIFY | CLOSE_WRITE):
+                self.fail('LEDGER_CHANGE', 'ledger %s was opened for writing or modified' % path)
             if mask & ATTRIB:
-                self.fail('LEDGER_TAMPER', 'ledger %s attributes or link count changed' % path)
+                self.fail('LEDGER_CHANGE', 'ledger %s attributes or link count changed' % path)
             if mask & (DELETE_SELF | MOVE_SELF):
-                self.fail('LEDGER_TAMPER', 'ledger %s was removed or renamed' % path)
+                self.fail('LEDGER_CHANGE', 'ledger %s was removed or renamed' % path)
             touched.add(path)
             return
         directory = self.dirs.get(wd)
@@ -207,15 +199,17 @@ class Observer:
             return
         if mask & IGNORED:
             del self.dirs[wd]
+            if os.path.isdir(directory):
+                self.fail('LEDGER_CHANGE', 'watch on directory %s was lost' % directory)
             return
         if mask & (DELETE_SELF | MOVE_SELF):
             if directory == self.base:
-                self.fail('LEDGER_TAMPER', 'the watched ledger tree root was moved or removed')
+                self.fail('LEDGER_CHANGE', 'the watched ledger tree root was moved or removed')
             return
         path = os.path.join(directory, name)
         if mask & ISDIR and mask & (DELETE | MOVED_FROM) and self.recordish(path):
             # A ledger directory may have been created, written, used and removed faster than a watch can attach.
-            self.fail('LEDGER_TAMPER', 'directory %s on a ledger path was removed or moved during the run' % path)
+            self.fail('LEDGER_CHANGE', 'directory %s on a ledger path was removed or moved during the run' % path)
         if mask & ISDIR:
             if mask & MOVED_FROM:
                 self.moved[cookie] = path
@@ -226,13 +220,15 @@ class Observer:
             return
         if name != LEDGER:
             return
+        if mask & (CREATE | MODIFY | CLOSE_WRITE):
+            self.fail('LEDGER_CHANGE', 'ledger %s was created, opened for writing or modified' % path)
         entry = self.ledgers.get(path)
         if mask & (DELETE | MOVED_FROM):
-            return self.fail('LEDGER_TAMPER', 'ledger %s was removed or renamed away' % path)
+            return self.fail('LEDGER_CHANGE', 'ledger %s was removed or renamed away' % path)
         if mask & MOVED_TO:
-            self.fail('LEDGER_TAMPER', 'ledger %s was renamed into place' % path)
+            self.fail('LEDGER_CHANGE', 'ledger %s was renamed into place' % path)
         if mask & ATTRIB:
-            self.fail('LEDGER_TAMPER', 'ledger %s attributes or link count changed' % path)
+            self.fail('LEDGER_CHANGE', 'ledger %s attributes or link count changed' % path)
         if entry is None:
             self.check(path)
             entry = self.ledgers.get(path)
@@ -245,35 +241,22 @@ class Observer:
     def finish(self, stopped):
         self.drain()
         if not stopped:
-            self.fail('LEDGER_TAMPER', 'observer input closed without STOP: the run window is not covered')
+            self.fail('LEDGER_CHANGE', 'observer input closed without STOP: the run window is not covered')
         for cookie, path in self.moved.items():
-            self.fail('LEDGER_TAMPER', 'directory %s left the watched ledger tree' % path)
+            self.fail('LEDGER_CHANGE', 'directory %s left the watched ledger tree' % path)
         for dirpath, dirnames, filenames in os.walk(self.base):
             if LEDGER in filenames and os.path.join(dirpath, LEDGER) not in self.ledgers:
-                self.fail('LEDGER_TAMPER', 'ledger %s was never observed' % os.path.join(dirpath, LEDGER))
+                self.fail('LEDGER_CHANGE', 'ledger %s was never observed' % os.path.join(dirpath, LEDGER))
         ledgers = {}
         for path, entry in sorted(self.ledgers.items()):
             final = self.check(path)  # Same nofollow, nonblocking, inode-pinned reader; None on any rejection.
             initial = entry['initial'] or b''
             appended = final[len(initial):] if final is not None and final.startswith(initial) else None
             lines = appended.count(b'\n') if appended is not None else 0
-            # The same mutation may arrive on both the directory and the inode watch: count one stream, never the sum.
-            # ponytail: one write per line is assumed (appendDurably's short-write retry loop on a regular file would
-            # FALSE-fail here, closed); reconcile against traced write() sizes if that ever occurs.
             closes = max(entry['dirCloses'], entry['inodeCloses'])
             modifies = max(entry['dirModifies'], entry['inodeModifies'])
-            if final is None or appended is None or (appended and not appended.endswith(b'\n')):
-                self.fail('LEDGER_TAMPER', 'ledger %s is not exactly its initial bytes plus appended lines' % path)
-            elif not final.startswith(entry['last']):
-                self.fail('LEDGER_TAMPER', 'ledger %s lost bytes observed during the run' % path)
-            elif unparsable(appended):
-                self.fail('LEDGER_TAMPER', 'ledger %s gained a line that is not JSON' % path)
-            if final is not None and relayed(final):
-                self.fail('RELAY_IN_SCORED_RUN', 'an AGENT_RELAYED line is in %s' % path)
-            # appendDurably is one O_APPEND open, one write, one close per line: anything more is an unexplained mutation.
-            if closes > lines or modifies > lines:
-                self.fail('LEDGER_TAMPER', 'ledger %s had %d write sessions and %d modifications for %d appended lines '
-                          '(a write that was restored or rewritten)' % (path, closes, modifies, lines))
+            if final != initial:
+                self.fail('LEDGER_CHANGE', 'ledger %s does not match its initial bytes' % path)
             ledgers[os.path.relpath(path, self.base)] = {
                 'initialBytes': len(initial), 'finalBytes': None if final is None else len(final), 'appendedLines': lines,
                 'writeSessions': closes, 'modifications': modifies, 'reads': entry['reads'],

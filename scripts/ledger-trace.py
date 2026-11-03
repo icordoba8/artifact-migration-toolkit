@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A9 syscall gate, companion to ledger-observer.py: records how a ledger changed and inspects ledger reads and writes,
-including private filesystem views. appendDurably only opens O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW.
+"""A9 syscall gate, companion to ledger-observer.py: rejects every ledger write and inspects ledger reads,
+including private filesystem views. No operator-ledger append is exempt in scored runs.
 The command must run as `strace <LEDGER_TRACE_FLAGS> -o <trace> -- python3 no-io-uring.py <isolated command>`
 (see ledgerTraced in acceptance-evidence.mjs).
 
@@ -11,9 +11,9 @@ No namespace is trusted: mounts are allowed anywhere (Codex bubblewrap), so ever
 names the ledger has its bytes inspected (any namespace, per shared-fd-table stream, unicode escapes decoded): a relay line read
 anywhere is RELAY_IN_SCORED_RUN. Opening a path named operator-decisions.ndjson that resolves to another file, a
 truncated read record, chroot, setns, or a pid not reached by a traced clone, fails.
-Ledger access (requested path or -yy canonical fd naming operator-decisions.ndjson): a writable open other than
-O_WRONLY|O_APPEND, or with O_TRUNC; creat/truncate/ftruncate/fallocate/link/unlink/rename/symlink; fcntl F_SETFL without
-O_APPEND; any pwrite*/copy_file_range/splice/sendfile touching it (appendDurably only uses write); any mmap. Also any successful io_uring_setup, open_by_handle_at,
+Ledger access (requested path or -yy canonical fd naming operator-decisions.ndjson): any writable open,
+O_CREAT or O_TRUNC; creat/truncate/ftruncate/fallocate/link/unlink/rename/symlink; fcntl F_SETFL without
+O_APPEND; any write*/pwrite*/copy_file_range/splice/sendfile touching it; any mmap. Also any successful io_uring_setup, open_by_handle_at,
 process_vm_writev or writable /proc/<pid>/mem open; an incomplete trace (no root exit, tracer still running).
 """
 import importlib.util, json, os, re, sys, time
@@ -167,6 +167,8 @@ def verify(trace, root_pid):
         elif opened and re.search(r'(?:"(?:[^"]*/)?mem"|/mem>)', text) and flags[:1] != ['O_RDONLY']:
             bad('writable process memory open')
         elif name in READS | WRITES and LEDGER in text.split(',', 1)[0]:
+            if name in WRITES:
+                bad('ledger write')
             fd, path = text.split(',', 1)[0].split('<', 1)
             key = (table(pid), fd)
             stream = reads.setdefault(key + (path, generation.get(key, 0), name in READS), [])
@@ -179,8 +181,8 @@ def verify(trace, root_pid):
         elif ledger and name in DESTRUCTIVE:
             bad('destructive ledger syscall')
         elif ledger and name in ('open', 'openat', 'openat2'):
-            if not flags or 'O_TRUNC' in flags or flags[0] == 'O_RDWR' or (flags[0] == 'O_WRONLY' and 'O_APPEND' not in flags):
-                bad('ledger open other than read-only or O_WRONLY|O_APPEND')
+            if not flags or flags[0] != 'O_RDONLY' or 'O_CREAT' in flags or 'O_TRUNC' in flags:
+                bad('ledger open other than read-only without creation or truncation')
         elif ledger and name == 'fcntl' and 'F_SETFL' in bare(text) and 'O_APPEND' not in bare(text):
             bad('ledger fd lost O_APPEND')
         elif ledger and name in ('pwrite64', 'pwritev', 'pwritev2', 'copy_file_range', 'splice', 'sendfile'):

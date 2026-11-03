@@ -340,11 +340,11 @@ test("record deletion and recreation is detected by a trusted observer and never
       "--target", "auth", "--output", output, "--isolation", "none"],
     { encoding: "utf8", timeout: 60000, stdio: "pipe",
       env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
-    (error) => /ACCEPTANCE_RECORD_REPLACED|LEDGER_TAMPER/.test(String(error.stderr)));
+    (error) => /ACCEPTANCE_RECORD_REPLACED|LEDGER_CHANGE/.test(String(error.stderr)));
     const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
     assert.equal(report.verdict, "FAIL");
     assert.equal(report.security.certified, false);
-    assert.match(report.failure, /ACCEPTANCE_RECORD_REPLACED|LEDGER_TAMPER/);
+    assert.match(report.failure, /ACCEPTANCE_RECORD_REPLACED|LEDGER_CHANGE/);
     assert.ok(report.security.recordContinuity.targetDirectoryRenameEvents >= 2);
     assert.notEqual(report.security.recordContinuity.violations.length, 0);
     assert.equal(report.agent.exitCode, 0);
@@ -442,13 +442,13 @@ test("OS-isolated agent deleting and recreating its migration record cannot obta
         "--target", "auth", "--output", output, "--goal", "complete", "--expected-pin", pin],
       { encoding: "utf8", timeout: 60000, stdio: "pipe",
         env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
-      (error) => /ACCEPTANCE_RECORD_REPLACED|LEDGER_TAMPER/.test(String(error.stderr)));
+      (error) => /ACCEPTANCE_RECORD_REPLACED|LEDGER_CHANGE/.test(String(error.stderr)));
       const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
       assert.equal(report.verdict, "FAIL");
       assert.equal(report.security.isolation, "OS_NAMESPACE");
       assert.equal(report.security.trustedRuntimeIsolated, true);
       assert.equal(report.security.certified, false);
-      assert.match(report.failure, /ACCEPTANCE_RECORD_REPLACED|LEDGER_TAMPER/);
+      assert.match(report.failure, /ACCEPTANCE_RECORD_REPLACED|LEDGER_CHANGE/);
       assert.ok(report.security.recordContinuity.targetDirectoryRenameEvents >= 2);
       assert.equal(report.agent.exitCode, 0);
     } finally {
@@ -822,7 +822,7 @@ test('artifact acceptance uses the installed artifact CLI and independent verifi
     const forgedReport = JSON.parse(await readFile(path.join(root, 'forged-report/report.json')));
     assert.equal(forgedRun.status, 1);
     assert.equal(forgedReport.verdict, 'FAIL');
-    assert.match(forgedReport.failure, /^RELAY_IN_SCORED_RUN/);
+    assert.match(forgedReport.failure, /^LEDGER_CHANGE/);
     assert.equal(forgedReport.rerunEligible, false);
     assert.match(await readFile(path.join(root, 'forged-report/ledger-observer.json'), 'utf8'), /AGENT_RELAYED/);
     await writeFile(verifier, 'process.exit(1);');
@@ -831,8 +831,8 @@ test('artifact acceptance uses the installed artifact CLI and independent verifi
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('A9 scored invocation rejects transient relay use, rapid restore and inode replacement but allows an engine append', async t => {
-  for (const mutation of ['restore', 'rapid-restore', 'replace', 'engine-append']) await t.test(mutation, async () => {
+test('A9 scored invocation rejects every ledger change, including forged legacy human decisions', async t => {
+  for (const mutation of ['restore', 'rapid-restore', 'replace', 'engine-append', 'legacy-human', 'relay', 'other-line']) await t.test(mutation, async () => {
     const root = await mkdtemp(path.join(scratch, 'agent-e2e-ledger-'));
     try {
       const { target, bin, receipt, release } = await installedArtifactCandidate(root);
@@ -853,6 +853,14 @@ test('A9 scored invocation rejects transient relay use, rapid restore and inode 
           await appendDurably(${JSON.stringify(target)}, ledger, JSON.stringify(buildDecision(fixture)) + '\\n');
           if ((await readOperatorDecisions(${JSON.stringify(path.dirname(path.dirname(ledger)))})).decisions.length !== 1)
             throw new Error('engine did not accept the non-relay line');
+        } else if (${JSON.stringify(mutation)} === 'legacy-human') {
+          appendFileSync(ledger, JSON.stringify(buildDecision(fixture)) + '\\n');
+          const read = await readOperatorDecisions(${JSON.stringify(path.dirname(path.dirname(ledger)))});
+          if (read.decisions.length !== 1 || read.decisions[0].v !== undefined) throw new Error('not a legacy human decision');
+        } else if (${JSON.stringify(mutation)} === 'relay') {
+          appendFileSync(ledger, relay);
+        } else if (${JSON.stringify(mutation)} === 'other-line') {
+          appendFileSync(ledger, '{"unrecognized":"line"}\\n');
         } else if (${JSON.stringify(mutation)} === 'replace') {
           writeFileSync(ledger + '.new', '');
           renameSync(ledger + '.new', ledger);
@@ -880,15 +888,10 @@ test('A9 scored invocation rejects transient relay use, rapid restore and inode 
         '--source-root', target, '--artifact-target', 'src/result.js', '--isolation', 'none'],
       { encoding: 'utf8', timeout: 60000, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
       const report = JSON.parse(await readFile(path.join(output, 'report.json')));
-      assert.equal(result.status, mutation === 'engine-append' ? 0 : 1, report.failure ?? result.stderr);
-      if (mutation === 'engine-append') {
-        assert.equal(report.verdict, 'BOOTSTRAP_PASS');
-        assert.equal(report.decisionLedgers.verdict, null);
-      } else {
-        assert.equal(report.verdict, 'FAIL');
-        assert.match(report.failure, /^(RELAY_IN_SCORED_RUN|LEDGER_TAMPER):/);
-        assert.equal(report.rerunEligible, false);
-      }
+      assert.equal(result.status, 1, report.failure ?? result.stderr);
+      assert.equal(report.verdict, 'FAIL');
+      assert.match(report.failure, /^LEDGER_CHANGE:/);
+      assert.equal(report.rerunEligible, false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
@@ -930,7 +933,7 @@ test('A9 scored invocation fails when its outside-sandbox ledger observer dies d
     assert.equal(await completed, 1);
     const report = JSON.parse(await readFile(path.join(output, 'report.json')));
     assert.equal(report.verdict, 'FAIL');
-    assert.match(report.failure, /^LEDGER_TAMPER:/);
+    assert.match(report.failure, /^LEDGER_CHANGE:/);
     assert.equal(report.rerunEligible, false);
   } finally {
     await completed;
@@ -1575,7 +1578,7 @@ test('native launcher: nonce handoff, Enter to launch, one operator turn; no pro
       const ledgerDir = '.agents/knowledge/migrations/modules/auth/decisions';
       nativeRun(path.join(root, 'relayed'), [idleReport.invocation], [], `mkdir -p ${ledgerDir} && echo '{"id":"DEC-relayed","principal":"AGENT_RELAYED"}' >> ${ledgerDir}/operator-decisions.ndjson`);
       const relayedReport = JSON.parse(await readFile(path.join(root, 'relayed/report.json')));
-      assert.match(relayedReport.failure, /^RELAY_IN_SCORED_RUN/);
+      assert.match(relayedReport.failure, /^LEDGER_CHANGE/);
       assert.equal(relayedReport.rerunEligible, false);
       assert.match(await readFile(path.join(root, 'relayed/ledger-observer.json'), 'utf8'), /AGENT_RELAYED/);
       await writeFile(path.join(installed.store, '..', 'bin', 'codex'), '#!/bin/sh\necho codex-cli 0.166.0\n', { mode: 0o755 });

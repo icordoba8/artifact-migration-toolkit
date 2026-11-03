@@ -34,15 +34,46 @@ async function observe(t, setup, act, options) {
   return { report, verdict: ledgerObserverVerdict(report) };
 }
 
-test('the engine durable append of non-relay lines passes', async t => {
+test('an unchanged legacy human ledger passes', async t => {
+  const { verdict, report } = await observe(t, ({ ledger }) => writeFileSync(ledger, text(INITIAL)), () => {});
+  assert.equal(verdict, null, JSON.stringify(report));
+});
+
+test('a forged legacy human decision accepted by the engine fails the observer', async t => {
   const { verdict, report } = await observe(t, ({ ledger }) => writeFileSync(ledger, text(INITIAL)), async ({ root, ledger }) => {
     const second = buildDecision({ ...fixture, previous: INITIAL });
     await appendDurably(root, ledger, text(second));
-    await appendDurably(root, ledger, text(buildDecision({ ...fixture, previous: second })));
-    assert.equal((await readOperatorDecisions(record(root))).decisions.length, 3);
+    const decisions = (await readOperatorDecisions(record(root))).decisions;
+    assert.equal(decisions.length, 2);
+    assert.equal(decisions[1].v, undefined);
   });
-  assert.equal(verdict, null, JSON.stringify(report));
-  assert.equal(Object.values(report.ledgers)[0].appendedLines, 2);
+  assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(report));
+});
+
+for (const [name, added] of [
+  ['AGENT_RELAYED', text(RELAY)],
+  ['other JSON', '{"engine":"not an authorized exception"}\n'],
+  ['non-JSON', 'anything\n'],
+  ['duplicate legacy line', text(INITIAL).repeat(2)],
+  ['one-byte altered legacy line', text(INITIAL).replace('fixture.js', 'fixture.ks')],
+]) test(`any appended line fails: ${name}`, async t => {
+  const { verdict } = await observe(t, ({ ledger }) => writeFileSync(ledger, text(INITIAL)),
+    ({ ledger }) => appendFileSync(ledger, added));
+  assert.equal(verdict?.code, 'LEDGER_CHANGE');
+});
+
+for (const [name, act] of [
+  ['removal', ({ ledger }) => rmSync(ledger)],
+  ['same-byte overwrite', ({ ledger }) => writeFileSync(ledger, text(INITIAL))],
+  ['one-byte modification', ({ ledger }) => writeFileSync(ledger, text(INITIAL).replace('fixture.js', 'fixture.ks'))],
+]) test(`ledger ${name} fails`, async t => {
+  const { verdict } = await observe(t, ({ ledger }) => writeFileSync(ledger, text(INITIAL)), act);
+  assert.equal(verdict?.code, 'LEDGER_CHANGE');
+});
+
+test('creating an empty ledger fails', async t => {
+  const { verdict } = await observe(t, null, ({ ledger }) => writeFileSync(ledger, ''));
+  assert.equal(verdict?.code, 'LEDGER_CHANGE');
 });
 
 test('a relay line written and restored before exit fails', async t => {
@@ -52,7 +83,7 @@ test('a relay line written and restored before exit fails', async t => {
     await settle();
     writeFileSync(ledger, text(INITIAL));
   });
-  assert.equal(verdict.code, 'RELAY_IN_SCORED_RUN');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
 });
 
 test('a rapid write and restore to identical bytes fails even when only the restored bytes are read', async t => {
@@ -61,7 +92,7 @@ test('a rapid write and restore to identical bytes fails even when only the rest
     assert.match(readFileSync(ledger, 'utf8'), /AGENT_RELAYED/);
     writeFileSync(ledger, text(INITIAL));
   });
-  assert.ok(['RELAY_IN_SCORED_RUN', 'LEDGER_TAMPER'].includes(verdict?.code));
+  assert.equal(verdict?.code, 'LEDGER_CHANGE');
 });
 
 test('an inode replacement with identical bytes fails', async t => {
@@ -69,7 +100,7 @@ test('an inode replacement with identical bytes fails', async t => {
     writeFileSync(path.join(decisions, 'x'), line('HUMAN'));
     renameSync(path.join(decisions, 'x'), ledger);
   });
-  assert.equal(verdict.code, 'LEDGER_TAMPER');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
 });
 
 test('a hard-link alias written through the other name fails', async t => {
@@ -77,18 +108,18 @@ test('a hard-link alias written through the other name fails', async t => {
     linkSync(ledger, path.join(root, 'alias'));
     appendFileSync(path.join(root, 'alias'), line('HUMAN'));
   });
-  assert.equal(verdict.code, 'LEDGER_TAMPER');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
 });
 
 test('a relay line present before the run fails', async t => {
   const { verdict } = await observe(t, ({ ledger }) => writeFileSync(ledger, line('AGENT_RELAYED')), () => {});
-  assert.equal(verdict.code, 'RELAY_IN_SCORED_RUN');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
 });
 
 test('a unicode-escaped relay principal fails', async t => {
   const { verdict } = await observe(t, null, async ({ root, ledger }) =>
     appendDurably(root, ledger, text(RELAY).replace('"AGENT_RELAYED"', '"AGENT_\\u0052ELAYED"')));
-  assert.equal(verdict.code, 'RELAY_IN_SCORED_RUN');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
 });
 
 test('a ledger swapped for a symlink or FIFO is never followed or opened', async t => {
@@ -98,7 +129,7 @@ test('a ledger swapped for a symlink or FIFO is never followed or opened', async
       rmSync(ledger);
       make(ledger, decisions);
     });
-    assert.equal(verdict.code, 'LEDGER_TAMPER');
+    assert.equal(verdict.code, 'LEDGER_CHANGE');
   }
 });
 
@@ -113,7 +144,7 @@ test('a relay ledger in a new directory written and removed with no pause fails'
 });
 
 test('an observer that cannot be spawned rejects', async () => {
-  await assert.rejects(startLedgerObserver(process.cwd(), { python: '/nonexistent/python3' }), /LEDGER_TAMPER/);
+  await assert.rejects(startLedgerObserver(process.cwd(), { python: '/nonexistent/python3' }), /LEDGER_CHANGE/);
 });
 
 test('a relay line created in a new directory, used and removed fails', async t => {
@@ -129,7 +160,7 @@ test('a relay line created in a new directory, used and removed fails', async t 
 
 test('a dead observer fails', async t => {
   const { verdict } = await observe(t, null, ({ observer }) => process.kill(observer.pid, 'SIGKILL'));
-  assert.equal(verdict.code, 'LEDGER_TAMPER');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
 });
 
 test('an inotify queue overflow fails', async t => {
@@ -141,7 +172,7 @@ test('an inotify queue overflow fails', async t => {
       process.kill(observer.pid, 'SIGCONT');
     }
   });
-  assert.equal(verdict.code, 'LEDGER_TAMPER');
+  assert.equal(verdict.code, 'LEDGER_CHANGE');
   assert.match(JSON.stringify(report), /overflow/);
 });
 
@@ -159,7 +190,7 @@ test('a one-open relay, truncate, benign append queued while the observer is sto
     }
   });
   // The inode and directory watches interleave their events, so the kernel never merges consecutive MODIFYs.
-  assert.equal(verdict.code, 'LEDGER_TAMPER', JSON.stringify(report));
+  assert.equal(verdict.code, 'LEDGER_CHANGE', JSON.stringify(report));
   assert.equal(Object.values(report.ledgers)[0].modifications, 3);
 });
 
@@ -170,12 +201,12 @@ test('an observer that exits cleanly before stop fails', async t => {
     chmodSync(fake, 0o755);
     t.fakeObserver = fake;
   }, async ({ observer }) => settle(), { python: () => t.fakeObserver });
-  assert.equal(verdict?.code, 'LEDGER_TAMPER', JSON.stringify(report));
+  assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(report));
   assert.match(JSON.stringify(report), /before stop/);
 });
 
 // Syscall gate: the inotify-invisible restores (one-fd ftruncate + multi-line benign write, shared mmap overwrite,
-// private mount-namespace shadow read by the engine) must fail; the engine's own durable append + read must pass.
+// private mount-namespace shadow read by the engine) and the engine's own durable append must all fail.
 const STRACE = process.env.LEDGER_TRACE_STRACE || (() => { try { return execFileSync('sh', ['-c', 'command -v strace'], { encoding: 'utf8' }).trim(); } catch { return ''; } })();
 const ISOLATED = ['unshare', '--user', '--map-current-user', '--mount', '--propagation', 'private', '--fork', '--pid', '--kill-child', '--'];
 const ENGINE_USE = `const { buildDecision, readOperatorDecisions } = await import(${JSON.stringify(new URL('../../packages/migration-engine/src/decisions/index.mjs', import.meta.url).href)});
@@ -203,14 +234,18 @@ async function gate(t, script) {
 const gated = (name, script, fails, reason) => test('syscall gate: ' + name, async t => {
   assert.ok(STRACE, 'strace is required (install it or set LEDGER_TRACE_STRACE)');
   const { exit, verdict } = await gate(t, script);
-  if (fails) assert.ok(verdict?.code, 'must fail');
+  if (fails) assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(verdict));
   if (reason) assert.match(JSON.stringify(verdict), reason);
   if (!fails) assert.equal(verdict, null, JSON.stringify(verdict));
   assert.doesNotMatch(readFileSync(t.trace, 'utf8'), /^\d+ +(?:read|readv|pread64|preadv2?|write|writev|pwrite64|pwritev2?)\((?!\d+<[^>]*operator-decisions)/m, 'non-ledger buffers must never be persisted');
-  assert.equal(exit, 0, 'the engine must actually have appended and read the line');
+  assert.equal(exit, 0, 'the traced command must actually run successfully');
 });
 const LEDGER = '"$REC/decisions/operator-decisions.ndjson"';
-gated('engine buildDecision + appendDurably + readOperatorDecisions passes', '"$NODE" use.mjs "$ROOT" "$REC"', false);
+gated('an unchanged ledger read passes', `cat ${LEDGER} >/dev/null`, false);
+gated('engine buildDecision + appendDurably + readOperatorDecisions fails', '"$NODE" use.mjs "$ROOT" "$REC"', true, /ledger write/);
+gated('a legacy line appended in a private view and discarded without a read fails',
+  `unshare -Urm sh -c 'mount -t tmpfs ledger "$REC/decisions" && "$NODE" use.mjs "$ROOT" "$REC" && umount "$REC/decisions"'`,
+  true, /ledger write/);
 gated('relay used by the engine, then ftruncate and ONE write of three benign lines on an append fd fails',
   `"$NODE" use.mjs "$ROOT" "$REC" 1 && python3 -c 'import os,sys;f=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND);os.ftruncate(f,${Buffer.byteLength(text(INITIAL))});os.write(f,sys.argv[2].encode())' ${LEDGER} '${(text(INITIAL) + text(INITIAL) + text(INITIAL)).replace(/'/g, "'\\''")}'`, true);
 gated('relay used by the engine, then overwritten through a shared mapping fails',

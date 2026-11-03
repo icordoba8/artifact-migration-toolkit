@@ -35,7 +35,7 @@ export const sameTree = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 /**
  * A9 in-run observer (scripts/ledger-observer.py): raw inotify outside the sandbox from before spawn until after exit.
  * Resolves once every watch is attached; `stop()` always resolves to a report whose violations are non-empty on any
- * relay line, tamper, watcher error/overflow or observer death, so a lost observer can never read as a clean window.
+ * ledger change, relay line, watcher error/overflow or observer death, so a lost observer can never read as a clean window.
  */
 export async function startLedgerObserver(root, { timeoutMs = 30_000, python = 'python3' } = {}) {
   const base = path.join(root, '.agents/knowledge/migrations');
@@ -58,7 +58,7 @@ export async function startLedgerObserver(root, { timeoutMs = 30_000, python = '
   if (!ready) {
     child.kill('SIGKILL');
     await exited;
-    throw new Error('LEDGER_TAMPER: ledger observer did not start: ' + (err.trim() || out.trim() || 'timeout'));
+    throw new Error('LEDGER_CHANGE: ledger observer did not start: ' + (err.trim() || out.trim() || 'timeout'));
   }
   let report, stopping = false;
   const premature = exited.then(() => !stopping);
@@ -75,7 +75,7 @@ export async function startLedgerObserver(root, { timeoutMs = 30_000, python = '
         if (code !== 0) throw new Error('exit ' + (code ?? signal));
         return JSON.parse(out.slice('READY\n'.length));
       } catch (error) {
-        return { violations: [{ code: 'LEDGER_TAMPER', reason: 'ledger observer failed (' + error.message + '): ' + err.trim() }] };
+        return { violations: [{ code: 'LEDGER_CHANGE', reason: 'ledger observer failed (' + error.message + '): ' + err.trim() }] };
       }
     })(),
   };
@@ -105,13 +105,13 @@ export const ledgerTraceVerdict = (trace, rootPid, { python = 'python3' } = {}) 
       throw new Error('invalid syscall observer report');
   } catch (error) { violations = ['syscall gate failed: ' + (run.error?.message ?? (run.stderr || error.message))]; }
   if (run.status !== (violations.length ? 1 : 0)) violations = [...violations, 'syscall gate exited ' + (run.status ?? run.signal)];
-  return violations.length ? { code: violations.some(v => v.startsWith('RELAY_IN_SCORED_RUN')) ? 'RELAY_IN_SCORED_RUN' : 'LEDGER_TAMPER', reasons: violations.map(v => 'syscall gate: ' + v) } : null;
+  return violations.length ? { code: 'LEDGER_CHANGE', reasons: violations.map(v => 'syscall gate: ' + v) } : null;
 };
 /** The scored-run failure code for an observer report, or null when the window was fully observed and clean. */
 export const ledgerObserverVerdict = report => {
-  const violations = Array.isArray(report?.violations) ? report.violations : [{ code: 'LEDGER_TAMPER', reason: 'no observer report' }];
+  const violations = Array.isArray(report?.violations) ? report.violations : [{ code: 'LEDGER_CHANGE', reason: 'no observer report' }];
   if (!violations.length) return null;
-  return { code: violations.some(v => v.code === 'RELAY_IN_SCORED_RUN') ? 'RELAY_IN_SCORED_RUN' : 'LEDGER_TAMPER', reasons: violations.map(v => v.code + ': ' + v.reason) };
+  return { code: 'LEDGER_CHANGE', reasons: violations.map(v => v.code + ': ' + v.reason) };
 };
 
 export const pendingTransaction = async record => await exists(path.join(record, 'transaction.json')) || await exists(path.join(record, 'advance.journal'));
