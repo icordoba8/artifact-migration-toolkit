@@ -218,12 +218,11 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
   if (provider === "opencode") return { command: "opencode",
     argv: ["run", "--standalone", "--format", "json", "--auto", ask] };
   // Codex workspace-write keeps .agents read-only, and an untrusted project skips its .codex/config.toml MCP entry.
-  // exec never prompts, so an MCP call needing approval is refused: approve only CODEX_MCP_TOOLS, per tool,
-  // on top of the installed start-migration entry (relay_decision stays out: operator decisions are not tool grants).
+  // E7: the installed entry's enabled_tools is the only tool filter (preflight: exactly CODEX_MCP_TOOLS). exec never
+  // prompts, so an MCP call needing approval is refused: approve those same tools, per tool.
   return { command: "codex",
     argv: [...(native ? ["--no-daemon"] : ["exec", "--json"]), "--sandbox", "workspace-write", "--add-dir", path.join(root, ".agents"),
       "-c", `projects={ ${JSON.stringify(root)} = { trust_level = "trusted" } }`, "-c", 'approval_policy="never"',
-      "-c", `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
       ...CODEX_MCP_TOOLS.flatMap((tool) => ["-c", `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`]),
       // Codex hands an MCP server only an env allowlist; forward the launcher's pnpm refusal to the engine's validators.
       "-c", 'mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]',
@@ -236,6 +235,30 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
 };
 export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
   "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
+
+/**
+ * E7: a host's effective start-migration grants, read only from what the installer wrote. Codex: the
+ * `.codex/config.toml` entry's enabled_tools minus disabled_tools. Copilot CLI: `tools` of the first of `.mcp.json`
+ * and `.github/mcp.json` that registers the server (`.mcp.json` shadows). No list, or "*", is unbounded: null.
+ */
+// ponytail: project config layer only; a CODEX_HOME or user config that narrows these further goes unseen.
+export async function installedGrants(root, host) {
+  if (host === "codex") {
+    const table = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
+      .split("[mcp_servers.start-migration]\n")[1]?.split(/^\[/m)[0];
+    if (table === undefined) return null;
+    // The installer writes JSON scalars and arrays, which are valid TOML; anything else fails to parse and refuses.
+    const key = (name) => { const line = table.match(new RegExp(`^${name} = (.*)$`, "m")); return line ? JSON.parse(line[1]) : undefined; };
+    const enabled = key("enabled_tools"), disabled = key("disabled_tools") ?? [];
+    return { server: { command: key("command"), args: key("args") },
+      grants: Array.isArray(enabled) ? enabled.filter((tool) => !disabled.includes(tool)) : null };
+  }
+  for (const file of [".mcp.json", ".github/mcp.json"]) {
+    const server = JSON.parse(await readFile(path.join(root, file), "utf8").catch(() => "{}")).mcpServers?.["start-migration"];
+    if (server) return { grants: Array.isArray(server.tools) && !server.tools.includes("*") ? server.tools : null };
+  }
+  return null;
+}
 
 /**
  * Waits until the in-namespace plant step has exited and is blocked on the gate (a writer can open
@@ -401,12 +424,23 @@ async function score(options, root, output, report) {
   const cli = installed.commands?.[cliName];
   if (!Array.isArray(cli) || cli.length !== 2 || !path.isAbsolute(cli[0]) || cli[1] !== expectedCli || !packageJson.bin?.[cliName])
     fail("ACCEPTANCE_PRECONDITION: Status command is not the one from the verified release.");
-  // Native Codex restates the installed MCP entry; it must be byte-for-byte what the installer wrote for this release.
+  // E7: every installed Codex/Copilot registration grants exactly the nine relay-less tools, or nothing spawns.
+  const shipped = {};
+  for (const host of ["codex", "copilot"]) {
+    if (!(await exists(path.join(root, ".artifact-migration-tools", host + ".json")))) continue;
+    shipped[host] = await installedGrants(root, host).catch(() => null);
+    const grants = shipped[host]?.grants;
+    if (!Array.isArray(grants) || new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
+      fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
+        (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
+        ", not exactly the nine without migration_relay_decision");
+  }
+  // Native Codex restates the installed MCP entry verbatim; it must launch the verified release's MCP server.
   let mcpServer = null;
   if (native) {
-    mcpServer = { command: cli[0], args: [path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs")] };
-    const config = await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => "");
-    if (!config.includes("[mcp_servers.start-migration]\ncommand = " + JSON.stringify(mcpServer.command) + "\nargs = " + JSON.stringify(mcpServer.args) + "\n"))
+    mcpServer = shipped.codex.server;
+    if (mcpServer.command !== cli[0] || !Array.isArray(mcpServer.args) ||
+        mcpServer.args[0] !== path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs"))
       fail("ACCEPTANCE_PRECONDITION: installed Codex start-migration entry is not the verified release's MCP server");
   }
   const invocationCommand = commandFor(options.provider, invocation, root, native, mcpServer);

@@ -1,4 +1,6 @@
+a64bf4b4522546d5fe21116ad3c294193ab2f866ca33d560f1fd6a3d1dbf09e1  ./checks/e7-harness-node22.13.0.tap
 987afaaca57791b2e8f29f70b7a0756b8843c6c1b64720b0505de7bb7149ff74  ./checks/engine-targets.txt
+2ed46f15640a492880323bbf7a3d499265033a0320ed4aa958924e8d1dde667e  ./checks/final-cleanup-20261103.txt
 989892e850be57aa0913907809e1b7723c887b724bda8cc0def35a7b4c319f20  ./checks/local-vault-login-logs-removed.txt
 007982aa2a7a243e81a6458f4fa9264a65e60613e47c2da85949fe4104b4a09e  ./checks/m15-certification-final-inventory.txt
 9971f2b114167710fcb7fa219bddc39010ff6026f904160a72f37a7fee3c6755  ./checks/m15-certification-run-sanitized.txt
@@ -9,8 +11,8 @@ aeb7ac8e85b1dfce52dafdec191b4699fa00543e0d3ab12f2885fa732cfea216  ./checks/s2-ha
 4c0e9e2327e2e731cef1fe8a9b9ca3f5f1c63b5d93c8a13298962d46ea5f337d  ./checks/s2-harness-joint-2782612-node22.13.0.tap
 3f3bc375be1238cddf2eb3a89bb5afb7e0762216af2d30aebc6e7d7024d41fd9  ./checks/t3-harness-node22.13.0.tap
 a568c80ea67c8c7536149d6969215bc98f9a4f709cf8149a925c6820d9cdf1d5  ./checks/vault-restricted-classification.txt
-069c6fa1cfc45f0ba50c47dd51fd5e45eedce12b50f5c9b18fbde534a7f90b05  ./lane-closed.md
+64ce13bb97262377a520c806d18cf58584b7bd3488e407343568f4183d9a485d  ./lane-closed.md
 a463ad8d0b109c751aa4cff1bc67aa3617361cc6e1b4f0fa3a8e2b298267a1d6  ./model-log.md
-989cd760d8317231f18b06f5a54709379fcaac5b5ad8b523f199cab5d6e9a113  ./owner-blocks.md
+ab47ef8388bcdae07632b4f9b5439d57c2b176a2ef2f301bbba51b503a75b88f  ./owner-blocks.md
 9e26fed72347ff493eb374179c7824f8433ad66a1d8274b9413f96e29bb79ce9  ./plan.md
-42753fc9be50d13538aeaf28da8da5e72e540b08a936bf19d60f537dfc81d8fa  ./scoring-changes.md
+8e6675245cea8c71c9366a262a6273e4455c7ef0efc49bb1f408ea20a9d4bb79  ./scoring-changes.md

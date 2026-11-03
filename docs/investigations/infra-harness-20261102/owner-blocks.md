@@ -54,7 +54,9 @@ left that only you can do:
    2026-11-03T13:34Z because its manifests held hashes of the login logs; and
    of `m15-certification-run-20261031T2015Z.tar` (`a1ee9706…c406`), removed
    2026-11-03T14:03:55Z because it held `runs/login-record.txt` and that
-   member's hash in `runs/SHA256SUMS`.
+   member's hash in `runs/SHA256SUMS`; and of its sidecar
+   `m15-certification-run-20261031T2015Z.tar.sha256`, removed
+   2026-11-03T14:36:55Z (`checks/final-cleanup-20261103.txt`).
 
 ```text
 V1 HOMES: auth-20261030T1715Z, auth2-20261030T1750Z, codex-recovery-20261030T125104Z

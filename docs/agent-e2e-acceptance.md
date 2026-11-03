@@ -145,12 +145,15 @@ terminal (`Seccomp: 0` in `/proc/self/status`).
 installed `.codex/config.toml` alone every MCP call that needs approval is
 refused (`approval policy is never`). For Codex launches only, the runner adds
 invocation-scoped `-c` overrides on top of the installed `start-migration`
-entry, whose command, arguments and bytes stay untouched:
-`approval_policy="never"`;
-`mcp_servers.start-migration.enabled_tools` set to exactly `artifact_status`,
+entry, whose command, arguments and bytes stay untouched. It injects no tool
+filter: the installed entry's `enabled_tools` (E7) is the only one. Before the
+agent spawns, every installed Codex (`.codex/config.toml` `enabled_tools` minus
+`disabled_tools`) and Copilot CLI (`tools` of `.mcp.json`, else
+`.github/mcp.json`) registration must grant exactly `artifact_status`,
 `artifact_run`, `migration_status`, `migration_scan`,
 `migration_evidence_binding`, `migration_prefill`, `migration_capture`,
-`migration_pending_decisions`, `migration_run`; and
+`migration_pending_decisions`, `migration_run`, or the run is refused with
+`ACCEPTANCE_INSTALLED_GRANTS`. The overrides are `approval_policy="never"`;
 `mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
 those nine (Codex CLI 0.165.0 keys); plus
 `mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]`, because Codex

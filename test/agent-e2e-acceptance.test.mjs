@@ -101,6 +101,11 @@ for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.F
 }
 `;
 
+/** The E7 installed Codex entry (`--without-relay` + enabled_tools) for a receipt's release. */
+const codexEntry = (receipt, { server = 'mcp-server.mjs', tools = CODEX_MCP_TOOLS } = {}) =>
+  '# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ' + JSON.stringify(receipt.commands['artifact-migration-discover'][0]) +
+  '\nargs = ' + JSON.stringify([path.join(receipt.release, 'packages/migration-engine/src', server), '--without-relay']) +
+  '\nenabled_tools = ' + JSON.stringify(tools) + '\n# END artifact-migration-tools\n';
 /** The installed candidate as a Codex consumer, driven by FAKE_CODEX with its own CODEX_HOME. */
 const codexCandidate = async (root, install = installedCandidate) => {
   const installed = await install(root);
@@ -108,6 +113,8 @@ const codexCandidate = async (root, install = installedCandidate) => {
   receipt.provider = 'codex';
   await writeFile(path.join(installed.target, '.artifact-migration-tools/codex.json'), JSON.stringify(receipt));
   await mkdir(path.join(installed.target, '.agents/skills'), { recursive: true });
+  await mkdir(path.join(installed.target, '.codex'));
+  await writeFile(path.join(installed.target, '.codex/config.toml'), codexEntry(receipt));
   await writeFile(path.join(installed.bin, 'codex'), FAKE_CODEX, { mode: 0o755 });
   const quoted = name => receipt.commands[name].map(x => "'" + x + "'").join(' ');
   const env = { ...process.env, PATH: installed.bin + path.delimiter + process.env.PATH, CODEX_HOME: path.join(root, 'codex-home') };
@@ -529,12 +536,15 @@ test("black-box acceptance refuses an unverified installed engine before startin
   }
 });
 
-test("Codex approves exactly the nine engine tools, per tool, and keeps approval_policy never", () => {
+test("Codex approves exactly the nine engine tools, per tool, keeps approval_policy never, and injects no tool filter", () => {
   const { argv } = commandFor("codex", "$start-migration discounts", "/consumer/target");
+  const native = commandFor("codex", "$start-migration discounts", "/consumer/target", true, { command: "/node", args: ["/r/mcp-server.mjs", "--without-relay"] }).argv;
+  // E7: the installed entry's enabled_tools is the only filter, headless and native.
+  for (const command of [argv, native]) assert.doesNotMatch(command.join(" "), /enabled_tools|disabled_tools|\.tools=|--(?:allow|deny|available|excluded)-tools?/);
+  assert.ok(native.includes('mcp_servers.start-migration.args=["/r/mcp-server.mjs","--without-relay"]'));
   const overrides = argv.filter((_, i) => argv[i - 1] === "-c");
   assert.deepEqual(overrides, [
     'projects={ "/consumer/target" = { trust_level = "trusted" } }', 'approval_policy="never"',
-    `mcp_servers.start-migration.enabled_tools=${JSON.stringify(CODEX_MCP_TOOLS)}`,
     ...CODEX_MCP_TOOLS.map((tool) => `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`),
     'mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]', 'model_reasoning_effort="high"']);
   assert.equal(argv[argv.indexOf("-m") + 1], "gpt-6.1-sol");
@@ -543,6 +553,38 @@ test("Codex approves exactly the nine engine tools, per tool, and keeps approval
   // No server-wide default, no relay grant, no sandbox escalation, no other server.
   assert.doesNotMatch(argv.join(" "), /default_tools_approval_mode|migration_relay_decision|danger|bypass|mcp_servers\.(?!start-migration\.)/);
   assert.deepEqual(argv.slice(0, 6), ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", "/consumer/target/.agents"]);
+});
+
+test("installed Codex and Copilot grants: exactly nine proceeds, ten refuses before the agent spawns", async () => {
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-grants-"));
+  try {
+    const { target, bin, receipt } = await installedCandidate(root);
+    const parsed = JSON.parse(receipt);
+    for (const host of ["codex", "copilot"])
+      await writeFile(path.join(target, `.artifact-migration-tools/${host}.json`), JSON.stringify({ ...parsed, provider: host }));
+    await mkdir(path.join(target, ".codex"));
+    await mkdir(path.join(target, ".github"));
+    const install = async (codex, copilot) => {
+      await writeFile(path.join(target, ".codex/config.toml"), codexEntry(parsed, { tools: codex }));
+      await writeFile(path.join(target, ".github/mcp.json"), JSON.stringify({ mcpServers: { "start-migration": { tools: copilot } } }));
+    };
+    const spawned = path.join(root, "spawned");
+    await writeFile(path.join(bin, "opencode"), `#!/bin/sh\ntouch '${spawned}'\n`, { mode: 0o755 });
+    const runner = (output) => spawnSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target, "--module", "auth",
+      "--target", "auth", "--output", path.join(root, output), "--isolation", "none"],
+    { encoding: "utf8", timeout: 60000, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+    const ten = [...CODEX_MCP_TOOLS, "migration_relay_decision"];
+    for (const [host, codex, copilot] of [["codex", ten, CODEX_MCP_TOOLS], ["copilot", CODEX_MCP_TOOLS, ten]]) {
+      await install(codex, copilot);
+      assert.match(runner(host + "-ten").stderr, new RegExp(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are 10 `));
+      await assert.rejects(stat(spawned), { code: "ENOENT" });
+    }
+    await install(CODEX_MCP_TOOLS, CODEX_MCP_TOOLS);
+    assert.doesNotMatch(runner("nine").stderr, /ACCEPTANCE_INSTALLED_GRANTS/);
+    await stat(spawned);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the runner fails visibly on bad arguments run directly or through a symlink, and importing it runs nothing", async () => {
@@ -1171,13 +1213,10 @@ test('native launcher: nonce handoff, Enter to launch, one operator turn; no pro
         '--cwd', target, '--module', 'auth', '--target', 'auth', '--output', output, '--ui', 'native', ...extra].map(quote).join(' '), '/dev/null'],
       { env: { ...env, FAKE_CODEX_PROMPTS: JSON.stringify(prompts), FAKE_CODEX_CMD: cmd }, input: '\n', encoding: 'utf8', timeout: 60000 });
       // The installed entry must be exactly the verified release's MCP server, or native refuses before launch.
-      const entry = server => '# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ' + JSON.stringify(installed.commands['artifact-migration-discover'][0]) +
-        '\nargs = ' + JSON.stringify([path.join(installed.release, 'packages/migration-engine/src', server)]) + '\n# END artifact-migration-tools\n';
-      await mkdir(path.join(target, '.codex'));
-      await writeFile(path.join(target, '.codex/config.toml'), entry('other-server.mjs'));
+      await writeFile(path.join(target, '.codex/config.toml'), codexEntry(installed, { server: 'other-server.mjs' }));
       assert.equal(nativeRun(path.join(root, 'foreign-entry')).status, 1);
       assert.match(JSON.parse(await readFile(path.join(root, 'foreign-entry/report.json'))).failure, /not the verified release's MCP server/);
-      await writeFile(path.join(target, '.codex/config.toml'), entry('mcp-server.mjs'));
+      await writeFile(path.join(target, '.codex/config.toml'), codexEntry(installed));
       // No operator turn: infrastructure only, not counted, rerunnable once on a fresh consumer.
       const idle = nativeRun(path.join(root, 'idle'));
       const idleReport = JSON.parse(await readFile(path.join(root, 'idle/report.json')));
