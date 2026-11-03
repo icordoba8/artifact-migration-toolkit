@@ -608,12 +608,33 @@ test("installed Codex and Copilot grants: effective nine proceeds, declared nine
     assert.match(runner("shadow").stderr, /ACCEPTANCE_INSTALLED_GRANTS: installed copilot.*grants are 10/);
     await assert.rejects(stat(spawned), { code: "ENOENT" });
     await rm(path.join(target, ".mcp.json"));
+    // Nine advertised tools are insufficient when the provider narrows the effective surface.
+    for (const filter of ["enabled_tools", "disabled_tools", "copilot", "malformed"]) {
+      await install(true, true);
+      const codexFile = path.join(target, ".codex/config.toml");
+      if (filter === "copilot") {
+        const file = path.join(target, ".github/mcp.json");
+        const config = JSON.parse(await readFile(file, "utf8"));
+        config.mcpServers["start-migration"].tools = ["artifact_status"];
+        await writeFile(file, JSON.stringify(config));
+      } else {
+        const config = (await readFile(codexFile, "utf8")).replace(/^enabled_tools = .*\n/m, "");
+        await writeFile(codexFile, config +
+          (filter === "malformed" ? 'disabled_tools = "migration_run"\n'
+            : `${filter}=${JSON.stringify([filter === "enabled_tools" ? "artifact_status" : "migration_run"])}\n`));
+      }
+      assert.match(runner("filtered-" + filter).stderr, /ACCEPTANCE_INSTALLED_GRANTS/);
+      await assert.rejects(stat(spawned), { code: "ENOENT" });
+    }
+    await install(true, true);
     assert.doesNotMatch(runner("nine").stderr, /ACCEPTANCE_INSTALLED_GRANTS/);
     await stat(spawned);
     // Probe this branch's actual legacy server too, not just the MCP stand-in.
     shadow.mcpServers["start-migration"].args = [fileURLToPath(new URL("../packages/migration-engine/src/mcp-server.mjs", import.meta.url))];
     await writeFile(path.join(target, ".mcp.json"), JSON.stringify(shadow));
-    assert.ok((await installedGrants(target, "copilot")).grants.includes("migration_relay_decision"));
+    const probed = await installedGrants(target, "copilot");
+    assert.ok(probed.advertised.includes("migration_relay_decision"));
+    assert.deepEqual(probed.grants, CODEX_MCP_TOOLS);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -237,8 +237,8 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
 export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
   "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
 
-/** Probe the installed stdio transport, never a provider CLI or a declared tool filter. */
-const effectiveGrants = (root, server) => new Promise((resolve, reject) => {
+/** Probe the installed stdio transport before applying the provider's installed filters. */
+const advertisedGrants = (root, server) => new Promise((resolve, reject) => {
   if (typeof server.command !== "string" || !server.command ||
       !Array.isArray(server.args) || !server.args.every(arg => typeof arg === "string"))
     return reject(new Error("Unreadable installed command/args"));
@@ -297,12 +297,18 @@ const effectiveGrants = (root, server) => new Promise((resolve, reject) => {
 export async function installedGrants(root, host) {
   let server;
   if (host === "codex") {
-    const table = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
-      .split("[mcp_servers.start-migration]\n")[1]?.split(/^\[/m)[0];
-    if (table === undefined) return null;
-    // The installer writes JSON scalars and arrays, which are valid TOML; anything else fails to parse and refuses.
-    const key = (name) => { const line = table.match(new RegExp(`^${name} = (.*)$`, "m")); return line ? JSON.parse(line[1]) : undefined; };
-    server = { command: key("command"), args: key("args") };
+    const tables = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
+      .split(/^\s*\[mcp_servers\.start-migration\]\s*$/m);
+    if (tables.length === 1) return null;
+    if (tables.length !== 2) fail("Ambiguous installed Codex registration");
+    // The installer emits JSON values in one TOML table. Refuse other syntax rather than ignore a filter.
+    server = {};
+    for (const line of tables[1].split(/^\s*\[/m)[0].split("\n")) {
+      if (!line.trim() || line.trimStart().startsWith("#")) continue;
+      const field = line.match(/^\s*([a-z_]+)\s*=\s*(.*?)\s*$/);
+      if (!field || Object.hasOwn(server, field[1])) fail("Unreadable installed Codex registration");
+      server[field[1]] = JSON.parse(field[2]);
+    }
   } else {
     for (const file of [".mcp.json", ".github/mcp.json"]) {
       server = JSON.parse(await readFile(path.join(root, file), "utf8").catch(error => {
@@ -312,7 +318,20 @@ export async function installedGrants(root, host) {
       if (server) break;
     }
   }
-  return server ? { server: { command: server.command, args: server.args }, grants: await effectiveGrants(root, server) } : null;
+  if (!server) return null;
+  const enabled = host === "codex" ? server.enabled_tools : server.tools;
+  const disabled = host === "codex" ? server.disabled_tools : undefined;
+  if (host === "copilot" && enabled === undefined) fail("Missing installed Copilot tools filter");
+  for (const filter of [enabled, disabled]) {
+    if (filter !== undefined && (!Array.isArray(filter) || !filter.every(tool => typeof tool === "string")))
+      fail("Unreadable installed tool filter");
+  }
+  if (server.enabled !== undefined && typeof server.enabled !== "boolean") fail("Unreadable installed server enablement");
+  const advertised = await advertisedGrants(root, server);
+  const grants = advertised.filter(tool => server.enabled !== false &&
+    (enabled === undefined || (host === "copilot" && enabled.includes("*")) || enabled.includes(tool)) &&
+    !disabled?.includes(tool));
+  return { server: { command: server.command, args: server.args }, advertised, grants };
 }
 
 /**
@@ -485,12 +504,13 @@ async function score(options, root, output, report) {
   for (const host of ["codex", "copilot"]) {
     if (!(await exists(path.join(root, ".artifact-migration-tools", host + ".json")))) continue;
     shipped[host] = await installedGrants(root, host).catch(() => null);
-    const grants = shipped[host]?.grants;
-    if (!Array.isArray(grants) || grants.length !== CODEX_MCP_TOOLS.length ||
-        new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
-      fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
-        (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
-        ", not exactly the nine without migration_relay_decision");
+    for (const grants of [shipped[host]?.advertised, shipped[host]?.grants]) {
+      if (!Array.isArray(grants) || grants.length !== CODEX_MCP_TOOLS.length ||
+          new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
+        fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
+          (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
+          ", not exactly the nine without migration_relay_decision (server surface and effective provider grants must both match)");
+    }
   }
   // Native Codex restates the installed MCP entry verbatim; it must launch the verified release's MCP server.
   let mcpServer = null;
