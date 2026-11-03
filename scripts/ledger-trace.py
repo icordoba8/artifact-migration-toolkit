@@ -9,9 +9,9 @@ The command must run as `strace <LEDGER_TRACE_FLAGS> -o <trace> -- python3 no-io
 
 No namespace is trusted: mounts are allowed anywhere (Codex bubblewrap), so every read or append of an fd whose canonical -yy path
 names the ledger has its bytes inspected (any namespace, per shared-fd-table stream, unicode escapes decoded): a relay line read
-anywhere is RELAY_IN_SCORED_RUN. Opening a path named operator-decisions.ndjson that resolves to another file, a
+anywhere is RELAY_IN_SCORED_RUN. Opening a path named operator- or auto-decisions.ndjson that resolves to another file, a
 truncated read record, chroot, setns, or a pid not reached by a traced clone, fails.
-Ledger access (requested path or -yy canonical fd naming operator-decisions.ndjson): any writable open,
+Ledger access (requested path or -yy canonical fd naming operator- or auto-decisions.ndjson): any writable open,
 O_CREAT or O_TRUNC; creat/truncate/ftruncate/fallocate/link/unlink/rename/symlink; fcntl F_SETFL without
 O_APPEND; any write*/pwrite*/copy_file_range/splice/sendfile touching it; any mmap. Also any successful io_uring_setup, open_by_handle_at,
 process_vm_writev or writable /proc/<pid>/mem open; an incomplete trace (no root exit, tracer still running).
@@ -60,10 +60,10 @@ def filter_stream(trace):
             else:
                 pid, name, rest, resumed = match.group(1), match.group(2), match.group(3), match.group(4)
                 if name in BUFFERED and rest.endswith('<unfinished ...>'):
-                    pending[pid] = LEDGER in rest.split(',', 1)[0]
+                    pending[pid] = bool(LEDGER.search(rest.split(',', 1)[0]))
                     if not pending[pid]:
                         continue
-                elif name in BUFFERED and LEDGER not in rest.split(',', 1)[0]:
+                elif name in BUFFERED and not LEDGER.search(rest.split(',', 1)[0]):
                     continue
                 elif resumed in BUFFERED:
                     known = pending.pop(pid, None)
@@ -75,7 +75,7 @@ def filter_stream(trace):
             out.flush()
 
 
-LEDGER = 'operator-decisions.ndjson'
+LEDGER = re.compile(r'(?:operator|auto)-decisions\.ndjson')  # human and AUTO ledgers: both are consumed as decisions
 DESTRUCTIVE = {'creat', 'truncate', 'ftruncate', 'fallocate', 'link', 'linkat', 'unlink', 'unlinkat', 'rename',
                'renameat', 'renameat2', 'symlink', 'symlinkat'}
 LINE = re.compile(r'^(\d+) +(?:(\w+)\((.*)|<\.\.\. (\w+) resumed>(.*)|(\+\+\+ .*|--- .*))$')
@@ -151,7 +151,7 @@ def verify(trace, root_pid):
     for pid, name, text in rows:  # trace (completion) order
         bad = lambda reason: violations.append('%s: pid %s %s(%s' % (reason, pid, name, text[:300]))
         ok = not FAILED.search(text)
-        ledger = LEDGER in text
+        ledger = bool(LEDGER.search(text))
         flags = re.search(r'O_(?:RDONLY|WRONLY|RDWR)[A-Z_|0-9x]*', bare(text))
         flags = flags.group(0).split('|') if flags else []
         opened = re.search(r'= (\d+)<([^<>]*)>\s*$', text) if name in ('open', 'openat', 'openat2', 'creat') and ok else None
@@ -166,7 +166,7 @@ def verify(trace, root_pid):
             bad('syscall that bypasses the trace')
         elif opened and re.search(r'(?:"(?:[^"]*/)?mem"|/mem>)', text) and flags[:1] != ['O_RDONLY']:
             bad('writable process memory open')
-        elif name in READS | WRITES and LEDGER in text.split(',', 1)[0]:
+        elif name in READS | WRITES and LEDGER.search(text.split(',', 1)[0]):
             if name in WRITES:
                 bad('ledger write')
             fd, path = text.split(',', 1)[0].split('<', 1)
@@ -176,7 +176,7 @@ def verify(trace, root_pid):
                 if cut:
                     bad('truncated ledger read')
                 stream.append(unescape(data))
-        elif opened and re.search(r'"(?:[^"]*/)?%s"' % re.escape(LEDGER), text) and not opened.group(2).endswith('/' + LEDGER):
+        elif opened and (named := re.search(r'"(?:[^"]*/)?(%s)"' % LEDGER.pattern, text)) and not opened.group(2).endswith('/' + named.group(1)):
             bad('ledger path opened as another file')
         elif ledger and name in DESTRUCTIVE:
             bad('destructive ledger syscall')

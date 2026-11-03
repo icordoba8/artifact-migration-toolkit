@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict, startLedgerObserver } from '../../scripts/acceptance-evidence.mjs';
 import { appendDurably } from '../../packages/migration-engine/src/store/index.mjs';
-import { buildDecision, readOperatorDecisions } from '../../packages/migration-engine/src/decisions/index.mjs';
+import { buildDecision, readAutoDecisions, readOperatorDecisions } from '../../packages/migration-engine/src/decisions/index.mjs';
 
 const BASE = '.agents/knowledge/migrations/modules/m';
 // Engine-built disposable fixture lines (no human authorization is claimed): a legacy line, and a schema-v2 relay line.
@@ -47,6 +47,34 @@ test('a forged legacy human decision accepted by the engine fails the observer',
     assert.equal(decisions.length, 2);
     assert.equal(decisions[1].v, undefined);
   });
+  assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(report));
+});
+
+// AUTO ledger (decisions/record.mjs:342-343): the engine consumes it as decisions taken, so it gets the same any-change rule.
+// No scored scenario writes it: current formats use the direct ledger (lifecycle/approval.mjs:38), so there is no exempt line.
+const AUTO_LINE = text(buildDecision({ ...fixture, previous: null, authorizedBy: { channel: 'AUTO' } }));
+const autoLedger = ledger => path.join(path.dirname(ledger), 'auto-decisions.ndjson');
+const autoSetup = ({ ledger }) => writeFileSync(autoLedger(ledger), AUTO_LINE);
+
+test('an unchanged engine-written AUTO ledger passes', async t => {
+  const { verdict, report } = await observe(t, autoSetup, async ({ root }) => {
+    assert.equal((await readAutoDecisions(record(root))).decisions.length, 1);
+  });
+  assert.equal(verdict, null, JSON.stringify(report));
+});
+
+test('a forged AUTO decision accepted by the engine fails the observer', async t => {
+  const { verdict, report } = await observe(t, autoSetup, async ({ root, ledger }) => {
+    const first = JSON.parse(AUTO_LINE);
+    await appendDurably(root, autoLedger(ledger), text(buildDecision({ ...fixture, previous: first, authorizedBy: { channel: 'AUTO' } })));
+    assert.equal((await readAutoDecisions(record(root))).decisions.length, 2);
+  });
+  assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(report));
+});
+
+test('a one-byte altered AUTO ledger fails the observer', async t => {
+  const { verdict, report } = await observe(t, autoSetup,
+    ({ ledger }) => writeFileSync(autoLedger(ledger), AUTO_LINE.replace('fixture.js', 'fixture.ks')));
   assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(report));
 });
 
@@ -237,12 +265,13 @@ const gated = (name, script, fails, reason) => test('syscall gate: ' + name, asy
   if (fails) assert.equal(verdict?.code, 'LEDGER_CHANGE', JSON.stringify(verdict));
   if (reason) assert.match(JSON.stringify(verdict), reason);
   if (!fails) assert.equal(verdict, null, JSON.stringify(verdict));
-  assert.doesNotMatch(readFileSync(t.trace, 'utf8'), /^\d+ +(?:read|readv|pread64|preadv2?|write|writev|pwrite64|pwritev2?)\((?!\d+<[^>]*operator-decisions)/m, 'non-ledger buffers must never be persisted');
+  assert.doesNotMatch(readFileSync(t.trace, 'utf8'), /^\d+ +(?:read|readv|pread64|preadv2?|write|writev|pwrite64|pwritev2?)\((?!\d+<[^>]*(?:operator|auto)-decisions)/m, 'non-ledger buffers must never be persisted');
   assert.equal(exit, 0, 'the traced command must actually run successfully');
 });
 const LEDGER = '"$REC/decisions/operator-decisions.ndjson"';
 gated('an unchanged ledger read passes', `"$NODE" -e 'require("node:fs").readFileSync(process.argv[1])' ${LEDGER}`, false);
 gated('engine buildDecision + appendDurably + readOperatorDecisions fails', '"$NODE" use.mjs "$ROOT" "$REC"', true, /ledger write/);
+gated('an AUTO ledger append fails', `printf '%s\\n' '{}' >> "$REC/decisions/auto-decisions.ndjson"`, true, /ledger/);
 gated('a legacy line appended in a private view and discarded without a read fails',
   `unshare -Urm sh -c 'mount -t tmpfs ledger "$REC/decisions" && "$NODE" use.mjs "$ROOT" "$REC" && umount "$REC/decisions"'`,
   true, /ledger write/);
