@@ -289,6 +289,9 @@ async function main() {
   await mkdir(path.dirname(options.output), { recursive: true });
   const output = path.join(await realpath(path.dirname(options.output)), path.basename(options.output));
   if (output === root || output.startsWith(root + path.sep)) fail("Output must be outside the disposable consumer");
+  // Evidence must survive a reboot: scratch may use TMPDIR, evidence never.
+  const tmp = await realpath(os.tmpdir()).catch(() => path.resolve(os.tmpdir()));
+  if (output === tmp || output.startsWith(path.join(tmp, path.sep))) fail("Output must be outside TMPDIR (" + tmp + "); write evidence to a persistent directory");
   // I5: one atomic, non-recursive reservation. An existing directory, even empty, is never reused.
   await mkdir(output).catch(error => {
     if (error.code === "EEXIST") fail("Output already exists; never overwrite earlier evidence");

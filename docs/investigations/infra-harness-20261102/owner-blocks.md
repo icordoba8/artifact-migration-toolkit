@@ -48,7 +48,10 @@ left that only you can do:
    platform console instead.
 2. **Purge the OneDrive recycle bin**, including the second-stage recycle bin,
    of `amt-evidence-vault.tar`, `amt-evidence-vault.tar.sha256` and
-   `amt-evidence-vault.files.sha256`, all removed 2026-11-03.
+   `amt-evidence-vault.files.sha256`, all removed 2026-11-03; and of
+   `amt-evidence-vault-sanitized-20261103.tar` (`620bf3b7…cc2c`) with its
+   `.tar.sha256`, `.files.sha256` and `.restricted-inventory.tsv`, removed
+   2026-11-03T13:34Z because its manifests held hashes of the login logs.
 
 ```text
 V1 HOMES: auth-20261030T1715Z, auth2-20261030T1750Z, codex-recovery-20261030T125104Z
@@ -87,9 +90,22 @@ Filled in by the agent from commands it ran itself. This is not owner evidence.
   Their hashes are in `amt-evidence-vault.SUPERSEDED.txt` in the vault. Record:
   `checks/vault-restricted-classification.txt`. Revocation and recycle-bin
   purge are block V1 above.
-  - Still open (separate task): the local source `/home/utmwac/amt-evidence-vault`
-    still holds the 3 logs.
-  - Still open: the name screen of `m15-certification-final-20261101T0100Z.tar`
-    had 1 match; that tar was not inventoried.
+  - **Credential-file hashes (owner correction, 2026-11-03).** A hash of a
+    credential file is a credential hash. The vault manifests
+    `manifests/{source-before,source-after,vault-copy}.sha256` held 3 such lines
+    each, in the local vault and in `620bf3b7…`. They were replaced, not
+    edited, by `*.r2.sha256` plus `manifests/MANIFESTS.SUPERSEDED.txt` (line
+    numbers and names only). The OneDrive copy is now
+    `amt-evidence-vault-sanitized-20261103-r2.tar` (`876b1678…cad3`): `sha256sum
+    -c` OK, per-file 7,629 OK / 0 failed, 0 credential-hash hits. `620bf3b7…`
+    is SUPERSEDED and removed; purge it per step 2.
+  - Local vault: the 3 logs were removed 2026-11-03T13:21:20Z
+    (`checks/local-vault-login-logs-removed.txt`). The shareable tar there has
+    no credential-class names.
+  - `m15-certification-final-20261101T0100Z.tar`: clean by name
+    (`checks/m15-certification-final-inventory.txt`).
+  - Still open (owner): `m15-certification-run-20261031T2015Z.tar` holds
+    `runs/login-record.txt` (260 bytes). Classifying it would require reading
+    it, so it was not touched.
 - OneDrive sync status, and receipt off this device, are not observable here.
   They are the I12 block above.

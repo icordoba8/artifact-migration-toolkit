@@ -8,6 +8,7 @@ Fallback policy (unchanged): Opus 5.5 → GPT-6 Astra → different family, on t
 | Stage 1 | GitHub Copilot CLI, Claude Opus 5.5 | T3 carry, `plan.md` | `c5fb8eb306005d4f38327ce0859e20cee49cc175` (T3), `b47ddc4` (plan) |
 | Stage 2 | GitHub Copilot CLI, Claude Opus 5.5 (same session as the owner decision) | G1–G7, A1–A8 | this branch, see PR |
 | 2026-11-03 02:20Z–03:40Z, resumed 07:35 local | GitHub Copilot CLI, Claude Opus 5.5 | PR #15 gap closure: A9 relay detection, delta `/ponytail-review`, vault `restricted/` sanitization, suite rerun | this branch, see PR |
+| 2026-11-03 13:19Z– | GitHub Copilot CLI, Claude Opus 5.5 (same session) | Credential cleanup (m15-final inventory, local vault logs, manifest hash scrub, r2 vault tar), TMPDIR evidence guard, A9 review confirmation, suite rerun | this branch, see PR |
 
 The 19:18 attempt was not a fallback: no trigger fired. No fallback model was used in Stage 1, Stage 2 or the gap closure.
 

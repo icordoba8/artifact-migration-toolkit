@@ -53,7 +53,9 @@ Line refs are at T3 (`scripts/agent-e2e-acceptance.mjs` = R,
 `scripts/acceptance-evidence.mjs` = AE) and the joint engine @ `2782612`.
 Every group's fix is harness-side only. Tests run on the infra branch (engine
 1.6.4) **and** on a scratch merge of this branch with `2782612` (outside Git,
-evidence logs only), Node 22.13.0, TMPDIR outside the repo.
+evidence logs only), Node 22.13.0, TMPDIR outside the repo. TMPDIR holds
+scratch only: TAP logs are redirected straight into `checks/`, never into TMPDIR
+(the first S2 logs were lost from `/tmp` at a reboot).
 
 ### G1 — Refusals scored from prose, not from engine tool results (I1)
 

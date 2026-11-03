@@ -1,0 +1,24 @@
+m15-certification-final inventory (agent-run, AGENT_OBSERVED)
+generated: 2026-11-03T13:21:07Z
+source: /mnt/c/Users/icordoba/OneDrive/amt-evidence-vault-copy/m15-certification-final-20261101T0100Z.tar
+tar sha256: 3e3d56d61b11836bd1a73a8e0c784c38178fd18274b58dcaa1adfc7023d6f4ce (sha256sum -c .tar.sha256: OK)
+method: tar headers + in-process SHA-256 of member bytes; no contents opened, printed or copied
+type	size	sha256	name
+d	0	-	m15-certification-final-20261101T0100Z
+f	1058	fe9280974d7bf15744959625b925273cc4b12fca22d964fa4de8ec72be296000	m15-certification-final-20261101T0100Z/SHA256SUMS
+f	1213	21e00bce54bc8c3d5afd33bde1cbeff71c834d1b49b0eddd6659bd8b2bbbad02	m15-certification-final-20261101T0100Z/close.sh
+f	868	76adeee010e0f4bd5d18efa6b7dc7ec6bd25c721ad6c7e3b7f50dfe33cfe3119	m15-certification-final-20261101T0100Z/credential-scan.md
+f	7794	941a489e4a9564241dcce0bce9f00be1f4d47dd661796fbcfa080739fd2abb8e	m15-certification-final-20261101T0100Z/report.md
+d	0	-	m15-certification-final-20261101T0100Z/review
+f	25	249bf6529402b1bcb0a2c3ce87e2bfafd0d0b51a5ecfd76b632e6b4257c690c0	m15-certification-final-20261101T0100Z/review/end.utc
+f	223022	02dd92cf4f668625cfcdd18e708fd58285b9e1f480e01da31ff88a57a0e81fdf	m15-certification-final-20261101T0100Z/review/events.jsonl
+f	7	19eaf43821a7660ec323a87c8457bf74823beb296c39f5e01aa8a683aa50f061	m15-certification-final-20261101T0100Z/review/exit
+f	677	331e1d2e9a86607406c7e01d694a36f3b0900217d29bb0139a4965eb432e25c3	m15-certification-final-20261101T0100Z/review/prompt.txt
+f	652914	27c19b275b15b7eebb0bfa2373c5b6ede3a76ec4db14e97f17b98d84ee6d4ee8	m15-certification-final-20261101T0100Z/review/rollout-2026-10-31T20-12-57-01a194aa-b11e-7f90-9bf8-d39d99488265.jsonl
+f	25	c4ca8861b68208f4a4bb826d87887409445dfdd668efdb6a86114aafbe9824f3	m15-certification-final-20261101T0100Z/review/start.utc
+f	39	1aa26269eb1cc57f86b235a03cda53c004edb5b1e9fc99d4da4f00843293d721	m15-certification-final-20261101T0100Z/review/stderr.log
+f	5255	790cea3ca0c2fa44e39bf1a8f9e9520e538477b05961bb7d8ef3b9726a98e0c7	m15-certification-final-20261101T0100Z/review-input.md
+f	12479	aa69ec3baf2c7fe5f05026e7e5658eaf794ea2d0a0605fc71c51749ecf8877f6	m15-certification-final-20261101T0100Z/review.md
+named credential classes (auth.json, tokens, keys, cookies, login logs, .npmrc, .env): none
+name-screen match: credential-scan.md = scan report by name, not credential material
+result: clean by name; no sanitized copy needed; no new V1 entries

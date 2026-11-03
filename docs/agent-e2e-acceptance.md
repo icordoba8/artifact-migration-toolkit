@@ -193,8 +193,11 @@ node scripts/agent-e2e-acceptance.mjs \
   --cwd /tmp/disposable-migration-consumer/target \
   --module example --target example \
   --goal bootstrap \
-  --output /tmp/acceptance-opencode-bootstrap
+  --output docs/investigations/<run-id>/acceptance-opencode-bootstrap
 ```
+
+The consumer is scratch and may live under TMPDIR. `--output` is evidence: the
+runner refuses it inside TMPDIR, so it survives a reboot.
 
 `--goal bootstrap` reports `BOOTSTRAP_PASS` only after the agent created
 a real migration record past RESOLVE and the installed engine can project

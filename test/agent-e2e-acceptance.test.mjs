@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
 import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated } from "../scripts/agent-e2e-acceptance.mjs";
@@ -14,6 +15,10 @@ import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, st
 import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src/lifecycle/index.mjs';
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
+// The runner refuses evidence inside TMPDIR, so runner children get their own TMPDIR; test roots live beside it.
+const scratch = os.tmpdir();
+process.env.TMPDIR = mkdtempSync(path.join(scratch, "agent-e2e-child-tmp-"));
+after(() => rmSync(process.env.TMPDIR, { recursive: true, force: true }));
 
 /** A disposable consumer with a genuinely built, verified candidate installed for opencode. */
 const installedCandidate = async (root, verifierHome = root) => {
@@ -147,10 +152,11 @@ test("complete acceptance requires a pin from outside the consumer", () => {
 });
 
 test("black-box acceptance requires an explicitly disposable consumer", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-negative-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-negative-"));
   try {
     const argv = ["--provider", "codex", "--cwd", root, "--module", "auth",
       "--target", "auth", "--output", path.join(root, "../" + path.basename(root) + "-report")];
+    assert.match(failRun([...argv.slice(0, -1), path.join(process.env.TMPDIR, "report")]), /Output must be outside TMPDIR/);
     assert.match(failRun(argv), /ENOENT/);
     const verifier = path.join(root, "trusted-verifier.mjs");
     await writeFile(verifier, "process.exit(0);\n");
@@ -166,7 +172,7 @@ test("black-box acceptance requires an explicitly disposable consumer", async ()
 });
 
 test("black-box acceptance reports a missing installed runtime receipt", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-no-receipt-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-no-receipt-"));
   try {
     const target = path.join(root, "target");
     await mkdir(target);
@@ -185,7 +191,7 @@ test("black-box acceptance reports a missing installed runtime receipt", async (
 });
 
 test("black-box acceptance refuses a changed independent verifier before agent execution", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-pin-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-pin-"));
   try {
     const target = path.join(root, "target");
     await mkdir(target);
@@ -202,7 +208,7 @@ test("black-box acceptance refuses a changed independent verifier before agent e
 });
 
 test("without OS isolation, a rewritten receipt or engine bundle is still caught after the run", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-receipt-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-receipt-"));
   try {
     // A legitimate staged candidate is required: the runner verifies the
     // installed bundle BEFORE invoking the provider. Only the agent's write
@@ -230,7 +236,7 @@ test("without OS isolation, a rewritten receipt or engine bundle is still caught
 });
 
 test("an agent that leaves no readable engine status still gets a fail-closed report", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-no-status-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-no-status-"));
   try {
     const { target, bin } = await installedCandidate(root);
     // Exits 0 and creates no migration record, so the engine has no status to give. An engine that resolves the
@@ -256,7 +262,7 @@ test("an agent that leaves no readable engine status still gets a fail-closed re
 });
 
 test("ordinary first-time record directory creation is not a replacement event", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-first-record-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-first-record-"));
   try {
     const { target, bin } = await installedCandidate(root);
     await writeFile(path.join(bin, "opencode"), [
@@ -283,7 +289,7 @@ test("ordinary first-time record directory creation is not a replacement event",
 });
 
 test("record deletion and recreation is detected by a trusted observer and never certified", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-record-continuity-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-record-continuity-"));
   try {
     const { target, bin } = await installedCandidate(root);
     // One normal bootstrap mkdir, a destructive rm -rf, and a forged bootstrap.
@@ -330,7 +336,7 @@ const isolationAvailable = (() => {
 
 test("under OS isolation the agent cannot write the runtime, receipt, verifier or report, and nothing it starts outlives it",
   { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-isolated-"));
+    const root = await mkdtemp(path.join(scratch, "agent-e2e-isolated-"));
     try {
       // A verifier in its own directory is sealed whole, dependencies included.
       const { target, bin, verifier, release, receiptPath, receipt, pin } = await installedCandidate(root, path.join(root, "verifier"));
@@ -387,7 +393,7 @@ test("under OS isolation the agent cannot write the runtime, receipt, verifier o
 
 test("OS-isolated agent deleting and recreating its migration record cannot obtain certification",
   { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-isolated-reset-"));
+    const root = await mkdtemp(path.join(scratch, "agent-e2e-isolated-reset-"));
     try {
       const { target, bin, pin } = await installedCandidate(root, path.join(root, "verifier"));
       await writeFile(path.join(bin, "opencode"), [
@@ -421,7 +427,7 @@ test("OS-isolated agent deleting and recreating its migration record cannot obta
 
 test("under OS isolation a verifier in a broad directory (an ancestor of HOME) seals its script and node_modules, not HOME",
   { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-broad-"));
+    const root = await mkdtemp(path.join(scratch, "agent-e2e-broad-"));
     try {
       const broad = path.join(root, "broad"), home = path.join(broad, "home");
       const { target, bin, verifier } = await installedCandidate(root, broad);
@@ -449,7 +455,7 @@ test("under OS isolation a verifier in a broad directory (an ancestor of HOME) s
 
 test("OS isolation refuses a UID-0 runner before the provider starts",
   { skip: isolationAvailable ? false : "unprivileged user/mount/PID namespaces are unavailable on this host" }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-uid0-"));
+    const root = await mkdtemp(path.join(scratch, "agent-e2e-uid0-"));
     try {
       const { target, bin, pin } = await installedCandidate(root, path.join(root, "verifier"));
       const started = path.join(root, "agent-started");
@@ -473,7 +479,7 @@ test("OS isolation refuses a UID-0 runner before the provider starts",
 // Simulated credentials: an --import shim makes process.geteuid() report 0 while
 // the real UID stays the caller's own (non-root), the setuid-root launcher shape.
 test("OS isolation refuses an effective UID 0 with a non-root real UID before the provider starts", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-euid0-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-euid0-"));
   try {
     const { target, bin, pin } = await installedCandidate(root, path.join(root, "verifier"));
     const started = path.join(root, "agent-started");
@@ -494,7 +500,7 @@ test("OS isolation refuses an effective UID 0 with a non-root real UID before th
 });
 
 test("black-box acceptance refuses an unverified installed engine before starting the agent", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-bundle-"));
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-bundle-"));
   try {
     const target = path.join(root, "target");
     const store = path.join(root, "store");
@@ -540,7 +546,7 @@ test("Codex approves exactly the nine engine tools, per tool, and keeps approval
 });
 
 test("the runner fails visibly on bad arguments run directly or through a symlink, and importing it runs nothing", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "amt-entry-"));
+  const dir = await mkdtemp(path.join(scratch, "amt-entry-"));
   try {
     const link = path.join(dir, "acceptance.mjs");
     await symlink(fileURLToPath(script), link);
@@ -565,7 +571,7 @@ test("the runner fails visibly on bad arguments run directly or through a symlin
 });
 
 test('artifact acceptance uses the installed artifact CLI and independent verifier pin', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-artifact-'));
+  const root = await mkdtemp(path.join(scratch, 'agent-e2e-artifact-'));
   try {
     const consumer = await installedArtifactCandidate(root), { target, verifier } = consumer;
     // The fake agent runs the installed artifact CLI, then any extra shell.
@@ -633,7 +639,7 @@ test('classifier: only engine tool results carry refusal codes; structured codes
     [5, 'cli', 'BLOCKED_NOT_STARTED', 'structured'], [6, 'cli', 'FS_ERRNO_UNKNOWN', 'template']]);
   assert.equal(rollout.refusals[0].sha256, sha256(lines[1]));
   assert.throws(() => codexRollout(lines[0] + '\n' + lines[0], [engine]), /more than one session/);
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-home-'));
+  const home = await mkdtemp(path.join(scratch, 'codex-home-'));
   try {
     await mkdir(path.join(home, 'sessions/2026/11/02'), { recursive: true });
     await writeFile(path.join(home, 'sessions/2026/11/02/rollout-2026-11-02T20-00-00-t1.jsonl'), lines.join('\n') + '\n');
@@ -646,7 +652,7 @@ test('classifier: only engine tool results carry refusal codes; structured codes
 });
 
 test('a run past --not-after starts nothing and is NOT_RUN; one rerun, on a fresh consumer only', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-deadline-'));
+  const root = await mkdtemp(path.join(scratch, 'agent-e2e-deadline-'));
   try {
     const consumers = [];
     for (const name of ['first', 'fresh']) {
@@ -700,7 +706,7 @@ test('a run past --not-after starts nothing and is NOT_RUN; one rerun, on a fres
 
 test('read-only refusal is scored from a bound engine tool result, never from prose',
   { skip: codexReady(isolationAvailable) }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-readonly-'));
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-readonly-'));
     try {
       const { target, quoted, runCodex } = await codexCandidate(root, installedArtifactCandidate);
       const artifact = ['--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target, '--artifact-target', 'src/result.js'];
@@ -752,7 +758,7 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
 
 test('live and abandoned locks: refusal codes from the rollout, reclaim proven only across PID namespaces',
   { skip: codexReady(isolationAvailable) }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-locks-'));
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-locks-'));
     try {
       const { target, quoted, runCodex } = await codexCandidate(root, installedArtifactCandidate);
       const artifact = ['--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target, '--artifact-target', 'src/result.js'];
@@ -805,7 +811,7 @@ test('live and abandoned locks: refusal codes from the rollout, reclaim proven o
 
 test('realm-abandoned-lock: an owner abandoned in the agent realm is reclaimed there, never across namespaces or by hand',
   { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-realm-lock-'));
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-realm-lock-'));
     try {
       const { target, bin, pin, receipt } = await installedArtifactCandidate(root);
       const cli = JSON.parse(receipt).commands['artifact-migrate'].map(x => "'" + x + "'").join(' ');
@@ -870,7 +876,7 @@ test('realm-abandoned-lock: an owner abandoned in the agent realm is reclaimed t
   });
 
 test('checkpoint waits for committed state and preserves history, integrity and frozen bytes', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'checkpoint-'));
+  const root = await mkdtemp(path.join(scratch, 'checkpoint-'));
   try {
     const record = path.join(root, 'record'), lock = path.join(root, 'lock');
     await mkdir(path.join(record, 'history'), { recursive: true });
@@ -903,7 +909,7 @@ test('checkpoint waits for committed state and preserves history, integrity and 
 });
 
 test('snapshot notices empty-directory, mode and symlink mutations', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'tree-evidence-'));
+  const root = await mkdtemp(path.join(scratch, 'tree-evidence-'));
   try {
     await writeFile(path.join(root, 'file'), 'unchanged');
     await writeFile(path.join(root, '__proto__'), 'included');
@@ -938,7 +944,7 @@ test('snapshot notices empty-directory, mode and symlink mutations', async () =>
 });
 
 test('real lock owner survives contention and only same-realm proven death allows recovery', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'owner-proof-'));
+  const root = await mkdtemp(path.join(scratch, 'owner-proof-'));
   let holder;
   try {
     holder = await startLockHolder(process.execPath, new URL('../packages/migration-engine/src/lifecycle/lock.mjs', import.meta.url).href, root, 'auth');
@@ -953,7 +959,7 @@ test('real lock owner survives contention and only same-realm proven death allow
 });
 
 test('interruption kills a provider only after the trusted checkpoint predicate and errors fail closed', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'interrupt-control-'));
+  const root = await mkdtemp(path.join(scratch, 'interrupt-control-'));
   try {
     const command = { command: process.execPath, argv: ['-e', 'console.log("started");setInterval(()=>{},1000)'], cwd: root, timeoutMs: 2000 };
     let checks = 0;
@@ -1001,7 +1007,7 @@ test('native and headless launches share exact permissions; prose cannot certify
 
 test('artifact resume preserves store and trusted identities; pending replayable journals refuse without launch or mutation',
   { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-resume-'));
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-resume-'));
     try {
       const { target, bin, release, pin, receiptPath } = await installedArtifactCandidate(root);
       const store = path.dirname(release);
@@ -1156,7 +1162,7 @@ test('artifact resume preserves store and trusted identities; pending replayable
 
 test('native launcher: nonce handoff, Enter to launch, one operator turn; no prompt is rerunnable, a rescue never',
   { skip: codexReady(isolationAvailable) }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "agent'e2e-native-"));
+    const root = await mkdtemp(path.join(scratch, "agent'e2e-native-"));
     try {
       const { target, receipt, env } = await codexCandidate(root);
       const installed = JSON.parse(receipt);
@@ -1226,7 +1232,7 @@ test('native launcher: nonce handoff, Enter to launch, one operator turn; no pro
   });
 
 test('recording intake binds a video to a native run window, or records it UNBOUND; never copies it', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-recording-'));
+  const root = await mkdtemp(path.join(scratch, 'agent-e2e-recording-'));
   const intake = fileURLToPath(new URL('../scripts/acceptance-recording.mjs', import.meta.url));
   const take = (output, video) => spawnSync(process.execPath, [intake, output, video], { encoding: 'utf8' });
   try {
@@ -1275,7 +1281,7 @@ test('official launcher keeps Corepack signature checks on with npm\'s current r
 test('Corepack 0.30.0 verifies a rotated-key npm signature only with the pinned keys, and refuses an altered key',
   { skip: process.env.CI ? 'local-only (G5): downloads from the live npm registry; CI stays offline-deterministic'
     : process.version === 'v22.13.0' ? false : 'requires Node 22.13.0 (Corepack 0.30.0)' }, async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'corepack-keys-'));
+    const root = await mkdtemp(path.join(scratch, 'corepack-keys-'));
     const keys = JSON.parse(await readFile(new URL('../scripts/npm-registry-keys.json', import.meta.url), 'utf8'));
     const shim = path.join(path.dirname(path.dirname(process.execPath)), 'lib/node_modules/corepack/dist/pnpm.js');
     try {
@@ -1301,7 +1307,7 @@ test('Corepack 0.30.0 verifies a rotated-key npm signature only with the pinned 
   });
 
 test('official launcher binds external committed-harness pins and a clean tree; complete patch survives staging and commit', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'm15 launcher '));
+  const root = await mkdtemp(path.join(scratch, 'm15 launcher '));
   const repo = fileURLToPath(new URL('..', import.meta.url));
   const fixture = path.join(root, 'fixture');
   try {
@@ -1398,7 +1404,7 @@ test('official launcher puts only the verified pinned pnpm first on PATH; a miss
   assert.match(launcher, /^  pnpm_config_pm_on_fail=error AMT_PNPM_DIR="\$AMT_PNPM_RUN" \\$/m);
   assert.doesNotMatch(launcher, /^exec /m, 'the cleanup trap must outlive the runner');
   assert.match(launcher, /^test "\$\(sha256sum "\$AMT_NODE" \| cut -d' ' -f1\)" = af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8$/m);
-  const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
+  const root = await mkdtemp(path.join(scratch, 'm15 pnpm '));
   t.after(() => rm(root, { recursive: true, force: true }));
   const missing = spawnSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz'), path.join(root, 'run')], { encoding: 'utf8' });
   assert.notEqual(missing.status, 0);
@@ -1414,7 +1420,7 @@ test('official launcher puts only the verified pinned pnpm first on PATH; a miss
 // Off CI a missing tarball fails here instead of skipping: the official host must have it.
 test('the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx, and refuses a target pinning another pnpm',
   { skip: process.env.CI && !process.env.AMT_PNPM_TGZ ? `tarball not cached on runner: CI does not provision ${provisionedPnpm}` : false }, async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
+  const root = await mkdtemp(path.join(scratch, 'm15 pnpm '));
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(provisionedPnpm, path.join(root, 'pnpm-11.21.0.tgz'));
   execFileSync('bash', [pnpmHelper, path.join(root, 'pnpm-11.21.0.tgz'), path.join(root, 'run')]);
