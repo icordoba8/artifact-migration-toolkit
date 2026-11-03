@@ -9,4 +9,6 @@ import { exitCodeFor } from "./lifecycle-policy.mjs";
 
 export * from "./transport/mcp.mjs";
 
-startCommand(import.meta.url, () => serve(), reportFailure(exitCodeFor("FAILED")));
+// `--without-relay` (T1): the Copilot registrations omit `migration_relay_decision`;
+// the operator's answer is then relayed through `artifact-migration-decision`.
+startCommand(import.meta.url, (argv) => serve({ withoutRelay: argv.includes("--without-relay") }), reportFailure(exitCodeFor("FAILED")));

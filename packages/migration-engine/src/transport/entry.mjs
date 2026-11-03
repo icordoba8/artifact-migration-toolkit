@@ -10,10 +10,35 @@
  */
 
 import { isMainModule } from "../engine-paths.mjs";
+import { BLOCKED_EXIT_CODE } from "../lifecycle/index.mjs";
+import { REGISTRY_UNBOUND } from "../store/index.mjs";
 
-/** The message on stderr, nothing on stdout, and a non-zero exit code. */
+/**
+ * E6. A coded engine refusal (LOCK_*, FS_ERRNO_UNKNOWN, EROFS, ...) as every
+ * transport carries it: MCP as an `isError` result's `structuredContent`, the
+ * CLI as its stdout document. Node's own `ERR_*` codes are internal faults.
+ */
+export const refusalOf = (error) => {
+  if (typeof error?.code !== "string" || error.code.startsWith("ERR_")) return null;
+  const { code, errno, syscall, path } = error;
+  return { code, errno, syscall, path };
+};
+
+/**
+ * The message on stderr and a non-zero exit code; a coded refusal also prints
+ * its `refusalOf` document on stdout. An unbound registry is resolved before
+ * anything runs: its BLOCKED / NOT_STARTED document on stdout, exactly as MCP
+ * returns it, and exit 2.
+ */
 export const reportFailure = (exitCode) => (error) => {
   process.stderr.write(`${error.message}\n`);
+  if (error.code === REGISTRY_UNBOUND) {
+    process.stdout.write(`${JSON.stringify(error.result, null, 2)}\n`);
+    process.exitCode = BLOCKED_EXIT_CODE;
+    return;
+  }
+  const refusal = refusalOf(error);
+  if (refusal) process.stdout.write(`${JSON.stringify(refusal, null, 2)}\n`);
   process.exitCode = exitCode;
 };
 

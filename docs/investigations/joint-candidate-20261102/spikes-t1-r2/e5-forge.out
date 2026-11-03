@@ -1,0 +1,12 @@
+relay: CONTINUE [ 'DEC-001' ] | line keys: v,id,seq,prevDigest,at,operator,kind,subject,statement,rationaleDigest,candidateId,targets,boundTo,principal,result,candidateDigest,policyId,policyDigest
+after plain-I/O append: outcome CONTINUE | still OPERATOR_DECISION? false
+line: {"v":2,"id":"DEC-001","seq":1,"prevDigest":"genesis","at":"2026-11-03T01:07:00.747Z","operator":"utmwac@unknown-host","kind":"EXCLUSION","subject":{"type":"FILE","path":"auth/marker.txt"},"statement":"AGENT_RELAYED APPROVED of candidate APP-971d352edd9acafe84dd.","rationaleDigest":"sha256:f759f397e2ad05e33a38bb98f1d82402327fd7b1b1cf0e69720bf6c546501fe1","candidateId":"APP-971d352edd9acafe84dd","ta
+✔ docs/investigations/joint-candidate-20261102/spikes-t1-r2/e5-forge.mjs (1404.564643ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1418.058243
