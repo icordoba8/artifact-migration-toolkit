@@ -326,8 +326,7 @@ export async function installedGrants(root, host, verifiedTransport = null) {
   if (verifiedTransport && (server.command !== verifiedTransport.command ||
       !Array.isArray(server.args) || ![1, 2].includes(server.args.length) ||
       (server.args.length === 2 && server.args[1] !== "--without-relay") ||
-      typeof server.args[0] !== "string" ||
-      await realpath(path.resolve(root, server.args[0])).catch(() => null) !== verifiedTransport.entry ||
+      server.args[0] !== verifiedTransport.entry ||
       (server.env && Object.keys(server.env).length)))
     fail(`ACCEPTANCE_PRECONDITION: installed ${host} start-migration entry is not the verified release's MCP server`);
   const enabled = host === "codex" ? server.enabled_tools : server.tools;
@@ -526,6 +525,8 @@ async function score(options, root, output, report) {
     for (const relative of host === "codex" ? [".codex/config.toml"] : [".mcp.json", ".github/mcp.json"]) {
       const file = path.join(root, relative);
       registrations.set(file, await registrationBytes(file));
+      if (registrations.get(file) !== null && await realpath(file) !== file)
+        fail("ACCEPTANCE_PRECONDITION: installed MCP registration must not use a mutable symlink: " + file);
     }
     shipped[host] = await installedGrants(root, host, {
       command: cli[0], entry: await realpath(path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs")),

@@ -709,6 +709,23 @@ test("headless refuses substitute MCP servers before probing and detects changed
       assert.match(runner("foreign-" + host).stderr, /not the verified release's MCP server/);
       await assert.rejects(stat(started), { code: "ENOENT" });
     }
+    // A mutable alias of today's verified entry can be redirected after preflight without changing config bytes.
+    const alias = path.join(root, "server-alias.mjs");
+    await symlink(path.join(parsed.release, "packages/migration-engine/src/mcp-server.mjs"), alias);
+    await restore();
+    await writeFile(codexFile, codexEntry(parsed, {
+      server: path.relative(path.join(parsed.release, "packages/migration-engine/src"), alias),
+    }));
+    assert.match(runner("mutable-server-alias").stderr, /not the verified release's MCP server/);
+    await assert.rejects(stat(started), { code: "ENOENT" });
+    await restore();
+    await rm(codexFile);
+    const configAlias = path.join(root, "aliased-config.toml");
+    await writeFile(configAlias, configs.get(codexFile));
+    await symlink(configAlias, codexFile);
+    assert.match(runner("mutable-config-alias").stderr, /registration must not use a mutable symlink/);
+    await assert.rejects(stat(started), { code: "ENOENT" });
+    await rm(codexFile);
     for (const [i, file] of [codexFile, copilotFile, shadowFile].entries()) {
       await restore();
       await writeFile(path.join(bin, "opencode"), `#!/bin/sh\nprintf changed >> '${file}'\n`, { mode: 0o755 });
