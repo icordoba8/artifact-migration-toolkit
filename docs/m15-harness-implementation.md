@@ -18,8 +18,8 @@ All matrix statuses remain historical; local tests are not new scored evidence.
 | Cases 1, 3; rows 11–13, 28–29 | `--kind artifact`, pinned source/target marker, installed `artifact-migrate --status --json`, real artifact record identity, independent external verifier, canonical progress saved | Artifact bootstrap/full run, M13 reference verification, MCP/progress review |
 | Case 4; rows 15, 23 | `--scenario interrupt` stops after the first observed unlocked committed STEP_COMPLETED/ADVANCED; `resume` accepts only that report and consumer | Separate interruption/resumption stages; full completion and verifier PASS after resume |
 | Case 5; rows 18, 26 | `--scenario read-only` seals the whole consumer, re-enters the mounted cwd, records byte/mode/link/directory snapshots and refusal | Official refusal transcript and independent safety review |
-| Case 5; rows 16–17, 24–25 | Real installed-engine lock holder; live owner remains alive through observation; abandoned owner is killed and reaped before launch; captures owner and before/after lock bytes | Live safety review; abandoned foreign-realm recovery remains blocked by protocol |
-| Case 5; rows 17, 25 (same realm) | `--scenario realm-abandoned-lock`: inside the agent's PID namespace, before the agent exists, a trusted step takes the real engine lock and exits without releasing it; a FIFO gate holds the agent until the runner has pinned the owner (agent realm, not host realm) from outside. Pass needs the owner entry gone with no lock-removal command in the transcript, plus `BOOTSTRAP_PASS` | Independent transcript review. Only an in-realm reclaimer (Codex's MCP server, so `artifact_run`) can prove that owner gone; module bootstrap is CLI-only (`migration_bootstrap` is a refused MCP tool), so module recovery stays blocked as below |
+| Case 5; rows 16–17, 24–25 | Real installed-engine lock holder; live owner remains alive through observation; abandoned owner is killed and reaped before launch; captures owner and before/after lock bytes | Live safety review; row 17 cross-realm recovery is now scored on the joint candidate: token-backed reclaim, observed reclaimer in another realm, no manual removal, then the normal verdict |
+| Case 5; rows 17, 25 (agent-realm topology) | `--scenario realm-abandoned-lock`: inside the agent's PID namespace, before the agent exists, a trusted step takes the real engine lock and exits without releasing it; a FIFO gate holds the agent until the runner has pinned the owner (agent realm, not host realm) from outside. Pass needs the owner entry and token gone with no lock-removal command in the transcript, plus `BOOTSTRAP_PASS` | Independent transcript review. On the joint candidate the dead owner's FIFO token also permits a nested-shell reclaimer; the old MCP-only/same-realm limitation is superseded |
 | Case 2; row 14 | Unmodified invocation; raw tool results retained; structured OpenSpec-related result line numbers/hashes indexed for review | Authentic engine rejection, agent-authored correction, successful retry without rescue. `openspec.status` stays NOT_TESTED; index matches alone never pass it |
 | Case 6; rows 22, 30 | `--ui native` uses the same namespace/mount/grant configuration with interactive Codex; trusted `script` records PTY output and timing | Operator screen recording, one-invocation attestation, visible-progress comparison. PTY output is not a screen recording; nativeUiCertified remains false |
 | Sign-off A1–A7 | Versions/model pinned; evidence cannot overwrite prior output; failures cannot retain certified=true | CI at an authorized committed harness SHA, owner rulings, final independent acceptance |
@@ -44,16 +44,13 @@ Existing functional `E2E_COMPLETE_PASS` semantics remain, including an external 
 
 ## Known blockers and unresolved rulings
 
-- **Engine protocol blocker:** a host lock owner has a different PID realm from every isolated agent.
-  A dead host PID therefore cannot be proven gone by that agent. `abandoned-lock` retains the lock and
-  reports `ACCEPTANCE_LOCK_OWNER_PROOF`, never deleting/relabeling it or claiming recovery. Because no
-  engine path can reclaim that owner, a lock that vanishes anyway fails as `ACCEPTANCE_LOCK_REMOVED`
-  (agent removed it outside the protocol). Local tests prove same-realm recovery, cross-realm refusal and
-  the manual-removal failure control separately. Codex 0.165.0 also gives every sandboxed shell command
-  its own PID namespace (probe: agent `pid:[4026535538]`, `codex sandbox` shell `pid:[4026535932]`), so
-  even an owner planted in the agent's realm could only be reclaimed through the MCP server process, and
-  a lock abandoned by one sandboxed engine CLI call is unreclaimable by the next. Changing this requires an engine/broker
-  protocol design and a new candidate, or an explicitly reviewed alternative acceptance topology.
+- **Superseded on the joint candidate — cross-realm engine protocol blocker:** the earlier engine could not
+  prove a dead owner gone from another PID realm, including Codex's nested command sandboxes.
+  The joint candidate's FIFO liveness token now supplies that proof (`packages/migration-engine/src/lifecycle/lock.mjs`).
+  Row 17 `abandoned-lock` is scored: require `RECLAIMED_ACROSS_REALM`, the dead owner's entry/token gone,
+  an observed reclaimer in a different realm, no lock-removal lead, and the normal bootstrap/completion verdict.
+  Missing, mismatched or unprobeable tokens still refuse; the harness never removes or relabels a lock.
+  The historical limitation remains applicable to releases without the token protocol.
 - **Interruption race:** polling observes a committed, unlocked checkpoint but cannot atomically stop
   the provider before its next engine call. A changed state, remaining lock or journal fails closed and is
   preserved. Reliable interception at every checkpoint would require engine coordination. Do not remove
@@ -203,8 +200,8 @@ bash scripts/m15-official-run.sh "${COMMON[@]}" --goal complete --scenario fresh
 # Module or artifact live lock: expected SAFETY_REFUSAL_PASS, independently review owner and target snapshots.
 # The official launcher supplies --scoring scored --code-source structured; do not pass overrides.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario live-lock --output "$E/live-lock"
-# Module or artifact abandoned lock: currently expected BLOCKED_OWNER_PROOF, NOT recovery PASS.
-# Do not spend a scored run on this until the blocker has a reviewed disposition.
+# Module or artifact abandoned lock (row 17, joint candidate): score RECLAIMED_ACROSS_REALM plus normal verdict.
+# Require token-backed reclaim and an observed reclaimer in another PID realm; never remove a lock manually.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario abandoned-lock --output "$E/abandoned-lock"
 # Artifact abandoned lock, owner abandoned in the agent's own realm: expected BOOTSTRAP_PASS with RECLAIMED_IN_AGENT_REALM.
 bash scripts/m15-official-run.sh "${COMMON[@]}" --goal bootstrap --scenario realm-abandoned-lock --output "$E/realm-abandoned-lock"
