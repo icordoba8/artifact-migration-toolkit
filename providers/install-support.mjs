@@ -129,6 +129,10 @@ const serverFor = (provider, release, legacy = false) => {
     : provider === 'copilot' ? { type: 'stdio', ...launch }
       : provider === 'codex' && !legacy ? { ...launch, enabled_tools: RELAYLESS_MCP_TOOLS } : launch;
 };
+// E7. Consumer tooling (`agents:sync`) generates `.codex/config.toml` from the shared
+// `.agents/mcp.json` entry, so a Codex install keeps that entry relay-less too. The
+// Claude-shaped launch every other provider (and Codex <=1.6.5) wrote stays accepted.
+const agentsServerFor = (provider, release, legacy = false) => serverFor(provider === 'codex' && !legacy ? 'codex' : 'claude', release);
 // The body of the owned `[mcp_servers.start-migration]` table; JSON arrays and strings are valid TOML.
 export const codexToml = server => `command = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n` +
   (server.enabled_tools ? `enabled_tools = ${JSON.stringify(server.enabled_tools)}\n` : '');
@@ -172,7 +176,7 @@ async function historicalOwned(receipt, provider, layout) {
           !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
     for (const legacy of provider === 'claude' ? [false] : [false, true]) {
-      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release), release: item.release, pin: item.pin, manifest });
+      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: agentsServerFor(provider, item.release, legacy), release: item.release, pin: item.pin, manifest });
     }
   }
   return owned;
@@ -266,9 +270,9 @@ function mergeAgents(raw, previous, server, historical, provider) {
       !targets.every(target => typeof target === 'string' && target.length > 0) || new Set(targets).size !== targets.length)) {
     throw conflict('.agents/mcp.json');
   }
-  const current = serverFor('claude', previous.release);
-  if (!same(registration, current) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
-  const desired = server ? serverFor('claude', server) : null;
+  const current = [serverFor('claude', previous.release), agentsServerFor(provider, previous.release)];
+  if (!current.some(item => same(registration, item)) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
+  const desired = server ? agentsServerFor(provider, server) : null;
   if (!desired || same(registration, desired)) return null;
   entries['start-migration'] = { ...desired, ...(targets && { targets }) };
   return Buffer.from(json(config));
@@ -374,7 +378,7 @@ async function adoptRegistration(provider, layout, store, current, rawConfig, ra
   const names = await readdir(store).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   const releases = names.filter(name => /^\d+\.\d+\.\d+-[a-f0-9]{64}$/.test(name)).map(name => ({ release: path.join(store, name), pin: `sha256:${name.slice(-64)}` }));
   const candidates = [
-    ...(provider === 'claude' ? [false] : [false, true]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
+    ...(provider === 'claude' ? [false] : [false, true]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: agentsServerFor(provider, current.release, legacy) })),
     ...await historicalOwned({ ...current, store, releases }, provider, layout),
   ];
   const parse = raw => { try { return JSON.parse(raw); } catch { return null; } };

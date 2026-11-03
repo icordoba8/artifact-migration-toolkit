@@ -549,12 +549,17 @@ test('without a receipt, a foreign .agents/mcp.json start-migration entry is a t
   // Its own entry for this store is adopted with the rest.
   await writeFile(path.join(root, '.agents/mcp.json'), '{"mcpServers":{}}\n');
   const first = await adapter('codex', options);
-  // `.agents/mcp.json` carries the shared (Claude-shaped) launch, not Codex's relay-less one.
+  // E7: a Claude-shaped (<=1.6.5) shared entry targeting Codex converges on Codex's relay-less one.
   const agents = { mcpServers: { 'start-migration': { command: first.mcp.command, args: first.mcp.args.slice(0, 1), targets: ['codex'] } } };
   await writeFile(path.join(root, '.agents/mcp.json'), `${JSON.stringify(agents, null, 2)}\n`);
   await dropReceipts(root);
   assert.deepEqual(await adapter('codex', options), first);
-  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), agents);
+  const relayless = { mcpServers: { 'start-migration': { ...first.mcp, targets: ['codex'] } } };
+  assert.equal(first.mcp.args.at(-1), '--without-relay');
+  assert.deepEqual(first.mcp.enabled_tools, RELAYLESS_MCP_TOOLS);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), relayless);
+  assert.equal((await adapter('codex', { ...options, action: 'doctor' })).mcpRepair, null);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), relayless);
 });
 
 test('SHA256SUMS disagreeing with the release manifest fails closed', async () => {

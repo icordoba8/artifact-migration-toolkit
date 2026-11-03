@@ -30,7 +30,10 @@ The Codex adapter's registration (`.codex/config.toml`, project or user)
 launches the server with `--without-relay` and grants exactly the nine
 remaining tools through `enabled_tools`, on install and on update from an
 earlier release, with no flag. `migration_relay_decision` is neither listed
-nor granted, and a call to it is refused by name.
+nor granted, and a call to it is refused by name. A project's shared
+`.agents/mcp.json` `start-migration` entry, which consumer tooling may turn
+into `.codex/config.toml`, gets the same relay-less launch and nine tools from
+a Codex install.
 
 The Copilot adapter registers the same server twice, one file per client:
 `.vscode/mcp.json` (`servers`, read by VS Code) and `.github/mcp.json`
