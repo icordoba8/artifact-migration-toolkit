@@ -1,7 +1,7 @@
 # M15 harness implementation and operator runbook
 
 Implementation scope: harness, local tests, review. **Certification: NOT_READY.**
-BASE: `d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d`.
+BASE: an explicit input (`AMT_BASE`), owner-approved at candidate pin time; never pinned in a script or this document.
 The reviewed starting patch was preserved; no applicable AGENTS.md was present in the candidate or its ancestors.
 No engine, provider, installed skill, requirement, release payload or historical evidence is changed.
 Attempt 3's accepted discounts functional PASS (37/37) stands. Do not repeat it to erase F1.
@@ -77,14 +77,16 @@ Existing functional `E2E_COMPLETE_PASS` semantics remain, including an external 
 
 Use a plain non-root terminal with `Seccomp: 0`. Approvals above must precede their dependent actions.
 The launcher requires externally approved `AMT_HARNESS_COMMIT` and `AMT_PATCH_SHA256`, a clean
-worktree (including no untracked files), and historical BASE ancestry. It refuses changed binary hashes,
+worktree (including no untracked files), and an explicit `AMT_BASE` (40 hex) that is an ancestor of the harness commit. It refuses changed binary hashes,
 other Node/Codex versions, or different reviewed content. It passes `gpt-6.1-sol`, high reasoning, workspace-write, approval_policy=never and the
 same exact nine MCP grants. It uses a separate disposable HOME and CODEX_HOME with an empty environment.
 Do not reuse the old official-run.sh, which requires a clean historical worktree.
 
 Four identities are separate:
 
-- **Historical BASE:** `d7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d`, the comparison ancestor, never the final harness SHA.
+- **BASE:** `AMT_BASE`, the full 40-character comparison ancestor, owner-approved at candidate pin time and never
+  the final harness SHA. The patch script and launcher refuse a missing, short or non-ancestor BASE; the patch's first
+  line is `BASE <sha>`, so `AMT_PATCH_SHA256` binds it, and the runner records it in `report.launch.base`.
 - **Reviewed content:** SHA-256 of `bash scripts/m15-patch.sh`, the complete binary BASE-to-worktree patch,
   including new files. A temporary index/object store leaves the real index untouched; staging order and
   committing the same bytes do not change this digest. The old HEAD-diff-only digest is historical.
@@ -97,7 +99,7 @@ this review's externally recorded digest. Do not put that digest or the future c
 it hashes. No candidate commit is authorized or executed by this implementation session.
 
 ```bash
-bash scripts/m15-patch.sh > /tmp/m15-reviewed-complete.patch
+AMT_BASE='<owner-approved full BASE commit>' bash scripts/m15-patch.sh > /tmp/m15-reviewed-complete.patch
 sha256sum /tmp/m15-reviewed-complete.patch
 # Compare with the final review report. The dirty, uncommitted candidate cannot launch officially.
 ```
@@ -112,6 +114,8 @@ cd /home/utmwac/amt-m15-uidmap
 R=/home/utmwac/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl
 N=/home/utmwac/.nvm/versions/node/v22.13.0/bin
 export PATH="$R/bin:$N:/usr/local/bin:/usr/bin:/bin"
+# Corepack shims (yarn) verify with scripts/npm-registry-keys.json, exported by the launcher as COREPACK_INTEGRITY_KEYS
+# with COREPACK_ENABLE_NETWORK=0; a yarn fixture's COREPACK_HOME is provisioned beforehand with the same keys.
 # One-time pnpm provisioning: the launcher verifies scripts/m15-pnpm.sh's pinned sha512 and never fetches.
 test -f ~/.cache/amt-pnpm/pnpm-11.21.0.tgz || { mkdir -p ~/.cache/amt-pnpm &&
   curl -fsS --proto =https -o ~/.cache/amt-pnpm/pnpm-11.21.0.tgz https://registry.npmjs.org/pnpm/-/pnpm-11.21.0.tgz; }
@@ -119,7 +123,8 @@ PIN=sha256:bbf8b295722287014407d2c6bf7bd5293105f3f65ea0575f92d135ab1fabbbf6
 VT=/home/utmwac/amt-evidence-vault/m15-20261030T2045Z/restricted/tmp
 V="$VT/amt-m15-run3-20261030T1910Z"
 ACC=/home/utmwac/artifact-migration-toolkit/docs/investigations/m15-codex-acceptance-20261030T1715Z
-# Copy both pins from the external review/commit approval records.
+# Copy all three pins from the external review/commit approval records.
+export AMT_BASE='<owner-approved full BASE commit, approved at candidate pin time>'
 export AMT_PATCH_SHA256='<reviewed complete BASE-to-harness patch SHA-256>'
 export AMT_HARNESS_COMMIT='<externally approved full final harness commit SHA>'
 # The prepare script's historical bundle path was lost on reboot: restore exact bytes first.

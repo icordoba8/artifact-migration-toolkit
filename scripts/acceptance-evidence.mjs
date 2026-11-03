@@ -1,5 +1,6 @@
 /** Trusted-side evidence only. Never repairs a consumer or awards human acceptance. */
 import { createHash } from 'node:crypto';
+import { readlinkSync } from 'node:fs';
 import { lstat, readdir, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -17,6 +18,9 @@ export async function snapshotTree(root) {
     const item = { mode: info.mode };
     if (info.isSymbolicLink()) item.link = await readlink(file);
     else if (info.isFile()) item.sha256 = sha256(await readFile(file));
+    // Never open a FIFO or socket (an engine liveness token): its identity and mode are the evidence.
+    else if (info.isFIFO()) item.type = 'fifo';
+    else if (info.isSocket()) item.type = 'socket';
     else if (!info.isDirectory()) throw new Error('Unsupported evidence entry: ' + file);
     entries[relative] = item;
     if (info.isDirectory()) for (const name of (await readdir(file)).sort()) await visit(path.join(relative, name));
@@ -82,12 +86,145 @@ export function openspecLeads(transcript) {
   });
 }
 
-// Review leads only: shell commands (Codex JSON command items, or plain trace lines) that remove or move a lock.
+// Review leads only: shell commands (Codex exec JSON or rollout command items, or plain trace lines) that remove or move a lock.
 export const lockRemovals = transcript => transcript.split('\n').flatMap((line, index) => {
   let command = line;
-  try { const event = JSON.parse(line); command = event?.item?.type === 'command_execution' ? String(event.item.command) : ''; } catch {}
+  try {
+    const event = JSON.parse(line), item = event?.payload?.item;
+    command = event?.item?.type === 'command_execution' ? String(event.item.command)
+      : event?.type === 'event_msg' && item?.type === 'CommandExecution' ? [].concat(item.command).join(' ') : '';
+  } catch {}
   return command.includes('locks') && /\b(rm|rmdir|unlink|mv)\b/.test(command) ? [{ line: index + 1, sha256: sha256(line) }] : [];
 });
+
+/**
+ * G1: refusals come from engine tool results bound to the call that produced them, never from agent prose.
+ * A structured engine code (E6: MCP `isError` + `structuredContent.code`; CLI stdout refusal document; the
+ * BLOCKED / NOT_STARTED document) always wins. Otherwise the engine's exact message templates
+ * (lock.mjs lockedError, store/files.mjs mkdirCause, Node errno, registry.mjs registryUnbound) give
+ * codeSource "template". ponytail: template matching is the ceiling for engines without E6.
+ */
+const TEMPLATES = [
+  ['LOCK_PROTOCOL_1', /^Another migration command holds the lock for '[^'\n]*' at [^\n]* as a lock file from a protocol-1 release/m],
+  ['LOCK_OWNER_UNKNOWN', /^Another migration command holds the lock for '[^'\n]*' at [^\n]*cannot be proven gone from here: its entry or liveness token is unreadable/m],
+  ['LOCK_NO_LIVENESS_TOKEN', /^Another migration command holds the lock for '[^'\n]*' at [^\n]*recorded no liveness token and runs in another PID realm/m],
+  // Engine 1.6.4 has no codes: its cross-realm refusal names no reason.
+  ['LOCK_OWNER_UNPROVEN', /^Another migration command holds the lock for '[^'\n]*' at [^\n]*\) cannot be proven gone from here, so it is never reclaimed/m],
+  ['LOCK_HELD', /^Another migration command holds the lock for '[^'\n]*' at [^\n]* \(pid (?:\d+|unknown)\)\. Wait for it to finish/m],
+  ['FS_ERRNO_UNKNOWN', /^Cannot create '[^\n]*': mkdir reported ENOENT and no syscall recovered the real cause\./m],
+  // Any Node errno is recorded by its own code; only the scenario's accepted codes ever count.
+  [null, /^(E[A-Z]+): [^,\n]+, [a-z]+ '/m],
+  ['BLOCKED_NOT_STARTED', /^Migration registry is not configured\./m],
+];
+const templateCode = text => {
+  for (const [code, pattern] of TEMPLATES) { const match = pattern.exec(text); if (match) return code ?? match[1]; }
+  return null;
+};
+export const parseJson = text => { try { return JSON.parse(text); } catch { return null; } };
+const structured = doc => typeof doc?.code === 'string' ? doc.code
+  : doc?.outcome === 'BLOCKED' && doc?.status === 'NOT_STARTED' ? 'BLOCKED_NOT_STARTED' : null;
+
+const mcpRefusal = item => {
+  if (item.status === 'failed') // Codex drops error.data: only the message after its JSON-RPC prefix is the engine's.
+    return { code: templateCode(String(item.error?.message ?? '').replace(/^[\s\S]*?Mcp error: -?\d+: /, '')), codeSource: 'template' };
+  const result = item.result ?? {}, doc = result.structuredContent ?? parseJson(result.content?.at(-1)?.text);
+  const code = structured(doc);
+  if (code && (result.isError || code === 'BLOCKED_NOT_STARTED')) return { code, codeSource: 'structured' };
+  return result.isError ? { code: templateCode((result.content ?? []).map(part => part.text ?? '').join('\n')), codeSource: 'template' } : null;
+};
+
+// Minimal POSIX word splitter. Returns null on anything but plain words and quotes (pipes, lists,
+// redirections, substitutions, globs), so a bound command's exit code is the engine's own.
+// ponytail: `cd x && engine ...`, env prefixes and heredocs are never bound; widen only with a real parser.
+const shellWords = line => {
+  const words = [];
+  let word = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "'") {
+      const end = line.indexOf("'", i + 1);
+      if (end < 0) return null;
+      word = (word ?? '') + line.slice(i + 1, end); i = end;
+    } else if (c === '"') {
+      let text = '', j = i + 1;
+      for (; j < line.length && line[j] !== '"'; j++) {
+        if (line[j] === '$' || line[j] === '`') return null;
+        if (line[j] === '\\' && /["\\$`]/.test(line[j + 1] ?? '')) j++;
+        text += line[j];
+      }
+      if (j >= line.length) return null;
+      word = (word ?? '') + text; i = j;
+    } else if (c === '\\') word = (word ?? '') + (line[++i] ?? '');
+    else if (/\s/.test(c)) { if (word !== null) words.push(word); word = null; }
+    else if (/[|&;<>()`$*?[\]{}~#!]/.test(c)) return null;
+    else word = (word ?? '') + c;
+  }
+  if (word !== null) words.push(word);
+  return words;
+};
+
+// Only a failed shell call whose argv runs a receipt-installed engine command is engine evidence: an
+// `echo` of an engine message, a provider sandbox line (bwrap) or prose never is.
+const cliRefusal = (item, engineCommands) => {
+  const [shell, flag, line] = Array.isArray(item.command) ? item.command : [];
+  if (!Number.isInteger(item.exit_code) || item.exit_code === 0 || !Array.isArray(item.command) || item.command.length !== 3 ||
+      !/^\/(?:usr\/)?bin\/(?:ba)?sh$/.test(shell) || !['-c', '-lc'].includes(flag)) return null;
+  const words = shellWords(String(line).replace(/\s+2>&1\s*$/, ''));
+  if (!words || !engineCommands.some(([node, entry]) => words[0] === node && words[1] === entry)) return null;
+  const output = String(item.aggregated_output ?? '');
+  const code = structured(parseJson(output.match(/^\{\n[\s\S]*?\n\}$/m)?.[0]));
+  if (code && (code !== 'BLOCKED_NOT_STARTED' || item.exit_code === 2)) return { code, codeSource: 'structured' };
+  return { code: templateCode(output), codeSource: 'template' };
+};
+
+/**
+ * A Codex 0.165.0 rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`): the provider's own per-call record.
+ * Returns its session, turn count, operator prompts and every engine refusal (line number + line SHA-256).
+ */
+export function codexRollout(text, engineCommands) {
+  const rollout = { meta: null, turns: 0, prompts: [], refusals: [] };
+  text.split('\n').forEach((line, index) => {
+    if (!line) return;
+    const event = JSON.parse(line), payload = event.payload ?? {};
+    if (event.type === 'session_meta') {
+      if (rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one session in a rollout');
+      rollout.meta = { id: payload.id, cwd: payload.cwd, timestamp: payload.timestamp };
+    }
+    if (event.type !== 'event_msg') return;
+    if (payload.type === 'task_started') rollout.turns += 1;
+    const item = payload.type === 'item_completed' ? payload.item : null;
+    if (item?.type === 'UserMessage') rollout.prompts.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+    const refusal = item?.type === 'McpToolCall' && item.server === 'start-migration' ? mcpRefusal(item)
+      : item?.type === 'CommandExecution' ? cliRefusal(item, engineCommands) : null;
+    if (refusal) rollout.refusals.push({ line: index + 1, sha256: sha256(line),
+      source: item.type === 'McpToolCall' ? 'mcp' : 'cli', tool: item.tool ?? null, exitCode: item.exit_code ?? null, ...refusal });
+  });
+  if (!rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: rollout has no session_meta');
+  return rollout;
+}
+
+/**
+ * Finds this run's rollout: headless by the `thread.started` id Codex printed (file name and session id must
+ * both match), native by consumer cwd within the launch window. Never another thread's or consumer's session.
+ * Returns null only when no candidate exists; a foreign or ambiguous match throws.
+ */
+export async function findCodexRollout(codexHome, { threadId, cwd, startedAt, endedAt }) {
+  const sessions = path.join(codexHome, 'sessions');
+  const names = (await readdir(sessions, { recursive: true }).catch(error => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  })).filter(name => /(?:^|\/)rollout-[^/]*\.jsonl$/.test(name) && (!threadId || name.endsWith('-' + threadId + '.jsonl')));
+  const found = [];
+  for (const name of names) {
+    const file = path.join(sessions, name), text = await readFile(file, 'utf8');
+    const meta = JSON.parse(text.slice(0, text.indexOf('\n'))).payload ?? {};
+    if (threadId && (meta.id !== threadId || meta.cwd !== cwd))
+      throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: ' + name + ' belongs to another thread or consumer');
+    if (threadId || (meta.cwd === cwd && meta.timestamp >= startedAt && meta.timestamp <= endedAt)) found.push({ file, text });
+  }
+  if (found.length > 1) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one rollout matches this run');
+  return found[0] ?? null;
+}
 
 // A real engine lock, owned by a separate trusted process in the host PID realm.
 export async function startLockHolder(node, moduleUrl, root, name) {
@@ -112,6 +249,9 @@ export async function startLockHolder(node, moduleUrl, root, name) {
       else { child.kill('SIGKILL'); reject(new Error('Unexpected lock holder output')); }
     });
   });
-  return { pid: child.pid, alive: () => child.exitCode === null && child.signalCode === null,
-    stop: async (abandon = false) => { child.kill(abandon ? 'SIGKILL' : 'SIGTERM'); await closed; } };
+  // A5: the holder's own PID namespace, read from the host side before it can die.
+  const pidns = readlinkSync(`/proc/${child.pid}/ns/pid`);
+  return { pid: child.pid, pidns, alive: () => child.exitCode === null && child.signalCode === null,
+    // Resolves with the signal that ended the holder: an abandoned owner must have died by SIGKILL.
+    stop: async (abandon = false) => { child.kill(abandon ? 'SIGKILL' : 'SIGTERM'); await closed; return child.signalCode; } };
 }

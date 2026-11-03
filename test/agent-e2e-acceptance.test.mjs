@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { buildRelease } from "../scripts/release.mjs";
 import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 
-import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256 } from '../scripts/acceptance-evidence.mjs';
+import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout } from '../scripts/acceptance-evidence.mjs';
 import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src/lifecycle/index.mjs';
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
@@ -63,6 +63,60 @@ const installedArtifactCandidate = async root => {
   await writeFile(markerPath, JSON.stringify(marker));
   return installed;
 };
+/**
+ * A stand-in for Codex 0.165.0: writes a rollout in its format under $CODEX_HOME, prints thread.started (exec),
+ * and runs FAKE_CODEX_CMD through bash -lc as one CommandExecution item. Native turns come from FAKE_CODEX_PROMPTS.
+ */
+const FAKE_CODEX = `#!${process.execPath}
+const fs = require('node:fs'), path = require('node:path'), { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('codex-cli 0.165.0'); process.exit(0); }
+const id = require('node:crypto').randomUUID(), now = new Date().toISOString(), headless = args[0] === 'exec';
+const dir = path.join(process.env.CODEX_HOME, 'sessions', now.slice(0, 10).replaceAll('-', '/'));
+fs.mkdirSync(dir, { recursive: true });
+const file = path.join(dir, 'rollout-' + now.replace(/[:.]/g, '-') + '-' + id + '.jsonl');
+const log = (type, payload) => fs.appendFileSync(file, JSON.stringify({ timestamp: new Date().toISOString(), type, payload }) + '\\n');
+const item = item => log('event_msg', { type: 'item_completed', item });
+log('session_meta', { id, cwd: process.cwd(), timestamp: now });
+if (headless) console.log(JSON.stringify({ type: 'thread.started', thread_id: id }));
+else {
+  if (process.stdin.isTTY) console.log('LOCAL_TEST_PTY_VISIBLE');
+  if (args.some(arg => arg.startsWith('mcp_servers.start-migration.command='))) console.log('TRANSPORT_RESTATED');
+}
+for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.FAKE_CODEX_PROMPTS || '[]')).entries()) {
+  log('event_msg', { type: 'task_started' });
+  item({ type: 'UserMessage', content: [{ type: 'text', text }] });
+  if (index === 0 && process.env.FAKE_CODEX_CMD) {
+    const run = spawnSync('/bin/bash', ['-lc', process.env.FAKE_CODEX_CMD], { encoding: 'utf8' });
+    console.log(run.stdout + run.stderr);
+    item({ type: 'CommandExecution', command: ['/bin/bash', '-lc', process.env.FAKE_CODEX_CMD], exit_code: run.status,
+      aggregated_output: run.stdout + run.stderr, status: 'completed' });
+  }
+  log('event_msg', { type: 'task_complete' });
+}
+`;
+
+/** The installed candidate as a Codex consumer, driven by FAKE_CODEX with its own CODEX_HOME. */
+const codexCandidate = async (root, install = installedCandidate) => {
+  const installed = await install(root);
+  const receipt = JSON.parse(installed.receipt);
+  receipt.provider = 'codex';
+  await writeFile(path.join(installed.target, '.artifact-migration-tools/codex.json'), JSON.stringify(receipt));
+  await mkdir(path.join(installed.target, '.agents/skills'), { recursive: true });
+  await writeFile(path.join(installed.bin, 'codex'), FAKE_CODEX, { mode: 0o755 });
+  const quoted = name => receipt.commands[name].map(x => "'" + x + "'").join(' ');
+  const env = { ...process.env, PATH: installed.bin + path.delimiter + process.env.PATH, CODEX_HOME: path.join(root, 'codex-home') };
+  const runCodex = (output, argv, cmd) => spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', installed.target,
+    '--module', 'auth', '--target', 'auth', '--output', output, '--expected-pin', installed.pin, ...argv],
+  { timeout: 90000, encoding: 'utf8', env: { ...env, FAKE_CODEX_CMD: cmd } });
+  return { ...installed, receipt: JSON.stringify(receipt), quoted, env, runCodex };
+};
+// The engine under test: the joint candidate has refusal codes, a liveness token and mkdir errno recovery; 1.6.4 has none.
+const codedEngine = (await readFile(new URL('../packages/migration-engine/src/store/files.mjs', import.meta.url), 'utf8')).includes('FS_ERRNO_UNKNOWN');
+const registryUnboundEngine = (await readFile(new URL('../packages/migration-engine/src/store/registry.mjs', import.meta.url), 'utf8')).includes('REGISTRY_UNBOUND');
+const codexReady = isolationAvailable => isolationAvailable && process.version === 'v22.13.0' ? false
+  : 'requires unprivileged namespaces and Node 22.13.0 (the Codex preflight pin)';
+
 const failRun = argv => {
   try {
     execFileSync(process.execPath, [script.pathname, ...argv], { encoding: "utf8", timeout: 10000, stdio: "pipe" });
@@ -179,16 +233,20 @@ test("an agent that leaves no readable engine status still gets a fail-closed re
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-e2e-no-status-"));
   try {
     const { target, bin } = await installedCandidate(root);
-    // Exits 0 and creates no migration record, so the engine has no status to give.
+    // Exits 0 and creates no migration record, so the engine has no status to give. An engine that resolves the
+    // (here absent) registry first exits 2 with BLOCKED/NOT_STARTED: typed as "nothing ran" (scoring change 2).
+    const expected = registryUnboundEngine ? /ENGINE_BLOCKED_NOT_STARTED: the engine reports nothing ran \(Migration registry is not configured/
+      : /Engine status failed/;
+    await writeFile(path.join(target, "package.json"), '{"type":"module"}\n');
     await writeFile(path.join(bin, "opencode"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const output = path.join(root, "reports");
     assert.throws(() => execFileSync(process.execPath, [script.pathname, "--provider", "opencode", "--cwd", target,
       "--module", "auth", "--target", "auth", "--output", output, "--isolation", "none"],
     { encoding: "utf8", timeout: 60000, stdio: "pipe", env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } }),
-    (error) => /Engine status failed/.test(String(error.stderr)));
+    (error) => expected.test(String(error.stderr)));
     const report = JSON.parse(await readFile(path.join(output, "report.json"), "utf8"));
     assert.equal(report.verdict, "FAIL");
-    assert.match(report.failure, /Engine status failed/);
+    assert.match(report.failure, expected);
     assert.equal(report.engine, undefined);
     assert.equal(report.independentVerification, undefined);
     assert.ok((await readFile(path.join(output, "engine-status.stderr.log"), "utf8")).length > 0);
@@ -491,6 +549,11 @@ test("the runner fails visibly on bad arguments run directly or through a symlin
       assert.equal(run.status, 1, entry);
       assert.match(run.stderr, /AGENT_ACCEPTANCE_ERROR: Expected unique --provider/, entry);
     }
+    for (const scenario of ['read-only', 'live-lock', 'abandoned-lock']) {
+      const run = spawnSync(process.execPath, [fileURLToPath(script), '--provider', 'opencode', '--cwd', dir, '--module', 'auth',
+        '--target', 'auth', '--output', path.join(dir, 'out'), '--scenario', scenario], { encoding: 'utf8' });
+      assert.match(run.stderr, /Refusal scenarios require --provider codex/, scenario);
+    }
     const imported = spawnSync(process.execPath, ["--input-type=module", "-e",
       `const m = await import(${JSON.stringify(script.href)}); console.log(typeof m.commandFor);`], { encoding: "utf8" });
     assert.equal(imported.status, 0);
@@ -531,66 +594,201 @@ test('artifact acceptance uses the installed artifact CLI and independent verifi
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('read-only consumer is sealed and unchanged',
-  { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
+test('classifier: only engine tool results carry refusal codes; structured codes win; rollouts bind to their thread', async () => {
+  const engine = ['/opt/node', '/store/r/src/cli/run.mjs'];
+  const mcpFailed = message => ({ type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status: 'failed',
+    error: { message: 'tool call error: tool call failed for `start-migration/migration_run`\n\nCaused by:\n    Mcp error: -32603: ' + message } });
+  const shell = (line, exit_code, aggregated_output) => ({ type: 'CommandExecution', command: ['/bin/bash', '-lc', line], exit_code, aggregated_output, status: 'completed' });
+  const held = "Another migration command holds the lock for 'auth' at /c/locks/auth.lock (pid 7). Wait for it to finish; the lock is reclaimed automatically once that process is gone.";
+  const items = [
+    mcpFailed(held),                                                                              // MCP template
+    { type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status: 'completed',  // MCP structured (E6)
+      result: { isError: true, content: [{ type: 'text', text: 'x' }], structuredContent: { code: 'LOCK_HELD' } } },
+    shell("'/opt/node' '/store/r/src/cli/run.mjs' auth 2>&1", 1, "EROFS: read-only file system, access '/c/.agents'\n"),
+    shell("/opt/node /store/r/src/cli/run.mjs auth", 2, '{\n  "outcome": "BLOCKED",\n  "status": "NOT_STARTED"\n}\n'),
+    shell('/opt/node /store/r/src/cli/run.mjs auth', 1, "Cannot create '/c/x': mkdir reported ENOENT and no syscall recovered the real cause.\n"),
+    shell("echo 'EROFS: read-only file system, mkdir ' /x", 1, "EROFS: read-only file system, mkdir '/x'\n"),           // echo
+    shell("/opt/node /store/r/src/cli/run.mjs auth | cat", 1, "EROFS: read-only file system, mkdir '/x'\n"),           // pipe
+    shell('bwrap --ro-bind / / true', 1, "bwrap: EROFS: read-only file system, mkdir '/x'\n"),                       // sandbox line
+    shell('/opt/node /store/r/src/cli/run.mjs auth', 0, "EROFS: read-only file system, mkdir '/x'\n"),             // exit 0
+    { ...mcpFailed(held), server: 'playwright' },                                                                    // other server
+    { type: 'AgentMessage', content: [{ type: 'text', text: held }] },                                               // prose
+  ];
+  const lines = [{ type: 'session_meta', payload: { id: 't1', cwd: '/c', timestamp: '2026-11-02T20:00:00.000Z' } },
+    ...items.map(item => ({ type: 'event_msg', payload: { type: 'item_completed', item } }))].map(line => JSON.stringify(line));
+  const rollout = codexRollout(lines.join('\n') + '\n', [engine]);
+  assert.deepEqual(rollout.refusals.map(({ line, source, code, codeSource }) => [line, source, code, codeSource]), [
+    [2, 'mcp', 'LOCK_HELD', 'template'], [3, 'mcp', 'LOCK_HELD', 'structured'], [4, 'cli', 'EROFS', 'template'],
+    [5, 'cli', 'BLOCKED_NOT_STARTED', 'structured'], [6, 'cli', 'FS_ERRNO_UNKNOWN', 'template']]);
+  assert.equal(rollout.refusals[0].sha256, sha256(lines[1]));
+  assert.throws(() => codexRollout(lines[0] + '\n' + lines[0], [engine]), /more than one session/);
+  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-home-'));
+  try {
+    await mkdir(path.join(home, 'sessions/2026/11/02'), { recursive: true });
+    await writeFile(path.join(home, 'sessions/2026/11/02/rollout-2026-11-02T20-00-00-t1.jsonl'), lines.join('\n') + '\n');
+    assert.equal((await findCodexRollout(home, { threadId: 't1', cwd: '/c' })).text, lines.join('\n') + '\n');
+    await assert.rejects(findCodexRollout(home, { threadId: 't1', cwd: '/other' }), /another thread or consumer/);
+    assert.equal(await findCodexRollout(home, { threadId: 't2', cwd: '/c' }), null);
+    assert.equal((await findCodexRollout(home, { cwd: '/c', startedAt: '2026-11-02T19:59:00Z', endedAt: '2026-11-02T20:01:00Z' })).text.length > 0, true);
+    assert.equal(await findCodexRollout(home, { cwd: '/c', startedAt: '2026-11-02T20:00:01Z', endedAt: '2026-11-02T20:01:00Z' }), null);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('a run past --not-after starts nothing and is NOT_RUN; one rerun, on a fresh consumer only', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-deadline-'));
+  try {
+    const consumers = [];
+    for (const name of ['first', 'fresh']) {
+      const installed = await installedCandidate(path.join(root, name));
+      await writeFile(path.join(installed.bin, 'opencode'), '#!/bin/sh\ntouch "$0.started"\n', { mode: 0o755 });
+      consumers.push(installed);
+    }
+    const runAt = (consumer, output, extra, env = {}) => spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', consumer.target,
+      '--module', 'auth', '--target', 'auth', '--output', output, '--isolation', 'none', ...extra],
+    { encoding: 'utf8', timeout: 60000, env: { ...process.env, ...env, PATH: consumer.bin + path.delimiter + process.env.PATH } });
+    const past = ['--not-after', '2000-01-01T00:00:00Z'];
+    assert.match(runAt(consumers[0], path.join(root, 'bad'), ['--not-after', '2000-01-01 00:00']).stderr, /ISO-8601 UTC/);
+    const late = runAt(consumers[0], path.join(root, 'late'), past);
+    const report = JSON.parse(await readFile(path.join(root, 'late/report.json')));
+    assert.equal(late.status, 1);
+    assert.equal(report.verdict, 'NOT_RUN');
+    assert.equal(report.notRun.reason, 'DEADLINE');
+    assert.equal(report.rerunEligible, true);
+    assert.equal(report.agent, undefined);
+    assert.equal(await stat(path.join(consumers[0].bin, 'opencode.started')).catch(() => null), null);
+    assert.equal(JSON.parse(late.stdout.trim().split('\n').at(-1)).verdict, 'NOT_RUN');
+    // Two drivers racing for one output: one atomic reservation wins, the other writes nothing.
+    const race = () => new Promise(resolve => execFile(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', consumers[0].target,
+      '--module', 'auth', '--target', 'auth', '--output', path.join(root, 'race'), '--isolation', 'none', ...past],
+    { encoding: 'utf8', timeout: 60000, env: { ...process.env, PATH: consumers[0].bin + path.delimiter + process.env.PATH } }, (error, stdout, stderr) => resolve(stderr)));
+    const raced = await Promise.all([race(), race()]);
+    assert.equal(raced.filter(stderr => /Output already exists/.test(stderr)).length, 1, raced.join('\n'));
+    assert.equal(JSON.parse(await readFile(path.join(root, 'race/report.json'))).verdict, 'NOT_RUN');
+    // Never on the same consumer.
+    runAt(consumers[0], path.join(root, 'same'), [...past, '--rerun-of', path.join(root, 'late/report.json')]);
+    assert.match(JSON.parse(await readFile(path.join(root, 'same/report.json'))).failure, /ACCEPTANCE_PRECONDITION: --rerun-of/);
+    // The rerun binds the prior report and is never itself rerunnable.
+    const rerun = runAt(consumers[1], path.join(root, 'rerun'), [...past, '--rerun-of', path.join(root, 'late/report.json')]);
+    const rerunReport = JSON.parse(await readFile(path.join(root, 'rerun/report.json')));
+    assert.equal(rerun.status, 1);
+    assert.equal(rerunReport.verdict, 'NOT_RUN');
+    assert.equal(rerunReport.rerunOf.sha256, sha256(await readFile(path.join(root, 'late/report.json'))));
+    assert.equal(rerunReport.rerunEligible, false);
+    const again = runAt(consumers[1], path.join(root, 'again'), ['--rerun-of', path.join(root, 'rerun/report.json')]);
+    assert.equal(again.status, 1);
+    assert.match(JSON.parse(await readFile(path.join(root, 'again/report.json'))).failure, /not itself a rerun/);
+    // A launched run records the launcher identity it was given (A2), never a default.
+    const base = 'b'.repeat(40);
+    runAt(consumers[1], path.join(root, 'launched'), [], { AMT_BASE: base, AMT_HARNESS_COMMIT: 'c'.repeat(40), AMT_PATCH_SHA256: 'd'.repeat(64) });
+    const { launch } = JSON.parse(await readFile(path.join(root, 'launched/report.json')));
+    assert.deepEqual([launch.base, launch.harnessCommit, launch.patchSha256, launch.node], [base, 'c'.repeat(40), 'd'.repeat(64), process.version]);
+    assert.ok(Date.parse(launch.startedAt) <= Date.parse(launch.endedAt));
+    assert.ok(await stat(path.join(consumers[1].bin, 'opencode.started')));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('read-only refusal is scored from a bound engine tool result, never from prose',
+  { skip: codexReady(isolationAvailable) }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-readonly-'));
     try {
-      const { target, bin, pin } = await installedCandidate(root);
-      await writeFile(path.join(bin, 'opencode'), '#!/bin/sh\nif touch should-not-exist; then exit 9; fi\necho read-only filesystem\n', { mode: 0o755 });
+      const { target, quoted, runCodex } = await codexCandidate(root, installedArtifactCandidate);
+      const artifact = ['--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target, '--artifact-target', 'src/result.js'];
+      const engine = quoted('artifact-migrate') + ' legacy/source.js --target src/result.js --mode auto --json';
       const output = path.join(root, 'report');
-      const result = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
-        '--target', 'auth', '--output', output, '--scenario', 'read-only', '--expected-pin', pin],
-      { timeout: 60000, stdio: 'pipe', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
+      const result = runCodex(output, [...artifact, '--scenario', 'read-only'], engine);
       const report = JSON.parse(await readFile(path.join(output, 'report.json')));
-      assert.equal(result.status, 0, JSON.stringify(report));
-      assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
       assert.equal(report.safety.unchanged, true);
+      if (codedEngine) {
+        assert.equal(result.status, 0, JSON.stringify(report.safety));
+        assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+        assert.ok(['EROFS', 'EACCES', 'EPERM'].includes(report.safety.refusal.code), JSON.stringify(report.safety));
+        assert.equal(report.safety.refusal.source, 'cli');
+      } else {
+        // 1.6.4 reports Node's recursive-mkdir ENOENT for a read-only mount: recorded, never normalized to a refusal.
+        assert.equal(result.status, 1);
+        assert.deepEqual(report.rollout.refusals.map(entry => entry.code), ['ENOENT']);
+      }
       assert.ok(report.security.readOnly.includes(target));
       assert.equal(report.security.certified, false);
+      assert.equal(report.rollout.sha256, sha256(await readFile(path.join(output, 'codex-rollout.jsonl'))));
+      // The last stdout line is the driver summary, on every verdict.
+      assert.equal(JSON.parse(result.stdout.trim().split('\n').at(-1)).report, path.join(output, 'report.json'));
+      // Prose is not a refusal: an agent that only echoes the engine's message fails.
+      const echoed = runCodex(path.join(root, 'echoed'), [...artifact, '--scenario', 'read-only'],
+        "echo \"EROFS: read-only file system, mkdir '/x'\"; exit 1");
+      const echoReport = JSON.parse(await readFile(path.join(root, 'echoed/report.json')));
+      assert.equal(echoed.status, 1);
+      assert.equal(echoReport.safety.refusalObserved, false);
+      assert.match(echoReport.failure, /Safety refusal not proven/);
+      assert.equal(JSON.parse(echoed.stdout.trim().split('\n').at(-1)).verdict, 'FAIL');
+      // A3: a scored joint run requires the engine's structured code; a template match does not satisfy it.
+      const strict = runCodex(path.join(root, 'strict'), [...artifact, '--scenario', 'read-only', '--code-source', 'structured'],
+        engine);
+      const strictReport = JSON.parse(await readFile(path.join(root, 'strict/report.json')));
+      assert.equal(strict.status, 1);
+      assert.equal(strictReport.safety.codeSourceRequired, 'structured');
+      assert.equal(strictReport.safety.refusal, null);
+      // Without E6 every engine refusal is template-matched, so a structured-only run cannot pass.
+      assert.deepEqual(strictReport.rollout.refusals.map(entry => entry.codeSource), ['template']);
+      // An existing output directory, even empty, is never reused.
+      await mkdir(path.join(root, 'taken'));
+      const taken = runCodex(path.join(root, 'taken'), [...artifact, '--scenario', 'read-only'], 'true');
+      assert.equal(taken.status, 1);
+      assert.match(taken.stderr, /Output already exists/);
+      assert.deepEqual(await readdir(path.join(root, 'taken')), []);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-test('live and abandoned scenarios retain genuine owner proof across PID isolation',
-  { skip: isolationAvailable ? false : 'unprivileged namespaces unavailable' }, async () => {
+test('live and abandoned locks: refusal codes from the rollout, reclaim proven only across PID namespaces',
+  { skip: codexReady(isolationAvailable) }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-locks-'));
     try {
-      const { target, bin, pin, release } = await installedCandidate(root);
-      const lockModule = new URL('../packages/migration-engine/src/lifecycle/lock.mjs', new URL('file://' + release + '/scripts/')).href;
-      const probe = path.join(root, 'lock-probe.mjs');
-      await writeFile(probe, `const { acquireModuleLock } = await import(${JSON.stringify(lockModule)});\n` +
-        `try { await (await acquireModuleLock(process.cwd(), 'auth', { timeoutMs: 50 }))(); console.log('unexpected acquire'); }\n` +
-        `catch(e) { console.log(e.message); }\n`);
-      await writeFile(path.join(bin, 'opencode'), `#!/bin/sh\nexec '${process.execPath}' '${probe}'\n`, { mode: 0o755 });
-      for (const scenario of ['live-lock', 'abandoned-lock']) {
-        const output = path.join(root, scenario);
-        const result = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
-          '--target', 'auth', '--output', output, '--scenario', scenario, '--expected-pin', pin],
-        { timeout: 60000, encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
-        const report = JSON.parse(await readFile(path.join(output, 'report.json')));
-        assert.equal(report.security.certified, false);
-        assert.deepEqual(report.lock.before, report.lock.after);
-        if (scenario === 'live-lock') {
-          assert.equal(result.status, 0, result.stderr);
-          assert.equal(report.lock.holderAliveAfter, true);
-          assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
-        } else {
-          assert.equal(result.status, 1);
-          assert.equal(report.lock.ownerExited, true);
-          assert.equal(report.lock.recovery, 'BLOCKED_OWNER_PROOF');
-          assert.match(report.failure, /ACCEPTANCE_LOCK_OWNER_PROOF/);
-        }
+      const { target, quoted, runCodex } = await codexCandidate(root, installedArtifactCandidate);
+      const artifact = ['--kind', 'artifact', '--source', 'legacy/source.js', '--source-root', target, '--artifact-target', 'src/result.js'];
+      const engine = quoted('artifact-migrate') + ' legacy/source.js --target src/result.js --mode auto --json';
+      const live = runCodex(path.join(root, 'live-lock'), [...artifact, '--scenario', 'live-lock'], engine);
+      const liveReport = JSON.parse(await readFile(path.join(root, 'live-lock/report.json')));
+      assert.equal(liveReport.lock.holderAliveAfter, true);
+      if (codedEngine) {
+        assert.equal(live.status, 0, JSON.stringify(liveReport.safety));
+        assert.equal(liveReport.verdict, 'SAFETY_REFUSAL_PASS');
+        assert.equal(liveReport.safety.refusal.code, 'LOCK_HELD');
+      } else {
+        // 1.6.4 cannot tell a live owner in another PID namespace from a dead one: a refusal, but not LOCK_HELD.
+        assert.equal(live.status, 1);
+        assert.deepEqual(liveReport.rollout.refusals.map(entry => entry.code), ['LOCK_OWNER_UNPROVEN']);
       }
-      // Failure control: an agent that deletes the abandoned lock by hand must never pass.
-      await rm(lockPathFor(target, 'auth'), { recursive: true }); // fixture reset: the runner refuses a pre-existing lock
-      await writeFile(path.join(bin, 'opencode'), `#!/bin/sh\nrm -rf .agents/knowledge/migrations/locks/auth.lock\nexec '${process.execPath}' '${probe}'\n`, { mode: 0o755 });
-      const removed = spawnSync(process.execPath, [script.pathname, '--provider', 'opencode', '--cwd', target, '--module', 'auth',
-        '--target', 'auth', '--output', path.join(root, 'removed'), '--scenario', 'abandoned-lock', '--expected-pin', pin],
-      { timeout: 60000, encoding: 'utf8', env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
-      const report = JSON.parse(await readFile(path.join(root, 'removed/report.json')));
+      assert.equal(liveReport.lock.owner.pid, liveReport.lock.holder.pid);
+      assert.deepEqual(liveReport.lock.before, liveReport.lock.after);
+      // A5: the holder dies by SIGKILL in the host PID namespace; the engine run by the agent lives in another.
+      const abandoned = runCodex(path.join(root, 'abandoned-lock'), [...artifact, '--scenario', 'abandoned-lock'], engine);
+      const report = JSON.parse(await readFile(path.join(root, 'abandoned-lock/report.json')));
+      assert.equal(report.lock.holder.signal, 'SIGKILL');
+      assert.equal(report.lock.ownerExited, true);
+      assert.equal(report.security.certified, false);
+      assert.equal(Boolean(report.lock.owner.fifo), codedEngine);
+      if (codedEngine) {
+        // Engine with a liveness token (joint candidate): the dead owner is reclaimed from the agent's namespace.
+        assert.equal(report.lock.recovery, 'RECLAIMED_ACROSS_REALM', JSON.stringify(report.lock));
+        assert.ok(report.lock.reclaimers.every(entry => entry.realm !== 'linux:' + report.lock.holder.pidns));
+      } else {
+        // Engine without one (1.6.4): the owner cannot be proven gone; the lock is preserved, codes recorded.
+        assert.equal(abandoned.status, 1);
+        assert.equal(report.lock.recovery, 'BLOCKED_OWNER_PROOF', JSON.stringify(report.lock));
+        assert.deepEqual(report.lock.before, report.lock.after);
+        assert.deepEqual(report.rollout.refusals.map(entry => entry.code), ['LOCK_OWNER_UNPROVEN']);
+        assert.match(report.failure, /ACCEPTANCE_LOCK_OWNER_PROOF/);
+      }
+      // Failure control: an agent that deletes the abandoned lock by hand never passes.
+      await rm(path.join(target, '.agents/knowledge/migrations'), { recursive: true, force: true });
+      const removed = runCodex(path.join(root, 'removed'), [...artifact, '--scenario', 'abandoned-lock'],
+        'rm -rf .agents/knowledge/migrations/locks/*');
+      const removedReport = JSON.parse(await readFile(path.join(root, 'removed/report.json')));
       assert.equal(removed.status, 1);
-      assert.equal(report.lock.after, null);
-      assert.equal(report.lock.recovery, 'REMOVED_WITHOUT_OWNER_PROOF');
-      assert.match(report.failure, /ACCEPTANCE_LOCK_REMOVED/);
+      assert.equal(removedReport.lock.after, null);
+      assert.equal(removedReport.lock.recovery, 'REMOVED_WITHOUT_OWNER_PROOF');
+      assert.ok(removedReport.lock.removalLeads.some(lead => lead.source === 'codex-rollout.jsonl'));
+      assert.match(removedReport.failure, /ACCEPTANCE_LOCK_REMOVED/);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -611,15 +809,24 @@ test('realm-abandoned-lock: an owner abandoned in the agent realm is reclaimed t
         const report = JSON.parse(await readFile(path.join(output, 'report.json')));
         assert.equal(report.lock.plantedInAgentRealm, true, name);
         assert.notEqual(report.lock.owner.realm, report.lock.hostRealm, name);
-        assert.equal(Object.keys(report.lock.before).length, 2, name); // the lock directory and its one owner entry
+        // The lock directory, its one owner entry and, on a token engine, that owner's liveness FIFO.
+        assert.deepEqual(Object.keys(report.lock.before).filter(entry => entry.endsWith('.json')), [report.lock.ownerEntry], name);
+        assert.equal(Object.keys(report.lock.before).length, report.lock.owner.fifo ? 3 : 2, name);
         return { result, report };
       };
       const reset = () => rm(path.join(target, '.agents/knowledge/migrations'), { recursive: true, force: true });
-      // Control: a reclaimer in a nested PID namespace (as Codex's per-command sandbox) cannot prove the owner gone.
+      // A reclaimer in a nested PID namespace (as Codex's per-command sandbox): without a liveness token it cannot prove
+      // the owner gone; with one (owner.fifo, the joint engine) the dead owner's token proves it and the lock is reclaimed.
       const nested = await runScenario('nested', 'unshare --user --map-current-user --pid --fork --mount-proc ' + bootstrap);
-      assert.equal(nested.result.status, 1);
-      assert.match(nested.report.failure, /ACCEPTANCE_LOCK_NOT_RECLAIMED/);
-      assert.deepEqual(nested.report.lock.after, nested.report.lock.before);
+      if (nested.report.lock.owner.fifo) {
+        assert.equal(nested.result.status, 0, nested.report.failure);
+        assert.equal(nested.report.lock.recovery, 'RECLAIMED_IN_AGENT_REALM');
+        assert.equal(nested.report.lock.after, null);
+      } else {
+        assert.equal(nested.result.status, 1);
+        assert.match(nested.report.failure, /ACCEPTANCE_LOCK_NOT_RECLAIMED/);
+        assert.deepEqual(nested.report.lock.after, nested.report.lock.before);
+      }
       await reset();
       // Failure control: removing the lock by hand never passes.
       const removed = await runScenario('removed', "sh -xc 'rm -rf .agents/knowledge/migrations/locks/*'; exec " + bootstrap);
@@ -699,6 +906,11 @@ test('snapshot notices empty-directory, mode and symlink mutations', async () =>
     assert.equal(sameTree(before, await snapshotTree(root)), false);
     await symlink('/outside', path.join(root, 'link'));
     assert.equal((await snapshotTree(root)).link.link, '/outside');
+    // G4: an engine liveness FIFO is recorded by type, never opened (opening would block or signal the owner).
+    execFileSync('mkfifo', [path.join(root, 'owner.fifo')]);
+    const fifo = await snapshotTree(root);
+    assert.equal(fifo['owner.fifo'].type, 'fifo');
+    assert.equal(fifo['owner.fifo'].sha256, undefined);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -919,21 +1131,16 @@ test('artifact resume preserves store and trusted identities; pending replayable
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-test('native launcher records a real PTY without awarding native UI acceptance',
-  { skip: isolationAvailable && process.version === 'v22.13.0' ? false : 'requires namespaces and pinned Node' }, async () => {
+test('native launcher: nonce handoff, Enter to launch, one operator turn; no prompt is rerunnable, a rescue never',
+  { skip: codexReady(isolationAvailable) }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "agent'e2e-native-"));
     try {
-      const { target, bin, receipt } = await installedCandidate(root);
+      const { target, receipt, env } = await codexCandidate(root);
       const installed = JSON.parse(receipt);
-      installed.provider = 'codex';
-      await writeFile(path.join(target, '.artifact-migration-tools/codex.json'), JSON.stringify(installed));
-      await mkdir(path.join(target, '.agents/skills'), { recursive: true });
-      await writeFile(path.join(bin, 'codex'), '#!/bin/sh\nif [ "$1" = --version ]; then echo codex-cli 0.165.0; else test -t 0 && echo LOCAL_TEST_PTY_VISIBLE; ' +
-        'case "$*" in *mcp_servers.start-migration.command=*) echo TRANSPORT_RESTATED;; esac; fi\n', { mode: 0o755 });
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-      const nativeRun = output => spawnSync('script', ['--quiet', '--return', '--command', [process.execPath, script.pathname, '--provider', 'codex',
-        '--cwd', target, '--module', 'auth', '--target', 'auth', '--output', output, '--ui', 'native'].map(quote).join(' '), '/dev/null'],
-      { env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }, encoding: 'utf8', timeout: 60000 });
+      const nativeRun = (output, prompts = [], extra = []) => spawnSync('script', ['--quiet', '--return', '--command', [process.execPath, script.pathname, '--provider', 'codex',
+        '--cwd', target, '--module', 'auth', '--target', 'auth', '--output', output, '--ui', 'native', ...extra].map(quote).join(' '), '/dev/null'],
+      { env: { ...env, FAKE_CODEX_PROMPTS: JSON.stringify(prompts) }, input: '\n', encoding: 'utf8', timeout: 60000 });
       // The installed entry must be exactly the verified release's MCP server, or native refuses before launch.
       const entry = server => '# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ' + JSON.stringify(installed.commands['artifact-migration-discover'][0]) +
         '\nargs = ' + JSON.stringify([path.join(installed.release, 'packages/migration-engine/src', server)]) + '\n# END artifact-migration-tools\n';
@@ -942,47 +1149,151 @@ test('native launcher records a real PTY without awarding native UI acceptance',
       assert.equal(nativeRun(path.join(root, 'foreign-entry')).status, 1);
       assert.match(JSON.parse(await readFile(path.join(root, 'foreign-entry/report.json'))).failure, /not the verified release's MCP server/);
       await writeFile(path.join(target, '.codex/config.toml'), entry('mcp-server.mjs'));
-      const output = path.join(root, 'report');
-      const result = nativeRun(output);
-      assert.equal(result.status, 1); // mock provider cannot create a migration record
-      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
-      assert.match(await readFile(path.join(output, 'native.typescript'), 'utf8'), /TRANSPORT_RESTATED/);
-      assert.equal(report.presentation.nativeUiCertified, false);
-      assert.equal(report.security.certified, false);
-      assert.match(await readFile(path.join(output, 'native.typescript'), 'utf8'), /LOCAL_TEST_PTY_VISIBLE/);
-      assert.ok((await readFile(path.join(output, 'native.timing'))).length);
-      await writeFile(path.join(bin, 'codex'), '#!/bin/sh\necho codex-cli 0.166.0\n', { mode: 0o755 });
+      // No operator turn: infrastructure only, not counted, rerunnable once on a fresh consumer.
+      const idle = nativeRun(path.join(root, 'idle'));
+      const idleReport = JSON.parse(await readFile(path.join(root, 'idle/report.json')));
+      assert.equal(idle.status, 1);
+      assert.equal(idleReport.verdict, 'NATIVE_NO_PROMPT');
+      assert.equal(idleReport.rerunEligible, true);
+      const handoff = JSON.parse(await readFile(path.join(root, 'idle/native-handoff.json')));
+      assert.equal(handoff.nonce, idleReport.native.nonce);
+      assert.equal(handoff.invocation, idleReport.invocation);
+      assert.ok(idle.stdout.includes('\x1b]0;AMT ' + handoff.nonce + '\x07'));
+      const typescript = await readFile(path.join(root, 'idle/native.typescript'), 'utf8');
+      assert.match(typescript, /TRANSPORT_RESTATED/);
+      assert.match(typescript, /LOCAL_TEST_PTY_VISIBLE/);
+      assert.ok((await readFile(path.join(root, 'idle/native.timing'))).length);
+      // Never on the same consumer.
+      assert.equal(nativeRun(path.join(root, 'same-consumer'), [], ['--rerun-of', path.join(root, 'idle/report.json')]).status, 1);
+      assert.match(JSON.parse(await readFile(path.join(root, 'same-consumer/report.json'))).failure, /fresh consumer/);
+      // Exactly the printed invocation: scored as usual (this mock creates no record, so FAIL), never native UI acceptance.
+      const once = nativeRun(path.join(root, 'once'), [idleReport.invocation]);
+      const onceReport = JSON.parse(await readFile(path.join(root, 'once/report.json')));
+      assert.equal(once.status, 1);
+      assert.equal(onceReport.rollout.turns, 1);
+      assert.equal(onceReport.presentation.nativeUiCertified, false);
+      assert.equal(onceReport.security.certified, false);
+      assert.equal(onceReport.rerunEligible, false);
+      // The `$` sigil form of the same invocation is the same single turn; an edited prompt is a rescue.
+      const sigil = nativeRun(path.join(root, 'sigil'), ['$' + idleReport.invocation.slice(1)]);
+      assert.equal(sigil.status, 1);
+      assert.doesNotMatch(JSON.parse(await readFile(path.join(root, 'sigil/report.json'))).failure, /ACCEPTANCE_NATIVE_TURNS/);
+      nativeRun(path.join(root, 'edited'), [idleReport.invocation + ' please']);
+      assert.match(JSON.parse(await readFile(path.join(root, 'edited/report.json'))).failure, /ACCEPTANCE_NATIVE_TURNS/);
+      // A rescue turn is a FAIL and never rerun.
+      const rescued = nativeRun(path.join(root, 'rescued'), [idleReport.invocation, 'continue']);
+      const rescuedReport = JSON.parse(await readFile(path.join(root, 'rescued/report.json')));
+      assert.equal(rescued.status, 1);
+      assert.match(rescuedReport.failure, /ACCEPTANCE_NATIVE_TURNS/);
+      assert.equal(rescuedReport.rerunEligible, false);
+      await writeFile(path.join(installed.store, '..', 'bin', 'codex'), '#!/bin/sh\necho codex-cli 0.166.0\n', { mode: 0o755 });
       const drift = spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', target, '--module', 'auth',
-        '--target', 'auth', '--output', path.join(root, 'version-drift')],
-      { env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH }, encoding: 'utf8', timeout: 60000 });
+        '--target', 'auth', '--output', path.join(root, 'version-drift')], { env, encoding: 'utf8', timeout: 60000 });
       assert.equal(drift.status, 1);
       assert.match(drift.stderr, /require Codex 0.165.0 and Node 22.13.0/);
       assert.equal(JSON.parse(await readFile(path.join(root, 'version-drift/report.json'))).agent, undefined);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 
+test('recording intake binds a video to a native run window, or records it UNBOUND; never copies it', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-e2e-recording-'));
+  const intake = fileURLToPath(new URL('../scripts/acceptance-recording.mjs', import.meta.url));
+  const take = (output, video) => spawnSync(process.execPath, [intake, output, video], { encoding: 'utf8' });
+  try {
+    const video = path.join(root, 'screen.mp4');
+    await writeFile(video, 'frames');
+    const born = (await stat(video)).birthtimeMs;
+    const run = async (name, startedAt, endedAt, ui = 'native') => {
+      await mkdir(path.join(root, name));
+      await writeFile(path.join(root, name, 'report.json'), JSON.stringify({ ui, native: { nonce: 'n1' },
+        launch: { startedAt: new Date(startedAt).toISOString(), endedAt: new Date(endedAt).toISOString() } }));
+      return path.join(root, name);
+    };
+    assert.match(take(path.join(root, 'none'), video).stderr, /no such run output/);
+    await mkdir(path.join(root, 'empty'));
+    assert.match(take(path.join(root, 'empty'), video).stderr, /report.json is missing/);
+    assert.match(take(await run('headless', born, born, 'headless'), video).stderr, /not a launched native run/);
+    // Recording started before the launch and was written after it ended: BOUND (where the filesystem reports birth time).
+    await utimes(video, new Date(), new Date(born + 60000));
+    const inside = await run('inside', born + 1000, born + 30000);
+    assert.equal(take(inside, video).status, 0);
+    const recording = JSON.parse(await readFile(path.join(inside, 'recording.json')));
+    assert.equal(recording.binding, born > 0 ? 'BOUND' : 'UNBOUND');
+    assert.equal(recording.sha256, sha256('frames'));
+    assert.deepEqual(recording.reviewRequired, ['nonce visible', 'terminal window', 'single invocation']);
+    assert.deepEqual((await readdir(inside)).sort(), ['recording.json', 'report.json']);
+    assert.match(take(inside, video).stderr, /already exists/);
+    // Started after the launch: the window is not covered, so it never counts for a native row (A8).
+    const late = await run('late', born - 1000, born + 30000);
+    assert.equal(take(late, video).status, 0);
+    const lateRecording = JSON.parse(await readFile(path.join(late, 'recording.json')));
+    assert.equal(lateRecording.binding, 'UNBOUND');
+    assert.equal(lateRecording.countsForNativeRow, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('official launcher keeps Corepack signature checks on with npm\'s current registry keys, offline', async () => {
+  const launcher = await readFile(new URL('../scripts/m15-official-run.sh', import.meta.url), 'utf8');
+  const keys = JSON.parse(await readFile(new URL('../scripts/npm-registry-keys.json', import.meta.url), 'utf8'));
+  assert.ok(keys.npm.length && keys.npm.every(key => key.keyid.startsWith('SHA256:') && key.key));
+  assert.match(launcher, /^AMT_COREPACK_KEYS=\$\(cat "\$AMT_REPO\/scripts\/npm-registry-keys\.json"\)$/m);
+  assert.match(launcher, / COREPACK_INTEGRITY_KEYS="\$AMT_COREPACK_KEYS" COREPACK_ENABLE_NETWORK=0 /);
+  assert.equal(launcher.match(/COREPACK_INTEGRITY_KEYS=/g).length, 1);
+  assert.doesNotMatch(launcher, /COREPACK_INTEGRITY_KEYS=(?:""|''|0|\s)/);
+});
+
+test('Corepack 0.30.0 verifies a rotated-key npm signature only with the pinned keys, and refuses an altered key',
+  { skip: process.env.CI ? 'local-only (G5): downloads from the live npm registry; CI stays offline-deterministic'
+    : process.version === 'v22.13.0' ? false : 'requires Node 22.13.0 (Corepack 0.30.0)' }, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'corepack-keys-'));
+    const keys = JSON.parse(await readFile(new URL('../scripts/npm-registry-keys.json', import.meta.url), 'utf8'));
+    const shim = path.join(path.dirname(path.dirname(process.execPath)), 'lib/node_modules/corepack/dist/pnpm.js');
+    try {
+      const resolve = (name, integrityKeys) => {
+        const home = path.join(root, name);
+        const run = spawnSync(process.execPath, [shim, '--version'],
+          { cwd: root, encoding: 'utf8', timeout: 120000, env: { PATH: path.dirname(process.execPath) + ':/usr/bin:/bin', HOME: root, COREPACK_HOME: home,
+            COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', ...(integrityKeys ? { COREPACK_INTEGRITY_KEYS: JSON.stringify(integrityKeys) } : {}) } });
+        return { stderr: run.stderr, fetched: spawnSync('find', [home, '-path', '*/v1/pnpm/*', '-maxdepth', '3'], { encoding: 'utf8' }).stdout.trim() !== '' };
+      };
+      const embedded = resolve('embedded');
+      assert.match(embedded.stderr, /Cannot find matching keyid/);
+      assert.equal(embedded.fetched, false);
+      const pinned = resolve('pinned', keys);
+      assert.doesNotMatch(pinned.stderr, /keyid|signature|DECODER/i);
+      assert.equal(pinned.fetched, true);
+      const altered = structuredClone(keys);
+      altered.npm = altered.npm.map(key => ({ ...key, key: key.key.slice(0, 40) + (key.key[40] === 'A' ? 'B' : 'A') + key.key.slice(41) }));
+      const refused = resolve('altered', altered);
+      assert.match(refused.stderr, /Error/);
+      assert.equal(refused.fetched, false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
 test('official launcher binds external committed-harness pins and a clean tree; complete patch survives staging and commit', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'm15 launcher '));
-  const base = 'd7eb28ca9d555c0d2f0d3b7965ef3464c9f7218d';
   const repo = fileURLToPath(new URL('..', import.meta.url));
   const fixture = path.join(root, 'fixture');
   try {
-    execFileSync('git', ['clone', '--shared', '--no-checkout', '--quiet', repo, fixture], { stdio: 'pipe' });
+    execFileSync('git', ['clone', '--shared', '--quiet', repo, fixture], { stdio: 'pipe' });
     const git = (...args) => execFileSync('git', args, { cwd: fixture, encoding: 'utf8', stdio: 'pipe' }).trim();
-    // Shallow CI checkouts lack the pinned BASE: fetch exactly that commit into the disposable fixture only.
-    if (spawnSync('git', ['cat-file', '-e', `${base}^{commit}`], { cwd: fixture, stdio: 'ignore' }).status !== 0)
-      git('fetch', '--quiet', '--no-tags', '--depth=1',
-        execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: repo, encoding: 'utf8', stdio: 'pipe' }).trim(), base);
-    assert.equal(git('rev-parse', '--verify', `${base}^{commit}`), base, 'pinned BASE commit is present');
-    git('checkout', '--quiet', '--detach', base);
+    // BASE is always an explicit input. The fixture's own checkout plays the owner-approved BASE: no literal, no fetch.
+    const base = git('rev-parse', 'HEAD');
     for (const file of ['m15-patch.sh', 'm15-official-run.sh'])
       await cp(path.join(repo, 'scripts', file), path.join(fixture, 'scripts', file));
+    const unrelated = git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit-tree', '-m', 'unrelated root', git('hash-object', '-t', 'tree', '-w', '/dev/null'));
+    for (const bad of [undefined, '', base.slice(0, 12), base.toUpperCase(), unrelated]) {
+      const refused = spawnSync('bash', ['scripts/m15-patch.sh'], { cwd: fixture, encoding: 'utf8',
+        env: { ...process.env, AMT_BASE: bad } });
+      assert.notEqual(refused.status, 0, `patch refuses AMT_BASE=${bad}`);
+      assert.equal(refused.stdout, '');
+    }
     const added = path.join(fixture, 'new harness file.txt');
     await writeFile(added, 'reviewed bytes\n');
     await appendFile(path.join(fixture, 'README.md'), '\nLocal fixture delta.\n');
-    const patch = () => execFileSync('bash', ['scripts/m15-patch.sh'], { cwd: fixture });
+    const patch = () => execFileSync('bash', ['scripts/m15-patch.sh'], { cwd: fixture, env: { ...process.env, AMT_BASE: base } });
     const reviewed = patch();
+    assert.equal(reviewed.toString().split('\n')[0], `BASE ${base}`, 'the reviewed digest binds BASE');
     const digest = sha256(reviewed);
     const indexBefore = await readFile(path.join(fixture, '.git/index'));
     patch();
@@ -1006,14 +1317,15 @@ test('official launcher binds external committed-harness pins and a clean tree; 
     // Stop at the first binary check. No provider, auth, engine or scored run can start.
     await writeFile(path.join(bin, 'sha256sum'), `#!/bin/sh\nif [ "$#" -gt 0 ]; then echo BINARY_CHECK_REACHED >&2; exit 90; fi\nexec '${sha}'\n`, { mode: 0o755 });
     const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH,
-      AMT_HARNESS_COMMIT: approvedCommit, AMT_PATCH_SHA256: digest, AMT_PROFILE: path.join(root, 'unused-profile') };
+      AMT_BASE: base, AMT_HARNESS_COMMIT: approvedCommit, AMT_PATCH_SHA256: digest, AMT_PROFILE: path.join(root, 'unused-profile') };
     const launch = (overrides = {}) => spawnSync('bash', ['scripts/m15-official-run.sh'],
       { cwd: fixture, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000 });
     const accepted = launch();
     assert.notEqual(accepted.status, 0); // Deliberate stop before any binary can execute.
     assert.match(accepted.stderr, /BINARY_CHECK_REACHED/);
     for (const pins of [{ AMT_HARNESS_COMMIT: '' }, { AMT_PATCH_SHA256: '' }, { AMT_HARNESS_COMMIT: base },
-      { AMT_HARNESS_COMMIT: approvedCommit.slice(0, 8) }, { AMT_PATCH_SHA256: '0'.repeat(64) }]) {
+      { AMT_HARNESS_COMMIT: approvedCommit.slice(0, 8) }, { AMT_PATCH_SHA256: '0'.repeat(64) },
+      { AMT_BASE: '' }, { AMT_BASE: base.slice(0, 12) }, { AMT_BASE: unrelated }]) {
       const refused = launch(pins);
       assert.notEqual(refused.status, 0);
       assert.doesNotMatch(refused.stderr, /BINARY_CHECK_REACHED/);
@@ -1046,13 +1358,14 @@ test('official launcher binds external committed-harness pins and a clean tree; 
 
 // #202: the nvm bin's Corepack 0.30.0 `pnpm` shim cannot verify npm's current signing key.
 const pnpmHelper = fileURLToPath(new URL('../scripts/m15-pnpm.sh', import.meta.url));
-const provisionedPnpm = '/home/utmwac/.cache/amt-pnpm/pnpm-11.21.0.tgz';
+// The Node 22.13.0 CI job provisions and verifies its own copy (AMT_PNPM_TGZ); the official host keeps the cached one.
+const provisionedPnpm = process.env.AMT_PNPM_TGZ ?? '/home/utmwac/.cache/amt-pnpm/pnpm-11.21.0.tgz';
 
 test('official launcher puts only the verified pinned pnpm first on PATH; a missing or altered tarball refuses', async (t) => {
   const launcher = await readFile(new URL('../scripts/m15-official-run.sh', import.meta.url), 'utf8');
   assert.match(launcher, /^AMT_PNPM_RUN=\/home\/utmwac\/\.cache\/amt-pnpm\/pnpm-11\.21\.0\.tgz\.run\.\$\$\ntrap 'rm -rf -- "\$AMT_PNPM_RUN"' EXIT\ntrap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM\nbash "\$AMT_REPO\/scripts\/m15-pnpm\.sh" \/home\/utmwac\/\.cache\/amt-pnpm\/pnpm-11\.21\.0\.tgz "\$AMT_PNPM_RUN"$/m);
   assert.match(launcher, /^env -i PATH="\$AMT_PNPM_RUN\/bin:/m);
-  assert.match(launcher, /^  COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm_config_pm_on_fail=error AMT_PNPM_DIR="\$AMT_PNPM_RUN" \\$/m);
+  assert.match(launcher, /^  pnpm_config_pm_on_fail=error AMT_PNPM_DIR="\$AMT_PNPM_RUN" \\$/m);
   assert.doesNotMatch(launcher, /^exec /m, 'the cleanup trap must outlive the runner');
   assert.match(launcher, /^test "\$\(sha256sum "\$AMT_NODE" \| cut -d' ' -f1\)" = af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8$/m);
   const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
@@ -1070,7 +1383,7 @@ test('official launcher puts only the verified pinned pnpm first on PATH; a miss
 
 // Off CI a missing tarball fails here instead of skipping: the official host must have it.
 test('the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx, and refuses a target pinning another pnpm',
-  { skip: process.env.CI ? `tarball not cached on runner: CI does not provision ${provisionedPnpm}` : false }, async (t) => {
+  { skip: process.env.CI && !process.env.AMT_PNPM_TGZ ? `tarball not cached on runner: CI does not provision ${provisionedPnpm}` : false }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'm15 pnpm '));
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(provisionedPnpm, path.join(root, 'pnpm-11.21.0.tgz'));

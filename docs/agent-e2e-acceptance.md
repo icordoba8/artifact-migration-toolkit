@@ -227,6 +227,31 @@ Artifacts written outside the consumer are `agent.stdout.log`,
 `report.json`. The latter deliberately sets `nativeUiCertified: false`;
 native UI proof is an additional screen recording.
 
+Run orchestration (G3):
+
+- `--output` must not exist: it is reserved with one atomic, non-recursive
+  `mkdir`, and every evidence file is created exclusively, so an earlier run is
+  never overwritten. Two drivers racing for one path get one run and one
+  `Output already exists` refusal.
+- The last stdout line is always one JSON object `{output, report, verdict,
+  currentStep, progressDisplayed}`, on every verdict. Drivers read paths from
+  it; they never re-derive them.
+- `--not-after <ISO-8601 UTC, …Z>` is checked immediately before the agent
+  starts. Past it, nothing starts and the verdict is `NOT_RUN` with
+  `notRun.reason: "DEADLINE"`; a running agent is never killed to meet it.
+- `NOT_RUN` and `NATIVE_NO_PROMPT` are infrastructure outcomes, never scored,
+  and exit 1. `report.rerunEligible` is true only for them. One rerun is
+  allowed: `--rerun-of <prior report.json>` on a **fresh** consumer (never the
+  same one) with the same provider, kind, scenario, module, target and UI; the
+  rerun binds the prior report's SHA-256 and is itself never rerunnable. A
+  `FAIL`, a rescue turn included, is never rerun.
+- `report.launch` records the start and end times, Node version, and, under
+  the official launcher, `AMT_BASE`, `AMT_HARNESS_COMMIT` and
+  `AMT_PATCH_SHA256`.
+- `ENGINE_BLOCKED_NOT_STARTED`: an engine status that exits 2 with a
+  `BLOCKED` / `NOT_STARTED` document fails as "nothing ran", never as a
+  generic status failure.
+
 ## Frontend acceptance
 
 A frontend migration verifies visible behavior in a browser, so the consumer
@@ -271,10 +296,41 @@ The runner also supports standalone artifacts (`--kind artifact`), committed-che
 resume, deliberately read-only consumers, genuine live/abandoned lock probes, and a native Codex terminal
 launcher. See [the M15 runbook](m15-harness-implementation.md) for marker fields, commands, contract-row
 traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13.0 and explicitly select
-`gpt-6.1-sol` with high reasoning. Every output directory must be empty and outside the consumer.
+`gpt-6.1-sol` with high reasoning. Every output directory must not yet exist and must be outside the consumer.
+
+Refusal scoring (G1). `read-only`, `live-lock` and `abandoned-lock` require `--provider codex`: a refusal is
+read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.jsonl`), bound to the run by the
+`thread.started` id (headless) or by consumer cwd and launch window (native), copied to
+`codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call, or a
+non-zero shell call whose argv is a receipt-installed engine command (no pipes, lists or substitutions). Agent
+prose, an `echo` of an engine message and provider sandbox lines never count. A structured engine code wins;
+the engine's exact message templates are the fallback (`codeSource: "template"`). Accepted codes:
+`read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
+`ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted. `--code-source
+structured` requires a structured code (scored runs on the joint candidate).
+
+Abandoned lock (G4). The trusted holder must be the lock's single owner entry in its own PID namespace; it is
+killed with `SIGKILL`. PASS (`lock.recovery: "RECLAIMED_ACROSS_REALM"`) requires the dead owner's entry and
+liveness token gone, no removal command in the transcript or rollout, and a reclaiming engine owner observed
+whose PID namespace (`realm`) differs from the holder's; then the normal verdict applies. An owner still
+present is `BLOCKED_OWNER_PROOF` with the engine's refusal codes; an unobserved or same-namespace reclaimer is
+`ACCEPTANCE_LOCK_RECLAIM_UNPROVEN`.
+
+Native Codex (G2). Before launch the runner writes `native-handoff.json` (invocation and a random nonce), sets
+the terminal title to `AMT <nonce>`, prints the invocation and waits for Enter. Start the screen recording of
+that terminal window first, then press Enter and type the invocation exactly once. Afterwards the rollout must
+show exactly one turn whose one operator message is the printed invocation (`/` or `$` sigil): zero turns is
+`NATIVE_NO_PROMPT` (not counted, rerunnable once on a fresh consumer); any other count or text is
+`ACCEPTANCE_NATIVE_TURNS` (a rescue: FAIL, never rerun). Bind the recording with
+`node scripts/acceptance-recording.mjs <output> <video>`: it writes `recording.json` (path, size, SHA-256,
+birth and modify times) and never copies the video. A recording whose birth time is unavailable or does not
+cover the launch window is `UNBOUND` and never counts for a native row; a `BOUND` one still needs human
+review (nonce visible, terminal window, single invocation). PTY typescript, recording and the operator's
+REC=yes stay three separate evidence types.
 
 These capabilities do not supply missing certification evidence. The native launcher captures terminal
 output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
-review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery remains blocked by the
-existing owner-proof protocol; `realm-abandoned-lock` plants the abandoned owner in the agent's own PID
-realm instead, where an in-realm reclaimer (the MCP server) can prove it gone. Bootstrap AUTO's contract/implementation contradiction remains unresolved.
+review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery needs an engine with a
+liveness token (the joint candidate); on 1.6.4 it stays `BLOCKED_OWNER_PROOF`. `realm-abandoned-lock` plants
+the abandoned owner in the agent's own PID realm instead, where an in-realm reclaimer (the MCP server) can
+prove it gone. Bootstrap AUTO's contract/implementation contradiction remains unresolved.

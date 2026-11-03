@@ -14,10 +14,10 @@
  * only and its report says it is not security-certified.
  */
 import { pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals } from "./acceptance-evidence.mjs";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { open, readdir, readFile, realpath, mkdir, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -29,7 +29,7 @@ const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];
-    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation", "--kind", "--source", "--source-root", "--artifact-target", "--scenario", "--resume-from", "--ui"].includes(name) || !argv[i + 1] || name in options)
+    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation", "--kind", "--source", "--source-root", "--artifact-target", "--scenario", "--resume-from", "--ui", "--code-source", "--not-after", "--rerun-of"].includes(name) || !argv[i + 1] || name in options)
       fail("Expected unique --provider, --cwd, --module, --target, --output and known optional flags, each with a value");
     options[name] = argv[i + 1];
   }
@@ -54,6 +54,14 @@ const argsOf = (argv) => {
     fail("Native UI requires Codex, OS isolation and a fresh scenario");
   if (["interrupt", "resume", "read-only", "live-lock", "abandoned-lock", "realm-abandoned-lock"].includes(scenario) && isolation !== "os")
     fail("Safety and interruption scenarios require OS isolation");
+  // G1: a refusal is read from the provider's own tool-result record; Codex's rollout is the only adapter (Copilot is P1).
+  if (["read-only", "live-lock", "abandoned-lock"].includes(scenario) && options["--provider"] !== "codex")
+    fail("Refusal scenarios require --provider codex: refusals are scored from its rollout tool results, never from prose");
+  const codeSource = options["--code-source"] ?? "any";
+  if (!["any", "structured"].includes(codeSource)) fail("--code-source must be any or structured");
+  const notAfter = options["--not-after"] ?? null;
+  if (notAfter !== null && (!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?Z$/.test(notAfter) || Number.isNaN(Date.parse(notAfter))))
+    fail("--not-after must be an ISO-8601 UTC time ending in Z");
   if (scenario === "resume" && !options["--resume-from"]) fail("Resume requires --resume-from interrupt report");
   if (scenario !== "resume" && options["--resume-from"]) fail("--resume-from is only valid with resume");
   if (kind === "artifact" && (!options["--source"] || !options["--source-root"] || !options["--artifact-target"]))
@@ -69,7 +77,8 @@ const argsOf = (argv) => {
   return { provider: options["--provider"], cwd: path.resolve(options["--cwd"]), module: options["--module"],
     target: options["--target"], goal, expectedPin, isolation, kind, scenario, ui, source: options["--source"],
     sourceRoot: options["--source-root"] ? path.resolve(options["--source-root"]) : null, artifactTarget: options["--artifact-target"],
-    resumeFrom: options["--resume-from"] ? path.resolve(options["--resume-from"]) : null, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000 };
+    resumeFrom: options["--resume-from"] ? path.resolve(options["--resume-from"]) : null, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000,
+    codeSource, notAfter, rerunOf: options["--rerun-of"] ? path.resolve(options["--rerun-of"]) : null };
 };
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
@@ -248,7 +257,8 @@ async function openGate(agentRun, gate, lock, report) {
     }
     let answer = "NO\n";
     try {
-      const entries = await readdir(lock).catch(() => []);
+      // The owner is the single .json entry; an engine with a liveness token also leaves its <uuid>.fifo (G4).
+      const entries = (await readdir(lock).catch(() => [])).filter(name => name.endsWith(".json"));
       const owner = entries.length === 1 ? JSON.parse(await readFile(path.join(lock, entries[0]), "utf8")) : null;
       const hostRealm = "linux:" + readlinkSync("/proc/self/ns/pid");
       if (owner && owner.hostname === os.hostname() && typeof owner.realm === "string" && owner.realm !== hostRealm) {
@@ -276,30 +286,50 @@ async function main() {
   // An explicit marker makes it harder to accidentally run destructive
   // acceptance work on a user's actual production repository.
   const root = await realpath(options.cwd);
-  await mkdir(options.output, { recursive: true });
-  const output = await realpath(options.output);
+  await mkdir(path.dirname(options.output), { recursive: true });
+  const output = path.join(await realpath(path.dirname(options.output)), path.basename(options.output));
   if (output === root || output.startsWith(root + path.sep)) fail("Output must be outside the disposable consumer");
-  if ((await readdir(output)).length) fail("Output must be empty; never overwrite earlier evidence");
+  // I5: one atomic, non-recursive reservation. An existing directory, even empty, is never reused.
+  await mkdir(output).catch(error => {
+    if (error.code === "EEXIST") fail("Output already exists; never overwrite earlier evidence");
+    throw error;
+  });
   // From here on every outcome -- a refusal, a tamper finding, a missing status
   // -- leaves a report.json: an absent report must never be read as a pass.
   const report = { schemaVersion: 1, provider: options.provider, module: options.module, target: options.target,
-    goal: options.goal, kind: options.kind, scenario: options.scenario, root, verdict: "FAIL", failure: null };
+    goal: options.goal, kind: options.kind, scenario: options.scenario, ui: options.ui, root, verdict: "FAIL", failure: null };
+  let error = null;
   try {
     await score(options, root, output, report);
-  } catch (error) {
-    report.failure = error.message;
+  } catch (caught) {
+    error = caught;
+    report.failure = caught.message;
     if (report.security) report.security.certified = false;
     report.verdict = "FAIL";
-    await mkdir(output, { recursive: true });
-    await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
-    throw error;
   }
-  process.stdout.write(JSON.stringify({ output, verdict: report.verdict, currentStep: report.engine?.currentStep,
-    progressDisplayed: report.presentation?.progressAppearsInAgentOutput }, null, 2) + "\n");
+  // A4: only infrastructure outcomes may be rerun, once, on a fresh consumer. A FAIL (a rescue turn included) never.
+  report.rerunEligible = ["NATIVE_NO_PROMPT", "NOT_RUN"].includes(report.verdict) && !report.rerunOf;
+  const reportPath = path.join(output, "report.json");
+  await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+  // I6: always the last stdout line, on every verdict. Drivers consume it; they never re-derive paths.
+  process.stdout.write(JSON.stringify({ output, report: reportPath, verdict: report.verdict, currentStep: report.engine?.currentStep,
+    progressDisplayed: report.presentation?.progressAppearsInAgentOutput }) + "\n");
+  if (error) throw error;
   if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS", "INTERRUPTED_CHECKPOINT", "SAFETY_REFUSAL_PASS"].includes(report.verdict)) process.exitCode = 1;
 }
 
 async function score(options, root, output, report) {
+  // Every evidence file is created exclusively: nothing in a reserved output is ever overwritten.
+  const put = (name, data) => writeFile(path.join(output, name), data, { flag: "wx" });
+  if (options.rerunOf) {
+    const priorBytes = await readFile(options.rerunOf);
+    const prior = JSON.parse(priorBytes);
+    if (prior.rerunEligible !== true || prior.rerunOf || prior.root === root ||
+        ["provider", "module", "target", "goal", "kind", "scenario", "ui"].some(key => prior[key] !== report[key]))
+      fail("ACCEPTANCE_PRECONDITION: --rerun-of needs a rerun-eligible report (NATIVE_NO_PROMPT or NOT_RUN) that is not itself a rerun, " +
+        "for the same invocation on a different, fresh consumer");
+    report.rerunOf = { report: options.rerunOf, sha256: sha256(priorBytes), verdict: prior.verdict };
+  }
   const markerPath = path.join(root, ".artifact-migration-acceptance.json");
   const markerBytes = await readFile(markerPath);
   const marker = JSON.parse(markerBytes);
@@ -412,7 +442,7 @@ async function score(options, root, output, report) {
       fail("ACCEPTANCE_CHECKPOINT_CHANGED: source was rebuilt or changed before resume");
     await verifyCheckpoint(recordDir, saved.checkpoint, true);
     const status = await readStatus();
-    await writeFile(path.join(output, "resume-before-status.json"), status.stdout);
+    await put("resume-before-status.json", status.stdout);
     if (status.code !== 0 || /"(?:status|outcome)"\s*:\s*"(?:BLOCKED|STALE)"/.test(status.stdout)) fail("Resume checkpoint fails installed engine integrity checks");
   } else if (await exists(record)) fail("Not a fresh consumer: migration record already exists");
   if (options.provider === "codex") {
@@ -426,8 +456,6 @@ async function score(options, root, output, report) {
   report.record = recordDir;
   const skills = path.join(root, SKILL_DIRS[options.provider]);
   const skillsBefore = await treeDigest(skills);
-  // The report directory exists before the agent does, so it can be sealed too.
-  await mkdir(output, { recursive: true });
   // A verifier in its own directory is sealed whole, so its own dependencies (a
   // browser driver) are as untouchable as its script. A broad directory -- one
   // holding the consumer, HOME (the provider's session files) or the temp dir,
@@ -472,9 +500,18 @@ async function score(options, root, output, report) {
       if (await exists(lock)) fail("ACCEPTANCE_PRECONDITION: Fixture already has a lock");
       holder = await startLockHolder(cli[0], pathToFileURL(path.join(installed.release,
         "packages/migration-engine/src/lifecycle/lock.mjs")).href, root, path.basename(lock, ".lock"));
-      const ownerFile = (await readdir(lock))[0];
-      report.lock = { owner: JSON.parse(await readFile(path.join(lock, ownerFile), "utf8")), before: await snapshotTree(lock) };
-      if (options.scenario === "abandoned-lock") { await holder.stop(true); report.lock.ownerExited = true; }
+      const ownerFiles = (await readdir(lock)).filter(name => name.endsWith(".json"));
+      const owner = ownerFiles.length === 1 ? JSON.parse(await readFile(path.join(lock, ownerFiles[0]), "utf8")) : null;
+      // G4: the owner must be the trusted holder itself, in the realm the host sees for it (A5).
+      if (owner?.pid !== holder.pid || (owner.realm !== undefined && owner.realm !== "linux:" + holder.pidns))
+        fail("ACCEPTANCE_PRECONDITION: the lock owner is not the trusted holder process in its own PID namespace");
+      report.lock = { owner, ownerEntry: ownerFiles[0], holder: { pid: holder.pid, pidns: holder.pidns },
+        before: await snapshotTree(lock) };
+      if (options.scenario === "abandoned-lock") {
+        report.lock.holder.signal = await holder.stop(true);
+        if (report.lock.holder.signal !== "SIGKILL") fail("ACCEPTANCE_PRECONDITION: the abandoned owner did not die by SIGKILL");
+        report.lock.ownerExited = true;
+      }
     }
     const lockModule = pathToFileURL(path.join(installed.release, "packages/migration-engine/src/lifecycle/lock.mjs")).href;
     const gate = path.join(output, "plant.gate");
@@ -484,7 +521,7 @@ async function score(options, root, output, report) {
       if (fifo.code !== 0) fail("ACCEPTANCE_PRECONDITION: cannot create the plant gate: " + fifo.stderr.trim());
     }
     const beforeTree = ["read-only", "live-lock"].includes(options.scenario) ? await snapshotTree(root) : null;
-    if (beforeTree) await writeFile(path.join(output, "consumer-before.json"), JSON.stringify(beforeTree, null, 2));
+    if (beforeTree) await put("consumer-before.json", JSON.stringify(beforeTree, null, 2));
     let agent, interruptedAt;
     const agentCommand = options.scenario === "realm-abandoned-lock"
       ? planted(invocationCommand, { node: cli[0], lockModule, root, name: path.basename(lock, ".lock"), gate }) : invocationCommand;
@@ -494,10 +531,39 @@ async function score(options, root, output, report) {
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
       launch = { command: "script", argv: ["--quiet", "--return", "--flush", "--log-out", path.join(output, "native.typescript"),
         "--log-timing", path.join(output, "native.timing"), "--command", [launch.command, ...launch.argv].map(quote).join(" ")] };
-      process.stdout.write("Record the screen. Type exactly once: " + invocation + "\nNo rescue prompts. Exit when the agent stops.\n");
+      // I3: the handoff is evidence written before launch; the title carries the nonce through Codex's redraw.
+      const nonce = randomBytes(8).toString("hex");
+      await put("native-handoff.json", JSON.stringify({ invocation, nonce, createdAt: new Date().toISOString() }, null, 2) + "\n");
+      report.native = { nonce, handoff: "native-handoff.json" };
+      process.stdout.write("\x1b]0;AMT " + nonce + "\x07Record this terminal window (title AMT " + nonce + "). After Codex starts, type exactly once: " +
+        invocation + "\nNo rescue prompts. Exit when the agent stops. Press Enter to launch.\n");
+      const entered = await new Promise(resolve => {
+        process.stdin.once("data", () => { process.stdin.pause(); resolve(true); });
+        process.stdin.once("end", () => resolve(false));
+        process.stdin.resume();
+      });
+      if (!entered) fail("ACCEPTANCE_PRECONDITION: the operator never pressed Enter; Codex was not launched");
     }
-    report.launch = { ...launch, cwd: root };
+    // I7: the last check before spawn. Nothing is killed to meet a cutoff; nothing starts after it.
+    if (options.notAfter && Date.now() > Date.parse(options.notAfter)) {
+      await unlink(gate).catch(() => undefined);
+      Object.assign(report, { verdict: "NOT_RUN", notRun: { reason: "DEADLINE", notAfter: options.notAfter, checkedAt: new Date().toISOString() } });
+      return;
+    }
     report.startedAt = new Date().toISOString();
+    report.launch = { ...launch, cwd: root, startedAt: report.startedAt, endedAt: null, node: process.version,
+      harnessCommit: process.env.AMT_HARNESS_COMMIT ?? null, base: process.env.AMT_BASE ?? null, patchSha256: process.env.AMT_PATCH_SHA256 ?? null };
+    // A5: the reclaiming engine process names its own PID namespace in the owner entry it writes. Poll the lock
+    // (readdir and JSON only, never the FIFO) for any owner other than the abandoned one.
+    // ponytail: 10 ms polling misses an owner held for less; an unobserved reclaimer fails closed below.
+    const reclaimers = new Map();
+    const watchReclaim = options.scenario === "abandoned-lock" ? setInterval(async () => {
+      for (const name of await readdir(lock).catch(() => [])) {
+        if (!name.endsWith(".json") || name === report.lock.ownerEntry || reclaimers.has(name)) continue;
+        const entry = await readFile(path.join(lock, name), "utf8").then(JSON.parse, () => null);
+        if (entry) reclaimers.set(name, { pid: entry.pid, realm: entry.realm, token: Boolean(entry.fifo) });
+      }
+    }, 10) : null;
     try {
       const agentRun = run({ ...launch, cwd: root, timeoutMs: options.timeoutMs, native: options.ui === "native",
         // Runtime selection must keep the installed store even when resume uses another HOME.
@@ -510,15 +576,37 @@ async function score(options, root, output, report) {
       if (options.scenario === "realm-abandoned-lock") await openGate(agentRun, gate, lock, report);
       agent = await agentRun;
     } finally {
+      clearInterval(watchReclaim);
+      report.launch.endedAt = new Date().toISOString();
       // Drain notifications already queued by the provider before closing watch.
       await new Promise((resolve) => setImmediate(resolve));
       report.security.recordContinuity = observer.snapshot();
       observer.close();
     }
     if (options.ui === "native") agent.stdout = await readFile(path.join(output, "native.typescript"), "utf8");
-    await writeFile(path.join(output, "agent.stdout.log"), agent.stdout);
-    await writeFile(path.join(output, "agent.stderr.log"), agent.stderr);
+    await put("agent.stdout.log", agent.stdout);
+    await put("agent.stderr.log", agent.stderr);
     const combined = agent.stdout + "\n" + agent.stderr;
+    // G1: Codex's own per-call record, bound to this run and copied into the evidence before anything is scored.
+    let rollout = null, rolloutText = "";
+    if (options.provider === "codex") {
+      const threads = native ? [] : agent.stdout.split("\n").flatMap(line => {
+        try { const event = JSON.parse(line); return event?.type === "thread.started" ? [String(event.thread_id)] : []; } catch { return []; }
+      });
+      if (!native && threads.length !== 1) fail("ACCEPTANCE_ROLLOUT_UNBOUND: Codex printed " + threads.length + " thread ids");
+      const found = await findCodexRollout(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+        { threadId: threads[0], cwd: root, startedAt: report.launch.startedAt, endedAt: report.launch.endedAt });
+      if (!found && !native) fail("ACCEPTANCE_ROLLOUT_UNBOUND: no rollout for thread " + threads[0]);
+      if (found) {
+        rolloutText = found.text;
+        await put("codex-rollout.jsonl", found.text);
+        rollout = codexRollout(found.text, Object.values(installed.commands).filter(command => Array.isArray(command) && command.length === 2));
+        report.rollout = { source: found.file, copy: "codex-rollout.jsonl", sha256: sha256(found.text), threadId: rollout.meta.id,
+          turns: rollout.turns, prompts: rollout.prompts.length, refusals: rollout.refusals };
+      }
+    }
+    // Lock-removal review leads from both the provider transcript and the bound rollout.
+    const removalLeads = () => [...lockRemovals(combined), ...lockRemovals(rolloutText).map(lead => ({ ...lead, source: "codex-rollout.jsonl" }))];
     report.openspec = { status: "NOT_TESTED", reviewRequired: true, candidates: openspecLeads(agent.stdout) };
     report.presentation = { nativeUiCertified: false, mode: options.ui,
       operatorRequired: options.ui === "native" ? ["screen recording", "single invocation attestation", "compare visible progress with engine status"] : [] };
@@ -541,44 +629,76 @@ async function score(options, root, output, report) {
     } catch (error) {
       fail("Agent left the installed runtime bundle modified or invalid (transcripts preserved): " + error.message);
     }
+    if (native) {
+      // I3: zero turns is an infrastructure miss (not counted, rerunnable once); a second turn is a rescue (FAIL, never rerun).
+      if (!rollout || (rollout.turns === 0 && rollout.prompts.length === 0)) { report.verdict = "NATIVE_NO_PROMPT"; return; }
+      if (rollout.turns !== 1 || rollout.prompts.length !== 1 || ![invocation, "$" + invocation.slice(1)].includes(rollout.prompts[0].trim()))
+        fail("ACCEPTANCE_NATIVE_TURNS: native evidence needs exactly one operator turn that is the printed invocation; a rescue or edited prompt is never rerun");
+    }
     const statusRun = await readStatus();
-    await writeFile(path.join(output, "engine-status.stdout.log"), statusRun.stdout);
-    await writeFile(path.join(output, "engine-status.stderr.log"), statusRun.stderr);
+    await put("engine-status.stdout.log", statusRun.stdout);
+    await put("engine-status.stderr.log", statusRun.stderr);
     if (sourceBefore && !sameTree(sourceBefore, await snapshotTree(options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot))) fail("Source changed during acceptance");
     if (holder) {
       report.lock.after = await exists(lock) ? await snapshotTree(lock) : null;
       report.lock.holderAliveAfter = holder.alive();
       if (options.scenario === "live-lock" && (!holder.alive() || !sameTree(report.lock.before, report.lock.after)))
         fail("Live lock ownership or bytes changed");
-      // The engine never proves a host-realm owner gone from the agent's PID namespace (nor from
-      // Codex's per-command sandbox namespace), so a vanished lock was removed outside the protocol.
+      // G4: scored from engine reclaim evidence. PASS needs the dead owner's entry and token gone, no removal
+      // lead, a reclaiming engine observed in a PID namespace other than the holder's (A5), then the normal verdict.
       if (options.scenario === "abandoned-lock") {
-        report.lock.recovery = report.lock.after ? "BLOCKED_OWNER_PROOF" : "REMOVED_WITHOUT_OWNER_PROOF";
-        fail(report.lock.after ? "ACCEPTANCE_LOCK_OWNER_PROOF: abandoned host-realm owner cannot be reclaimed in the agent PID namespace; preserve lock, engine change/owner ruling required"
-          : "ACCEPTANCE_LOCK_REMOVED: the abandoned lock vanished although no engine path can prove its host-realm owner gone; never certify");
+        const uuid = report.lock.ownerEntry.slice(0, -5);
+        const left = Object.keys(report.lock.after ?? {}).filter(name => [report.lock.ownerEntry, uuid + ".fifo"].includes(name));
+        report.lock.removalLeads = removalLeads();
+        report.lock.reclaimers = [...reclaimers.values()];
+        if (left.length) {
+          report.lock.recovery = "BLOCKED_OWNER_PROOF";
+          fail("ACCEPTANCE_LOCK_OWNER_PROOF: the abandoned owner still holds the lock; engine refusal codes: " +
+            JSON.stringify((rollout?.refusals ?? []).map(refusal => refusal.code)) + ". Lock preserved; never removed or relabeled");
+        }
+        if (report.lock.removalLeads.length) {
+          report.lock.recovery = "REMOVED_WITHOUT_OWNER_PROOF";
+          fail("ACCEPTANCE_LOCK_REMOVED: the transcript or rollout shows a command removing a lock; never certify");
+        }
+        const holderRealm = "linux:" + report.lock.holder.pidns;
+        if (!report.lock.reclaimers.length || report.lock.reclaimers.some(entry => typeof entry.realm !== "string" || entry.realm === holderRealm)) {
+          report.lock.recovery = "RECLAIM_UNPROVEN";
+          fail("ACCEPTANCE_LOCK_RECLAIM_UNPROVEN: no reclaiming engine owner was observed in a PID namespace other than the holder's");
+        }
+        report.lock.recovery = "RECLAIMED_ACROSS_REALM";
       }
     }
     if (options.scenario === "realm-abandoned-lock") {
       if (!report.lock?.ownerExited) fail("ACCEPTANCE_PRECONDITION: the in-realm abandoned owner was never planted; agent did not start");
       report.lock.after = await exists(lock) ? await snapshotTree(lock) : null;
-      report.lock.removalLeads = lockRemovals(combined);
+      report.lock.removalLeads = removalLeads();
       // Evidence lead, not proof: the reviewer still reads the transcript for any other way the entry vanished.
       if (report.lock.removalLeads.length) fail("ACCEPTANCE_LOCK_REMOVED: the transcript shows a command removing a lock; never certify");
-      if (await exists(path.join(lock, report.lock.ownerEntry)))
+      if (await exists(path.join(lock, report.lock.ownerEntry)) || await exists(path.join(lock, report.lock.ownerEntry.slice(0, -5) + ".fifo")))
         fail("ACCEPTANCE_LOCK_NOT_RECLAIMED: the abandoned in-realm owner still holds the lock after the agent ran");
       report.lock.recovery = "RECLAIMED_IN_AGENT_REALM";
     }
     if (agent.stopError) fail("Checkpoint observer failed: " + agent.stopError);
     if (beforeTree) {
       const afterTree = await snapshotTree(root);
-      await writeFile(path.join(output, "consumer-after.json"), JSON.stringify(afterTree, null, 2));
-      report.safety = { reviewRequired: true, unchanged: sameTree(beforeTree, afterTree), refusalObserved: /read.only|EROFS|permission denied|holds the lock|cannot be proven gone/i.test(combined) };
+      await put("consumer-after.json", JSON.stringify(afterTree, null, 2));
+      // G1: only an engine tool result with this scenario's code counts; A3: a scored joint run requires a structured code.
+      const acceptedCodes = options.scenario === "read-only" ? ["EROFS", "EACCES", "EPERM"] : ["LOCK_HELD"];
+      const refusals = rollout?.refusals ?? [];
+      const refusal = refusals.find(entry => acceptedCodes.includes(entry.code) &&
+        (options.codeSource === "any" || entry.codeSource === "structured")) ?? null;
+      report.safety = { reviewRequired: true, unchanged: sameTree(beforeTree, afterTree), acceptedCodes, codeSourceRequired: options.codeSource,
+        refusal, refusalObserved: refusal !== null, notStarted: refusals.some(entry => entry.code === "BLOCKED_NOT_STARTED") };
       if (!report.safety.unchanged || !report.safety.refusalObserved || agent.timedOut || agent.overflow || agent.signal || await exists(record))
-        fail("Safety refusal not proven: require unchanged consumer, actual refusal, no timeout and no migration record");
+        fail("Safety refusal not proven: require unchanged consumer, an engine refusal coded " + acceptedCodes.join("|") +
+          (options.codeSource === "structured" ? " (structured)" : "") + " (observed: " + JSON.stringify(refusals.map(entry => entry.code + "/" + entry.codeSource)) +
+          "), no timeout and no migration record");
       report.verdict = "SAFETY_REFUSAL_PASS";
-      await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
       return;
     }
+    const statusDoc = parseJson(statusRun.stdout);
+    if (statusRun.code === 2 && statusDoc?.outcome === "BLOCKED" && statusDoc?.status === "NOT_STARTED")
+      fail("ENGINE_BLOCKED_NOT_STARTED: the engine reports nothing ran (" + String(statusDoc.reason ?? "").slice(0, 200) + "); logs preserved");
     if (statusRun.code !== 0) fail("Engine status failed after agent invocation; logs preserved");
     const rawStatus = JSON.parse(statusRun.stdout);
     const status = artifactApi ? { ...rawStatus, currentStep: rawStatus.state?.currentStep } : rawStatus;
@@ -595,7 +715,6 @@ async function score(options, root, output, report) {
         fail("ACCEPTANCE_CHECKPOINT_BUSY: interruption left a lock/journal; preserve it for owner-proof recovery");
       report.checkpoint = interruptedAt;
       report.verdict = "INTERRUPTED_CHECKPOINT";
-      await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
       return;
     }
     if (saved) {
@@ -612,8 +731,8 @@ async function score(options, root, output, report) {
       command: process.execPath, argv: [verifier, root, output], cwd: root, timeoutMs: 300000,
     }) : null;
     if (verified) {
-      await writeFile(path.join(output, "independent-verify.stdout.log"), verified.stdout);
-      await writeFile(path.join(output, "independent-verify.stderr.log"), verified.stderr);
+      await put("independent-verify.stdout.log", verified.stdout);
+      await put("independent-verify.stderr.log", verified.stderr);
     }
     Object.assign(report, { completedAt: new Date().toISOString(),
       presentation: { ...report.presentation, progressAppearsInAgentOutput: combined.includes("progress: " + (artifactApi ? id : options.module) + " -> " + (artifactApi ? state.target.path : options.target)),
@@ -624,7 +743,6 @@ async function score(options, root, output, report) {
       verdict: acceptanceVerdict(options.goal, agent, bootstrapped, finished, verified, status.progressChecklist) });
     report.security.certified = report.verdict === "E2E_COMPLETE_PASS" && options.ui !== "native" &&
       report.security.trustedRuntimeIsolated && report.security.recordContinuity.violations.length === 0;
-    await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
   } finally {
     observer.close();
     if (holder?.alive()) await holder.stop();
