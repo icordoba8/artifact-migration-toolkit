@@ -121,6 +121,48 @@ replacement. It does not certify native task-UI recording or every supported
 platform. On a host without unprivileged namespaces the runner refuses;
 `--isolation none` yields functional evidence with `certified: false`.
 
+**Launch as a non-root user.** The agent keeps the runner's effective UID and
+GID inside its namespace (`unshare --map-current-user` maps the effective IDs
+onto themselves), never namespace root, so
+a provider's own nested sandbox (Codex bubblewrap) can still map its user
+namespace: Linux 5.12+ lets a namespace map parent UID 0 only when its creator
+held `CAP_SETFCAP`, which the agent never does. With `--isolation os` the
+runner refuses with `ACCEPTANCE_PRECONDITION`, before the isolation probe and
+the provider start, when its real **or** effective UID is 0: an effective root
+agent would own root's files, and a real root could switch back to them. GIDs
+are not checked. Compatible launch context: a non-root login whose real and
+effective UIDs are both nonzero (not under `sudo` or a setuid wrapper), on a
+host that allows unprivileged user namespaces. It needs util-linux 2.38+
+`unshare`/`setpriv`. Capability boundary: only the trusted setup shell holds
+capabilities (`--keep-caps`, in the new namespace only) to create the read-only
+bind mounts; `setpriv` empties all five capability sets and sets
+`no_new_privs` before the agent starts. A runner launched under a seccomp
+filter that refuses `socket(AF_NETLINK, NETLINK_ROUTE)` (such as a managed
+Codex session) breaks bubblewrap's loopback setup; launch from a plain
+terminal (`Seccomp: 0` in `/proc/self/status`).
+
+**Codex MCP grants (harness only).** `codex exec` never prompts, so with the
+installed `.codex/config.toml` alone every MCP call that needs approval is
+refused (`approval policy is never`). For Codex launches only, the runner adds
+invocation-scoped `-c` overrides on top of the installed `start-migration`
+entry, whose command, arguments and bytes stay untouched:
+`approval_policy="never"`;
+`mcp_servers.start-migration.enabled_tools` set to exactly `artifact_status`,
+`artifact_run`, `migration_status`, `migration_scan`,
+`migration_evidence_binding`, `migration_prefill`, `migration_capture`,
+`migration_pending_decisions`, `migration_run`; and
+`mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
+those nine (Codex CLI 0.165.0 keys); plus
+`mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]`, because Codex
+passes an MCP server only an environment allowlist and the official launcher's
+pnpm version-switch refusal must reach the engine's validators. There is no server-wide
+`default_tools_approval_mode`, no grant for `migration_relay_decision`, any
+other server (including a frontend consumer's Playwright server) or unknown
+tools, and no sandbox escalation. Tool execution permission is not an operator
+decision: the engine still refuses decisions without the operator's own
+authorization. This configures only this harness; an ordinary installed
+`codex exec` is unchanged.
+
 **Record continuity refusal:** the agent may legitimately write
 `modules/<target>/state.json` through the engine, but it must never remove and
 recreate the containing `modules/<target>` record directory to erase prior
@@ -222,3 +264,17 @@ For every provider and supported OS, the release record needs:
 
 **Green CI, a mock LLM, or a green engine fixture does not constitute live-agent
 production acceptance.** Never make that claim without the external evidence.
+
+## M15 scenario extensions
+
+The runner also supports standalone artifacts (`--kind artifact`), committed-checkpoint interruption and
+resume, deliberately read-only consumers, genuine live/abandoned lock probes, and a native Codex terminal
+launcher. See [the M15 runbook](m15-harness-implementation.md) for marker fields, commands, contract-row
+traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13.0 and explicitly select
+`gpt-6.1-sol` with high reasoning. Every output directory must be empty and outside the consumer.
+
+These capabilities do not supply missing certification evidence. The native launcher captures terminal
+output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
+review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery remains blocked by the
+existing owner-proof protocol; `realm-abandoned-lock` plants the abandoned owner in the agent's own PID
+realm instead, where an in-realm reclaimer (the MCP server) can prove it gone. Bootstrap AUTO's contract/implementation contradiction remains unresolved.
