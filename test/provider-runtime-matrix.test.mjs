@@ -406,7 +406,9 @@ for (const provider of NAMES) {
     const agentsFile = path.join(root, '.agents/mcp.json');
     await mkdir(path.dirname(agentsFile), { recursive: true });
     const launch = receipt => ({ command: process.execPath, args: [path.join(receipt.release, 'packages/migration-engine/src/mcp-server.mjs')] });
-    const agents = { mcpServers: { other: { command: 'other', args: [], targets: ['claude'] }, 'start-migration': { ...launch(current), targets: [provider, 'antigravity'] } }, keep: { untouched: true } };
+    // E7: Codex's shared entry is its own relay-less registration; the old Claude-shaped one converges on it.
+    const shared = provider === 'codex' ? current.mcp : launch(current);
+    const agents = { mcpServers: { other: { command: 'other', args: [], targets: ['claude'] }, 'start-migration': { ...shared, targets: [provider, 'antigravity'] } }, keep: { untouched: true } };
     await writeFile(agentsFile, JSON.stringify(agents));
     assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null);
     assert.equal(await readFile(agentsFile, 'utf8'), JSON.stringify(agents));
@@ -414,7 +416,7 @@ for (const provider of NAMES) {
     await writeFile(agentsFile, JSON.stringify(agents));
     assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair.repaired, true);
     const settled = JSON.parse(await readFile(agentsFile, 'utf8'));
-    assert.deepEqual(settled, { ...agents, mcpServers: { ...agents.mcpServers, 'start-migration': { ...launch(current), targets: [provider, 'antigravity'] } } });
+    assert.deepEqual(settled, { ...agents, mcpServers: { ...agents.mcpServers, 'start-migration': { ...shared, targets: [provider, 'antigravity'] } } });
     const settledBytes = await readFile(agentsFile, 'utf8');
     assert.equal((await ensureRuntime({ provider, root, store }, OFFLINE)).mcpRepair, null);
     assert.equal(await readFile(agentsFile, 'utf8'), settledBytes);
