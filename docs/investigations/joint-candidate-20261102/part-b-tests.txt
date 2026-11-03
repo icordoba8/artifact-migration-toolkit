@@ -23,4 +23,4 @@ $ node --test --test-concurrency=1 test/providers-sync.test.mjs test/provider-in
 EXIT 0
 
 pnpm providers:check: Provider outputs are synchronized (62 files).
-pnpm release:check before commit: only blocker 'working tree is not clean', versionConflict null; rerun after commit below.
+pnpm release:check on the committed tree (1.6.5): blockers [], versionConflict null.
