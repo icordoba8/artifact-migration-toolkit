@@ -816,11 +816,18 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       const strict = runCodex(path.join(root, 'strict'), [...artifact, '--scenario', 'read-only', '--code-source', 'structured'],
         engine);
       const strictReport = JSON.parse(await readFile(path.join(root, 'strict/report.json')));
-      assert.equal(strict.status, 1);
       assert.equal(strictReport.safety.codeSourceRequired, 'structured');
-      assert.equal(strictReport.safety.refusal, null);
-      // Without E6 every engine refusal is template-matched, so a structured-only run cannot pass.
-      assert.deepEqual(strictReport.rollout.refusals.map(entry => entry.codeSource), ['template']);
+      if (codedEngine) {
+        // E6: the joint candidate's own structured code satisfies a structured-only run.
+        assert.equal(strict.status, 0, JSON.stringify(strictReport.safety));
+        assert.equal(strictReport.verdict, 'SAFETY_REFUSAL_PASS');
+        assert.equal(strictReport.safety.refusal.codeSource, 'structured');
+      } else {
+        assert.equal(strict.status, 1);
+        assert.equal(strictReport.safety.refusal, null);
+        // Without E6 every engine refusal is template-matched, so a structured-only run cannot pass.
+        assert.deepEqual(strictReport.rollout.refusals.map(entry => entry.codeSource), ['template']);
+      }
       // An existing output directory, even empty, is never reused.
       await mkdir(path.join(root, 'taken'));
       const taken = runCodex(path.join(root, 'taken'), [...artifact, '--scenario', 'read-only'], 'true');
