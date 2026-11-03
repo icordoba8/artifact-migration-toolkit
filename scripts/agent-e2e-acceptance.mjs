@@ -26,6 +26,7 @@ import { verifyBundle } from "../providers/install-support.mjs";
 import { isMainModule } from "../packages/migration-engine/src/engine-paths.mjs";
 
 const fail = (message) => { throw new Error(message); };
+const NODE_22_13_SHA256 = "af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8";
 const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
@@ -329,6 +330,11 @@ export async function installedGrants(root, host, verifiedTransport = null) {
       server.args[0] !== verifiedTransport.entry ||
       (server.env && Object.keys(server.env).length)))
     fail(`ACCEPTANCE_PRECONDITION: installed ${host} start-migration entry is not the verified release's MCP server`);
+  if (verifiedTransport) {
+    const executable = await realpath(server.command);
+    if (executable !== server.command || sha256(await readFile(executable)) !== NODE_22_13_SHA256)
+      fail(`ACCEPTANCE_MCP_EXECUTABLE: installed ${host} command is not the independently pinned Node 22.13.0 executable`);
+  }
   const enabled = host === "codex" ? server.enabled_tools : server.tools;
   const disabled = host === "codex" ? server.disabled_tools : undefined;
   if (host === "copilot" && enabled === undefined) fail("Missing installed Copilot tools filter");
@@ -606,8 +612,9 @@ async function score(options, root, output, report) {
   const verifierModules = await realpath(path.join(verifierDir, "node_modules")).catch(() => null);
   const sealedVerifier = broad ? [verifier, verifierModules].filter(Boolean) : [verifierDir];
   // AMT_PNPM_DIR is the official launcher's per-run pinned pnpm (scripts/m15-official-run.sh).
-  const sealedRegistrations = [...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
-    path.dirname(file) === root ? [file] : [path.dirname(file), file]);
+  const sealedRegistrations = [...Object.values(shipped).map(entry => entry.server.command),
+    ...[...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
+      path.dirname(file) === root ? [file] : [path.dirname(file), file])];
   const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",

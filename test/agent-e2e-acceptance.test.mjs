@@ -577,7 +577,8 @@ test("Codex approves exactly the nine engine tools, per tool, keeps approval_pol
   assert.deepEqual(argv.slice(0, 6), ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", "/consumer/target/.agents"]);
 });
 
-test("installed Codex and Copilot grants: effective nine proceeds, declared nine and legacy ten refuse before spawn", async () => {
+test("installed Codex and Copilot grants: effective nine proceeds, declared nine and legacy ten refuse before spawn",
+  { skip: process.version === "v22.13.0" ? false : "requires the pinned Node 22.13.0 MCP executable" }, async () => {
   const root = await mkdtemp(path.join(scratch, "agent-e2e-grants-"));
   try {
     const { target, bin, receipt } = await installedCandidate(root);
@@ -669,7 +670,8 @@ test("the runner fails visibly on bad arguments run directly or through a symlin
   }
 });
 
-test("headless refuses substitute MCP servers before probing and detects changed registrations after the run", async () => {
+test("headless refuses substitute MCP servers before probing and detects changed registrations after the run",
+  { skip: process.version === "v22.13.0" ? false : "requires the pinned Node 22.13.0 MCP executable" }, async () => {
   const root = await mkdtemp(path.join(scratch, "agent-e2e-transport-"));
   try {
     const { target, bin, receipt } = await installedCandidate(root);
@@ -746,6 +748,42 @@ test("headless refuses substitute MCP servers before probing and detects changed
         assert.ok(report.security.readOnly.includes(file));
         assert.equal(await readFile(file, "utf8"), bytes);
       }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a substituted executable with matching receipt and registration is refused before spawn in both UIs", async () => {
+  const root = await mkdtemp(path.join(scratch, "agent-e2e-executable-pin-"));
+  try {
+    const { target, bin, receipt, receiptPath, pin } = await installedCandidate(root);
+    const parsed = JSON.parse(receipt);
+    const started = path.join(root, "substitute-started");
+    const executable = path.join(bin, "substitute-node");
+    await writeFile(executable, `#!${process.execPath}\n` +
+      `require('node:fs').writeFileSync(${JSON.stringify(started)}, 'UNTRUSTED_EXECUTABLE_STARTED');\n`, { mode: 0o755 });
+    for (const command of Object.values(parsed.commands)) command[0] = executable;
+    await writeFile(receiptPath, JSON.stringify(parsed));
+    await mkdir(path.join(target, ".codex"));
+    await mkdir(path.join(target, ".github"));
+    for (const host of ["codex", "copilot"]) {
+      const hostReceipt = path.join(target, `.artifact-migration-tools/${host}.json`);
+      await writeFile(hostReceipt, JSON.stringify({ ...parsed, provider: host }));
+      if (host === "codex") await writeFile(path.join(target, ".codex/config.toml"), codexEntry(parsed));
+      else await writeFile(path.join(target, ".github/mcp.json"), JSON.stringify({ mcpServers: { "start-migration": {
+        command: executable, args: [path.join(parsed.release, "packages/migration-engine/src/mcp-server.mjs"), "--without-relay"],
+        tools: CODEX_MCP_TOOLS,
+      } } }));
+      for (const ui of host === "codex" ? ["headless", "native"] : ["headless"]) {
+        const output = path.join(root, host + "-" + ui);
+        const result = spawnSync(process.execPath, [script.pathname, "--provider", host === "codex" ? "codex" : "opencode",
+          "--cwd", target, "--module", "auth", "--target", "auth", "--output", output, "--ui", ui, "--expected-pin", pin],
+        { encoding: "utf8", timeout: 60000 });
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /ACCEPTANCE_MCP_EXECUTABLE:.*independently pinned Node 22.13.0/);
+        assert.equal(JSON.parse(await readFile(path.join(output, "report.json"))).agent, undefined);
+        await assert.rejects(stat(started), { code: "ENOENT" });
+      }
+      await rm(hostReceipt);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

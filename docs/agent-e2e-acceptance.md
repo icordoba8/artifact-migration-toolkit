@@ -90,9 +90,13 @@ fails with `ACCEPTANCE_PRECONDITION` rather than a raw filesystem error.
 It independently verifies the receipt's selected release against the pinned
 manifest and checks that the discover command is the binary from that bundle.
 For headless and native runs alike, each installed Codex/Copilot MCP transport must
-use that receipt's Node command and the canonical path of the verified release's `mcp-server.mjs`,
+use a canonical Node executable whose SHA-256 independently matches the pinned Node 22.13.0
+binary (`af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8`)
+and the canonical path of the verified release's `mcp-server.mjs`,
 with no mutable alias, wrapper, foreign entry, extra arguments or environment override. This binding
 is checked before probing the server, so a substitute server is never executed.
+The receipt cannot authorize a different executable, even when its command agrees with the registration.
+The verified executable is also mounted read-only for the provider run.
 Registration paths containing symlinks refuse. Existing registration files (and their `.codex`/`.github` parent directories) are
 read-only inside the sandbox. Their exact bytes and the absence of alternate Copilot
 registration files are pinned and checked again after the run; any change fails with
