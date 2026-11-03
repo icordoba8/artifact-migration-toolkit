@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A9 in-run ledger observer. Trusted side only: started by the runner OUTSIDE the agent sandbox before spawn,
 stopped after exit. Raw inotify (never fs.watch: libuv drops IN_Q_OVERFLOW) on every directory below
-.agents/knowledge/migrations, an inode watch on every operator-decisions.ndjson (so same-inode aliases are seen),
+.agents/knowledge/migrations, an inode watch on every operator-decisions.ndjson and auto-decisions.ndjson (so same-inode aliases are seen),
 and the ancestor chain up to / (a renamed ancestor would move the tree out from under the watches).
 
 Protocol: argv = <migrations base> <consumer root>. Prints READY once every watch is attached; reads STOP on stdin;
@@ -17,7 +17,7 @@ Ceiling: a shared writable mmap store emits no MODIFY, and a mount in a nested n
 """
 import ctypes, json, os, re, select, stat, struct, sys
 
-LEDGER = 'operator-decisions.ndjson'
+LEDGERS = ('operator-decisions.ndjson', 'auto-decisions.ndjson')  # human and AUTO ledgers: both are consumed as decisions
 RELAY = b'AGENT_RELAYED'
 STAGED = re.compile(r'^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.init$')
 (MODIFY, ATTRIB, CLOSE_WRITE, MOVED_FROM, MOVED_TO, CREATE, DELETE, DELETE_SELF, MOVE_SELF,
@@ -97,7 +97,7 @@ class Observer:
                 continue
             if stat.S_ISDIR(info.st_mode):
                 self.walk(child, late)
-            elif name == LEDGER:
+            elif name in LEDGERS:
                 if late:
                     self.fail('LEDGER_CHANGE', 'ledger %s appeared before its directory was watched; its writes were not observed' % child)
                 self.check(child)
@@ -218,7 +218,7 @@ class Observer:
             if mask & (CREATE | MOVED_TO):
                 self.walk(path, late=True)
             return
-        if name != LEDGER:
+        if name not in LEDGERS:
             return
         if mask & (CREATE | MODIFY | CLOSE_WRITE):
             self.fail('LEDGER_CHANGE', 'ledger %s was created, opened for writing or modified' % path)
@@ -245,8 +245,9 @@ class Observer:
         for cookie, path in self.moved.items():
             self.fail('LEDGER_CHANGE', 'directory %s left the watched ledger tree' % path)
         for dirpath, dirnames, filenames in os.walk(self.base):
-            if LEDGER in filenames and os.path.join(dirpath, LEDGER) not in self.ledgers:
-                self.fail('LEDGER_CHANGE', 'ledger %s was never observed' % os.path.join(dirpath, LEDGER))
+            for name in LEDGERS:
+                if name in filenames and os.path.join(dirpath, name) not in self.ledgers:
+                    self.fail('LEDGER_CHANGE', 'ledger %s was never observed' % os.path.join(dirpath, name))
         ledgers = {}
         for path, entry in sorted(self.ledgers.items()):
             final = self.check(path)  # Same nofollow, nonblocking, inode-pinned reader; None on any rejection.

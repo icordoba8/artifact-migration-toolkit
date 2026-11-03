@@ -381,7 +381,9 @@ Direct-ledger decisions need an explicit answer (`lifecycle/recorder.mjs:674-693
 writes only after signer verification (`lifecycle/recorder.mjs:529-584`). These are not authorized scored
 scenario writes, and their bytes contain runtime timestamps, candidate bindings or proofs
 (`decisions/record.mjs:237-297`), not deterministic expected lines. All engine paths here are relative to
-`packages/migration-engine/src/`. The separate AUTO ledger is outside this operator-ledger rule.
+`packages/migration-engine/src/`. The AUTO ledger `auto-decisions.ndjson` is consumed as decisions taken
+(`decisions/authority.mjs:180-190`), so the observer and syscall gate apply the same any-change rule to it; no
+scored scenario writes it (current formats use the direct ledger, `lifecycle/approval.mjs:38`), so nothing is exempt.
 
 These capabilities do not supply missing certification evidence. The native launcher captures terminal
 output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
