@@ -63,6 +63,22 @@ faults. This supersedes Part B's E4 `error.data` transport. Contract:
 Limits: `run` without `--json` prints its text block without the code; a
 refused progress tool returns the JSON document only.
 
+## Codex effective grants: 9
+
+Config: the harness (`infra/harness-20261102` `eb89b47`,
+`scripts/agent-e2e-acceptance.mjs` `commandFor`) passes
+`-c mcp_servers.start-migration.enabled_tools=[9 tools]` plus a per-tool
+`approval_mode="approve"` for those nine; the shipped Codex `config.toml` has
+no tool filter, so the server still lists 10.
+
+Spike (non-scored, no model, no auth): `spikes-t1-r2/codex-grants.{mjs,out}`.
+It runs the harness's own Codex argv against the unfiltered server and a local
+Responses endpoint in an empty temporary `CODEX_HOME`. The endpoint's single
+`exec` call reads Codex's `ALL_TOOLS` (its enabled nested tools). codex-cli
+0.166.0: server `tools/list` 10; harness argv **9** granted,
+`tools.mcp__start_migration__migration_relay_decision` is `undefined`. The
+control run without `enabled_tools` gives 10 and the relay is a `function`.
+
 ## Identity
 
 | Item | Before (2782612, labelled 1.6.5) | After (1.6.6) |
@@ -83,4 +99,5 @@ Docs are outside the payload, so this section does not move the contentHash.
   installer ("Installation MCP selection conflict"); fails closed.
 - Claude + Copilot in one root: Copilot refuses while Claude's `.mcp.json`
   entry exists; a Claude install after Copilot is not refused by Claude, and
-  Copilot's next preflight doctor refuses instead.
+  Copilot's next preflight doctor refuses instead. Recorded as the 1.6.6 known
+  limitation in `README.md` *Install* (do not co-install in one root); no code change.
