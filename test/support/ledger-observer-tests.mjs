@@ -241,7 +241,7 @@ const gated = (name, script, fails, reason) => test('syscall gate: ' + name, asy
   assert.equal(exit, 0, 'the traced command must actually run successfully');
 });
 const LEDGER = '"$REC/decisions/operator-decisions.ndjson"';
-gated('an unchanged ledger read passes', `cat ${LEDGER} >/dev/null`, false);
+gated('an unchanged ledger read passes', `"$NODE" -e 'require("node:fs").readFileSync(process.argv[1])' ${LEDGER}`, false);
 gated('engine buildDecision + appendDurably + readOperatorDecisions fails', '"$NODE" use.mjs "$ROOT" "$REC"', true, /ledger write/);
 gated('a legacy line appended in a private view and discarded without a read fails',
   `unshare -Urm sh -c 'mount -t tmpfs ledger "$REC/decisions" && "$NODE" use.mjs "$ROOT" "$REC" && umount "$REC/decisions"'`,
