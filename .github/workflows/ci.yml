@@ -116,7 +116,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.13.0
+
+      - name: Install trusted-side ledger observer tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3 strace
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       # providers-sync.mjs imports `yaml` and the engine requires
       # `ts-discovery-compiler`. A clean checkout that runs providers:check
@@ -211,6 +217,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
+
+      - name: Install trusted-side ledger observer tools
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3 strace
 
       - name: Allow unprivileged user namespaces (ephemeral runner)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

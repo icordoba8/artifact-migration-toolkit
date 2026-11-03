@@ -89,6 +89,18 @@ requires a provider-specific receipt at
 fails with `ACCEPTANCE_PRECONDITION` rather than a raw filesystem error.
 It independently verifies the receipt's selected release against the pinned
 manifest and checks that the discover command is the binary from that bundle.
+For headless and native runs alike, each installed Codex/Copilot MCP transport must
+use a canonical Node executable whose SHA-256 independently matches the pinned Node 22.13.0
+binary (`af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8`)
+and the canonical path of the verified release's `mcp-server.mjs`,
+with no mutable alias, wrapper, foreign entry, extra arguments or environment override. This binding
+is checked before probing the server, so a substitute server is never executed.
+The receipt cannot authorize a different executable, even when its command agrees with the registration.
+The verified executable is also mounted read-only for the provider run.
+Registration paths containing symlinks refuse. Existing registration files (and their `.codex`/`.github` parent directories) are
+read-only inside the sandbox. Their exact bytes and the absence of alternate Copilot
+registration files are pinned and checked again after the run; any change fails with
+`ACCEPTANCE_REGISTRATION_CHANGED`.
 After the agent returns, it re-verifies the same release to detect on-disk
 toolkit tampering. Installing a candidate only *during* the scored invocation
 is insufficient for this harness; the installation flow requires a separate
@@ -153,7 +165,13 @@ agent spawns, every installed Codex (`.codex/config.toml` `enabled_tools` minus
 `artifact_run`, `migration_status`, `migration_scan`,
 `migration_evidence_binding`, `migration_prefill`, `migration_capture`,
 `migration_pending_decisions`, `migration_run`, or the run is refused with
-`ACCEPTANCE_INSTALLED_GRANTS`. The overrides are `approval_policy="never"`;
+`ACCEPTANCE_INSTALLED_GRANTS`.
+The runner probes the server's actual `tools/list`, then intersects it with the installed
+allowlist and removes installed denylisted tools. Both the advertised surface and that
+effective set must be exactly the nine tools; a nine-tool declaration cannot hide a
+relay-bearing server, and a nine-tool server cannot hide a narrowed provider filter.
+Malformed or ambiguous filters refuse rather than being ignored.
+The overrides are `approval_policy="never"`;
 `mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
 those nine (Codex CLI 0.165.0 keys); plus
 `mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]`, because Codex
@@ -309,11 +327,14 @@ read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.json
 `thread.started` id (headless) or by consumer cwd and launch window (native), copied to
 `codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call, or a
 non-zero shell call whose argv is a receipt-installed engine command (no pipes, lists or substitutions). Agent
-prose, an `echo` of an engine message and provider sandbox lines never count. A structured engine code wins;
-the engine's exact message templates are the fallback (`codeSource: "template"`). Accepted codes:
+prose, an `echo` of an engine message and provider sandbox lines never count. Scored runs default to
+`--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
 `read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
-`ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted. `--code-source
-structured` requires a structured code (scored runs on the joint candidate).
+`ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.
+Template-classified refusals remain visible in the rollout but never satisfy scored refusal checks.
+Only a direct runner invocation with `--scoring diagnostic --code-source any` permits template fallback.
+Such a run reports `DIAGNOSTIC_ONLY` (or `FAIL`), never a scored PASS, checkpoint or security certification.
+The official launcher fixes both scored/structured flags itself and refuses caller overrides.
 
 Abandoned lock (G4). The trusted holder must be the lock's single owner entry in its own PID namespace; it is
 killed with `SIGKILL`. PASS (`lock.recovery: "RECLAIMED_ACROSS_REALM"`) requires the dead owner's entry and
@@ -334,12 +355,33 @@ cover the launch window is `UNBOUND` and never counts for a native row; a `BOUND
 review (nonce visible, terminal window, single invocation). PTY typescript, recording and the operator's
 REC=yes stay three separate evidence types.
 
-Relay detection (A9). Immediately before the agent starts and right after it exits, the runner reads every
-`decisions/operator-decisions.ndjson` under the consumer's `.agents/knowledge/migrations`. It reads from the
-host, outside the agent sandbox, and never follows a symlink or opens a FIFO. This applies to headless and
-native runs alike. If any ledger line was added, rewritten or removed, the run fails with
-`RELAY_IN_SCORED_RUN`. This is a functional FAIL, never rerun, and the changed lines are copied into
-`relay-lines.json`. The engine's own `auto-decisions.ndjson` is not a human ledger and is not checked.
+Ledger any-change rule (A9). Before spawning the provider, the runner starts a Linux inotify observer in a
+separate host process, outside the agent's PID and mount namespaces. Linux x86-64, Python 3 and
+strace with `--seccomp-bpf`, `--pidns-translation` and `--kill-on-exit` are required. Harness helper scripts
+are mounted read-only too, so the provider cannot replace the post-run syscall verifier. The observer
+watches the ledger files, their directories and ancestors under `.agents/knowledge/migrations` until
+after provider exit, for both headless and native runs. It reads no-follow, checks inode identity and
+requires the final bytes to be identical to the original bytes. Every addition, removal, modification,
+write-then-restore, inode replacement, watcher error or queue overflow is `FAIL LEDGER_CHANGE`, never
+rerunnable. This includes forged legacy human decisions, relay lines, and calls to the engine's own append
+helper: E5 cannot prove authorship. An unchanged pre-existing relay line also fails.
+An external syscall observer follows the complete provider process tree, rejecting all writable ledger
+opens, writes, destructive operations and mappings. It checks actual ledger read and write bytes even in private mount namespaces,
+rather than assuming a sandbox's namespace is trustworthy. Non-ledger read/write buffers are discarded before
+the trace reaches disk. An inherited seccomp filter denies io_uring and unsupported syscall ABIs so they
+cannot bypass syscall observation. Missing tools, incomplete traces and observer failures refuse.
+The host writes `ledger-observer.json` and `ledger-syscalls.log` and preserves the provider transcripts
+before scoring anything else. There is no append allowlist.
+
+Scored scenario audit (`fresh` headless/native, `interrupt`, `resume`, `read-only`, `live-lock`,
+`abandoned-lock`, `realm-abandoned-lock`; module and artifact): **none has a deterministic engine-written
+operator-ledger line to exempt**. `lifecycle/approval.mjs:36-42` selects AUTO only for historical non-direct
+ledgers; `decisions/record.mjs:342-361` routes AUTO to `auto-decisions.ndjson`, not the operator ledger.
+Direct-ledger decisions need an explicit answer (`lifecycle/recorder.mjs:674-693,798-830`); attestation
+writes only after signer verification (`lifecycle/recorder.mjs:529-584`). These are not authorized scored
+scenario writes, and their bytes contain runtime timestamps, candidate bindings or proofs
+(`decisions/record.mjs:237-297`), not deterministic expected lines. All engine paths here are relative to
+`packages/migration-engine/src/`. The separate AUTO ledger is outside this operator-ledger rule.
 
 These capabilities do not supply missing certification evidence. The native launcher captures terminal
 output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent

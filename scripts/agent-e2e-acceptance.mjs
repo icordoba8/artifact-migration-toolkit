@@ -13,8 +13,8 @@
  * hosts without unprivileged namespaces; such a run is functional evidence
  * only and its report says it is not security-certified.
  */
-import { pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, decisionLedgers, ledgerChanges } from "./acceptance-evidence.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
@@ -26,11 +26,12 @@ import { verifyBundle } from "../providers/install-support.mjs";
 import { isMainModule } from "../packages/migration-engine/src/engine-paths.mjs";
 
 const fail = (message) => { throw new Error(message); };
+const NODE_22_13_SHA256 = "af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8";
 const argsOf = (argv) => {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i];
-    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation", "--kind", "--source", "--source-root", "--artifact-target", "--scenario", "--resume-from", "--ui", "--code-source", "--not-after", "--rerun-of"].includes(name) || !argv[i + 1] || name in options)
+    if (!["--provider", "--cwd", "--module", "--target", "--output", "--timeout-minutes", "--goal", "--expected-pin", "--isolation", "--kind", "--source", "--source-root", "--artifact-target", "--scenario", "--resume-from", "--ui", "--code-source", "--scoring", "--not-after", "--rerun-of"].includes(name) || !argv[i + 1] || name in options)
       fail("Expected unique --provider, --cwd, --module, --target, --output and known optional flags, each with a value");
     options[name] = argv[i + 1];
   }
@@ -58,8 +59,12 @@ const argsOf = (argv) => {
   // G1: a refusal is read from the provider's own tool-result record; Codex's rollout is the only adapter (Copilot is P1).
   if (["read-only", "live-lock", "abandoned-lock"].includes(scenario) && options["--provider"] !== "codex")
     fail("Refusal scenarios require --provider codex: refusals are scored from its rollout tool results, never from prose");
-  const codeSource = options["--code-source"] ?? "any";
+  const scoring = options["--scoring"] ?? "scored";
+  if (!["scored", "diagnostic"].includes(scoring)) fail("--scoring must be scored or diagnostic");
+  const codeSource = options["--code-source"] ?? "structured";
   if (!["any", "structured"].includes(codeSource)) fail("--code-source must be any or structured");
+  if (scoring === "scored" && codeSource !== "structured")
+    fail("Scored runs require structured codes; template fallback requires --scoring diagnostic");
   const notAfter = options["--not-after"] ?? null;
   if (notAfter !== null && (!/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?Z$/.test(notAfter) || Number.isNaN(Date.parse(notAfter))))
     fail("--not-after must be an ISO-8601 UTC time ending in Z");
@@ -79,7 +84,7 @@ const argsOf = (argv) => {
     target: options["--target"], goal, expectedPin, isolation, kind, scenario, ui, source: options["--source"],
     sourceRoot: options["--source-root"] ? path.resolve(options["--source-root"]) : null, artifactTarget: options["--artifact-target"],
     resumeFrom: options["--resume-from"] ? path.resolve(options["--resume-from"]) : null, output: path.resolve(options["--output"]), timeoutMs: minutes * 60000,
-    codeSource, notAfter, rerunOf: options["--rerun-of"] ? path.resolve(options["--rerun-of"]) : null };
+    scoring, codeSource, notAfter, rerunOf: options["--rerun-of"] ? path.resolve(options["--rerun-of"]) : null };
 };
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
@@ -130,7 +135,7 @@ export const run = ({ command, argv, cwd, timeoutMs, stopWhen, native = false, e
   child.once("close", (code, signal) => {
     if (done) return;
     done = true; clear();
-    resolve({ code, signal, timedOut, overflow, interrupted, stopError,
+    resolve({ pid: child.pid, code, signal, timedOut, overflow, interrupted, stopError,
       stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
   });
 });
@@ -237,8 +242,8 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
 export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
   "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
 
-/** Probe the installed stdio transport, never a provider CLI or a declared tool filter. */
-const effectiveGrants = (root, server) => new Promise((resolve, reject) => {
+/** Probe the installed stdio transport before applying the provider's installed filters. */
+const advertisedGrants = (root, server) => new Promise((resolve, reject) => {
   if (typeof server.command !== "string" || !server.command ||
       !Array.isArray(server.args) || !server.args.every(arg => typeof arg === "string"))
     return reject(new Error("Unreadable installed command/args"));
@@ -294,15 +299,21 @@ const effectiveGrants = (root, server) => new Promise((resolve, reject) => {
 });
 
 /** Installed project registrations only; .mcp.json shadows .github/mcp.json for Copilot. */
-export async function installedGrants(root, host) {
+export async function installedGrants(root, host, verifiedTransport = null) {
   let server;
   if (host === "codex") {
-    const table = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
-      .split("[mcp_servers.start-migration]\n")[1]?.split(/^\[/m)[0];
-    if (table === undefined) return null;
-    // The installer writes JSON scalars and arrays, which are valid TOML; anything else fails to parse and refuses.
-    const key = (name) => { const line = table.match(new RegExp(`^${name} = (.*)$`, "m")); return line ? JSON.parse(line[1]) : undefined; };
-    server = { command: key("command"), args: key("args") };
+    const tables = (await readFile(path.join(root, ".codex/config.toml"), "utf8").catch(() => ""))
+      .split(/^\s*\[mcp_servers\.start-migration\]\s*$/m);
+    if (tables.length === 1) return null;
+    if (tables.length !== 2) fail("Ambiguous installed Codex registration");
+    // The installer emits JSON values in one TOML table. Refuse other syntax rather than ignore a filter.
+    server = {};
+    for (const line of tables[1].split(/^\s*\[/m)[0].split("\n")) {
+      if (!line.trim() || line.trimStart().startsWith("#")) continue;
+      const field = line.match(/^\s*([a-z_]+)\s*=\s*(.*?)\s*$/);
+      if (!field || Object.hasOwn(server, field[1])) fail("Unreadable installed Codex registration");
+      server[field[1]] = JSON.parse(field[2]);
+    }
   } else {
     for (const file of [".mcp.json", ".github/mcp.json"]) {
       server = JSON.parse(await readFile(path.join(root, file), "utf8").catch(error => {
@@ -312,7 +323,31 @@ export async function installedGrants(root, host) {
       if (server) break;
     }
   }
-  return server ? { server: { command: server.command, args: server.args }, grants: await effectiveGrants(root, server) } : null;
+  if (!server) return null;
+  if (verifiedTransport && (server.command !== verifiedTransport.command ||
+      !Array.isArray(server.args) || ![1, 2].includes(server.args.length) ||
+      (server.args.length === 2 && server.args[1] !== "--without-relay") ||
+      server.args[0] !== verifiedTransport.entry ||
+      (server.env && Object.keys(server.env).length)))
+    fail(`ACCEPTANCE_PRECONDITION: installed ${host} start-migration entry is not the verified release's MCP server`);
+  if (verifiedTransport) {
+    const executable = await realpath(server.command);
+    if (executable !== server.command || sha256(await readFile(executable)) !== NODE_22_13_SHA256)
+      fail(`ACCEPTANCE_MCP_EXECUTABLE: installed ${host} command is not the independently pinned Node 22.13.0 executable`);
+  }
+  const enabled = host === "codex" ? server.enabled_tools : server.tools;
+  const disabled = host === "codex" ? server.disabled_tools : undefined;
+  if (host === "copilot" && enabled === undefined) fail("Missing installed Copilot tools filter");
+  for (const filter of [enabled, disabled]) {
+    if (filter !== undefined && (!Array.isArray(filter) || !filter.every(tool => typeof tool === "string")))
+      fail("Unreadable installed tool filter");
+  }
+  if (server.enabled !== undefined && typeof server.enabled !== "boolean") fail("Unreadable installed server enablement");
+  const advertised = await advertisedGrants(root, server);
+  const grants = advertised.filter(tool => server.enabled !== false &&
+    (enabled === undefined || (host === "copilot" && enabled.includes("*")) || enabled.includes(tool)) &&
+    !disabled?.includes(tool));
+  return { server: { command: server.command, args: server.args }, advertised, grants };
 }
 
 /**
@@ -378,7 +413,7 @@ async function main() {
   // From here on every outcome -- a refusal, a tamper finding, a missing status
   // -- leaves a report.json: an absent report must never be read as a pass.
   const report = { schemaVersion: 1, provider: options.provider, module: options.module, target: options.target,
-    goal: options.goal, kind: options.kind, scenario: options.scenario, ui: options.ui, root, verdict: "FAIL", failure: null };
+    goal: options.goal, kind: options.kind, scenario: options.scenario, ui: options.ui, scoring: options.scoring, root, verdict: "FAIL", failure: null };
   let error = null;
   try {
     await score(options, root, output, report);
@@ -388,6 +423,10 @@ async function main() {
     if (report.security) report.security.certified = false;
     report.verdict = "FAIL";
   }
+  if (options.scoring === "diagnostic") {
+    if (report.verdict !== "FAIL") report.verdict = "DIAGNOSTIC_ONLY";
+    if (report.security) report.security.certified = false;
+  }
   // A4: only infrastructure outcomes may be rerun, once, on a fresh consumer. A FAIL (a rescue turn included) never.
   report.rerunEligible = ["NATIVE_NO_PROMPT", "NOT_RUN"].includes(report.verdict) && !report.rerunOf;
   const reportPath = path.join(output, "report.json");
@@ -396,7 +435,7 @@ async function main() {
   process.stdout.write(JSON.stringify({ output, report: reportPath, verdict: report.verdict, currentStep: report.engine?.currentStep,
     progressDisplayed: report.presentation?.progressAppearsInAgentOutput }) + "\n");
   if (error) throw error;
-  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS", "INTERRUPTED_CHECKPOINT", "SAFETY_REFUSAL_PASS"].includes(report.verdict)) process.exitCode = 1;
+  if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS", "INTERRUPTED_CHECKPOINT", "SAFETY_REFUSAL_PASS", "DIAGNOSTIC_ONLY"].includes(report.verdict)) process.exitCode = 1;
 }
 
 async function score(options, root, output, report) {
@@ -406,7 +445,7 @@ async function score(options, root, output, report) {
     const priorBytes = await readFile(options.rerunOf);
     const prior = JSON.parse(priorBytes);
     if (prior.rerunEligible !== true || prior.rerunOf || prior.root === root ||
-        ["provider", "module", "target", "goal", "kind", "scenario", "ui"].some(key => prior[key] !== report[key]))
+        ["provider", "module", "target", "goal", "kind", "scenario", "ui", "scoring"].some(key => prior[key] !== report[key]))
       fail("ACCEPTANCE_PRECONDITION: --rerun-of needs a rerun-eligible report (NATIVE_NO_PROMPT or NOT_RUN) that is not itself a rerun, " +
         "for the same invocation on a different, fresh consumer");
     report.rerunOf = { report: options.rerunOf, sha256: sha256(priorBytes), verdict: prior.verdict };
@@ -482,29 +521,39 @@ async function score(options, root, output, report) {
   // E7: every installed Codex/Copilot registration grants exactly the nine relay-less tools, or nothing spawns.
   const shipped = {};
   report.installedGrants = shipped;
+  const registrations = new Map();
+  const registrationBytes = file => readFile(file).catch(error => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   for (const host of ["codex", "copilot"]) {
     if (!(await exists(path.join(root, ".artifact-migration-tools", host + ".json")))) continue;
-    shipped[host] = await installedGrants(root, host).catch(() => null);
-    const grants = shipped[host]?.grants;
-    if (!Array.isArray(grants) || grants.length !== CODEX_MCP_TOOLS.length ||
-        new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
-      fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
-        (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
-        ", not exactly the nine without migration_relay_decision");
+    for (const relative of host === "codex" ? [".codex/config.toml"] : [".mcp.json", ".github/mcp.json"]) {
+      const file = path.join(root, relative);
+      registrations.set(file, await registrationBytes(file));
+      if (registrations.get(file) !== null && await realpath(file) !== file)
+        fail("ACCEPTANCE_PRECONDITION: installed MCP registration must not use a mutable symlink: " + file);
+    }
+    shipped[host] = await installedGrants(root, host, {
+      command: cli[0], entry: await realpath(path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs")),
+    }).catch(error => fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} registration refused: ${error.message}`));
+    for (const grants of [shipped[host]?.advertised, shipped[host]?.grants]) {
+      if (!Array.isArray(grants) || grants.length !== CODEX_MCP_TOOLS.length ||
+          new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
+        fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
+          (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
+          ", not exactly the nine without migration_relay_decision (server surface and effective provider grants must both match)");
+    }
   }
-  // Native Codex restates the installed MCP entry verbatim; it must launch the verified release's MCP server.
-  let mcpServer = null;
-  if (native) {
-    mcpServer = shipped.codex.server;
-    if (mcpServer.command !== cli[0] || !Array.isArray(mcpServer.args) ||
-        mcpServer.args[0] !== path.join(installed.release, "packages/migration-engine/src/mcp-server.mjs"))
-      fail("ACCEPTANCE_PRECONDITION: installed Codex start-migration entry is not the verified release's MCP server");
-  }
+  // Both UIs are bound before tools/list is probed; native only restates the verified installed transport.
+  const mcpServer = shipped.codex?.server ?? null;
   const invocationCommand = commandFor(options.provider, invocation, root, native, mcpServer);
   report.trusted = {
     marker: { path: markerPath, sha256: sha256(markerBytes) },
     receipt: { path: receiptPath, sha256: sha256(receiptBytes), store: installed.store, release: installed.release },
     verifier: { path: verifier, sha256: verifierSha256 },
+    ...(registrations.size ? { registrations: Object.fromEntries([...registrations].map(([file, bytes]) =>
+      [file, bytes === null ? null : sha256(bytes)])) } : {}),
   };
   const artifactApi = options.kind === "artifact" ? await import(pathToFileURL(path.join(installed.release,
     "packages/migration-engine/src/artifact/artifact-migration.mjs"))) : null;
@@ -523,7 +572,7 @@ async function score(options, root, output, report) {
   const saved = savedBytes === null ? null : JSON.parse(savedBytes);
   if (options.resumeFrom && (!saved || typeof saved !== "object")) fail("Resume report must be an interruption report object");
   if (saved) {
-    if (saved.verdict !== "INTERRUPTED_CHECKPOINT" || saved.root !== root || saved.kind !== options.kind || saved.provider !== options.provider ||
+    if (saved.verdict !== "INTERRUPTED_CHECKPOINT" || saved.scoring !== options.scoring || saved.root !== root || saved.kind !== options.kind || saved.provider !== options.provider ||
         saved.invocation !== invocation || saved.candidate?.installedPin !== installed.pin ||
         saved.security?.isolation !== (options.isolation === "os" ? "OS_NAMESPACE" : "NONE") || !saved.checkpoint)
       fail("ACCEPTANCE_PRECONDITION: Resume report does not bind this interrupted consumer");
@@ -562,8 +611,12 @@ async function score(options, root, output, report) {
   const broad = writable.some((dir) => dir === verifierDir || dir.startsWith(path.join(verifierDir, path.sep)));
   const verifierModules = await realpath(path.join(verifierDir, "node_modules")).catch(() => null);
   const sealedVerifier = broad ? [verifier, verifierModules].filter(Boolean) : [verifierDir];
+  const harnessScripts = path.dirname(fileURLToPath(import.meta.url));
   // AMT_PNPM_DIR is the official launcher's per-run pinned pnpm (scripts/m15-official-run.sh).
-  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), installed.store, ...sealedVerifier, receiptPath, markerPath, skills, output]
+  const sealedRegistrations = [...Object.values(shipped).map(entry => entry.server.command),
+    ...[...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
+      path.dirname(file) === root ? [file] : [path.dirname(file), file])];
+  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), harnessScripts, installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],
@@ -644,7 +697,9 @@ async function score(options, root, output, report) {
       Object.assign(report, { verdict: "NOT_RUN", notRun: { reason: "DEADLINE", notAfter: options.notAfter, checkedAt: new Date().toISOString() } });
       return;
     }
-    const ledgersBefore = await decisionLedgers(root);
+    const ledgerObserver = await startLedgerObserver(root);
+    const ledgerTrace = path.join(output, "ledger-syscalls.log");
+    launch = ledgerTraced(launch, ledgerTrace);
     report.startedAt = new Date().toISOString();
     report.launch = { ...launch, cwd: root, startedAt: report.startedAt, endedAt: null, node: process.version,
       harnessCommit: process.env.AMT_HARNESS_COMMIT ?? null, base: process.env.AMT_BASE ?? null, patchSha256: process.env.AMT_PATCH_SHA256 ?? null };
@@ -677,18 +732,21 @@ async function score(options, root, output, report) {
       await new Promise((resolve) => setImmediate(resolve));
       report.security.recordContinuity = observer.snapshot();
       observer.close();
-    }
-    if (options.ui === "native") agent.stdout = await readFile(path.join(output, "native.typescript"), "utf8");
-    await put("agent.stdout.log", agent.stdout);
-    await put("agent.stderr.log", agent.stderr);
-    // A9: read by this runner, outside the agent sandbox, before anything else is scored (native included).
-    const relayed = ledgerChanges(ledgersBefore, await decisionLedgers(root));
-    report.decisionLedgers = { files: Object.keys(ledgersBefore).length, changed: relayed.length };
-    if (relayed.length) {
-      await put("relay-lines.json", JSON.stringify(relayed, null, 2) + "\n");
-      report.decisionLedgers.evidence = "relay-lines.json";
-      fail("RELAY_IN_SCORED_RUN: a decision ledger changed during a scored run (" + relayed.map(change => change.file).join(", ") +
-        "); functional FAIL, never rerun");
+      const ledgerReport = await ledgerObserver.stop();
+      const syscallVerdict = ledgerTraceVerdict(ledgerTrace, agent?.pid);
+      const ledgerVerdict = ledgerObserverVerdict(ledgerReport) ?? syscallVerdict;
+      report.decisionLedgers = { observer: ledgerReport.assurance ?? null, ledgers: ledgerReport.ledgers ?? {},
+        evidence: "ledger-observer.json", syscallEvidence: "ledger-syscalls.log",
+        syscallVerdict, verdict: ledgerVerdict?.code ?? null };
+      await put("ledger-observer.json", JSON.stringify(ledgerReport, null, 2) + "\n");
+      if (agent) {
+        if (options.ui === "native") agent.stdout = await readFile(path.join(output, "native.typescript"), "utf8");
+        await put("agent.stdout.log", agent.stdout);
+        await put("agent.stderr.log", agent.stderr);
+        report.agent = { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
+          transcriptSha256: createHash("sha256").update(agent.stdout + "\n" + agent.stderr).digest("hex") };
+      }
+      if (ledgerVerdict) fail(ledgerVerdict.code + ": " + ledgerVerdict.reasons.join("; ") + "; functional FAIL, never rerun");
     }
     const combined = agent.stdout + "\n" + agent.stderr;
     // G1: Codex's own per-call record, bound to this run and copied into the evidence before anything is scored.
@@ -714,8 +772,6 @@ async function score(options, root, output, report) {
     report.openspec = { status: "NOT_TESTED", reviewRequired: true, candidates: openspecLeads(agent.stdout) };
     report.presentation = { nativeUiCertified: false, mode: options.ui,
       operatorRequired: options.ui === "native" ? ["screen recording", "single invocation attestation", "compare visible progress with engine status"] : [] };
-    report.agent = { exitCode: agent.code, signal: agent.signal, timedOut: agent.timedOut, overflow: agent.overflow,
-      transcriptSha256: createHash("sha256").update(combined).digest("hex") };
     if (report.security.recordContinuity.violations.length > 0) {
       fail("ACCEPTANCE_RECORD_REPLACED: The coding agent destroyed or replaced its migration record. " +
         report.security.recordContinuity.violations.join(" ") + " Transcripts preserved; never certify this run.");
@@ -728,6 +784,11 @@ async function score(options, root, output, report) {
       fail("Agent modified the installed skills (transcripts preserved)");
     if (!receiptBytes.equals(await readFile(receiptPath)))
       fail("Agent modified the installed runtime receipt (transcripts preserved)");
+    for (const [file, before] of registrations) {
+      const after = await registrationBytes(file);
+      if (before === null ? after !== null : after === null || !before.equals(after))
+        fail("ACCEPTANCE_REGISTRATION_CHANGED: installed MCP registration changed during the run: " + file);
+    }
     try {
       await verifyBundle(installed.release, installed.pin);
     } catch (error) {

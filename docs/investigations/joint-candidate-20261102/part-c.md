@@ -166,6 +166,8 @@ Docs are outside the payload, so this section does not move the contentHash.
   callable, E7 spike). Safe for 1.6.6 consumers because the shipped registration
   filters itself; a harness run against an unfiltered (≤1.6.5) Codex install on
   0.165.0 would grant the relay. Harness-lane follow-up, not changed here.
-- The shared `.agents/mcp.json` entry (consumer tooling, `targets`) stays the
-  relay-carrying Claude-shaped launch even when it targets Codex; unchanged by E7.
+- **Superseded by the later E7 change:** the shared `.agents/mcp.json` entry
+  (consumer tooling, `targets`) is relay-less for Codex installs: `--without-relay`
+  and the nine-tool `enabled_tools` filter (`providers/install-support.mjs`, `agentsServerFor`).
+  Other providers and historical Codex installs retain the Claude-shaped shared entry.
 - Codex rollback 1.6.6 → ≤1.6.5 by the old installer: not exercised in E7; behaviour unverified.

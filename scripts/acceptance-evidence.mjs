@@ -1,8 +1,10 @@
 /** Trusted-side evidence only. Never repairs a consumer or awards human acceptance. */
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, readlinkSync } from 'node:fs';
+import { readlinkSync } from 'node:fs';
 import { lstat, readdir, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export const exists = file => lstat(file).then(() => true, error => {
@@ -31,28 +33,86 @@ export async function snapshotTree(root) {
 export const sameTree = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 /**
- * A9: every human/relay decision ledger in the consumer, read host-side. snapshotTree never follows a symlink
- * or opens a FIFO; an entry under the ledger name that is not a regular file stands in as one line.
+ * A9 in-run observer (scripts/ledger-observer.py): raw inotify outside the sandbox from before spawn until after exit.
+ * Resolves once every watch is attached; `stop()` always resolves to a report whose violations are non-empty on any
+ * ledger change, relay line, watcher error/overflow or observer death, so a lost observer can never read as a clean window.
  */
-export async function decisionLedgers(root) {
+export async function startLedgerObserver(root, { timeoutMs = 30_000, python = 'python3' } = {}) {
   const base = path.join(root, '.agents/knowledge/migrations');
-  const ledgers = {};
-  if (!await exists(base)) return ledgers;
-  for (const [name, item] of Object.entries(await snapshotTree(base))) {
-    if (path.basename(name) !== 'operator-decisions.ndjson') continue;
-    ledgers[name] = item.sha256
-      ? (await readFile(path.join(base, name), { encoding: 'utf8', flag: constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK })).split('\n').filter(Boolean)
-      : ['<not a regular file: ' + JSON.stringify(item) + '>'];
+  const child = spawn(python, [fileURLToPath(new URL('./ledger-observer.py', import.meta.url)), base, root], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '', err = '';
+  child.stdout.on('data', chunk => { out += chunk; });
+  child.stderr.on('data', chunk => { err += chunk; });
+  child.stdin.on('error', () => {});
+  const exited = new Promise(resolve => {
+    child.on('close', (code, signal) => resolve({ code, signal }));
+    child.on('error', error => { err += error.message; resolve({ code: null, signal: error.code ?? 'error' }); });
+  });
+  let readyTimer;
+  const ready = await Promise.race([
+    new Promise(resolve => child.stdout.on('data', () => out.startsWith('READY\n') && resolve(true))),
+    exited.then(() => false),
+    new Promise(resolve => { readyTimer = setTimeout(resolve, timeoutMs, false); }),
+  ]);
+  clearTimeout(readyTimer);
+  if (!ready) {
+    child.kill('SIGKILL');
+    await exited;
+    throw new Error('LEDGER_CHANGE: ledger observer did not start: ' + (err.trim() || out.trim() || 'timeout'));
   }
-  return ledgers;
+  let report, stopping = false;
+  const premature = exited.then(() => !stopping);
+  return {
+    pid: child.pid,
+    stop: () => report ??= (async () => {
+      stopping = true;
+      child.stdin.end('STOP\n');
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      const { code, signal } = await exited;
+      clearTimeout(timer);
+      try {
+        if (await premature) throw new Error('exited before stop (' + (code ?? signal) + '): the run was not fully observed');
+        if (code !== 0) throw new Error('exit ' + (code ?? signal));
+        return JSON.parse(out.slice('READY\n'.length));
+      } catch (error) {
+        return { violations: [{ code: 'LEDGER_CHANGE', reason: 'ledger observer failed (' + error.message + '): ' + err.trim() }] };
+      }
+    })(),
+  };
 }
-/** Each ledger whose lines differ, with its lines from the first difference on (none for a truncation or removal). */
-export const ledgerChanges = (before, after) => [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().flatMap(file => {
-  const was = before[file] ?? [], now = after[file] ?? [];
-  if (sameTree(was, now)) return [];
-  const at = now.findIndex((line, i) => line !== was[i]);
-  return [{ file, lines: at < 0 ? [] : now.slice(at) }];
+/**
+ * Wrap an (already isolated) command in the A9 syscall gate: strace (LEDGER_TRACE_STRACE, default `strace` on PATH)
+ * follows every descendant from outside the namespaces; -DD keeps the command itself as the spawned child, so the
+ * runner's SIGTERM/SIGKILL still reach it. no-io-uring.py installs an inherited seccomp denial of io_uring.
+ */
+const quote = arg => "'" + arg.replaceAll("'", "'\\''") + "'";
+export const ledgerTraced = ({ command, argv }, trace, { strace = process.env.LEDGER_TRACE_STRACE || 'strace', python = 'python3' } = {}) => ({
+  command: strace,
+  argv: ['-DD', '-f', '-yy', '-s', String(1 << 24), '--pidns-translation', '--kill-on-exit', '--seccomp-bpf', '-e',
+    'trace=read,readv,pread64,preadv,preadv2,write,writev,pwrite64,pwritev,pwritev2,copy_file_range,splice,sendfile,process_vm_writev,open,openat,openat2,creat,truncate,ftruncate,fallocate,link,linkat,unlink,unlinkat,rename,' +
+    'renameat,renameat2,symlink,symlinkat,fcntl,mmap,io_uring_setup,open_by_handle_at,mount,umount2,move_mount,' +
+    'open_tree,fsmount,mount_setattr,pivot_root,chroot,setns,unshare,clone,clone3,fork,vfork',
+    // Non-ledger read/write buffers are dropped by the trusted sink before anything is persisted.
+    '-o', '|' + [python, fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'filter', trace].map(quote).join(' '), '--', python, fileURLToPath(new URL('./no-io-uring.py', import.meta.url)), command, ...argv],
 });
+/** Gate verdict for a finished ledgerTraced run (rootPid = the spawned child's pid). No namespace is trusted: every ledger read's bytes are inspected. */
+export const ledgerTraceVerdict = (trace, rootPid, { python = 'python3' } = {}) => {
+  const run = spawnSync(python, [fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), trace, String(rootPid)], { encoding: 'utf8', timeout: 120_000 });
+  let violations;
+  try {
+    violations = JSON.parse(run.stdout).violations;
+    if (!Array.isArray(violations) || !violations.every(value => typeof value === 'string'))
+      throw new Error('invalid syscall observer report');
+  } catch (error) { violations = ['syscall gate failed: ' + (run.error?.message ?? (run.stderr || error.message))]; }
+  if (run.status !== (violations.length ? 1 : 0)) violations = [...violations, 'syscall gate exited ' + (run.status ?? run.signal)];
+  return violations.length ? { code: 'LEDGER_CHANGE', reasons: violations.map(v => 'syscall gate: ' + v) } : null;
+};
+/** The scored-run failure code for an observer report, or null when the window was fully observed and clean. */
+export const ledgerObserverVerdict = report => {
+  const violations = Array.isArray(report?.violations) ? report.violations : [{ code: 'LEDGER_CHANGE', reason: 'no observer report' }];
+  if (!violations.length) return null;
+  return { code: 'LEDGER_CHANGE', reasons: violations.map(v => v.code + ': ' + v.reason) };
+};
 
 export const pendingTransaction = async record => await exists(path.join(record, 'transaction.json')) || await exists(path.join(record, 'advance.journal'));
 
