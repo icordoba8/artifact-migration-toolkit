@@ -34,7 +34,9 @@ export const syncDirectory = async (directory) => {
  * directory cannot lose its path to a power loss. An existing path is a no-op.
  */
 export const mkdirDurably = async (directory) => {
-  const first = await mkdir(directory, { recursive: true });
+  const first = await mkdir(directory, { recursive: true }).catch(
+    async (error) => { throw error.code === "ENOENT" ? await mkdirCause(directory, error) : error; },
+  );
   if (first === undefined) return;
   // Node on Windows reports `first` in its `\\?\` namespaced spelling, so both
   // sides are compared in that spelling (a no-op on POSIX). A walk that still
@@ -49,6 +51,25 @@ export const mkdirDurably = async (directory) => {
       );
     }
   }
+};
+
+/**
+ * Node's recursive mkdir reports a read-only mount as ENOENT on its first
+ * missing component. That component's parent exists, so `access(W_OK)` on it
+ * asks the kernel for the real refusal without creating anything. Only a real
+ * EROFS/EACCES/EPERM from that syscall is reported; anything else is
+ * FS_ERRNO_UNKNOWN -- never a guessed read-only refusal, never a missing path.
+ */
+const mkdirCause = async (directory, error) => {
+  const refusal = await access(path.dirname(error.path ?? directory), fsConstants.W_OK).then(
+    () => null,
+    (probe) => (["EROFS", "EACCES", "EPERM"].includes(probe.code) ? probe : null),
+  );
+  if (refusal) return Object.assign(refusal, { cause: error });
+  return Object.assign(
+    new Error(`Cannot create '${directory}': mkdir reported ENOENT and no syscall recovered the real cause.`),
+    { code: "FS_ERRNO_UNKNOWN", cause: error },
+  );
 };
 
 /** A rename made durable in both directories it changes. */

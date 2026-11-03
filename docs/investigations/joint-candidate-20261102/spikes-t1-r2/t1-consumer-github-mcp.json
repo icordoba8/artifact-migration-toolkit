@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "start-migration": {
+      "type": "stdio",
+      "command": "~/.nvm/versions/node/v26.8.2/bin/node",
+      "args": [
+        "$S/t1/tap.mjs"
+      ],
+      "tools": [
+        "artifact_status",
+        "artifact_run",
+        "migration_status",
+        "migration_scan",
+        "migration_evidence_binding",
+        "migration_prefill",
+        "migration_capture",
+        "migration_pending_decisions",
+        "migration_run"
+      ],
+      "env": {
+        "pnpm_config_pm_on_fail": "error"
+      }
+    }
+  }
+}

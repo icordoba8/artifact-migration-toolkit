@@ -1,0 +1,8 @@
+# first 7 lines of the relay CLI JSON output (host namespace, Copilot topology)
+{
+  "outcome": "CONTINUE",
+  "recorded": [
+    "DEC-001"
+  ],
+  "reason": "Recorded AGENT_RELAYED APPROVED DEC-001. Run the migration again to continue.",
+  "decisions": {

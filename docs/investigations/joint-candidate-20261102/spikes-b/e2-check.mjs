@@ -1,0 +1,23 @@
+import { acquireModuleLock } from "../../../../packages/migration-engine/src/lifecycle/lock.mjs";
+import { spawn } from "node:child_process";
+import { readdirSync, readFileSync, readlinkSync, mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const root = mkdtempSync(path.join(os.tmpdir(), "e2-"));
+const rel = await acquireModuleLock(root, "self");
+const fd = readdirSync("/proc/self/fd").find((f) => { try { return readlinkSync("/proc/self/fd/" + f).endsWith(".fifo"); } catch { return false; } });
+console.log("token fd flags", readFileSync("/proc/self/fdinfo/" + fd, "utf8").match(/flags:\s+(\d+)/)[1], "(O_CLOEXEC=02000000)");
+await rel();
+const child = spawn("unshare", ["-Urpf", process.execPath, path.join(import.meta.dirname, "e2-holder.mjs"), root], { stdio: ["ignore", "pipe", "inherit"] });
+await new Promise((r) => child.stdout.once("data", r));
+const lockDir = path.join(root, ".agents/knowledge/migrations/locks/auth.lock");
+console.log("entries", readdirSync(lockDir).map((e) => e.replace(/^[0-9a-f-]{36}/, "<uuid>")));
+await acquireModuleLock(root, "auth", { timeoutMs: 300 }).then(() => console.log("UNEXPECTED acquire"), (e) => console.log("live:", e.code));
+const nodePid = Number(readFileSync("/proc/" + child.pid + "/task/" + child.pid + "/children", "utf8").trim());
+console.log("unshare pid", child.pid, "engine node pid", nodePid, readlinkSync("/proc/" + nodePid + "/ns/pid") !== readlinkSync("/proc/self/ns/pid") ? "(other pidns)" : "(same pidns)");
+process.kill(nodePid, "SIGKILL");
+await new Promise((r) => child.once("exit", r));
+const release = await acquireModuleLock(root, "auth", { timeoutMs: 2000 });
+console.log("reclaimed after SIGKILL of the engine process");
+await release();

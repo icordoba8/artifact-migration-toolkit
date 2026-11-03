@@ -1,0 +1,11 @@
+HEAD 07437dbfe870967ef7584b7dcedf39429964ec8f 2026-11-03T15:32:42Z node v26.8.2
+✔ E7: Codex grants nine tools without the relay by default, on install and on upgrade from a <=1.6.5 receipt (26743.518484ms)
+✔ without a receipt, a foreign .agents/mcp.json start-migration entry is a typed conflict (12662.008841ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 39843.140999

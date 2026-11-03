@@ -1,10 +1,11 @@
 // Shared adapter file/config operations only. Migration rules live in the engine.
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, readlinkSync } from 'node:fs';
-import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 
 export const digest = bytes => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 const json = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -15,6 +16,17 @@ const optional = file => readFile(file).catch(error => { if (error.code === 'ENO
 // The release manifest's `writerLockProtocol`; a manifest without it is protocol 1.
 const WRITER_LOCK_PROTOCOL = 2;
 const refuse = (code, message, state = {}) => Object.assign(new Error(message), { code, state: { code, ...state } });
+// ponytail: mirrors the engine's `mkdirDurably` ENOENT recovery (store/files.mjs);
+// the installer runs before any engine exists, so it cannot import it. Node
+// reports a read-only mount as ENOENT; `access(W_OK)` on the first missing
+// component's parent asks the kernel for the real refusal and creates nothing.
+const mkdirp = directory => mkdir(directory, { recursive: true }).catch(async error => {
+  if (error.code !== 'ENOENT') throw error;
+  const refusal = await access(path.dirname(error.path ?? directory), fsConstants.W_OK)
+    .then(() => null, probe => (['EROFS', 'EACCES', 'EPERM'].includes(probe.code) ? probe : null));
+  throw refusal ? Object.assign(refusal, { cause: error })
+    : Object.assign(new Error(`Cannot create '${directory}': mkdir reported ENOENT and no syscall recovered the real cause.`), { code: 'FS_ERRNO_UNKNOWN', cause: error });
+});
 const conflict = (file, message = 'Conflicting or modified MCP configuration') => refuse('INSTALL_REGISTRATION_CONFLICT', message, { file });
 const layouts = {
   claude: { project: ['skills', null, '.mcp.json', 'mcpServers'], user: ['skills', null, '.mcp.json', 'mcpServers'] },
@@ -22,6 +34,14 @@ const layouts = {
   opencode: { project: ['.opencode/skills', '.opencode/commands', 'opencode.json', 'mcp.servers'], user: ['.config/opencode/skills', '.config/opencode/commands', '.config/opencode/opencode.json', 'mcp.servers'] },
   copilot: { project: ['.github/skills', '.github/prompts', '.vscode/mcp.json', 'servers'] },
 };
+// T1. VS Code reads only `.vscode/mcp.json`; Copilot CLI reads `.mcp.json` or
+// `.github/mcp.json` (trusted folder) and ignores `.vscode`. So Copilot owns a
+// second registration, and both launch `--without-relay`: 9 tools, never the relay.
+// E7. Codex's registration launches `--without-relay` too and grants the same
+// nine through `enabled_tools`. The relay is CLI-only on both hosts.
+export const RELAYLESS_MCP_TOOLS = ['artifact_status', 'artifact_run', 'migration_status', 'migration_scan', 'migration_evidence_binding', 'migration_prefill', 'migration_capture', 'migration_pending_decisions', 'migration_run'];
+export const copilotCliEntry = server => ({ ...server, tools: RELAYLESS_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
+const copilotCli = [null, null, '.github/mcp.json', 'mcpServers'];
 
 // Validate every component, including existing ancestors of the selected root.
 export async function safePath(root, relative = '') {
@@ -101,17 +121,30 @@ const serversIn = (config, key) => {
   const { [nested]: servers, ...legacy } = config[outer] ?? {};
   return { ...legacy, ...servers };
 };
+// `legacy` for Codex and Copilot is the <=1.6.5 relay-carrying registration, accepted only so it can converge.
 const serverFor = (provider, release, legacy = false) => {
   const launch = { command: process.execPath, args: [path.join(release, 'packages/migration-engine/src/mcp-server.mjs')] };
+  if (['copilot', 'codex'].includes(provider) && !legacy) launch.args.push('--without-relay');
   return provider === 'opencode' ? opencodeServer([launch.command, ...launch.args], legacy)
-    : provider === 'copilot' ? { type: 'stdio', ...launch } : launch;
+    : provider === 'copilot' ? { type: 'stdio', ...launch }
+      : provider === 'codex' && !legacy ? { ...launch, enabled_tools: RELAYLESS_MCP_TOOLS } : launch;
 };
+// E7. Consumer tooling (`agents:sync`) generates `.codex/config.toml` from the shared
+// `.agents/mcp.json` entry, so a Codex install keeps that entry relay-less too. The
+// Claude-shaped launch every other provider (and Codex <=1.6.5) wrote stays accepted.
+const agentsServerFor = (provider, release, legacy = false) => serverFor(provider === 'codex' && !legacy ? 'codex' : 'claude', release);
+// The body of the owned `[mcp_servers.start-migration]` table; JSON arrays and strings are valid TOML.
+export const codexToml = server => `command = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n` +
+  (server.enabled_tools ? `enabled_tools = ${JSON.stringify(server.enabled_tools)}\n` : '');
+// Copilot requires `tools` for a local server and builds its environment from `env`.
+const copilotCliServer = release => copilotCliEntry(serverFor('copilot', release));
 
 async function historicalTemplateMatches(release, provider, layout, adapter) {
   const template = await readFile(await safePath(release, `providers/${provider}/${adapter.mcpTemplate}`), 'utf8');
   if (layout[3] === null) {
     const sections = template.split('[mcp_servers.start-migration]\n');
-    return sections.length === 2 && sections[1].trim() === 'command = "node"\nargs = ["{{ENGINE_MCP_ENTRY}}"]';
+    return sections.length === 2 && [codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] }),
+      codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'], enabled_tools: RELAYLESS_MCP_TOOLS })].includes(`${sections[1].trim()}\n`);
   }
   const parsed = JSON.parse(template);
   const launch = { command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] };
@@ -119,7 +152,13 @@ async function historicalTemplateMatches(release, provider, layout, adapter) {
     return same(parsed?.mcp?.servers?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], false)) ||
       same(parsed?.mcp?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], true));
   }
-  return same(parsed?.[layout[3]]?.['start-migration'], provider === 'copilot' ? { type: 'stdio', ...launch } : launch);
+  if (provider === 'copilot') {
+    const relayless = { type: 'stdio', command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'] };
+    return same(parsed?.servers?.['start-migration'], { type: 'stdio', ...launch }) ||
+      (same(parsed?.servers?.['start-migration'], relayless) &&
+        same(parsed?.mcpServers?.['start-migration'], copilotCliEntry(relayless)));
+  }
+  return same(parsed?.[layout[3]]?.['start-migration'], launch);
 }
 
 async function historicalOwned(receipt, provider, layout) {
@@ -136,8 +175,8 @@ async function historicalOwned(receipt, provider, layout) {
       if (adapter.provider !== provider || !same(adapter.toolkit, manifest.toolkit) ||
           !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
-    for (const legacy of provider === 'opencode' ? [false, true] : [false]) {
-      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: serverFor('claude', item.release), release: item.release, pin: item.pin, manifest });
+    for (const legacy of provider === 'claude' ? [false] : [false, true]) {
+      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: agentsServerFor(provider, item.release, legacy), release: item.release, pin: item.pin, manifest });
     }
   }
   return owned;
@@ -176,7 +215,7 @@ function mergeConfig(raw, layout, previous, server, historical = []) {
     }
     if (/start-migration|BEGIN artifact-migration-tools|END artifact-migration-tools/.test(text)) throw conflict(layout[2], 'Conflicting MCP configuration');
     const separator = text && !text.endsWith('\n') ? '\n' : '';
-    const fresh = server ? `${begin}[mcp_servers.start-migration]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n${end}` : null;
+    const fresh = server ? `${begin}[mcp_servers.start-migration]\n${codexToml(server)}${end}` : null;
     // Restoring re-emits the receipt's own bytes, so the repair adds nothing of
     // its own and the next validation matches exactly. A merge that genuinely
     // changes the registration (update/rollback) writes the new block instead
@@ -231,16 +270,16 @@ function mergeAgents(raw, previous, server, historical, provider) {
       !targets.every(target => typeof target === 'string' && target.length > 0) || new Set(targets).size !== targets.length)) {
     throw conflict('.agents/mcp.json');
   }
-  const current = serverFor('claude', previous.release);
-  if (!same(registration, current) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
-  const desired = server ? serverFor('claude', server) : null;
+  const current = [serverFor('claude', previous.release), agentsServerFor(provider, previous.release)];
+  if (!current.some(item => same(registration, item)) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
+  const desired = server ? agentsServerFor(provider, server) : null;
   if (!desired || same(registration, desired)) return null;
   entries['start-migration'] = { ...desired, ...(targets && { targets }) };
   return Buffer.from(json(config));
 }
 
 async function replace(file, bytes) {
-  await mkdir(path.dirname(file), { recursive: true });
+  await mkdirp(path.dirname(file));
   const temporary = `${file}.${randomUUID()}.tmp`;
   try { await writeFile(temporary, bytes, { flag: 'wx' }); await rename(temporary, file); }
   finally { await rm(temporary, { force: true }); }
@@ -279,6 +318,7 @@ async function validateSelection(receipt, provider, layout) {
   if (!server) throw new Error('Installation MCP selection conflict');
   const owned = mergeConfig(null, layout, null, server).owned;
   if (!same(receipt.configOwned, owned) && !(typeof owned === 'string' && receipt.configOwned === `\n${owned}`)) throw new Error('Invalid configuration ownership');
+  if (receipt.cliConfigOwned !== undefined && !same(receipt.cliConfigOwned, copilotCliServer(receipt.release))) throw new Error('Invalid configuration ownership');
   const source = JSON.parse(await readFile(path.join(receipt.release, `providers/${provider}/adapter.json`)));
   const expectedFiles = (receipt.mode === 'runtime' ? [] : source.files).flatMap(relative => {
     if (relative.startsWith('skills/')) return [`${layout[0]}/${relative.slice(7)}`];
@@ -338,7 +378,7 @@ async function adoptRegistration(provider, layout, store, current, rawConfig, ra
   const names = await readdir(store).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   const releases = names.filter(name => /^\d+\.\d+\.\d+-[a-f0-9]{64}$/.test(name)).map(name => ({ release: path.join(store, name), pin: `sha256:${name.slice(-64)}` }));
   const candidates = [
-    ...(provider === 'opencode' ? [false, true] : [false]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: serverFor('claude', current.release) })),
+    ...(provider === 'claude' ? [false] : [false, true]).map(legacy => ({ ...current, native: mergeConfig(null, layout, null, serverFor(provider, current.release, legacy)).owned, agents: agentsServerFor(provider, current.release, legacy) })),
     ...await historicalOwned({ ...current, store, releases }, provider, layout),
   ];
   const parse = raw => { try { return JSON.parse(raw); } catch { return null; } };
@@ -376,6 +416,12 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const rawConfig = await optional(configFile);
   const agentsFile = scope === 'project' ? await safePath(root, '.agents/mcp.json') : null;
   const rawAgents = agentsFile ? await optional(agentsFile) : null;
+  const cliFile = provider === 'copilot' ? await safePath(root, copilotCli[2]) : null;
+  const rawCli = cliFile ? await optional(cliFile) : null;
+  // Copilot CLI lets a root `.mcp.json` entry of the same name shadow ours, with every tool.
+  if (cliFile && action !== 'remove' && /"start-migration"\s*:/.test((await optional(await safePath(root, '.mcp.json')))?.toString() ?? '')) {
+    throw conflict('.mcp.json', "Conflicting MCP configuration: '.mcp.json' registers 'start-migration', which Copilot CLI loads instead of '.github/mcp.json' with every tool, the relay included. Remove that entry or install Copilot in another root.");
+  }
   for (const [relative, hash] of Object.entries(previous?.files ?? {})) {
     if (!ownedPath(relative, provider, layout)) throw new Error(`Invalid ownership manifest: ${relative}`);
     if (digest(await readFile(await safePath(root, relative))) !== hash) throw new Error(`Owned file modified: ${relative}`);
@@ -390,18 +436,21 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     // have rejected conflicts; leave unrelated configuration untouched.
     const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp, historical);
     const agents = mergeAgents(rawAgents, previous, previous.release, history, provider);
+    const cli = previous.cliConfigOwned ? mergeConfig(rawCli, copilotCli, previous.cliConfigOwned, previous.cliConfigOwned) : null;
     let mcpRepair = null;
-    if (merged.missing || merged.stale || agents) {
+    if (merged.missing || merged.stale || agents || cli?.missing) {
       try {
         if (agents) await replace(agentsFile, agents);
+        if (cli?.missing) await replace(cliFile, cli.bytes);
         if (merged.missing || merged.stale) await replace(configFile, merged.bytes);
       } catch (error) {
         if (agents) await replace(agentsFile, rawAgents);
+        if (cli?.missing) { if (rawCli) await replace(cliFile, rawCli); else await rm(cliFile, { force: true }); }
         throw error;
       }
       // A host that cannot load an MCP server mid-process needs a restart. The
       // runtime still succeeds: this invocation continues on absolute CLI paths.
-      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: merged.missing || merged.stale ? configFile : agentsFile, restartRequired: true };
+      mcpRepair = { repaired: true, server: 'start-migration', registrationFile: merged.missing || merged.stale ? configFile : cli?.missing ? cliFile : agentsFile, restartRequired: true };
     }
     const servers = layout[3] ? serversIn(JSON.parse(merged.bytes), layout[3]) : { 'start-migration': previous.mcp };
     return { ...previous, outcome: 'OK', mcpRepair, mcpServers: Object.entries(servers).map(([name, server]) => ({ name, registered: true, portable: server.command !== 'cmd', ...server })), registrationFile: configFile };
@@ -465,9 +514,12 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const merged = mergeConfig(rawConfig, layout, previous?.configOwned ?? adopted?.native, server, historical);
   const agents = mergeAgents(rawAgents, previous ?? adopted, receipt?.release, history, provider);
   if (receipt) receipt.configOwned = merged.owned;
+  // A legacy (<=1.6.5) receipt owns no `.github` entry; an adopted registration owns its release's.
+  const cli = cliFile && (receipt || previous?.cliConfigOwned) ? mergeConfig(rawCli, copilotCli, previous ? previous.cliConfigOwned : adopted && copilotCliServer(adopted.release), receipt && copilotCliServer(receipt.release)) : null;
+  if (receipt && cli) receipt.cliConfigOwned = cli.owned;
   const owned = previous?.files ?? adopted?.files ?? {};
   const backups = new Map();
-  for (const relative of new Set([...Object.keys(owned), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), `.artifact-migration-tools/${provider}.json`])) {
+  for (const relative of new Set([...Object.keys(owned), ...writes.keys(), layout[2], ...(agents ? ['.agents/mcp.json'] : []), ...(cli ? [copilotCli[2]] : []), `.artifact-migration-tools/${provider}.json`])) {
     const file = await safePath(root, relative);
     const bytes = await optional(file);
     if (writes.has(relative) && bytes && !owned[relative]) throw refuse('INSTALL_UNOWNED_FILE', `Unowned file exists: ${relative}`, { file: relative });
@@ -492,6 +544,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     for (const relative of Object.keys(owned)) if (!writes.has(relative)) await rm(await safePath(root, relative));
     for (const [relative, bytes] of writes) await replace(await safePath(root, relative), bytes);
     await replace(configFile, merged.bytes);
+    if (cli && (rawCli || receipt)) await replace(cliFile, cli.bytes);
     if (agents) await replace(agentsFile, agents);
     if (receipt) await replace(receiptFile, Buffer.from(json(receipt)));
     else await rm(receiptFile);
@@ -507,6 +560,8 @@ const LOCKED = 'Installation locked; inspect interrupted installation before ret
 // (EPERM: Windows will not replace an existing directory).
 const OCCUPIED = new Set(['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM']);
 const OWNER_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/;
+const TOKEN_ENTRY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.fifo$/;
+const DECIMAL = /^[0-9]{1,20}$/;
 const MAX_OWNER_BYTES = 1024;
 const ignore = (...codes) => error => { if (!codes.includes(error.code)) throw error; };
 const rmdirIfEmpty = dir => rmdir(dir).catch(ignore('ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'));
@@ -518,20 +573,63 @@ const PID_REALM = (() => {
   try { return `linux:${readlinkSync('/proc/self/ns/pid')}`; } catch { return null; }
 })();
 
+// ponytail: the engine's liveness token (lifecycle/lock.mjs), mirrored because
+// the installer runs before any engine exists. `<uuid>.fifo` sits beside the
+// owner entry, which binds its dev/ino; the owner holds its only read end
+// (O_CLOEXEC: no child inherits it), so a non-blocking write-open answers ENXIO
+// once the owner is dead in any PID namespace. Without mkfifo the owner falls
+// back to the PID rule below.
+const heldTokens = new Set(); // a collected FileHandle is closed: keep it referenced
+const createToken = async file => {
+  if (process.platform === 'win32') return null;
+  let handle;
+  try {
+    await promisify(execFile)('mkfifo', ['-m', '600', file]);
+    handle = await open(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW);
+    const { dev, ino } = await handle.stat({ bigint: true });
+    heldTokens.add(handle);
+    return { handle, fifo: { dev: String(dev), ino: String(ino) } };
+  } catch {
+    await handle?.close().catch(() => undefined);
+    await unlink(file).catch(() => undefined);
+    return null;
+  }
+};
+const dropToken = async token => {
+  if (!token) return;
+  heldTokens.delete(token.handle);
+  await token.handle.close().catch(() => undefined);
+};
+const probeToken = async (file, fifo) => {
+  const recorded = async () => {
+    const info = await lstat(file, { bigint: true }).catch(() => null);
+    return Boolean(info?.isFIFO() && String(info.dev) === fifo.dev && String(info.ino) === fifo.ino);
+  };
+  if (!await recorded()) return 'UNKNOWN';
+  try {
+    await (await open(file, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW)).close();
+    return 'ALIVE';
+  } catch (error) { return error.code === 'ENXIO' && await recorded() ? 'GONE' : 'UNKNOWN'; }
+};
+const unknown = reason => ({ code: 'LOCK_OWNER_UNKNOWN', reason });
+
 /**
  * Is the lock owner recorded in `file` provably dead? Null when it is;
- * otherwise why not, for the refusal to name.
+ * otherwise `{ code, reason }` for the refusal to name: LOCK_HELD (alive),
+ * LOCK_OWNER_UNKNOWN (an entry or token that proves nothing) or
+ * LOCK_NO_LIVENESS_TOKEN (a token-less owner outside this PID realm).
  *
  * Only when the entry is a regular file of bounded size, read without following
  * a symlink (O_NOFOLLOW where the OS has it, and the opened file must be the
  * lstat-vetted one everywhere), naming this `uuid`, this host and this PID
- * realm, and `kill(pid, 0)` answers ESRCH. EPERM is a live process another user
+ * realm, and `kill(pid, 0)` answers ESRCH -- or, for an owner with a token, when
+ * the token proves it gone. EPERM is a live process another user
  * owns, and every other answer -- a torn or foreign entry, another host or
  * realm, an unexpected probe error -- is ambiguous, and ambiguity fails closed:
  * reclaiming a live installer's lock would run two config writers at once.
  */
 const lockOwnerAlive = async (file, uuid) => {
-  const unreadable = 'its owner entry is unreadable or malformed';
+  const unreadable = unknown('its owner entry is unreadable or malformed');
   let handle;
   let owner;
   try {
@@ -545,21 +643,30 @@ const lockOwnerAlive = async (file, uuid) => {
     if (bytesRead > MAX_OWNER_BYTES) return unreadable;
     owner = JSON.parse(buffer.toString('utf8', 0, bytesRead));
   } catch { return unreadable; } finally { await handle?.close().catch(() => undefined); }
-  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || !Number.isInteger(owner.pid) || owner.pid <= 0) return unreadable;
+  const fifo = owner?.fifo;
+  if (!owner || typeof owner !== 'object' || owner.uuid !== uuid || !Number.isInteger(owner.pid) || owner.pid <= 0
+    || (fifo !== undefined && fifo !== null && !(DECIMAL.test(fifo?.dev) && DECIMAL.test(fifo?.ino)))) return unreadable;
   const who = `pid ${owner.pid} (${owner.action ?? 'unknown action'}, started ${owner.startedAt ?? 'at an unknown time'})`;
-  if (owner.hostname !== os.hostname()) return `it is held by ${who} on host ${owner.hostname}, which this host cannot probe`;
-  if (PID_REALM === null || owner.realm !== PID_REALM) return `it is held by ${who} in another PID namespace (${owner.realm ?? 'unrecorded'}; this process: ${PID_REALM ?? 'unknown'}), such as another sandboxed shell, where this process cannot prove the owner exited`;
-  try { process.kill(owner.pid, 0); return `it is held by ${who}, which is still running`; }
+  const running = { code: 'LOCK_HELD', reason: `it is held by ${who}, which is still running` };
+  if (owner.hostname !== os.hostname()) return unknown(`it is held by ${who} on host ${owner.hostname}, which this host cannot probe`);
+  if (fifo) {
+    const verdict = await probeToken(path.join(path.dirname(file), `${uuid}.fifo`), fifo);
+    return verdict === 'GONE' ? null : verdict === 'ALIVE' ? running
+      : unknown(`it is held by ${who}, whose liveness token is missing, replaced or unreadable, so it cannot be proven gone`);
+  }
+  if (PID_REALM === null || owner.realm !== PID_REALM) return { code: 'LOCK_NO_LIVENESS_TOKEN', reason: `it is held by ${who}, which recorded no liveness token, in another PID namespace (${owner.realm ?? 'unrecorded'}; this process: ${PID_REALM ?? 'unknown'}), such as another sandboxed shell, where this process cannot prove the owner exited` };
+  try { process.kill(owner.pid, 0); return running; }
   catch (error) {
     if (error.code === 'ESRCH') return null;
-    return `it is held by ${who}, ${error.code === 'EPERM' ? 'which is still running as another user' : `whose liveness probe answered ${error.code}`}`;
+    return error.code === 'EPERM' ? { code: 'LOCK_HELD', reason: `it is held by ${who}, which is still running as another user` }
+      : unknown(`it is held by ${who}, whose liveness probe answered ${error.code}`);
   }
 };
 
 /**
  * Frees a lock nothing provably holds: 'dead' when a dead owner was removed,
  * 'empty' when there was no owner left (a release or reclaim cut short),
- * 'legacy' for a protocol-1 `install.lock` file, `{ reason }` to fail closed. Each
+ * 'legacy' for a protocol-1 `install.lock` file, `{ code, reason }` to fail closed. Each
  * removal is keyed by identity -- the dead owner's own entry name, `rmdir` of
  * an empty directory -- so a reclaimer that lost the race removes nothing of
  * the winner's.
@@ -570,15 +677,20 @@ const reclaim = async (lock) => {
   // Written by a protocol-1 installer, which does not honour this format: never
   // ours to remove, whoever wrote it and whether or not they are alive.
   if (info.isFile()) return 'legacy';
-  if (!info.isDirectory()) return { reason: 'the lock path is not a directory' };
+  if (!info.isDirectory()) return unknown('the lock path is not a directory');
   const entries = await readdir(lock).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return []; throw error; });
-  if (entries.length === 0) { await rmdirIfEmpty(lock); return 'empty'; }
-  const [entry] = entries;
-  const reason = entries.length !== 1 || !OWNER_ENTRY.test(entry)
-    ? 'it does not hold exactly one owner entry'
-    : await lockOwnerAlive(path.join(lock, entry), entry.slice(0, -5));
-  if (reason) return { reason };
+  // Released or reclaimed but not yet removed: an owner entry already gone.
+  const orphan = entries.length === 1 && TOKEN_ENTRY.test(entries[0]);
+  if (orphan) await unlink(path.join(lock, entries[0])).catch(ignore('ENOENT', 'ENOTDIR'));
+  if (entries.length === 0 || orphan) { await rmdirIfEmpty(lock); return 'empty'; }
+  const entry = entries.find(name => OWNER_ENTRY.test(name));
+  const uuid = entry?.slice(0, -5);
+  const refusal = !entry || !entries.every(name => name === entry || name === `${uuid}.fifo`)
+    ? unknown('it does not hold exactly one owner entry')
+    : await lockOwnerAlive(path.join(lock, entry), uuid);
+  if (refusal) return refusal;
   await unlink(path.join(lock, entry)).catch(ignore('ENOENT', 'ENOTDIR'));
+  await unlink(path.join(lock, `${uuid}.fifo`)).catch(ignore('ENOENT', 'ENOTDIR'));
   await rmdirIfEmpty(lock);
   return 'dead';
 };
@@ -588,7 +700,7 @@ const reclaim = async (lock) => {
 export async function adapter(provider, options = {}) {
   if (!layouts[provider]?.[options.scope] || !options.root || !options.store) throw new Error('Supported scope, explicit root and external store are required');
   const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
-  await mkdir(path.dirname(lock), { recursive: true });
+  await mkdirp(path.dirname(lock));
   // One config writer per host root. The lock is a directory holding exactly
   // its owner's `<uuid>.json`, staged complete and published by one `rename`,
   // which cannot land on a held lock -- so it never exists without saying who
@@ -603,20 +715,22 @@ export async function adapter(provider, options = {}) {
   let held = false;
   let recoveredLock = false;
   let blocked;
+  let token = null;
   try {
     await mkdir(staging);
-    await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), realm: PID_REALM, startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
+    token = await createToken(path.join(staging, `${id}.fifo`));
+    await writeFile(path.join(staging, `${id}.json`), json({ uuid: id, pid: process.pid, hostname: os.hostname(), realm: PID_REALM, fifo: token?.fifo ?? null, startedAt: new Date().toISOString(), action: options.action ?? 'install', provider }), { flag: 'wx' });
     held = await claim();
     // One reclaim, then one claim: a second installer that also saw the dead
     // owner loses that claim and fails closed with the existing message.
     const freed = held ? null : await reclaim(lock);
     if (freed === 'legacy') throw refuse('INSTALL_LEGACY_LOCK', `${LOCKED}: ${lock} is a lock file from a protocol-1 release, which is never reclaimed automatically. Stop every installer and migration command on this root, old releases included, then remove it by hand (docs/lock-protocol-cutover.md).`, { lock });
     if (typeof freed === 'string') { held = await claim(); recoveredLock = held && freed === 'dead'; }
-    if (!held) blocked = freed?.reason ?? 'another installer took it first';
-  } finally { if (!held) await rm(staging, { recursive: true, force: true }); }
+    if (!held) blocked = typeof freed === 'object' && freed ? freed : { code: 'LOCK_HELD', reason: 'another installer took it first' };
+  } finally { if (!held) { await dropToken(token); await rm(staging, { recursive: true, force: true }); } }
   // Diagnosed, never bypassed: only the operator can settle an owner this
   // process cannot prove gone.
-  if (!held) throw new Error(`${LOCKED}: ${lock}: ${blocked}. If no installer or migration command is running for this root, remove that directory by hand.`);
+  if (!held) throw refuse(blocked.code, `${LOCKED}: ${lock}: ${blocked.reason}. If no installer or migration command is running for this root, remove that directory by hand.`, { lock });
   try {
     const result = await applyAdapter(provider, options);
     // Reported, not persisted: the receipt records what is installed, and a
@@ -627,6 +741,8 @@ export async function adapter(provider, options = {}) {
     // Our entry, then the directory only if that emptied it: never another
     // installer's lock, whatever happened to ours meanwhile.
     await unlink(path.join(lock, `${id}.json`)).catch(ignore('ENOENT', 'ENOTDIR'));
+    await unlink(path.join(lock, `${id}.fifo`)).catch(ignore('ENOENT', 'ENOTDIR'));
+    await dropToken(token);
     await rmdirIfEmpty(lock);
   }
 }

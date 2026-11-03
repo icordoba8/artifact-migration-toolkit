@@ -15,7 +15,7 @@ import {
   portablePath,
   samePath,
 } from "../shared/index.mjs";
-import { atomicWrite } from "./files.mjs";
+import { atomicWrite, fileExists } from "./files.mjs";
 
 const resolveRegistryRoot = (value, registryPath, label) => {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -313,6 +313,33 @@ const mismatch = (source, sourcePath, authoritativeSource, authoritativePath) =>
     `Migration registry binding mismatch: ${source} resolves to '${sourcePath}', but ${authoritativeSource} resolves to '${authoritativePath}'.`,
   );
 
+export const REGISTRY_UNBOUND = "REGISTRY_UNBOUND";
+
+/**
+ * Nothing binds a registry yet: a first setup. Resolution runs before any lock
+ * or write, so this is a BLOCKED / NOT_STARTED result that MCP and the CLI
+ * return unchanged. The conventional registry is named only if it exists.
+ */
+const registryUnbound = async (moduleName, projectRoot) => {
+  const reason =
+    "Migration registry is not configured. On first setup pass --registry <path>; otherwise restore config.startMigration.registry in the project package.json. MIGRATION_REGISTRY_PATH is available only as a CI fallback.";
+  const conventional = path.join(projectRoot, ".agents/knowledge/migrations/registry.json");
+  const registry = (await fileExists(conventional)) ? conventional : "<registry.json>";
+  const module = moduleName ?? "<module>";
+  return Object.assign(new Error(reason), {
+    code: REGISTRY_UNBOUND,
+    result: {
+      outcome: "BLOCKED",
+      status: "NOT_STARTED",
+      module,
+      reason,
+      nextAction:
+        "First setup: nothing was executed. Draft the OpenSpec proposal and bootstrap through the discover call, which binds the registry; run and MCP never bootstrap. A sandbox refusing that write is a safety stop, not something to work around.",
+      nextCommand: `artifact-migration-discover ${module} --target <target-module> --registry ${registry} --openspec-proposal-stdin`,
+    },
+  });
+};
+
 export const resolveRegistryPath = async ({
   cliPath,
   moduleName,
@@ -345,11 +372,7 @@ export const resolveRegistryPath = async ({
   const authoritative = state
     ? ["existing migration state", state.registryPath]
     : sources[0];
-  if (!authoritative) {
-    throw new Error(
-      "Migration registry is not configured. On first setup pass --registry <path>; otherwise restore config.startMigration.registry in the project package.json. MIGRATION_REGISTRY_PATH is available only as a CI fallback.",
-    );
-  }
+  if (!authoritative) throw await registryUnbound(moduleName, resolvedProjectRoot);
   for (const [source, candidate] of sources) {
     if (!samePath(candidate, authoritative[1])) {
       throw mismatch(source, candidate, authoritative[0], authoritative[1]);

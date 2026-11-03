@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { assertOptionCombination } from "./arguments.mjs";
+import { refusalOf } from "./entry.mjs";
 import {
   approveWithOperator,
   authoringRequest,
@@ -36,7 +37,7 @@ import {
   renderProgressBlock,
   validateResumableMigration,
 } from "../lifecycle/index.mjs";
-import { resolveRegistryPath } from "../store/index.mjs";
+import { REGISTRY_UNBOUND, resolveRegistryPath } from "../store/index.mjs";
 import { MODULE_CLASSIFICATION_FILE } from "../formats/index.mjs";
 import {
   normalizePonytailArgument,
@@ -578,9 +579,12 @@ export const runMigration = async (
       next: advance.next,
     });
   } catch (error) {
-    // Never downgraded to BLOCKED: exit 2 promises nothing was executed, and a
-    // throw from inside the advance cannot promise that.
     process.stderr.write(`${error.message}\n`);
-    return finish("FAILED", { reason: error.message });
+    // An unbound registry is the one exception: resolution precedes every
+    // lock and write, so nothing was executed.
+    if (error.code === REGISTRY_UNBOUND) return finish("BLOCKED", error.result);
+    // Never downgraded to BLOCKED otherwise: exit 2 promises nothing was
+    // executed, and a throw from inside the advance cannot promise that.
+    return finish("FAILED", { reason: error.message, ...refusalOf(error) });
   }
 };

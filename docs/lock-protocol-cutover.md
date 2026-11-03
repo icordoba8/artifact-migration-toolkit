@@ -27,9 +27,21 @@ and the release installer `providers/install-support.mjs`):
   `exec` a protocol-1 release (`INSTALL_LOCK_PROTOCOL_UNSUPPORTED`). A root on
   protocol 1 can still be updated to protocol 2.
 - A protocol-1 lock file is never reclaimed automatically, alive or dead.
-- An owner entry is reclaimed automatically only if it is a valid regular
-  file (no symlink) recorded on this host, in this PID realm, and the PID
-  probe answers ESRCH. Anything else fails closed.
+- From 1.6.6 an owner also holds a liveness token, `<uuid>.fifo`, beside its
+  entry, which records the FIFO's `dev`/`ino`. The owner holds the FIFO's only
+  read end (close-on-exec, so no child it spawns keeps it), and the kernel
+  closes it when the owner dies, in any PID namespace. Such an owner is
+  reclaimed automatically when a non-blocking write-open of that same FIFO
+  answers ENXIO. A missing, replaced or remote FIFO proves nothing
+  (`LOCK_OWNER_UNKNOWN`).
+- An owner entry without a token (no `mkfifo`: Windows, FIFO-less filesystems;
+  or a lock written before 1.6.6) is reclaimed automatically only if it is a
+  valid regular file (no symlink) recorded on this host, in this PID realm, and
+  the PID probe answers ESRCH. Outside this realm it fails closed with
+  `LOCK_NO_LIVENESS_TOKEN`. Anything else fails closed.
+- A refusal's `code` says why: `LOCK_HELD` (a live owner: wait),
+  `LOCK_OWNER_UNKNOWN`, `LOCK_NO_LIVENESS_TOKEN` or `LOCK_PROTOCOL_1` (an
+  operator decides).
 
 Not enforceable: historical executables. A 1.3.x `runtime.mjs` in an old skill
 copy, a release still in a store (`node <store>/<release>/...`), an MCP server
@@ -39,6 +51,11 @@ downloadable by exact tag. The cutover therefore depends on the operator:
 every writer is stopped first and restarted only on protocol 2.
 
 ## Rule: one writer OS/PID namespace per writable root
+
+The liveness token lets a sandboxed writer killed in its own PID namespace
+release its lock to the next writer. It does not lift this rule where there is
+no token (Windows) or where the root is shared across kernels (`/mnt/c`,
+`\\wsl.localhost`): there the token proves nothing and the lock fails closed.
 
 A PID only means something inside its own namespace. Windows and each WSL
 distro share a hostname, and through `/mnt/c` and `\\wsl.localhost` they share
@@ -50,8 +67,8 @@ per PID namespace: each WSL distro, each container).
   namespace runs CLI, MCP, installer or skill commands that write to the root.
 - Windows and WSL must never both write to the same root, before or after
   the cutover.
-- A lock owned by another realm is never reclaimed automatically. The error
-  says "cannot be proven gone". `wsl --shutdown` starts a new realm, so a lock
+- A token-less lock owned by another realm is never reclaimed automatically.
+  The error says "cannot be proven gone". `wsl --shutdown` starts a new realm, so a lock
   left by a WSL process killed before the shutdown also needs manual removal.
 
 ## Procedure
@@ -62,7 +79,7 @@ Do this once per consumer root. Do not touch roots you are not cutting over.
    `<root>/.artifact-migration-tools/<provider>.json` (`toolkit.version`,
    `release`). Record every MCP registration that points at a store release
    (`.mcp.json`, `.codex/config.toml`, `opencode.json`, `.vscode/mcp.json`,
-   `.agents/mcp.json`).
+   `.github/mcp.json`, `.agents/mcp.json`).
 2. **Stop every writer, in every namespace that can reach the root.** Close
    Claude Code, Codex, OpenCode and Copilot sessions on the root, including
    unattended ones (`--permission-mode auto`, `--approve-for-me`). Closing a
@@ -81,8 +98,8 @@ Do this once per consumer root. Do not touch roots you are not cutting over.
    protocol 1. With quiescence verified, rename it instead of deleting it,
    for example `mv install.lock install.lock.protocol1-<UTC timestamp>`. No
    tool reads that name. A `*.lock` directory is protocol 2: leave it alone.
-   An empty directory, or one whose owner died in this realm, is reclaimed
-   automatically.
+   An empty directory, or one whose owner is provably dead (its token, or its
+   PID in this realm), is reclaimed automatically.
 5. **Upgrade, from the chosen namespace only.** Run `skills add` for both
    `start-migration` and `migrate-artifact` from the v1.4.0 release, then run
    either skill once for each provider in use. The launcher converges the
@@ -112,7 +129,8 @@ the launcher converges the receipt on the next run. After an interruption:
   staging left by a killed acquirer. Nothing reads them, and they can be
   deleted while the root is quiescent.
 - If an error reports an owner that "cannot be proven gone" (another realm,
-  an unreadable or malformed entry, a symlink), confirm quiescence in every
+  an unreadable or malformed entry, a symlink, a missing or replaced token),
+  confirm quiescence in every
   namespace, then remove that lock directory by hand (`rm -r <lock>`).
 - If an error reports a protocol-1 lock file, do step 4.
 - Then continue from step 5.
