@@ -339,9 +339,16 @@ name outside the list, is persisted. An engine started with `NODE_OPTIONS`, `NOD
 code before its entry: it binds nothing, is listed by name in `report.traceUnsafeEngines`, and voids every
 plain-word `cli` refusal of that run. Argv between node and the entry fails closed the same way. A shadow mount over
 the node binary, the entry or a library needs a user namespace of its own, because the sandbox holds no capability
-and `setns` fails the gate, so an engine also binds nothing unless its lineage created exactly 1 user namespace (the
-runner's isolation) or 3 (inside Codex 0.165.0's bwrap, measured on real runs): `USERNS_DEPTH_<n>` in
-`report.traceUnsafeEngines`. A Codex upgrade must re-measure that baseline. Named remaining path: Node's legacy
+and `setns` fails the gate, so an engine also binds nothing unless its lineage created exactly 3 user namespaces
+(the runner's isolation plus Codex 0.165.0's bwrap, measured on real runs; depth 1, the runner without the sandbox, is
+never accepted, since two nested namespaces from there would forge 3): `USERNS_DEPTH_<n>` in
+`report.traceUnsafeEngines`. A Codex upgrade must re-measure that baseline. A path to the node binary or entry can also
+be replaced without capabilities where an ancestor is writable (rename it away, run a fake tree at the same path,
+rename it back before verification): any successful rename/link/symlink/unlink naming the node or entry path or an
+ancestor of it (a relative path the trace cannot resolve counts if it climbs with `..` or names any component of
+those paths), or a writable open of either file, unbinds every engine of the run (`ENTRY_PATH_CHANGED`). With the path
+proven unchanged, the runner hashes the node file outside the sandbox: anything but the pinned Node 22.13.0 is
+`NODE_UNPINNED`. Named remaining path: Node's legacy
 `$HOME/.node_modules` / `.node_libraries` fallback, used only by a CommonJS `require` nothing else resolves.
 Scored runs default to
 `--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:

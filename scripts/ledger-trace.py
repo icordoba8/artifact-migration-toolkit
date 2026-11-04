@@ -79,6 +79,32 @@ def userns_depth(pid, born, unshared):
     return depth + count
 
 
+def touches(name, text, engines):
+    """True if a successful path change or writable open in this record could replace an engine's node or entry path."""
+    protected = {os.path.normpath(p) for pair in engines for p in pair}
+    parts = {part for p in protected for part in p.split('/') if part}
+    plain = bare(text)
+    if name in ('open', 'openat', 'openat2', 'creat', 'truncate'):
+        if name not in ('creat', 'truncate') and not re.search(r'O_(?:WRONLY|RDWR|CREAT|TRUNC)', plain):
+            return False
+        opened = re.search(r'= \d+<([^<>]*)>\s*$', text)
+        candidates = [opened.group(1)] if opened else []
+        named = PATH_ARG.search(text)
+        if named:
+            candidates.append(os.path.join(named.group(1) or '', unescape(named.group(2)).decode('utf-8', 'replace')))
+        return any(os.path.normpath(c) in protected or (not c.startswith('/') and os.path.basename(c) in parts) for c in candidates)
+    for directory, raw in PATH_ARG.findall(text):
+        path = os.path.join(directory, unescape(raw).decode('utf-8', 'replace'))
+        if not path.startswith('/'):  # A plain relative path: no cwd in the trace, so any overlap with a protected name counts.
+            if '..' in path.split('/') or parts & set(path.split('/')):
+                return True
+            continue
+        path = os.path.normpath(path)
+        if any(p == path or p.startswith(path.rstrip('/') + '/') for p in protected):
+            return True
+    return False
+
+
 def unsafe_names(entries):
     names = set()
     for data, _ in QUOTED.findall(entries):
@@ -160,9 +186,15 @@ def filter_stream(trace, engines):
             out.flush()
 
 
-# The runner's isolation alone (1), or inside Codex 0.165.0's bwrap (3, measured on real scored runs, whose every shell
-# process sits at 1 or 3). The runner pins that Codex version; a shadowing namespace adds at least one.
-USERNS_DEPTHS = {1, 3}
+# Exactly the harness sandbox: the runner's isolation (1) plus Codex 0.165.0's bwrap (2), measured at 3 on real scored runs.
+# The runner pins that Codex version and every agent shell runs in its sandbox; any namespace an agent process creates
+# adds at least one. Depth 1 (runner alone) is never accepted: from there two nested namespaces would forge depth 3.
+SANDBOX_USERNS_DEPTH = 3
+# Replacing a node or entry path, or any ancestor of it, needs no capability where the ancestor is writable (rename it away,
+# put a fake tree in its place, rename it back). Path-changing syscalls are kept by the sink; one that names a protected path,
+# its ancestor, or that cannot be resolved and could name one, unbinds every engine of the run (ENTRY_PATH_CHANGED).
+PATH_CHANGES = {'rename', 'renameat', 'renameat2', 'link', 'linkat', 'symlink', 'symlinkat', 'unlink', 'unlinkat'}
+PATH_ARG = re.compile(r'(?:(?:AT_FDCWD|\d+)<([^<>]*)>, )?"((?:[^"\\]|\\.)*)"')
 LEDGER = re.compile(r'(?:operator|auto)-decisions\.ndjson')  # human and AUTO ledgers: both are consumed as decisions
 DESTRUCTIVE = {'creat', 'truncate', 'ftruncate', 'fallocate', 'link', 'linkat', 'unlink', 'unlinkat', 'rename',
                'renameat', 'renameat2', 'symlink', 'symlinkat'}
@@ -294,9 +326,11 @@ def verify(trace, root_pid):
 
 def engine_documents(trace, engines):
     """JSON objects an installed engine process wrote whole to its own fd 1 and then exited non-zero."""
-    found, unsafe, running, started, born, unshared = [], [], {}, [], {}, {}
+    found, unsafe, running, started, born, unshared, changed = [], [], {}, [], {}, {}, []
     with open(trace, errors='surrogateescape') as handle:
         for pid, name, text in calls(handle):
+            if name in PATH_CHANGES | {'open', 'openat', 'openat2', 'creat', 'truncate'} and not FAILED.search(text) and touches(name, text, engines):
+                changed.append({'pid': pid, 'names': ['ENTRY_PATH_CHANGED'], 'syscall': name})
             if name == 'unshare' and not FAILED.search(text) and 'CLONE_NEWUSER' in bare(text):
                 unshared[pid] = unshared.get(pid, 0) + 1
             elif name in ('clone', 'clone3', 'fork', 'vfork') and not FAILED.search(text) and child_of(text):
@@ -327,9 +361,10 @@ def engine_documents(trace, engines):
                     running[pid]['documents'].append(document)
     # Completion order puts a vforked child's exec before its clone record: lineage is read once the whole trace is in.
     shadowed = {pid: userns_depth(pid, born, unshared) for pid in started}
-    shadowed = {pid: depth for pid, depth in shadowed.items() if depth not in USERNS_DEPTHS}
-    unsafe += [{'pid': pid, 'names': ['USERNS_DEPTH_%d' % depth]} for pid, depth in shadowed.items()]
-    return {'documents': [item for item in found if item['pid'] not in shadowed], 'unsafeEngines': unsafe}
+    shadowed = {pid: depth for pid, depth in shadowed.items() if depth != SANDBOX_USERNS_DEPTH}
+    unsafe += [{'pid': pid, 'names': ['USERNS_DEPTH_%d' % depth]} for pid, depth in shadowed.items()] + changed
+    # A changed path can precede or follow any engine and be restored before verification: then no engine binds.
+    return {'documents': [] if changed else [item for item in found if item['pid'] not in shadowed], 'unsafeEngines': unsafe}
 
 
 def tracer_done(trace, seconds=10):

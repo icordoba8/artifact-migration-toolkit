@@ -23,6 +23,8 @@ import { open, readdir, readFile, realpath, mkdir, unlink, writeFile } from "nod
 import os from "node:os";
 import path from "node:path";
 import { verifyBundle } from "../providers/install-support.mjs";
+// Node 22.13.0 linux-x64, the Codex preflight pin (scripts/m15-official-run.sh).
+const PINNED_NODE_SHA256 = "af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8";
 import { isMainModule } from "../packages/migration-engine/src/engine-paths.mjs";
 
 const fail = (message) => { throw new Error(message); };
@@ -798,7 +800,13 @@ async function score(options, root, output, report) {
       }
     }
     // G1: the rollout's tool results plus every structured refusal the outside-sandbox trace binds to an engine process.
-    const traced = options.provider === "codex" ? traceRefusals(ledgerTrace, engines) : { refusals: [], unsafeEngines: [] };
+    let traced = options.provider === "codex" ? traceRefusals(ledgerTrace, engines) : { refusals: [], unsafeEngines: [] };
+    // The trace proves which node path ran and that no path to it changed (ENTRY_PATH_CHANGED); its bytes are hashed here,
+    // outside the sandbox: only the pinned Node 22.13.0 binds a CLI refusal.
+    const unpinned = [];
+    for (const node of new Set(engines.map(([node]) => node)))
+      if (createHash("sha256").update(await readFile(node).catch(() => "")).digest("hex") !== PINNED_NODE_SHA256) unpinned.push({ node, names: ["NODE_UNPINNED"] });
+    if (options.provider === "codex" && unpinned.length) traced = { refusals: [], unsafeEngines: [...traced.unsafeEngines, ...unpinned] };
     Object.assign(report, { traceRefusals: traced.refusals, traceUnsafeEngines: traced.unsafeEngines });
     // A rollout shell item cannot be matched to a pid: once any engine ran with pre-entry code, none of them binds.
     const refusals = [...(rollout?.refusals ?? []).filter(entry => entry.source !== "cli" || !traced.unsafeEngines.length), ...traced.refusals];
