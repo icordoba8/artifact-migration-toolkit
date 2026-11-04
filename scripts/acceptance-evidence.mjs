@@ -211,10 +211,14 @@ const structured = doc => typeof doc?.code === 'string' ? doc.code
   : doc?.outcome === 'BLOCKED' && doc?.status === 'NOT_STARTED' ? 'BLOCKED_NOT_STARTED' : null;
 
 const mcpRefusal = item => {
-  const result = item.result ?? {}, doc = result.structuredContent ?? parseJson(result.content?.at(-1)?.text);
-  const code = structured(doc);
-  // Codex marks an isError result "failed" with error null: its structured code is still the engine's.
-  if (code && (item.status === 'failed' || result.isError || code === 'BLOCKED_NOT_STARTED')) return { code, codeSource: 'structured' };
+  const result = item.result ?? {}, refused = item.status === 'failed' || result.isError;
+  // Only `structuredContent.code` is structured. Codex marks an isError result "failed" with error null: its structured code
+  // is still the engine's.
+  const code = structured(result.structuredContent);
+  if (code && (refused || code === 'BLOCKED_NOT_STARTED')) return { code, codeSource: 'structured' };
+  // A code parsed from text content is recorded as "text", never structured and never accepted (owner ruling 2026-11-04).
+  const textCode = result.structuredContent ? null : structured(parseJson(result.content?.at(-1)?.text));
+  if (textCode && (refused || textCode === 'BLOCKED_NOT_STARTED')) return { code: textCode, codeSource: 'text' };
   if (item.status === 'failed') // Codex drops error.data: only the message after its JSON-RPC prefix is the engine's.
     return { code: templateCode(String(item.error?.message ?? '').replace(/^[\s\S]*?Mcp error: -?\d+: /, '')), codeSource: 'template' };
   return result.isError ? { code: templateCode((result.content ?? []).map(part => part.text ?? '').join('\n')), codeSource: 'template' } : null;

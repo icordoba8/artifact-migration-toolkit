@@ -68,6 +68,7 @@ const installedCandidate = async (root, verifierHome = root) => {
       "artifact-migrate": [process.execPath, path.join(release, "packages/migration-engine", pkg.bin["artifact-migrate"])],
       "artifact-migration-discover": [process.execPath,
         path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-discover"])],
+      "artifact-migration-run": [process.execPath, path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-run"])],
     } });
   await writeFile(receiptPath, receipt);
   return { target, bin, verifier, pin, release, receiptPath, receipt };
@@ -134,8 +135,9 @@ for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.F
     const input = [{ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-codex', version: '1' } } },
       { method: 'notifications/initialized' }, { id: 2, method: 'tools/call', params: { name: 'migration_run', arguments: toolArguments } }];
     const server = spawnSync(process.execPath, ['--input-type=module', '-e', 'await (await import(process.argv[1])).serve({ withoutRelay: true });', transport],
-      { input: input.map(message => JSON.stringify({ jsonrpc: '2.0', ...message })).join('\\n') + '\\n', encoding: 'utf8', timeout: 30000 });
+      { input: input.map(message => JSON.stringify({ jsonrpc: '2.0', ...message })).join('\\n') + '\\n', encoding: 'utf8', timeout: 60000 }); // Codex's default MCP tool_timeout_sec; the engine waits 30 s on a held lock
     const result = server.stdout.trim().split('\\n').map(line => JSON.parse(line)).find(message => message.id === 2).result;
+    if (process.env.FAKE_CODEX_MCP_TEXT_ONLY) delete result.structuredContent;
     item({ type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status: result.isError ? 'failed' : 'completed', error: null, result });
   }
   if (index === 0 && process.env.FAKE_CODEX_CMD) {
@@ -1018,6 +1020,19 @@ test('classifier: a failed MCP call keeps its structured code; without one it is
     [['EROFS', 'structured'], [null, 'template'], [null, 'template']]);
 });
 
+test('classifier: an MCP code only in text content is recorded as text, never structured', () => {
+  const call = (status, result) => ({ type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status, error: null, result });
+  const text = obj => [{ type: 'text', text: JSON.stringify(obj) }];
+  const lines = [{ type: 'session_meta', payload: { id: 't1', cwd: '/c', timestamp: '2026-11-04T20:30:00.000Z' } },
+    ...[call('failed', { isError: true, content: text({ code: 'LOCK_HELD' }) }),
+      call('completed', { isError: true, content: text({ code: 'LOCK_HELD' }) }),
+      call('completed', { content: text({ outcome: 'BLOCKED', status: 'NOT_STARTED' }) }),
+      call('completed', { isError: true, content: text({ code: 'LOCK_HELD' }), structuredContent: { reason: 'no code' } })]
+      .map(item => ({ type: 'event_msg', payload: { type: 'item_completed', item } }))].map(line => JSON.stringify(line));
+  assert.deepEqual(codexRollout(lines.join('\n') + '\n', []).refusals.map(({ code, codeSource }) => [code, codeSource]),
+    [['LOCK_HELD', 'text'], ['LOCK_HELD', 'text'], ['BLOCKED_NOT_STARTED', 'text'], [null, 'template']]);
+});
+
 test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zero exit, never another process\'s text', async () => {
   const node = '/opt/node', entry = '/store/r/src/cli/discover-module.mjs';
   const clean = '["AMT_ENV_CLEAN"]';
@@ -1108,8 +1123,8 @@ test('an engine started with pre-entry code binds nothing; its environment never
       const { target, quoted, runCodex } = await codexCandidate(root, installedModuleCandidate);
       const discover = quoted('artifact-migration-discover');
       const preload = Buffer.from('process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }, null, 2) + "\\n"); process.exit(1);').toString('base64');
-      const registry = path.join(target, '.agents/knowledge/migrations/registry.json');
-      const real = `${discover} auth --target auth --mode auto --ponytail full --design-source target-system --registry '${registry}' --openspec-proposal-stdin <<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL`;
+      // The live-lock module fixture is bound before the holder locks: its CLI path to the lock is `run` (a heredoc, ignored).
+      const real = `${quoted('artifact-migration-run')} auth --target auth --mode auto --ponytail full --design-source target-system --json <<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL`;
       const scored = (name, command, extraEnv) => {
         const result = runCodex(path.join(root, name), ['--scenario', 'live-lock'], command, extraEnv);
         return { result, report: JSON.parse(readFileSync(path.join(root, name, 'report.json'), 'utf8')), trace: readFileSync(path.join(root, name, 'ledger-syscalls.log'), 'utf8') };
@@ -1155,7 +1170,7 @@ test('an engine started with pre-entry code binds nothing; its environment never
       // A plain-word rollout item cannot be matched to a pid: inherited pre-entry code voids even a genuine engine refusal.
       await mkdir(path.join(target, 'openspec/specs/auth'), { recursive: true });
       await writeFile(path.join(target, 'openspec/specs/auth/spec.md'), '### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\n');
-      const inherited = scored('inherited', `${discover} auth --target auth --mode auto --ponytail full --design-source target-system --registry '${registry}'`, { LD_PRELOAD: '/nonexistent-preload.so' });
+      const inherited = scored('inherited', `${discover} auth --target auth --mode auto --ponytail full --design-source target-system`, { LD_PRELOAD: '/nonexistent-preload.so' });
       assert.ok(inherited.report.rollout.refusals.some(entry => entry.source === 'cli' && entry.code === 'LOCK_HELD' && entry.codeSource === 'structured'), JSON.stringify(inherited.report.rollout.refusals));
       assert.equal(inherited.report.safety.refusal, null, JSON.stringify(inherited.report.safety));
       assert.ok(inherited.report.traceUnsafeEngines.length > 0);
@@ -1168,9 +1183,9 @@ test('a composed engine call counts through the trace; shell text never does (H0
     try {
       const { target, quoted, runCodex } = await codexCandidate(root, installedModuleCandidate);
       const discover = quoted('artifact-migration-discover'), live = ['--scenario', 'live-lock'];
-      const registry = path.join(target, '.agents/knowledge/migrations/registry.json');
       const proposal = "<<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL";
-      const heredoc = `${discover} auth --target auth --mode auto --ponytail full --design-source target-system --registry '${registry}' --openspec-proposal-stdin ${proposal}`;
+      // The live-lock module fixture is bound before the holder locks: its CLI path to the lock is `run` (a heredoc, ignored).
+      const heredoc = `${quoted('artifact-migration-run')} auth --target auth --mode auto --ponytail full --design-source target-system --json ${proposal}`;
       const fake = String.raw`'{\n  "code": "LOCK_HELD"\n}\n'`;
       const scored = (name, command) => {
         const result = runCodex(path.join(root, name), live, command);
@@ -1220,7 +1235,8 @@ test('read-only module: trusted setup reaches the write path and the real engine
       const blocked = call(unbound, 'not-started');
       const blockedReport = JSON.parse(await readFile(path.join(blocked.output, 'report.json')));
       assert.equal(blocked.result.status, 1);
-      assert.deepEqual(blockedReport.rollout.refusals.map(({ code, codeSource }) => [code, codeSource]), [['BLOCKED_NOT_STARTED', 'structured']]);
+      // migration_run carries no structuredContent (mcp.mjs progress tools): its NOT_STARTED is read from text, recorded as text.
+      assert.deepEqual(blockedReport.rollout.refusals.map(({ code, codeSource }) => [code, codeSource]), [['BLOCKED_NOT_STARTED', 'text']]);
       assert.equal(blockedReport.safety.refusal, null);
       assert.equal(blockedReport.safety.notStarted, true);
       assert.match(blockedReport.failure, /Safety refusal not proven/);
@@ -1232,8 +1248,8 @@ test('read-only module: trusted setup reaches the write path and the real engine
       assert.deepEqual([report.safety.refusal.source, report.safety.refusal.tool, report.safety.refusal.codeSource], ['mcp', 'migration_run', 'structured']);
       assert.ok(['EROFS', 'EACCES', 'EPERM'].includes(report.safety.refusal.code), report.safety.refusal.code);
       assert.equal(report.safety.unchanged, true);
-      assert.deepEqual(report.readOnlyFixture, { registry: '.agents/knowledge/migrations/registry.json', openspec: 'openspec/specs/auth/spec.md', seeded: false });
-      assert.equal(JSON.parse(await readFile(path.join(target, 'package.json'), 'utf8')).config.startMigration.registry, report.readOnlyFixture.registry);
+      assert.deepEqual(report.moduleFixture, { registry: '.agents/knowledge/migrations/registry.json', openspec: 'openspec/specs/auth/spec.md', seeded: false });
+      assert.equal(JSON.parse(await readFile(path.join(target, 'package.json'), 'utf8')).config.startMigration.registry, report.moduleFixture.registry);
       assert.ok('openspec/specs/auth/spec.md' in JSON.parse(await readFile(path.join(output, 'consumer-before.json'), 'utf8')));
       await assert.rejects(stat(path.join(target, '.agents/knowledge/migrations/modules/auth')), { code: 'ENOENT' });
       // Setup is the fixture's, never a repair: a consumer without the fixture's registry is refused before spawn.
@@ -1241,6 +1257,42 @@ test('read-only module: trusted setup reaches the write path and the real engine
       const missing = call(target, 'no-registry');
       assert.equal(missing.result.status, 1);
       assert.match(JSON.parse(await readFile(path.join(missing.output, 'report.json'))).failure, /ACCEPTANCE_PRECONDITION: a read-only module fixture needs/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('module live-lock: pre-bootstrapped before the holder locks, MCP migration_run gets a structured LOCK_HELD; text-only never counts',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-live-lock-module-'));
+    try {
+      const { target, release, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const transport = 'file://' + path.join(release, 'packages/migration-engine/src/transport/mcp.mjs');
+      const call = (name, env = {}) => {
+        const output = path.join(root, name);
+        const result = runCodex(output, ['--scenario', 'live-lock'], '', { FAKE_CODEX_MCP_CALL: JSON.stringify({ transport,
+          arguments: { cwd: target, module: 'auth', target: 'auth', mode: 'auto', ponytail: 'full', designSource: 'target-system' } }), ...env });
+        return { result, output };
+      };
+      const { result, output } = call('held');
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(result.status, 0, JSON.stringify([report.failure, report.rollout?.refusals]));
+      assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.deepEqual([report.safety.refusal.source, report.safety.refusal.tool, report.safety.refusal.code, report.safety.refusal.codeSource],
+        ['mcp', 'migration_run', 'LOCK_HELD', 'structured']);
+      assert.equal(report.moduleFixture.registry, '.agents/knowledge/migrations/registry.json');
+      assert.equal(report.lock.holderAliveAfter, true);
+      assert.deepEqual(report.lock.before, report.lock.after);
+      assert.equal(report.safety.unchanged, true);
+      // The bound registry is in the before-snapshot: the fixture was set before the holder and the agent.
+      assert.ok('openspec/specs/auth/spec.md' in JSON.parse(await readFile(path.join(output, 'consumer-before.json'), 'utf8')));
+      assert.equal(JSON.parse(await readFile(path.join(target, 'package.json'), 'utf8')).config.startMigration.registry, report.moduleFixture.registry);
+      await assert.rejects(stat(path.join(target, '.agents/knowledge/migrations/modules/auth')), { code: 'ENOENT' });
+      // The same engine result with its code only in text content: recorded as text, never accepted.
+      const text = call('text-only', { FAKE_CODEX_MCP_TEXT_ONLY: '1' });
+      const textReport = JSON.parse(await readFile(path.join(text.output, 'report.json')));
+      assert.equal(text.result.status, 1);
+      assert.deepEqual(textReport.rollout.refusals.map(({ source, code, codeSource }) => [source, code, codeSource]), [['mcp', 'LOCK_HELD', 'text']]);
+      assert.equal(textReport.safety.refusal, null);
+      assert.match(textReport.failure, /Safety refusal not proven/);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

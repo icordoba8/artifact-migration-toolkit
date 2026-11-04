@@ -362,10 +362,14 @@ Template-classified refusals remain visible in the rollout but never satisfy sco
 Module read-only fixture. A module consumer has no bound registry and MCP/run never bootstraps, and Codex's
 shell cannot run the discover bootstrap on a read-only mount. Before `consumer-before.json` is snapshotted the
 runner, as trusted setup, binds the fixture's `.agents/knowledge/migrations/registry.json` in `package.json` and
-seeds a valid `openspec/specs/<target>/spec.md` (`report.readOnlyFixture`): binding alone still blocks on the
+seeds a valid `openspec/specs/<target>/spec.md` (`report.moduleFixture`): binding alone still blocks on the
 absent OpenSpec. `migration_run` then starts RESOLVE and the mount refuses its first write. A fixture without
 that registry is an `ACCEPTANCE_PRECONDITION`; the seeded OpenSpec cites no API response, so a legacy module with
 API obligations blocks instead of reaching the write.
+Module live-lock fixture: the same binding is applied before the trusted holder takes the lock, so the lock is
+on a migration in progress and the agent's `migration_run` reaches it through MCP (structured `LOCK_HELD`).
+Holder alive, lock bytes unchanged and consumer unchanged are still required. An MCP code read only from text
+content is recorded with `codeSource: "text"`, never structured, never accepted.
 Only a direct runner invocation with `--scoring diagnostic --code-source any` permits template fallback.
 Such a run reports `DIAGNOSTIC_ONLY` (or `FAIL`), never a scored PASS, checkpoint or security certification.
 The official launcher fixes both scored/structured flags itself and refuses caller overrides.

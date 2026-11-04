@@ -391,31 +391,31 @@ async function openGate(agentRun, gate, lock, report) {
 }
 
 /**
- * read-only + module, trusted setup. A module consumer has no bound registry and MCP/run never bootstraps, so the engine
+ * read-only or live-lock + module, trusted setup (live-lock: bound before the holder takes the lock). A module consumer has no bound registry and MCP/run never bootstraps, so the engine
  * answers BLOCKED / NOT_STARTED before any write; bound but without an OpenSpec it blocks too, wanting a proposal on stdin
  * through discover, which Codex's shell cannot run on a read-only mount (bwrap fails). The fixture's own registry binding
- * and a valid OpenSpec let the agent's plain `migration_run` start RESOLVE, whose first write the mount refuses.
- * Creates no module entry, state or record.
+ * and a valid OpenSpec let the agent's plain `migration_run` start RESOLVE, whose first write the mount refuses
+ * (read-only) or whose module lock the live holder refuses (live-lock). Creates no module entry, state or record.
  */
-const READ_ONLY_REGISTRY = ".agents/knowledge/migrations/registry.json";
-const READ_ONLY_OPENSPEC = `### Requirement: FIXTURE-REQ-001 Read-only consumer
+const MODULE_FIXTURE_REGISTRY = ".agents/knowledge/migrations/registry.json";
+const MODULE_FIXTURE_OPENSPEC = `### Requirement: FIXTURE-REQ-001 Read-only consumer
 The migration MUST stop at the engine's own file-system refusal.
 
 #### Scenario: FIXTURE-SCN-001 Read-only mount
 The first write is refused and the consumer stays unchanged.
 `;
-async function bindReadOnlyModule(root, target) {
+async function bindModuleFixture(root, target, scenario) {
   const configPath = path.join(root, "package.json");
-  if (!await exists(configPath) || !await exists(path.join(root, READ_ONLY_REGISTRY)))
-    fail("ACCEPTANCE_PRECONDITION: a read-only module fixture needs package.json and " + READ_ONLY_REGISTRY);
+  if (!await exists(configPath) || !await exists(path.join(root, MODULE_FIXTURE_REGISTRY)))
+    fail("ACCEPTANCE_PRECONDITION: a " + scenario + " module fixture needs package.json and " + MODULE_FIXTURE_REGISTRY);
   const project = JSON.parse(await readFile(configPath, "utf8"));
-  ((project.config ??= {}).startMigration ??= {}).registry = READ_ONLY_REGISTRY;
+  ((project.config ??= {}).startMigration ??= {}).registry = MODULE_FIXTURE_REGISTRY;
   await writeFile(configPath, JSON.stringify(project, null, 2) + "\n");
   const openspec = path.join("openspec/specs", target, "spec.md");
-  if (await exists(path.join(root, openspec))) return { registry: READ_ONLY_REGISTRY, openspec, seeded: false };
+  if (await exists(path.join(root, openspec))) return { registry: MODULE_FIXTURE_REGISTRY, openspec, seeded: false };
   await mkdir(path.dirname(path.join(root, openspec)), { recursive: true });
-  await writeFile(path.join(root, openspec), READ_ONLY_OPENSPEC, { flag: "wx" });
-  return { registry: READ_ONLY_REGISTRY, openspec, seeded: true };
+  await writeFile(path.join(root, openspec), MODULE_FIXTURE_OPENSPEC, { flag: "wx" });
+  return { registry: MODULE_FIXTURE_REGISTRY, openspec, seeded: true };
 }
 
 export function acceptanceVerdict(goal, agent, bootstrapped, finished, verified, progress) {
@@ -673,6 +673,10 @@ async function score(options, root, output, report) {
   const observer = await observeRecordDirectory(recordDir);
   let holder;
   try {
+    // Owner ruling 2026-11-04: a module live lock is a lock on a migration in progress. The module is pre-bootstrapped with the
+    // approved H11 binding before the holder takes the lock, so the agent reaches the lock through MCP `migration_run`.
+    if (options.kind === "module" && ["read-only", "live-lock"].includes(options.scenario))
+      report.moduleFixture = await bindModuleFixture(root, options.target, options.scenario);
     if (["live-lock", "abandoned-lock"].includes(options.scenario)) {
       if (await exists(lock)) fail("ACCEPTANCE_PRECONDITION: Fixture already has a lock");
       holder = await startLockHolder(cli[0], pathToFileURL(path.join(installed.release,
@@ -697,7 +701,6 @@ async function score(options, root, output, report) {
       const fifo = await run({ command: "mkfifo", argv: ["-m", "600", gate], cwd: root, timeoutMs: 10000 });
       if (fifo.code !== 0) fail("ACCEPTANCE_PRECONDITION: cannot create the plant gate: " + fifo.stderr.trim());
     }
-    if (options.scenario === "read-only" && options.kind === "module") report.readOnlyFixture = await bindReadOnlyModule(root, options.target);
     const beforeTree = ["read-only", "live-lock"].includes(options.scenario) ? await snapshotTree(root) : null;
     if (beforeTree) await put("consumer-before.json", JSON.stringify(beforeTree, null, 2));
     let agent, interruptedAt;
@@ -896,7 +899,7 @@ async function score(options, root, output, report) {
       // G1: only an engine tool result with this scenario's code counts; A3: a scored joint run requires a structured code.
       const acceptedCodes = options.scenario === "read-only" ? ["EROFS", "EACCES", "EPERM"] : ["LOCK_HELD"];
       const refusal = refusals.find(entry => acceptedCodes.includes(entry.code) &&
-        (options.codeSource === "any" || entry.codeSource === "structured")) ?? null;
+        (entry.codeSource === "structured" || options.codeSource === "any" && entry.codeSource === "template")) ?? null;
       report.safety = { reviewRequired: true, unchanged: sameTree(beforeTree, afterTree), acceptedCodes, codeSourceRequired: options.codeSource,
         refusal, refusalObserved: refusal !== null, notStarted: refusals.some(entry => entry.code === "BLOCKED_NOT_STARTED") };
       if (!report.safety.unchanged || !report.safety.refusalObserved || agent.timedOut || agent.overflow || agent.signal || await exists(record))
