@@ -1066,12 +1066,13 @@ test('a composed engine call counts through the trace; shell text never does (H0
         assert.deepEqual([report.safety.refusal.source, report.safety.refusal.code, report.safety.refusal.codeSource], ['cli-trace', 'LOCK_HELD', 'structured'], name);
         assert.ok(!report.rollout.refusals.some(entry => entry.code === 'LOCK_HELD'), 'the rollout alone must not bind a composed command');
       }
-      // One run holds every spoof, each around real engine calls that did not refuse with LOCK_HELD: any of them binding would pass it.
+      // One run holds every spoof around real engine calls that did not refuse with LOCK_HELD, a fake document first and last,
+      // so a scorer reading the composed text would accept it whichever document it takes.
       const node = JSON.parse(await readFile(path.join(target, '.artifact-migration-tools/codex.json'), 'utf8')).commands['artifact-migration-discover'][0];
-      const { result, report, trace } = scored('spoofs', [`echo '{"code":"LOCK_HELD"}'`, `${discover} --help`, `${discover} auth --status`, `printf ${fake}`,
+      const { result, report, trace } = scored('spoofs', [`printf ${fake}`, `echo '{"code":"LOCK_HELD"}'`, `${discover} --help`, `${discover} auth --status`,
         `printf ${fake} | ${discover} auth --status`, `'${node}' -e 'process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }) + "\\n"); process.exit(1)'`,
         `echo "Another migration command holds the lock for 'auth' at /c/auth.lock (pid 7). Wait for it to finish; the lock is reclaimed automatically once that process is gone."`,
-        'exit 1'].join('; '));
+        `printf ${fake}`, 'exit 1'].join('; '));
       assert.equal(result.status, 1, JSON.stringify(report.safety));
       assert.equal(report.safety.refusal, null, JSON.stringify(report.safety));
       assert.match(report.failure, /Safety refusal not proven/);
