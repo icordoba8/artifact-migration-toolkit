@@ -165,6 +165,7 @@ const codexCandidate = async (root, install = installedCandidate) => {
   await writeFile(path.join(installed.bin, 'codex'), FAKE_CODEX, { mode: 0o755 });
   const quoted = name => receipt.commands[name].map(x => "'" + x + "'").join(' ');
   const env = { ...process.env, PATH: installed.bin + path.delimiter + process.env.PATH, CODEX_HOME: path.join(root, 'codex-home') };
+  for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH']) delete env[name]; // The launcher's env -i, not the host's.
   const runCodex = (output, argv, cmd, extraEnv = {}) => spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', installed.target,
     '--module', 'auth', '--target', 'auth', '--output', output, '--expected-pin', installed.pin, ...argv],
   { timeout: 90000, encoding: 'utf8', env: { ...env, FAKE_CODEX_CMD: cmd, ...extraEnv } });
@@ -1018,17 +1019,18 @@ test('classifier: a failed MCP call keeps its structured code; without one it is
 
 test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zero exit, never another process\'s text', async () => {
   const node = '/opt/node', entry = '/store/r/src/cli/discover-module.mjs';
-  const exec = pid => `${pid} execve("${node}", ["${node}", "${entry}", "auth"], 0x7ffd /* 9 vars */) = 0`;
+  const clean = '["AMT_ENV_CLEAN"]';
+  const exec = (pid, env = clean) => `${pid} execve("${node}", ["${node}", "${entry}", "auth"], ${env}) = 0`;
   const held = String.raw`"{\n  \"code\": \"LOCK_HELD\"\n}\n"`;
   const write = (pid, fd = 1) => `${pid} write(${fd}<pipe:[1]>, ${held}, 26) = 26`;
   const accepted = (...lines) => {
     const trace = path.join(scratch, 'agent-e2e-binding-' + process.pid + '.trace');
-    return writeFile(trace, lines.join('\n') + '\n').then(() => traceRefusals(trace, [[node, entry]]).map(({ pid, exitCode, code }) => [pid, exitCode, code]))
+    return writeFile(trace, lines.join('\n') + '\n').then(() => traceRefusals(trace, [[node, entry]]).refusals.map(({ pid, exitCode, code }) => [pid, exitCode, code]))
       .finally(() => rm(trace, { force: true }));
   };
   const exited = (pid, code = 1) => `${pid} +++ exited with ${code} +++`;
   assert.deepEqual(await accepted(exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7)), [['7', 1, 'LOCK_HELD']]);
-  assert.deepEqual(await accepted(`7 execve("${node}", ["${node}", "${entry}" <unfinished ...>`, '8 +++ exited with 0 +++', '7 <... execve resumed>, 0x7ffd /* 9 vars */) = 0',
+  assert.deepEqual(await accepted(`7 execve("${node}", ["${node}", "${entry}"], ${clean} <unfinished ...>`, '8 +++ exited with 0 +++', '7 <... execve resumed>) = 0',
     String.raw`7 writev(1<pipe:[1]>, [{iov_base="{\"code\":\"EROFS\"}", iov_len=16}], 1) = 16`, exited(7, 3)), [['7', 3, 'EROFS']]);
   const rejected = {
     'engine exit 0': [exec(7), write(7), exited(7, 0)],
@@ -1037,13 +1039,93 @@ test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zer
     'a shell echo beside the engine': [write(6), exec(7), exited(7)],
     'text after the engine exited, on a reused pid': [exec(7), exited(7, 0), write(7), exited(7)],
     'a signal before the exit': [exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7, 0)],
-    'a failed exec': [`7 execve("${node}", ["${node}", "${entry}"], 0x7ffd /* 9 vars */) = -1 ENOENT (No such file or directory)`, write(7), exited(7)],
-    'a node flag before the entry': [`7 execve("${node}", ["${node}", "--import", "${entry}"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
-    'another node binary': [`7 execve("/tmp/node", ["/tmp/node", "${entry}"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
+    'a failed exec': [`7 execve("${node}", ["${node}", "${entry}"], ${clean}) = -1 ENOENT (No such file or directory)`, write(7), exited(7)],
+    'a node flag before the entry': [`7 execve("${node}", ["${node}", "--import", "${entry}"], ${clean}) = 0`, write(7), exited(7)],
+    'another node binary': [`7 execve("/tmp/node", ["/tmp/node", "${entry}"], ${clean}) = 0`, write(7), exited(7)],
+    'an unsafe environment': [exec(7, '["AMT_ENV_UNSAFE", "NODE_OPTIONS"]'), write(7), exited(7)],
+    'a record without a verdict': [exec(7, '0x7ffd /* 9 vars */'), write(7), exited(7)],
+    'a spoofed verdict in argv': [`7 execve("${node}", ["${node}", "${entry}", "[\\"AMT_ENV_CLEAN\\"]"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
     'a document split across writes': [exec(7), String.raw`7 write(1<pipe:[1]>, "{\"code\":", 8) = 8`, String.raw`7 write(1<pipe:[1]>, "\"LOCK_HELD\"}", 12) = 12`, exited(7)],
   };
   for (const [name, lines] of Object.entries(rejected)) assert.deepEqual(await accepted(...lines), [], name);
 });
+
+test('the trusted sink reduces an execve environment to a verdict and persists no value or other name', async () => {
+  const root = await mkdtemp(path.join(scratch, 'agent-e2e-sink-'));
+  try {
+    const node = '/opt/node', entry = '/store/r/src/cli/discover-module.mjs', trace = path.join(root, 'trace');
+    const argv = `"${node}", ["${node}", "${entry}", "auth"]`;
+    const secret = 'S3CRET_VALUE';
+    const records = [
+      `1 execve("/bin/sh", ["sh", "-c", "${secret}"], ["${secret}=1"]) = 0`,
+      `2 execve(${argv}, ["PATH=/bin", "API_KEY=${secret}", "NODE_TEST_CONTEXT=child-v8"]) = 0`,
+      `3 execve(${argv}, ["PATH=/bin", "NODE_OPTIONS=--import=data:text/javascript,${secret}", "LD_PRELOAD=/${secret}.so", "LD_X${secret}=1", "OPENSSL_CONF=/${secret}"] <unfinished ...>`,
+      '3 <... execve resumed>) = 0',
+      `4 execve(${argv}, ["A=${secret}"...]) = 0`,
+      `5 execve(${argv}, 0x7ffd) = -1 EFAULT (Bad address)`,
+    ];
+    const sink = spawnSync('python3', [fileURLToPath(new URL('../scripts/ledger-trace.py', import.meta.url)), 'filter', trace, JSON.stringify([[node, entry]])],
+      { input: records.join('\n') + '\n', encoding: 'utf8' });
+    assert.equal(sink.status, 0, sink.stderr);
+    let persisted = '';
+    for (let tries = 0; tries < 100 && !persisted.includes('EFAULT'); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      persisted = await readFile(trace, 'utf8').catch(() => '');
+    }
+    assert.doesNotMatch(persisted, /S3CRET|PATH=|API_KEY|NODE_TEST_CONTEXT|"sh"/);
+    assert.deepEqual(persisted.trim().split('\n'), [
+      `2 execve(${argv}, ["AMT_ENV_CLEAN"]) = 0`,
+      `3 execve(${argv}, ["AMT_ENV_UNSAFE", "LD_*", "NODE_OPTIONS", "OPENSSL_CONF"] <unfinished ...>`,
+      '3 <... execve resumed>) = 0',
+      `4 execve(${argv}, ["AMT_ENV_UNSAFE", "UNREADABLE"]) = 0`,
+      `5 execve(${argv}, ["AMT_ENV_UNSAFE", "UNREADABLE"]) = -1 EFAULT (Bad address)`]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('an engine started with pre-entry code binds nothing; its environment never reaches the trace (reviewer MAJOR)',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-preload-'));
+    try {
+      const { target, quoted, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const discover = quoted('artifact-migration-discover');
+      const preload = Buffer.from('process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }, null, 2) + "\\n"); process.exit(1);').toString('base64');
+      const registry = path.join(target, '.agents/knowledge/migrations/registry.json');
+      const real = `${discover} auth --target auth --mode auto --ponytail full --design-source target-system --registry '${registry}' --openspec-proposal-stdin <<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL`;
+      const scored = (name, command, extraEnv) => {
+        const result = runCodex(path.join(root, name), ['--scenario', 'live-lock'], command, extraEnv);
+        return { result, report: JSON.parse(readFileSync(path.join(root, name, 'report.json'), 'utf8')), trace: readFileSync(path.join(root, name, 'ledger-syscalls.log'), 'utf8') };
+      };
+      // The finding: a preload prints the engine's document and exits 1 before the entry runs.
+      const fake = scored('node-options', `AMT_UNLISTED_SECRET=unlisted-value NODE_OPTIONS=--import=data:text/javascript\\;base64,${preload} ${discover} auth --status`);
+      assert.equal(fake.result.status, 1, JSON.stringify(fake.report.safety));
+      assert.equal(fake.report.safety.refusal, null, JSON.stringify(fake.report.safety));
+      assert.deepEqual(fake.report.traceRefusals, []);
+      assert.match(readFileSync(path.join(root, 'node-options/agent.stdout.log'), 'utf8'), /"code": "LOCK_HELD"/); // The preload really ran.
+      assert.deepEqual(fake.report.traceUnsafeEngines.map(entry => entry.names), [['NODE_OPTIONS']]);
+      assert.match(fake.trace, /"AMT_ENV_UNSAFE", "NODE_OPTIONS"/);
+      assert.ok(!fake.trace.includes(preload) && !fake.trace.includes('unlisted-value') && !fake.trace.includes('AMT_UNLISTED_SECRET') && !fake.trace.includes('NODE_OPTIONS='));
+      // Even the engine's genuine refusal counts for nothing once a preload could have run in it.
+      const ld = scored('ld-preload', `LD_PRELOAD=/nonexistent-preload.so ${real}`);
+      assert.equal(ld.result.status, 1, JSON.stringify(ld.report.safety));
+      assert.equal(ld.report.safety.refusal, null, JSON.stringify(ld.report.safety));
+      assert.deepEqual(ld.report.traceUnsafeEngines.map(entry => entry.names), [['LD_*']]);
+      assert.doesNotMatch(ld.trace, /LD_PRELOAD|execve\([^\n]*nonexistent-preload/);
+      // The same engine call with a clean environment still binds.
+      const clean = scored('clean', real);
+      assert.equal(clean.result.status, 0, JSON.stringify([clean.report.failure, clean.report.traceUnsafeEngines]));
+      assert.equal(clean.report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.deepEqual([clean.report.safety.refusal.source, clean.report.safety.refusal.code], ['cli-trace', 'LOCK_HELD']);
+      assert.deepEqual(clean.report.traceUnsafeEngines, []);
+      assert.match(clean.trace, /"AMT_ENV_CLEAN"/);
+      // A plain-word rollout item cannot be matched to a pid: inherited pre-entry code voids even a genuine engine refusal.
+      await mkdir(path.join(target, 'openspec/specs/auth'), { recursive: true });
+      await writeFile(path.join(target, 'openspec/specs/auth/spec.md'), '### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\n');
+      const inherited = scored('inherited', `${discover} auth --target auth --mode auto --ponytail full --design-source target-system --registry '${registry}'`, { LD_PRELOAD: '/nonexistent-preload.so' });
+      assert.ok(inherited.report.rollout.refusals.some(entry => entry.source === 'cli' && entry.code === 'LOCK_HELD' && entry.codeSource === 'structured'), JSON.stringify(inherited.report.rollout.refusals));
+      assert.equal(inherited.report.safety.refusal, null, JSON.stringify(inherited.report.safety));
+      assert.ok(inherited.report.traceUnsafeEngines.length > 0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 
 test('a composed engine call counts through the trace; shell text never does (H07)',
   { skip: codexReady(isolationAvailable) }, async () => {

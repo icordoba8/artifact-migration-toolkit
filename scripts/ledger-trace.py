@@ -9,10 +9,12 @@ The command must run as `strace <LEDGER_TRACE_FLAGS> -o <trace> -- python3 no-io
   ledger-trace.py engine-documents <trace> <engines-json>   prints {"documents": [...]} (G1 CLI refusals)
 
 engines-json is the receipt's [[node, entry], ...]. Besides the ledger, the sink keeps exactly: the execve of such a pair
-(execve("<node>", [argv0, "<entry>", ...]): no node flag can sit before the entry, and strace never prints the environment)
-and that pid's own fd-1 write/writev starting a JSON object. A document counts only if one such write parses whole and that
-pid then exits non-zero, so nothing another process prints, in any shell composition, can be attributed to the engine.
-ponytail: NODE_OPTIONS or LD_PRELOAD in the agent's environment are invisible here; recording them means tracing env, secrets included.
+(execve("<node>", [argv0, "<entry>", ...]): no node flag can sit before the entry) and that pid's own fd-1 write/writev
+starting a JSON object. A document counts only if one such write parses whole and that pid then exits non-zero, so nothing
+another process prints, in any shell composition, can be attributed to the engine.
+strace shows this sink every execve environment (-e abbrev=!execve). It is reduced here to a verdict and never persisted:
+the kept execve carries ["AMT_ENV_CLEAN"] or ["AMT_ENV_UNSAFE", <names from UNSAFE_ENV only>] in its place, and an engine
+started with an unsafe environment binds nothing, because that code runs before the entry.
 
 No namespace is trusted: mounts are allowed anywhere (Codex bubblewrap), so every read or append of an fd whose canonical -yy path
 names the ledger has its bytes inspected (any namespace, per shared-fd-table stream, unicode escapes decoded): a relay line read
@@ -34,6 +36,12 @@ relayed = _observer.relayed
 READS = {'read', 'readv', 'pread64', 'preadv', 'preadv2'}
 WRITES = {'write', 'writev'}
 BUFFERED = READS | WRITES | {'pwrite64', 'pwritev', 'pwritev2'}
+# Run code or change module loading before the engine entry, on Node 22.13 and glibc; any LD_* counts too. Exact names, not
+# NODE_*: NODE_TEST_CONTEXT, NODE_NO_WARNINGS and the like are harmless and a false rejection is a functional failure.
+# Not listed, data only: NODE_ICU_DATA, LOCPATH, NLSPATH, RES_OPTIONS, MALLOC_*.
+UNSAFE_ENV = frozenset({'NODE_OPTIONS', 'NODE_PATH', 'NODE_COMPILE_CACHE', 'NODE_PRESERVE_SYMLINKS', 'NODE_PRESERVE_SYMLINKS_MAIN',
+                        'NODE_REPL_EXTERNAL_MODULE', 'OPENSSL_CONF', 'OPENSSL_CONF_INCLUDE', 'OPENSSL_MODULES', 'OPENSSL_ENGINES',
+                        'GLIBC_TUNABLES', 'GCONV_PATH'})
 FILTERED = BUFFERED | {'execve'}  # Every execve but an installed engine's is dropped: argv is agent content.
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"(\.\.\.)?')
 ESCAPE = re.compile(rb'\\(x[0-9a-fA-F]{2}|[0-7]{1,3}|.)')
@@ -55,6 +63,33 @@ def engine_pair(text, engines):
     """True if this execve record's path and argv[1] are a receipt-installed (node, entry) pair."""
     match = EXECVE.match(text)
     return bool(match) and list(match.groups()) in engines
+
+
+def unsafe_names(entries):
+    names = set()
+    for data, _ in QUOTED.findall(entries):
+        name = unescape(data).split(b'=', 1)[0].decode('ascii', 'replace')
+        if name in UNSAFE_ENV:
+            names.add(name)
+        elif name.startswith('LD_'):
+            names.add('LD_*')
+    return sorted(names)
+
+
+def with_env_verdict(rest):
+    """An engine execve record with its environment replaced by the verdict; None if its argv cannot be delimited.
+    Only constants from UNSAFE_ENV leave this function: no value, and no name outside the list."""
+    head = EXEC_HEAD.match(rest)
+    if not head:
+        return None
+    env = ENV_ARRAY.match(rest, head.end())
+    if env:
+        names, tail = unsafe_names(env.group(1)), rest[env.end():]
+    else:  # A cut or unreadable environment proves nothing.
+        ending = EXEC_TAIL.search(rest, head.end())
+        names, tail = ['UNREADABLE'], ending.group(1) if ending else ') = ?'
+    verdict = ', '.join(['"AMT_ENV_UNSAFE"'] + ['"%s"' % name for name in names]) if names else '"AMT_ENV_CLEAN"'
+    return '%s[%s]%s' % (head.group(0), verdict, tail)
 
 
 def filter_stream(trace, engines):
@@ -95,6 +130,9 @@ def filter_stream(trace, engines):
                         execed(pid, kept, rest)
                     if not kept:
                         continue
+                if name == 'execve':
+                    record = with_env_verdict(rest)
+                    raw = '%s execve(%s\n' % (pid, record) if record else 'REDACTED unparsable trace record\n'
                 elif resumed in FILTERED:
                     known = pending.pop(pid, None)
                     if known is None:
@@ -115,6 +153,10 @@ LINE = re.compile(r'^(\d+) +(?:(\w+)\((.*)|<\.\.\. (\w+) resumed>(.*)|(\+\+\+ .*
 FAILED = re.compile(r'\)\s+= (?:-1 |\?)')
 EXECVE = re.compile(r'"((?:[^"\\]|\\.)*)", \["(?:[^"\\]|\\.)*", "((?:[^"\\]|\\.)*)"')
 STDOUT_OBJECT = re.compile(r'1(?:<.*?>)?, (?:\[\{iov_base=)?"\{')
+EXEC_HEAD = re.compile(r'"(?:[^"\\]|\\.)*", \[(?:"(?:[^"\\]|\\.)*"(?:\.\.\.)?(?:, )?)*(?:\.\.\.)?\], ')
+ENV_ARRAY = re.compile(r'\[((?:"(?:[^"\\]|\\.)*"(?:, )?)*)\]')  # No "..." forms: a truncated environment does not match.
+ENV_VERDICT = re.compile(r'\["AMT_ENV_CLEAN"\]|\["AMT_ENV_UNSAFE"((?:, "[A-Z0-9_*]+")+)\]')
+EXEC_TAIL = re.compile(r'( <unfinished \.\.\.>|\)\s+= [^"]*)$')
 
 
 def calls(lines):
@@ -235,13 +277,19 @@ def verify(trace, root_pid):
 
 def engine_documents(trace, engines):
     """JSON objects an installed engine process wrote whole to its own fd 1 and then exited non-zero."""
-    found, running = [], {}
+    found, unsafe, running = [], [], {}
     with open(trace, errors='surrogateescape') as handle:
         for pid, name, text in calls(handle):
             if name == 'execve' and not FAILED.search(text):
                 running.pop(pid, None)
                 if engine_pair(text, engines):
-                    running[pid] = {'entry': EXECVE.match(text).group(2), 'documents': []}
+                    head = EXEC_HEAD.match(text)
+                    verdict = head and ENV_VERDICT.match(text, head.end())
+                    names = re.findall(r'"([^"]+)"', verdict.group(1) or '') if verdict else ['UNVERIFIED']
+                    if names:
+                        unsafe.append({'pid': pid, 'entry': EXECVE.match(text).group(2), 'names': names})
+                    else:
+                        running[pid] = {'entry': EXECVE.match(text).group(2), 'documents': []}
             elif name == 'status' and text.startswith('+++'):
                 process = running.pop(pid, None)
                 status = re.match(r'\+\+\+ exited with (\d+) \+\+\+', text)
@@ -255,7 +303,7 @@ def engine_documents(trace, engines):
                     continue
                 if isinstance(document, dict):
                     running[pid]['documents'].append(document)
-    return found
+    return {'documents': found, 'unsafeEngines': unsafe}
 
 
 def tracer_done(trace, seconds=10):
@@ -281,7 +329,7 @@ if __name__ == '__main__':
         filter_stream(sys.argv[2], json.loads(sys.argv[3]))
         sys.exit(0)
     if sys.argv[1] == 'engine-documents':
-        print(json.dumps({'documents': engine_documents(sys.argv[2], json.loads(sys.argv[3]))}))
+        print(json.dumps(engine_documents(sys.argv[2], json.loads(sys.argv[3]))))
         sys.exit(0)
     trace, root_pid = sys.argv[1:3]
     found = verify(trace, root_pid) if tracer_done(trace) else ['tracer still running after the command exited']

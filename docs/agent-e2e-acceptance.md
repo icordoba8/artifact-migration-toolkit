@@ -332,8 +332,15 @@ pipe, list) is bound by the outside-sandbox trace instead, as `traceRefusals` in
 (`source: "cli-trace"`): the `execve` of a receipt-installed node + entry pair, that pid's own fd-1 write of one
 whole JSON document, and that pid's non-zero exit. Only that execve and write survive the trusted sink besides
 ledger records. Agent prose, an `echo` or `printf` of an engine message and provider sandbox lines never count,
-in any composition. Ceiling: an engine started with `NODE_OPTIONS` or `LD_PRELOAD` in its environment is not
-distinguishable, because the trace never records environments. Scored runs default to
+in any composition. The sink also sees each execve environment and reduces it to a verdict; no value, and no
+name outside the list, is persisted. An engine started with `NODE_OPTIONS`, `NODE_PATH`, `NODE_COMPILE_CACHE`,
+`NODE_PRESERVE_SYMLINKS[_MAIN]`, `NODE_REPL_EXTERNAL_MODULE`, `OPENSSL_CONF[_INCLUDE]`, `OPENSSL_MODULES`,
+`OPENSSL_ENGINES`, `GLIBC_TUNABLES`, `GCONV_PATH` or any `LD_*`, or with a cut or unreadable environment, can run
+code before its entry: it binds nothing, is listed by name in `report.traceUnsafeEngines`, and voids every
+plain-word `cli` refusal of that run. Argv between node and the entry fails closed the same way. Named remaining
+paths, not excluded by the trace: a private mount namespace that shadows the node binary, the entry or a shared
+library at the same path (a `mount` is legitimate here, Codex's own sandbox uses it), and Node's legacy
+`$HOME/.node_modules` / `.node_libraries` fallback for a CommonJS `require` nothing else resolves. Scored runs default to
 `--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
 `read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
 `ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.

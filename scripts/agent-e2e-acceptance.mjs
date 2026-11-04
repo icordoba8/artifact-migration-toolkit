@@ -798,8 +798,10 @@ async function score(options, root, output, report) {
       }
     }
     // G1: the rollout's tool results plus every structured refusal the outside-sandbox trace binds to an engine process.
-    report.traceRefusals = options.provider === "codex" ? traceRefusals(ledgerTrace, engines) : [];
-    const refusals = [...(rollout?.refusals ?? []), ...report.traceRefusals];
+    const traced = options.provider === "codex" ? traceRefusals(ledgerTrace, engines) : { refusals: [], unsafeEngines: [] };
+    Object.assign(report, { traceRefusals: traced.refusals, traceUnsafeEngines: traced.unsafeEngines });
+    // A rollout shell item cannot be matched to a pid: once any engine ran with pre-entry code, none of them binds.
+    const refusals = [...(rollout?.refusals ?? []).filter(entry => entry.source !== "cli" || !traced.unsafeEngines.length), ...traced.refusals];
     // Lock-removal review leads from both the provider transcript and the bound rollout.
     const removalLeads = () => [...lockRemovals(combined), ...lockRemovals(rolloutText).map(lead => ({ ...lead, source: "codex-rollout.jsonl" }))];
     report.openspec = { status: "NOT_TESTED", reviewRequired: true, candidates: openspecLeads(agent.stdout) };

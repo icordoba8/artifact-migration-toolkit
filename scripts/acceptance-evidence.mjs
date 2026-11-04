@@ -88,7 +88,8 @@ export async function startLedgerObserver(root, { timeoutMs = 30_000, python = '
 const quote = arg => "'" + arg.replaceAll("'", "'\\''") + "'";
 export const ledgerTraced = ({ command, argv }, trace, { strace = process.env.LEDGER_TRACE_STRACE || 'strace', python = 'python3', engines = [] } = {}) => ({
   command: strace,
-  argv: ['-DD', '-f', '-yy', '-s', String(1 << 24), '--pidns-translation', '--kill-on-exit', '--seccomp-bpf', '-e',
+  // abbrev=!execve shows the sink every execve environment; it persists only a verdict (ledger-trace.py).
+  argv: ['-DD', '-f', '-yy', '-s', String(1 << 24), '--pidns-translation', '--kill-on-exit', '--seccomp-bpf', '-e', 'abbrev=!execve', '-e',
     'trace=execve,read,readv,pread64,preadv,preadv2,write,writev,pwrite64,pwritev,pwritev2,copy_file_range,splice,sendfile,process_vm_writev,open,openat,openat2,creat,truncate,ftruncate,fallocate,link,linkat,unlink,unlinkat,rename,' +
     'renameat,renameat2,symlink,symlinkat,fcntl,mmap,io_uring_setup,open_by_handle_at,mount,umount2,move_mount,' +
     'open_tree,fsmount,mount_setattr,pivot_root,chroot,setns,unshare,clone,clone3,fork,vfork',
@@ -272,10 +273,11 @@ export const traceRefusals = (trace, engines, { python = 'python3' } = {}) => {
   const run = spawnSync(python, [fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'engine-documents', trace, JSON.stringify(engines)],
     { encoding: 'utf8', timeout: 120_000, maxBuffer: 1 << 26 });
   if (run.status !== 0) throw new Error('ACCEPTANCE_TRACE_UNREADABLE: ' + (run.error?.message ?? run.stderr));
-  return JSON.parse(run.stdout).documents.flatMap(({ pid, entry, exitCode, document }) => {
+  const { documents, unsafeEngines } = JSON.parse(run.stdout);
+  return { unsafeEngines, refusals: documents.flatMap(({ pid, entry, exitCode, document }) => {
     const code = structured(document);
     return code && (code !== 'BLOCKED_NOT_STARTED' || exitCode === 2) ? [{ source: 'cli-trace', pid, entry, exitCode, code, codeSource: 'structured' }] : [];
-  });
+  }) };
 };
 
 /**
