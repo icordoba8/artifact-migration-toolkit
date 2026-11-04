@@ -325,13 +325,26 @@ traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13
 Refusal scoring (G1). `read-only`, `live-lock` and `abandoned-lock` require `--provider codex`: a refusal is
 read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.jsonl`), bound to the run by the
 `thread.started` id (headless) or by consumer cwd and launch window (native), copied to
-`codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call, or a
-non-zero shell call whose argv is a receipt-installed engine command (no pipes, lists or substitutions). Agent
-prose, an `echo` of an engine message and provider sandbox lines never count. Scored runs default to
+`codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call (its
+`structuredContent.code` counts even when Codex records the call `failed`), or a non-zero shell call whose argv
+is a receipt-installed engine command (no pipes, lists or substitutions). A composed shell command (heredoc,
+pipe, list) is bound by the outside-sandbox trace instead, as `traceRefusals` in `report.traceRefusals`
+(`source: "cli-trace"`): the `execve` of a receipt-installed node + entry pair, that pid's own fd-1 write of one
+whole JSON document, and that pid's non-zero exit. Only that execve and write survive the trusted sink besides
+ledger records. Agent prose, an `echo` or `printf` of an engine message and provider sandbox lines never count,
+in any composition. Ceiling: an engine started with `NODE_OPTIONS` or `LD_PRELOAD` in its environment is not
+distinguishable, because the trace never records environments. Scored runs default to
 `--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
 `read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
 `ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.
 Template-classified refusals remain visible in the rollout but never satisfy scored refusal checks.
+Module read-only fixture. A module consumer has no bound registry and MCP/run never bootstraps, and Codex's
+shell cannot run the discover bootstrap on a read-only mount. Before `consumer-before.json` is snapshotted the
+runner, as trusted setup, binds the fixture's `.agents/knowledge/migrations/registry.json` in `package.json` and
+seeds a valid `openspec/specs/<target>/spec.md` (`report.readOnlyFixture`): binding alone still blocks on the
+absent OpenSpec. `migration_run` then starts RESOLVE and the mount refuses its first write. A fixture without
+that registry is an `ACCEPTANCE_PRECONDITION`; the seeded OpenSpec cites no API response, so a legacy module with
+API obligations blocks instead of reaching the write.
 Only a direct runner invocation with `--scoring diagnostic --code-source any` permits template fallback.
 Such a run reports `DIAGNOSTIC_ONLY` (or `FAIL`), never a scored PASS, checkpoint or security certification.
 The official launcher fixes both scored/structured flags itself and refuses caller overrides.

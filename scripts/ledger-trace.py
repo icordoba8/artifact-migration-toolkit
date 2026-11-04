@@ -4,8 +4,15 @@ including private filesystem views. No operator-ledger append is exempt in score
 The command must run as `strace <LEDGER_TRACE_FLAGS> -o <trace> -- python3 no-io-uring.py <isolated command>`
 (see ledgerTraced in acceptance-evidence.mjs).
 
-  ledger-trace.py filter <trace>                 strace -o '|...' sink: drops data records of non-ledger fds
+  ledger-trace.py filter <trace> <engines-json>       strace -o '|...' sink: drops data records of non-ledger fds
   ledger-trace.py <trace> <root-pid>                  prints {"violations": [...]}; exit 1 if any
+  ledger-trace.py engine-documents <trace> <engines-json>   prints {"documents": [...]} (G1 CLI refusals)
+
+engines-json is the receipt's [[node, entry], ...]. Besides the ledger, the sink keeps exactly: the execve of such a pair
+(execve("<node>", [argv0, "<entry>", ...]): no node flag can sit before the entry, and strace never prints the environment)
+and that pid's own fd-1 write/writev starting a JSON object. A document counts only if one such write parses whole and that
+pid then exits non-zero, so nothing another process prints, in any shell composition, can be attributed to the engine.
+ponytail: NODE_OPTIONS or LD_PRELOAD in the agent's environment are invisible here; recording them means tracing env, secrets included.
 
 No namespace is trusted: mounts are allowed anywhere (Codex bubblewrap), so every read or append of an fd whose canonical -yy path
 names the ledger has its bytes inspected (any namespace, per shared-fd-table stream, unicode escapes decoded): a relay line read
@@ -27,6 +34,7 @@ relayed = _observer.relayed
 READS = {'read', 'readv', 'pread64', 'preadv', 'preadv2'}
 WRITES = {'write', 'writev'}
 BUFFERED = READS | WRITES | {'pwrite64', 'pwritev', 'pwritev2'}
+FILTERED = BUFFERED | {'execve'}  # Every execve but an installed engine's is dropped: argv is agent content.
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"(\.\.\.)?')
 ESCAPE = re.compile(rb'\\(x[0-9a-fA-F]{2}|[0-7]{1,3}|.)')
 SIMPLE = {b'n': b'\n', b't': b'\t', b'r': b'\r', b'v': b'\v', b'f': b'\f'}
@@ -43,7 +51,13 @@ def unescape(text):
     return ESCAPE.sub(one, text.encode('utf-8', 'surrogateescape'))
 
 
-def filter_stream(trace):
+def engine_pair(text, engines):
+    """True if this execve record's path and argv[1] are a receipt-installed (node, entry) pair."""
+    match = EXECVE.match(text)
+    return bool(match) and list(match.groups()) in engines
+
+
+def filter_stream(trace, engines):
     """strace -o '|...' sink: discard non-ledger read/write buffers before persisting records.
     A record that cannot be attributed is replaced by a REDACTED marker, which verify() rejects as unparsed."""
     # strace -DD execs the tracee in its original process. script(1) waits for all its children;
@@ -51,7 +65,17 @@ def filter_stream(trace):
     if os.fork():
         return
     os.setsid()
-    pending = {}
+    pending, engine = {}, set()
+
+    def keep(pid, name, rest):
+        if name == 'execve':
+            return engine_pair(rest, engines)
+        return bool(LEDGER.search(rest.split(',', 1)[0])) or (pid in engine and name in WRITES and bool(STDOUT_OBJECT.match(rest)))
+
+    def execed(pid, kept, result):
+        if not FAILED.search(result):
+            (engine.add if kept else engine.discard)(pid)
+
     with open(trace, 'w', errors='surrogateescape') as out:
         for raw in sys.stdin:
             match = LINE.match(raw.rstrip('\n'))
@@ -59,18 +83,27 @@ def filter_stream(trace):
                 raw = 'REDACTED unparsable trace record\n'
             else:
                 pid, name, rest, resumed = match.group(1), match.group(2), match.group(3), match.group(4)
-                if name in BUFFERED and rest.endswith('<unfinished ...>'):
-                    pending[pid] = bool(LEDGER.search(rest.split(',', 1)[0]))
+                if (match.group(6) or '').startswith('+++'):
+                    engine.discard(pid)  # The pid is gone and may be reused.
+                if name in FILTERED and rest.endswith('<unfinished ...>'):
+                    pending[pid] = keep(pid, name, rest)
                     if not pending[pid]:
                         continue
-                elif name in BUFFERED and not LEDGER.search(rest.split(',', 1)[0]):
-                    continue
-                elif resumed in BUFFERED:
+                elif name in FILTERED:
+                    kept = keep(pid, name, rest)
+                    if name == 'execve':
+                        execed(pid, kept, rest)
+                    if not kept:
+                        continue
+                elif resumed in FILTERED:
                     known = pending.pop(pid, None)
                     if known is None:
                         raw = 'REDACTED read resumed without its start (pid %s)\n' % pid
-                    elif not known:
-                        continue
+                    else:
+                        if resumed == 'execve':
+                            execed(pid, known, match.group(5))
+                        if not known:
+                            continue
             out.write(raw)
             out.flush()
 
@@ -80,6 +113,8 @@ DESTRUCTIVE = {'creat', 'truncate', 'ftruncate', 'fallocate', 'link', 'linkat', 
                'renameat', 'renameat2', 'symlink', 'symlinkat'}
 LINE = re.compile(r'^(\d+) +(?:(\w+)\((.*)|<\.\.\. (\w+) resumed>(.*)|(\+\+\+ .*|--- .*))$')
 FAILED = re.compile(r'\)\s+= (?:-1 |\?)')
+EXECVE = re.compile(r'"((?:[^"\\]|\\.)*)", \["(?:[^"\\]|\\.)*", "((?:[^"\\]|\\.)*)"')
+STDOUT_OBJECT = re.compile(r'1(?:<.*?>)?, (?:\[\{iov_base=)?"\{')
 
 
 def calls(lines):
@@ -198,6 +233,31 @@ def verify(trace, root_pid):
     return violations
 
 
+def engine_documents(trace, engines):
+    """JSON objects an installed engine process wrote whole to its own fd 1 and then exited non-zero."""
+    found, running = [], {}
+    with open(trace, errors='surrogateescape') as handle:
+        for pid, name, text in calls(handle):
+            if name == 'execve' and not FAILED.search(text):
+                running.pop(pid, None)
+                if engine_pair(text, engines):
+                    running[pid] = {'entry': EXECVE.match(text).group(2), 'documents': []}
+            elif name == 'status' and text.startswith('+++'):
+                process = running.pop(pid, None)
+                status = re.match(r'\+\+\+ exited with (\d+) \+\+\+', text)
+                if process and status and status.group(1) != '0':
+                    found += [{'pid': pid, 'entry': process['entry'], 'exitCode': int(status.group(1)), 'document': document}
+                              for document in process['documents']]
+            elif pid in running and name in WRITES and STDOUT_OBJECT.match(text) and not FAILED.search(text):
+                try:
+                    document = json.loads(b''.join(unescape(data) for data, _ in QUOTED.findall(text.split(',', 1)[1])))
+                except ValueError:
+                    continue
+                if isinstance(document, dict):
+                    running[pid]['documents'].append(document)
+    return found
+
+
 def tracer_done(trace, seconds=10):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -218,7 +278,10 @@ def tracer_done(trace, seconds=10):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'filter':
-        filter_stream(sys.argv[2])
+        filter_stream(sys.argv[2], json.loads(sys.argv[3]))
+        sys.exit(0)
+    if sys.argv[1] == 'engine-documents':
+        print(json.dumps({'documents': engine_documents(sys.argv[2], json.loads(sys.argv[3]))}))
         sys.exit(0)
     trace, root_pid = sys.argv[1:3]
     found = verify(trace, root_pid) if tracer_done(trace) else ['tracer still running after the command exited']

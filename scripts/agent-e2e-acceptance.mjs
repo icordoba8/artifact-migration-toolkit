@@ -14,7 +14,7 @@
  * only and its report says it is not security-certified.
  */
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict } from "./acceptance-evidence.mjs";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict, traceRefusals } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
@@ -388,6 +388,34 @@ async function openGate(agentRun, gate, lock, report) {
   }
 }
 
+/**
+ * read-only + module, trusted setup. A module consumer has no bound registry and MCP/run never bootstraps, so the engine
+ * answers BLOCKED / NOT_STARTED before any write; bound but without an OpenSpec it blocks too, wanting a proposal on stdin
+ * through discover, which Codex's shell cannot run on a read-only mount (bwrap fails). The fixture's own registry binding
+ * and a valid OpenSpec let the agent's plain `migration_run` start RESOLVE, whose first write the mount refuses.
+ * Creates no module entry, state or record.
+ */
+const READ_ONLY_REGISTRY = ".agents/knowledge/migrations/registry.json";
+const READ_ONLY_OPENSPEC = `### Requirement: FIXTURE-REQ-001 Read-only consumer
+The migration MUST stop at the engine's own file-system refusal.
+
+#### Scenario: FIXTURE-SCN-001 Read-only mount
+The first write is refused and the consumer stays unchanged.
+`;
+async function bindReadOnlyModule(root, target) {
+  const configPath = path.join(root, "package.json");
+  if (!await exists(configPath) || !await exists(path.join(root, READ_ONLY_REGISTRY)))
+    fail("ACCEPTANCE_PRECONDITION: a read-only module fixture needs package.json and " + READ_ONLY_REGISTRY);
+  const project = JSON.parse(await readFile(configPath, "utf8"));
+  ((project.config ??= {}).startMigration ??= {}).registry = READ_ONLY_REGISTRY;
+  await writeFile(configPath, JSON.stringify(project, null, 2) + "\n");
+  const openspec = path.join("openspec/specs", target, "spec.md");
+  if (await exists(path.join(root, openspec))) return { registry: READ_ONLY_REGISTRY, openspec, seeded: false };
+  await mkdir(path.dirname(path.join(root, openspec)), { recursive: true });
+  await writeFile(path.join(root, openspec), READ_ONLY_OPENSPEC, { flag: "wx" });
+  return { registry: READ_ONLY_REGISTRY, openspec, seeded: true };
+}
+
 export function acceptanceVerdict(goal, agent, bootstrapped, finished, verified, progress) {
   if (agent.code !== 0 || agent.timedOut || agent.overflow) return "FAIL";
   if (goal === "bootstrap") return bootstrapped ? "BOOTSTRAP_PASS" : "FAIL";
@@ -667,6 +695,7 @@ async function score(options, root, output, report) {
       const fifo = await run({ command: "mkfifo", argv: ["-m", "600", gate], cwd: root, timeoutMs: 10000 });
       if (fifo.code !== 0) fail("ACCEPTANCE_PRECONDITION: cannot create the plant gate: " + fifo.stderr.trim());
     }
+    if (options.scenario === "read-only" && options.kind === "module") report.readOnlyFixture = await bindReadOnlyModule(root, options.target);
     const beforeTree = ["read-only", "live-lock"].includes(options.scenario) ? await snapshotTree(root) : null;
     if (beforeTree) await put("consumer-before.json", JSON.stringify(beforeTree, null, 2));
     let agent, interruptedAt;
@@ -699,7 +728,8 @@ async function score(options, root, output, report) {
     }
     const ledgerObserver = await startLedgerObserver(root);
     const ledgerTrace = path.join(output, "ledger-syscalls.log");
-    launch = ledgerTraced(launch, ledgerTrace);
+    const engines = Object.values(installed.commands).filter(command => Array.isArray(command) && command.length === 2);
+    launch = ledgerTraced(launch, ledgerTrace, { engines });
     report.startedAt = new Date().toISOString();
     report.launch = { ...launch, cwd: root, startedAt: report.startedAt, endedAt: null, node: process.version,
       harnessCommit: process.env.AMT_HARNESS_COMMIT ?? null, base: process.env.AMT_BASE ?? null, patchSha256: process.env.AMT_PATCH_SHA256 ?? null };
@@ -762,11 +792,14 @@ async function score(options, root, output, report) {
       if (found) {
         rolloutText = found.text;
         await put("codex-rollout.jsonl", found.text);
-        rollout = codexRollout(found.text, Object.values(installed.commands).filter(command => Array.isArray(command) && command.length === 2));
+        rollout = codexRollout(found.text, engines);
         report.rollout = { source: found.file, copy: "codex-rollout.jsonl", sha256: sha256(found.text), threadId: rollout.meta.id,
           turns: rollout.turns, prompts: rollout.prompts.length, refusals: rollout.refusals };
       }
     }
+    // G1: the rollout's tool results plus every structured refusal the outside-sandbox trace binds to an engine process.
+    report.traceRefusals = options.provider === "codex" ? traceRefusals(ledgerTrace, engines) : [];
+    const refusals = [...(rollout?.refusals ?? []), ...report.traceRefusals];
     // Lock-removal review leads from both the provider transcript and the bound rollout.
     const removalLeads = () => [...lockRemovals(combined), ...lockRemovals(rolloutText).map(lead => ({ ...lead, source: "codex-rollout.jsonl" }))];
     report.openspec = { status: "NOT_TESTED", reviewRequired: true, candidates: openspecLeads(agent.stdout) };
@@ -819,7 +852,7 @@ async function score(options, root, output, report) {
         if (left.length) {
           report.lock.recovery = "BLOCKED_OWNER_PROOF";
           fail("ACCEPTANCE_LOCK_OWNER_PROOF: the abandoned owner still holds the lock; engine refusal codes: " +
-            JSON.stringify((rollout?.refusals ?? []).map(refusal => refusal.code)) + ". Lock preserved; never removed or relabeled");
+            JSON.stringify(refusals.map(refusal => refusal.code)) + ". Lock preserved; never removed or relabeled");
         }
         if (report.lock.removalLeads.length) {
           report.lock.recovery = "REMOVED_WITHOUT_OWNER_PROOF";
@@ -849,7 +882,6 @@ async function score(options, root, output, report) {
       await put("consumer-after.json", JSON.stringify(afterTree, null, 2));
       // G1: only an engine tool result with this scenario's code counts; A3: a scored joint run requires a structured code.
       const acceptedCodes = options.scenario === "read-only" ? ["EROFS", "EACCES", "EPERM"] : ["LOCK_HELD"];
-      const refusals = rollout?.refusals ?? [];
       const refusal = refusals.find(entry => acceptedCodes.includes(entry.code) &&
         (options.codeSource === "any" || entry.codeSource === "structured")) ?? null;
       report.safety = { reviewRequired: true, unchanged: sameTree(beforeTree, afterTree), acceptedCodes, codeSourceRequired: options.codeSource,

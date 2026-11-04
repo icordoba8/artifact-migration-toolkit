@@ -5,14 +5,14 @@ import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, sym
 import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
 import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 import "./support/ledger-observer-tests.mjs";
 
-import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout } from '../scripts/acceptance-evidence.mjs';
+import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout, traceRefusals } from '../scripts/acceptance-evidence.mjs';
 import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src/lifecycle/index.mjs';
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
@@ -87,6 +87,20 @@ const installedArtifactCandidate = async root => {
   await writeFile(markerPath, JSON.stringify(marker));
   return installed;
 };
+/** A disposable module consumer shaped like the official fixture: legacy/ and target/ in one repository, registry unbound, nothing registered. */
+const installedModuleCandidate = async root => {
+  const installed = await installedCandidate(root);
+  await mkdir(path.join(root, 'legacy/src/features/auth'), { recursive: true });
+  await writeFile(path.join(root, 'legacy/src/features/auth/index.js'), 'exports.login = () => true;\n');
+  await writeFile(path.join(root, 'legacy/package.json'), '{"name":"legacy-fixture"}\n');
+  await writeFile(path.join(installed.target, 'package.json'), '{"name":"target-fixture","type":"module"}\n');
+  await mkdir(path.join(installed.target, '.agents/knowledge/migrations'), { recursive: true });
+  await writeFile(path.join(installed.target, '.agents/knowledge/migrations/registry.json'),
+    JSON.stringify({ version: 1, projects: { legacy: { root: '../../../../legacy' }, target: { root: '../../..' } }, modules: {} }, null, 2) + '\n');
+  for (const args of [['init', '-q'], ['add', 'legacy', 'target'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Disposable test fixture']])
+    execFileSync('git', args, { cwd: root });
+  return installed;
+};
 /**
  * A stand-in for Codex 0.165.0: writes a rollout in its format under $CODEX_HOME, prints thread.started (exec),
  * and runs FAKE_CODEX_CMD through bash -lc as one CommandExecution item. Native turns come from FAKE_CODEX_PROMPTS.
@@ -114,6 +128,16 @@ for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.F
     type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'completed',
     result: { isError: true, content: [{ type: 'text', text: "EROFS: read-only file system, mkdir '/fixture'" }] }
   });
+  if (index === 0 && process.env.FAKE_CODEX_MCP_CALL) {
+    // The release's real transport, called as Codex calls it: an isError result is recorded "failed" with error null.
+    const { transport, arguments: toolArguments } = JSON.parse(process.env.FAKE_CODEX_MCP_CALL);
+    const input = [{ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-codex', version: '1' } } },
+      { method: 'notifications/initialized' }, { id: 2, method: 'tools/call', params: { name: 'migration_run', arguments: toolArguments } }];
+    const server = spawnSync(process.execPath, ['--input-type=module', '-e', 'await (await import(process.argv[1])).serve({ withoutRelay: true });', transport],
+      { input: input.map(message => JSON.stringify({ jsonrpc: '2.0', ...message })).join('\\n') + '\\n', encoding: 'utf8', timeout: 30000 });
+    const result = server.stdout.trim().split('\\n').map(line => JSON.parse(line)).find(message => message.id === 2).result;
+    item({ type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status: result.isError ? 'failed' : 'completed', error: null, result });
+  }
   if (index === 0 && process.env.FAKE_CODEX_CMD) {
     const run = spawnSync('/bin/bash', ['-lc', process.env.FAKE_CODEX_CMD], { encoding: 'utf8' });
     console.log(run.stdout + run.stderr);
@@ -981,6 +1005,126 @@ test('classifier: only engine tool results carry refusal codes; structured codes
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test('classifier: a failed MCP call keeps its structured code; without one it is never structured', () => {
+  const failed = (structuredContent, text) => ({ type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'failed', error: null,
+    result: { isError: true, content: [{ type: 'text', text }], ...(structuredContent ? { structuredContent } : {}) } });
+  const erofs = "EROFS: read-only file system, access '/c/.agents/knowledge/migrations'";
+  const lines = [{ type: 'session_meta', payload: { id: 't1', cwd: '/c', timestamp: '2026-11-04T01:32:00.000Z' } },
+    ...[failed({ code: 'EROFS', errno: -30, syscall: 'access', path: '/c/.agents/knowledge/migrations' }, erofs), failed(null, erofs), failed({ reason: 'no code' }, erofs)]
+      .map(item => ({ type: 'event_msg', payload: { type: 'item_completed', item } }))].map(line => JSON.stringify(line));
+  assert.deepEqual(codexRollout(lines.join('\n') + '\n', []).refusals.map(({ code, codeSource }) => [code, codeSource]),
+    [['EROFS', 'structured'], [null, 'template'], [null, 'template']]);
+});
+
+test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zero exit, never another process\'s text', async () => {
+  const node = '/opt/node', entry = '/store/r/src/cli/discover-module.mjs';
+  const exec = pid => `${pid} execve("${node}", ["${node}", "${entry}", "auth"], 0x7ffd /* 9 vars */) = 0`;
+  const held = String.raw`"{\n  \"code\": \"LOCK_HELD\"\n}\n"`;
+  const write = (pid, fd = 1) => `${pid} write(${fd}<pipe:[1]>, ${held}, 26) = 26`;
+  const accepted = (...lines) => {
+    const trace = path.join(scratch, 'agent-e2e-binding-' + process.pid + '.trace');
+    return writeFile(trace, lines.join('\n') + '\n').then(() => traceRefusals(trace, [[node, entry]]).map(({ pid, exitCode, code }) => [pid, exitCode, code]))
+      .finally(() => rm(trace, { force: true }));
+  };
+  const exited = (pid, code = 1) => `${pid} +++ exited with ${code} +++`;
+  assert.deepEqual(await accepted(exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7)), [['7', 1, 'LOCK_HELD']]);
+  assert.deepEqual(await accepted(`7 execve("${node}", ["${node}", "${entry}" <unfinished ...>`, '8 +++ exited with 0 +++', '7 <... execve resumed>, 0x7ffd /* 9 vars */) = 0',
+    String.raw`7 writev(1<pipe:[1]>, [{iov_base="{\"code\":\"EROFS\"}", iov_len=16}], 1) = 16`, exited(7, 3)), [['7', 3, 'EROFS']]);
+  const rejected = {
+    'engine exit 0': [exec(7), write(7), exited(7, 0)],
+    'engine killed': [exec(7), write(7), '7 +++ killed by SIGKILL +++'],
+    'stderr, not stdout': [exec(7), write(7, 2), exited(7)],
+    'a shell echo beside the engine': [write(6), exec(7), exited(7)],
+    'text after the engine exited, on a reused pid': [exec(7), exited(7, 0), write(7), exited(7)],
+    'a signal before the exit': [exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7, 0)],
+    'a failed exec': [`7 execve("${node}", ["${node}", "${entry}"], 0x7ffd /* 9 vars */) = -1 ENOENT (No such file or directory)`, write(7), exited(7)],
+    'a node flag before the entry': [`7 execve("${node}", ["${node}", "--import", "${entry}"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
+    'another node binary': [`7 execve("/tmp/node", ["/tmp/node", "${entry}"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
+    'a document split across writes': [exec(7), String.raw`7 write(1<pipe:[1]>, "{\"code\":", 8) = 8`, String.raw`7 write(1<pipe:[1]>, "\"LOCK_HELD\"}", 12) = 12`, exited(7)],
+  };
+  for (const [name, lines] of Object.entries(rejected)) assert.deepEqual(await accepted(...lines), [], name);
+});
+
+test('a composed engine call counts through the trace; shell text never does (H07)',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-composed-'));
+    try {
+      const { target, quoted, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const discover = quoted('artifact-migration-discover'), live = ['--scenario', 'live-lock'];
+      const registry = path.join(target, '.agents/knowledge/migrations/registry.json');
+      const proposal = "<<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL";
+      const heredoc = `${discover} auth --target auth --mode auto --ponytail full --design-source target-system --registry '${registry}' --openspec-proposal-stdin ${proposal}`;
+      const fake = String.raw`'{\n  "code": "LOCK_HELD"\n}\n'`;
+      const scored = (name, command) => {
+        const result = runCodex(path.join(root, name), live, command);
+        return { result, report: JSON.parse(readFileSync(path.join(root, name, 'report.json'), 'utf8')), trace: () => readFileSync(path.join(root, name, 'ledger-syscalls.log'), 'utf8') };
+      };
+      for (const [name, command] of [['heredoc', heredoc], ['compound', `cd . && ${heredoc} | cat; true`]]) {
+        const { result, report } = scored(name, command);
+        assert.equal(result.status, 0, name + JSON.stringify([report.failure, report.safety, report.traceRefusals]));
+        assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS', name);
+        assert.deepEqual([report.safety.refusal.source, report.safety.refusal.code, report.safety.refusal.codeSource], ['cli-trace', 'LOCK_HELD', 'structured'], name);
+        assert.ok(!report.rollout.refusals.some(entry => entry.code === 'LOCK_HELD'), 'the rollout alone must not bind a composed command');
+      }
+      // One run holds every spoof, each around real engine calls that did not refuse with LOCK_HELD: any of them binding would pass it.
+      const node = JSON.parse(await readFile(path.join(target, '.artifact-migration-tools/codex.json'), 'utf8')).commands['artifact-migration-discover'][0];
+      const { result, report, trace } = scored('spoofs', [`echo '{"code":"LOCK_HELD"}'`, `${discover} --help`, `${discover} auth --status`, `printf ${fake}`,
+        `printf ${fake} | ${discover} auth --status`, `'${node}' -e 'process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }) + "\\n"); process.exit(1)'`,
+        `echo "Another migration command holds the lock for 'auth' at /c/auth.lock (pid 7). Wait for it to finish; the lock is reclaimed automatically once that process is gone."`,
+        'exit 1'].join('; '));
+      assert.equal(result.status, 1, JSON.stringify(report.safety));
+      assert.equal(report.safety.refusal, null, JSON.stringify(report.safety));
+      assert.match(report.failure, /Safety refusal not proven/);
+      assert.ok(report.traceRefusals.every(entry => entry.code === 'BLOCKED_NOT_STARTED'), JSON.stringify(report.traceRefusals));
+      assert.doesNotMatch(trace(), /LOCK_HELD/);
+      // Trust set kept narrow: only the engine's own execve survives the sink, never another command's argv.
+      assert.ok(trace().split('\n').filter(line => /^\d+ +execve\(/.test(line)).every(line => line.includes('discover-module.mjs')));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('read-only module: trusted setup reaches the write path and the real engine refuses it; NOT_STARTED stays unaccepted (H11)',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-readonly-module-'));
+    try {
+      const { target, release, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const transport = 'file://' + path.join(release, 'packages/migration-engine/src/transport/mcp.mjs');
+      const call = (cwd, name) => {
+        const output = path.join(root, name);
+        const result = runCodex(output, ['--scenario', 'read-only'], '', { FAKE_CODEX_MCP_CALL: JSON.stringify({ transport,
+          arguments: { cwd, module: 'auth', target: 'auth', mode: 'auto', ponytail: 'full', designSource: 'target-system' } }) });
+        return { result, output };
+      };
+      // A consumer outside the binding: the real engine answers NOT_STARTED, which never satisfies the scenario.
+      const unbound = path.join(root, 'unbound');
+      await mkdir(unbound);
+      await writeFile(path.join(unbound, 'package.json'), '{"name":"unbound"}\n');
+      const blocked = call(unbound, 'not-started');
+      const blockedReport = JSON.parse(await readFile(path.join(blocked.output, 'report.json')));
+      assert.equal(blocked.result.status, 1);
+      assert.deepEqual(blockedReport.rollout.refusals.map(({ code, codeSource }) => [code, codeSource]), [['BLOCKED_NOT_STARTED', 'structured']]);
+      assert.equal(blockedReport.safety.refusal, null);
+      assert.equal(blockedReport.safety.notStarted, true);
+      assert.match(blockedReport.failure, /Safety refusal not proven/);
+      // The bound fixture, snapshotted bound: the same `migration_run` starts RESOLVE and the mount refuses its first write.
+      const { result, output } = call(target, 'refused');
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(result.status, 0, JSON.stringify([report.failure, report.rollout?.refusals]));
+      assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.deepEqual([report.safety.refusal.source, report.safety.refusal.tool, report.safety.refusal.codeSource], ['mcp', 'migration_run', 'structured']);
+      assert.ok(['EROFS', 'EACCES', 'EPERM'].includes(report.safety.refusal.code), report.safety.refusal.code);
+      assert.equal(report.safety.unchanged, true);
+      assert.deepEqual(report.readOnlyFixture, { registry: '.agents/knowledge/migrations/registry.json', openspec: 'openspec/specs/auth/spec.md', seeded: false });
+      assert.equal(JSON.parse(await readFile(path.join(target, 'package.json'), 'utf8')).config.startMigration.registry, report.readOnlyFixture.registry);
+      assert.ok('openspec/specs/auth/spec.md' in JSON.parse(await readFile(path.join(output, 'consumer-before.json'), 'utf8')));
+      await assert.rejects(stat(path.join(target, '.agents/knowledge/migrations/modules/auth')), { code: 'ENOENT' });
+      // Setup is the fixture's, never a repair: a consumer without the fixture's registry is refused before spawn.
+      await rm(path.join(target, '.agents/knowledge/migrations/registry.json'));
+      const missing = call(target, 'no-registry');
+      assert.equal(missing.result.status, 1);
+      assert.match(JSON.parse(await readFile(path.join(missing.output, 'report.json'))).failure, /ACCEPTANCE_PRECONDITION: a read-only module fixture needs/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
 test('a run past --not-after starts nothing and is NOT_RUN; one rerun, on a fresh consumer only', async () => {
   const root = await mkdtemp(path.join(scratch, 'agent-e2e-deadline-'));
   try {
@@ -1099,7 +1243,7 @@ test('scored defaults reject template-only refusals; explicit diagnostics never 
   { skip: codexReady(isolationAvailable) }, async () => {
     const root = await mkdtemp(path.join(scratch, 'agent-e2e-structured-default-'));
     try {
-      const { runCodex } = await codexCandidate(root);
+      const { runCodex } = await codexCandidate(root, installedModuleCandidate);
       for (const diagnostic of [false, true]) {
         const output = path.join(root, diagnostic ? 'diagnostic' : 'scored');
         const result = runCodex(output, ['--scenario', 'read-only',
