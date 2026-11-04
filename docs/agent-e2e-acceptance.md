@@ -325,13 +325,51 @@ traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13
 Refusal scoring (G1). `read-only`, `live-lock` and `abandoned-lock` require `--provider codex`: a refusal is
 read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.jsonl`), bound to the run by the
 `thread.started` id (headless) or by consumer cwd and launch window (native), copied to
-`codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call, or a
-non-zero shell call whose argv is a receipt-installed engine command (no pipes, lists or substitutions). Agent
-prose, an `echo` of an engine message and provider sandbox lines never count. Scored runs default to
+`codex-rollout.jsonl` and hashed. Owner ruling 2026-11-04: a scored refusal is accepted only from a structured result of the verified, sealed
+`start-migration` MCP server (`structuredContent.code`, even on a call Codex records `failed`). Every CLI refusal, plain
+or trace-bound, is recorded in `report.cliRefusalsRecordedNotAccepted` (and `report.traceRefusals`) and never accepted
+toward any verdict: no trace rule below proves the executed file and mount view of a CLI process. The CLI rules that follow
+describe what is recorded. Recorded engine tool results: a failed `start-migration` MCP call (its
+`structuredContent.code` counts even when Codex records the call `failed`), or a non-zero shell call whose argv
+is a receipt-installed engine command (no pipes, lists or substitutions). A composed shell command (heredoc,
+pipe, list) is bound by the outside-sandbox trace instead, as `traceRefusals` in `report.traceRefusals`
+(`source: "cli-trace"`): the `execve` of a receipt-installed node + entry pair, that pid's own fd-1 write of one
+whole JSON document, and that pid's non-zero exit. Only that execve and write survive the trusted sink besides
+ledger records. Agent prose, an `echo` or `printf` of an engine message and provider sandbox lines never count,
+in any composition. The sink also sees each execve environment and reduces it to a verdict; no value, and no
+name outside the list, is persisted. An engine started with `NODE_OPTIONS`, `NODE_PATH`, `NODE_COMPILE_CACHE`,
+`NODE_PRESERVE_SYMLINKS[_MAIN]`, `NODE_REPL_EXTERNAL_MODULE`, `OPENSSL_CONF[_INCLUDE]`, `OPENSSL_MODULES`,
+`OPENSSL_ENGINES`, `GLIBC_TUNABLES`, `GCONV_PATH` or any `LD_*`, or with a cut or unreadable environment, can run
+code before its entry: it binds nothing, is listed by name in `report.traceUnsafeEngines`, and voids every
+plain-word `cli` refusal of that run. Argv between node and the entry fails closed the same way. A shadow mount over
+the node binary, the entry or a library needs a user namespace of its own, because the sandbox holds no capability
+and `setns` fails the gate, so an engine also binds nothing unless its lineage created exactly 3 user namespaces
+(the runner's isolation plus Codex 0.165.0's bwrap, measured on real runs; depth 1, the runner without the sandbox, is
+never accepted, since two nested namespaces from there would forge 3): `USERNS_DEPTH_<n>` in
+`report.traceUnsafeEngines`. A Codex upgrade must re-measure that baseline. A path to the node binary or entry can also
+be replaced without capabilities where an ancestor is writable (rename it away, run a fake tree at the same path,
+rename it back before verification): any successful rename/link/symlink/unlink naming the node or entry path or an
+ancestor of it (a relative path the trace cannot resolve counts if it climbs with `..` or names any component of
+those paths), or a writable open of either file, unbinds every engine of the run (`ENTRY_PATH_CHANGED`). With the path
+proven unchanged, the runner hashes the node file outside the sandbox: anything but the pinned Node 22.13.0 is
+`NODE_UNPINNED`. Named remaining path: Node's legacy
+`$HOME/.node_modules` / `.node_libraries` fallback, used only by a CommonJS `require` nothing else resolves.
+Scored runs default to
 `--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
 `read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
 `ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.
 Template-classified refusals remain visible in the rollout but never satisfy scored refusal checks.
+Module read-only fixture. A module consumer has no bound registry and MCP/run never bootstraps, and Codex's
+shell cannot run the discover bootstrap on a read-only mount. Before `consumer-before.json` is snapshotted the
+runner, as trusted setup, binds the fixture's `.agents/knowledge/migrations/registry.json` in `package.json` and
+seeds a valid `openspec/specs/<target>/spec.md` (`report.moduleFixture`): binding alone still blocks on the
+absent OpenSpec. `migration_run` then starts RESOLVE and the mount refuses its first write. A fixture without
+that registry is an `ACCEPTANCE_PRECONDITION`; the seeded OpenSpec cites no API response, so a legacy module with
+API obligations blocks instead of reaching the write.
+Module live-lock fixture: the same binding is applied before the trusted holder takes the lock, so the lock is
+on a migration in progress and the agent's `migration_run` reaches it through MCP (structured `LOCK_HELD`).
+Holder alive, lock bytes unchanged and consumer unchanged are still required. An MCP code read only from text
+content is recorded with `codeSource: "text"`, never structured, never accepted.
 Only a direct runner invocation with `--scoring diagnostic --code-source any` permits template fallback.
 Such a run reports `DIAGNOSTIC_ONLY` (or `FAIL`), never a scored PASS, checkpoint or security certification.
 The official launcher fixes both scored/structured flags itself and refuses caller overrides.

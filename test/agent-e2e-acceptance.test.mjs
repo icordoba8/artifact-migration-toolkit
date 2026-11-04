@@ -5,14 +5,14 @@ import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, sym
 import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
 import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 import "./support/ledger-observer-tests.mjs";
 
-import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout } from '../scripts/acceptance-evidence.mjs';
+import { checkpoint, verifyCheckpoint, snapshotTree, sameTree, openspecLeads, startLockHolder, sha256, codexRollout, findCodexRollout, traceRefusals } from '../scripts/acceptance-evidence.mjs';
 import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src/lifecycle/index.mjs';
 
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
@@ -68,6 +68,7 @@ const installedCandidate = async (root, verifierHome = root) => {
       "artifact-migrate": [process.execPath, path.join(release, "packages/migration-engine", pkg.bin["artifact-migrate"])],
       "artifact-migration-discover": [process.execPath,
         path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-discover"])],
+      "artifact-migration-run": [process.execPath, path.join(release, "packages/migration-engine", pkg.bin["artifact-migration-run"])],
     } });
   await writeFile(receiptPath, receipt);
   return { target, bin, verifier, pin, release, receiptPath, receipt };
@@ -85,6 +86,20 @@ const installedArtifactCandidate = async root => {
   const marker = JSON.parse(await readFile(markerPath, 'utf8'));
   Object.assign(marker, { kind: 'artifact', source: 'legacy/source.js', sourceRoot: target, artifactTarget: 'src/result.js' });
   await writeFile(markerPath, JSON.stringify(marker));
+  return installed;
+};
+/** A disposable module consumer shaped like the official fixture: legacy/ and target/ in one repository, registry unbound, nothing registered. */
+const installedModuleCandidate = async root => {
+  const installed = await installedCandidate(root);
+  await mkdir(path.join(root, 'legacy/src/features/auth'), { recursive: true });
+  await writeFile(path.join(root, 'legacy/src/features/auth/index.js'), 'exports.login = () => true;\n');
+  await writeFile(path.join(root, 'legacy/package.json'), '{"name":"legacy-fixture"}\n');
+  await writeFile(path.join(installed.target, 'package.json'), '{"name":"target-fixture","type":"module"}\n');
+  await mkdir(path.join(installed.target, '.agents/knowledge/migrations'), { recursive: true });
+  await writeFile(path.join(installed.target, '.agents/knowledge/migrations/registry.json'),
+    JSON.stringify({ version: 1, projects: { legacy: { root: '../../../../legacy' }, target: { root: '../../..' } }, modules: {} }, null, 2) + '\n');
+  for (const args of [['init', '-q'], ['add', 'legacy', 'target'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Disposable test fixture']])
+    execFileSync('git', args, { cwd: root });
   return installed;
 };
 /**
@@ -114,8 +129,20 @@ for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.F
     type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'completed',
     result: { isError: true, content: [{ type: 'text', text: "EROFS: read-only file system, mkdir '/fixture'" }] }
   });
+  if (index === 0 && process.env.FAKE_CODEX_MCP_CALL) {
+    // The release's real transport, called as Codex calls it: an isError result is recorded "failed" with error null.
+    const { transport, arguments: toolArguments } = JSON.parse(process.env.FAKE_CODEX_MCP_CALL);
+    const input = [{ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-codex', version: '1' } } },
+      { method: 'notifications/initialized' }, { id: 2, method: 'tools/call', params: { name: 'migration_run', arguments: toolArguments } }];
+    const server = spawnSync(process.execPath, ['--input-type=module', '-e', 'await (await import(process.argv[1])).serve({ withoutRelay: true });', transport],
+      { input: input.map(message => JSON.stringify({ jsonrpc: '2.0', ...message })).join('\\n') + '\\n', encoding: 'utf8', timeout: 60000 }); // Codex's default MCP tool_timeout_sec; the engine waits 30 s on a held lock
+    const result = server.stdout.trim().split('\\n').map(line => JSON.parse(line)).find(message => message.id === 2).result;
+    if (process.env.FAKE_CODEX_MCP_TEXT_ONLY) delete result.structuredContent;
+    item({ type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status: result.isError ? 'failed' : 'completed', error: null, result });
+  }
   if (index === 0 && process.env.FAKE_CODEX_CMD) {
-    const run = spawnSync('/bin/bash', ['-lc', process.env.FAKE_CODEX_CMD], { encoding: 'utf8' });
+    // Codex's bwrap sandbox: two user namespaces under the runner's, so agent shells sit at depth 3 as in scored runs.
+    const run = spawnSync('unshare', ['-Uc', 'unshare', '-Uc', '/bin/bash', '-lc', process.env.FAKE_CODEX_CMD], { encoding: 'utf8' });
     console.log(run.stdout + run.stderr);
     item({ type: 'CommandExecution', command: ['/bin/bash', '-lc', process.env.FAKE_CODEX_CMD], exit_code: run.status,
       aggregated_output: run.stdout + run.stderr, status: 'completed' });
@@ -141,6 +168,7 @@ const codexCandidate = async (root, install = installedCandidate) => {
   await writeFile(path.join(installed.bin, 'codex'), FAKE_CODEX, { mode: 0o755 });
   const quoted = name => receipt.commands[name].map(x => "'" + x + "'").join(' ');
   const env = { ...process.env, PATH: installed.bin + path.delimiter + process.env.PATH, CODEX_HOME: path.join(root, 'codex-home') };
+  for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH']) delete env[name]; // The launcher's env -i, not the host's.
   const runCodex = (output, argv, cmd, extraEnv = {}) => spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', installed.target,
     '--module', 'auth', '--target', 'auth', '--output', output, '--expected-pin', installed.pin, ...argv],
   { timeout: 90000, encoding: 'utf8', env: { ...env, FAKE_CODEX_CMD: cmd, ...extraEnv } });
@@ -981,6 +1009,293 @@ test('classifier: only engine tool results carry refusal codes; structured codes
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test('classifier: a failed MCP call keeps its structured code; without one it is never structured', () => {
+  const failed = (structuredContent, text) => ({ type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'failed', error: null,
+    result: { isError: true, content: [{ type: 'text', text }], ...(structuredContent ? { structuredContent } : {}) } });
+  const erofs = "EROFS: read-only file system, access '/c/.agents/knowledge/migrations'";
+  const lines = [{ type: 'session_meta', payload: { id: 't1', cwd: '/c', timestamp: '2026-11-04T01:32:00.000Z' } },
+    ...[failed({ code: 'EROFS', errno: -30, syscall: 'access', path: '/c/.agents/knowledge/migrations' }, erofs), failed(null, erofs), failed({ reason: 'no code' }, erofs)]
+      .map(item => ({ type: 'event_msg', payload: { type: 'item_completed', item } }))].map(line => JSON.stringify(line));
+  assert.deepEqual(codexRollout(lines.join('\n') + '\n', []).refusals.map(({ code, codeSource }) => [code, codeSource]),
+    [['EROFS', 'structured'], [null, 'template'], [null, 'template']]);
+});
+
+test('classifier: an MCP code only in text content is recorded as text, never structured', () => {
+  const call = (status, result) => ({ type: 'McpToolCall', server: 'start-migration', tool: 'migration_run', status, error: null, result });
+  const text = obj => [{ type: 'text', text: JSON.stringify(obj) }];
+  const lines = [{ type: 'session_meta', payload: { id: 't1', cwd: '/c', timestamp: '2026-11-04T20:30:00.000Z' } },
+    ...[call('failed', { isError: true, content: text({ code: 'LOCK_HELD' }) }),
+      call('completed', { isError: true, content: text({ code: 'LOCK_HELD' }) }),
+      call('completed', { content: text({ outcome: 'BLOCKED', status: 'NOT_STARTED' }) }),
+      call('completed', { isError: true, content: text({ code: 'LOCK_HELD' }), structuredContent: { reason: 'no code' } })]
+      .map(item => ({ type: 'event_msg', payload: { type: 'item_completed', item } }))].map(line => JSON.stringify(line));
+  assert.deepEqual(codexRollout(lines.join('\n') + '\n', []).refusals.map(({ code, codeSource }) => [code, codeSource]),
+    [['LOCK_HELD', 'text'], ['LOCK_HELD', 'text'], ['BLOCKED_NOT_STARTED', 'text'], [null, 'template']]);
+});
+
+test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zero exit, never another process\'s text', async () => {
+  const node = '/opt/node', entry = '/store/r/src/cli/discover-module.mjs';
+  const clean = '["AMT_ENV_CLEAN"]';
+  const exec = (pid, env = clean) => `${pid} execve("${node}", ["${node}", "${entry}", "auth"], ${env}) = 0`;
+  const held = String.raw`"{\n  \"code\": \"LOCK_HELD\"\n}\n"`;
+  const write = (pid, fd = 1) => `${pid} write(${fd}<pipe:[1]>, ${held}, 26) = 26`;
+  // The harness sandbox: the runner's isolation plus Codex's bwrap, three user namespaces; every test pid is pid 1's child.
+  const runner = '1 unshare(CLONE_NEWNS|CLONE_NEWUSER|CLONE_NEWPID) = 0', children = [6, 7].map(pid => `1 clone(child_stack=NULL, flags=SIGCHLD) = ${pid}`);
+  const lineage = [runner, '1 unshare(CLONE_NEWUSER|CLONE_NEWNS) = 0', '1 unshare(CLONE_NEWUSER) = 0', ...children];
+  const accepted = (...lines) => acceptedUnder(lineage, ...lines);
+  const acceptedUnder = (lineage, ...lines) => {
+    const trace = path.join(scratch, 'agent-e2e-binding-' + process.pid + '.trace');
+    return writeFile(trace, [...lineage, ...lines].join('\n') + '\n').then(() => traceRefusals(trace, [[node, entry]]).refusals.map(({ pid, exitCode, code }) => [pid, exitCode, code]))
+      .finally(() => rm(trace, { force: true }));
+  };
+  const exited = (pid, code = 1) => `${pid} +++ exited with ${code} +++`;
+  assert.deepEqual(await accepted(exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7)), [['7', 1, 'LOCK_HELD']]);
+  assert.deepEqual(await accepted(`7 execve("${node}", ["${node}", "${entry}"], ${clean} <unfinished ...>`, '8 +++ exited with 0 +++', '7 <... execve resumed>) = 0',
+    String.raw`7 writev(1<pipe:[1]>, [{iov_base="{\"code\":\"EROFS\"}", iov_len=16}], 1) = 16`, exited(7, 3)), [['7', 3, 'EROFS']]);
+  assert.deepEqual(await accepted('6 renameat2(AT_FDCWD</work>, "a", AT_FDCWD</work>, "b", 0) = 0', '6 rename("/store/other", "/store/x") = 0',
+    `6 openat(AT_FDCWD</work>, "out", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 3</work/out>`, exec(7), write(7), exited(7)), [['7', 1, 'LOCK_HELD']],
+  'unrelated path changes do not unbind');
+  assert.deepEqual(await acceptedUnder([runner, ...children], exec(7), write(7), exited(7)), [], 'depth 1, the runner without the sandbox, never binds');
+  assert.deepEqual(await accepted(exec(7), write(7), exited(7), '1 unshare(CLONE_NEWUSER) = 0'), [['7', 1, 'LOCK_HELD']], 'a parent\'s later unshare is not in the child\'s lineage');
+  const rejected = {
+    'engine exit 0': [exec(7), write(7), exited(7, 0)],
+    'engine killed': [exec(7), write(7), '7 +++ killed by SIGKILL +++'],
+    'stderr, not stdout': [exec(7), write(7, 2), exited(7)],
+    'a shell echo beside the engine': [write(6), exec(7), exited(7)],
+    'text after the engine exited, on a reused pid': [exec(7), exited(7, 0), write(7), exited(7)],
+    'a signal before the exit': [exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7, 0)],
+    'a failed exec': [`7 execve("${node}", ["${node}", "${entry}"], ${clean}) = -1 ENOENT (No such file or directory)`, write(7), exited(7)],
+    'a node flag before the entry': [`7 execve("${node}", ["${node}", "--import", "${entry}"], ${clean}) = 0`, write(7), exited(7)],
+    'another node binary': [`7 execve("/tmp/node", ["/tmp/node", "${entry}"], ${clean}) = 0`, write(7), exited(7)],
+    'an unsafe environment': [exec(7, '["AMT_ENV_UNSAFE", "NODE_OPTIONS"]'), write(7), exited(7)],
+    'one namespace above the baseline': ['7 unshare(CLONE_NEWUSER|CLONE_NEWNS) = 0', exec(7), write(7), exited(7)],
+    'one above the Codex baseline': ['7 clone3({flags=CLONE_NEWUSER|CLONE_NEWNS, exit_signal=SIGCHLD}, 88) = 8', '8 unshare(CLONE_NEWUSER) = 0',
+      '8 unshare(CLONE_NEWUSER) = 0', '8 clone(child_stack=NULL, flags=SIGCHLD) = 9', exec(9), write(9), exited(9)],
+    'MAJOR 1: two nested user namespaces above the sandbox': ['6 clone3({flags=CLONE_NEWUSER|CLONE_NEWNS, exit_signal=SIGCHLD}, 88) = 8', '8 unshare(CLONE_NEWUSER) = 0', exec(8), write(8), exited(8)],
+    'MAJOR 2: an entry ancestor renamed away and restored': ['6 rename("/store", "/store.real") = 0', exec(7), write(7), exited(7), '6 rename("/store.real", "/store") = 0'],
+    'MAJOR 2: the same through a directory fd': [exec(7), write(7), exited(7), '6 renameat2(AT_FDCWD</>, "store", AT_FDCWD</>, "s", RENAME_NOREPLACE) = 0'],
+    'MAJOR 2: the node binary overwritten': ['6 openat(AT_FDCWD</>, "/opt/node", O_WRONLY|O_TRUNC) = 3</opt/node>', exec(7), write(7), exited(7)],
+    'unprovable: a relative rename that may name an ancestor': ['6 rename("r", "x") = 0', exec(7), write(7), exited(7)],
+    'unprovable: a relative rename climbing out': ['6 rename("../a", "x") = 0', exec(7), write(7), exited(7)],
+    'a record without a verdict': [exec(7, '0x7ffd /* 9 vars */'), write(7), exited(7)],
+    'a spoofed verdict in argv': [`7 execve("${node}", ["${node}", "${entry}", "[\\"AMT_ENV_CLEAN\\"]"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
+    'a document split across writes': [exec(7), String.raw`7 write(1<pipe:[1]>, "{\"code\":", 8) = 8`, String.raw`7 write(1<pipe:[1]>, "\"LOCK_HELD\"}", 12) = 12`, exited(7)],
+  };
+  for (const [name, lines] of Object.entries(rejected)) assert.deepEqual(await accepted(...lines), [], name);
+});
+
+test('the trusted sink reduces an execve environment to a verdict and persists no value or other name', async () => {
+  const root = await mkdtemp(path.join(scratch, 'agent-e2e-sink-'));
+  try {
+    const node = '/opt/node', entry = '/store/r/src/cli/discover-module.mjs', trace = path.join(root, 'trace');
+    const argv = `"${node}", ["${node}", "${entry}", "auth"]`;
+    const secret = 'S3CRET_VALUE';
+    const records = [
+      `1 execve("/bin/sh", ["sh", "-c", "${secret}"], ["${secret}=1"]) = 0`,
+      `2 execve(${argv}, ["PATH=/bin", "API_KEY=${secret}", "NODE_TEST_CONTEXT=child-v8"]) = 0`,
+      `3 execve(${argv}, ["PATH=/bin", "NODE_OPTIONS=--import=data:text/javascript,${secret}", "LD_PRELOAD=/${secret}.so", "LD_X${secret}=1", "OPENSSL_CONF=/${secret}"] <unfinished ...>`,
+      '3 <... execve resumed>) = 0',
+      `4 execve(${argv}, ["A=${secret}"...]) = 0`,
+      `5 execve(${argv}, 0x7ffd) = -1 EFAULT (Bad address)`,
+    ];
+    const sink = spawnSync('python3', [fileURLToPath(new URL('../scripts/ledger-trace.py', import.meta.url)), 'filter', trace, JSON.stringify([[node, entry]])],
+      { input: records.join('\n') + '\n', encoding: 'utf8' });
+    assert.equal(sink.status, 0, sink.stderr);
+    let persisted = '';
+    for (let tries = 0; tries < 100 && !persisted.includes('EFAULT'); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      persisted = await readFile(trace, 'utf8').catch(() => '');
+    }
+    assert.doesNotMatch(persisted, /S3CRET|PATH=|API_KEY|NODE_TEST_CONTEXT|"sh"/);
+    assert.deepEqual(persisted.trim().split('\n'), [
+      `2 execve(${argv}, ["AMT_ENV_CLEAN"]) = 0`,
+      `3 execve(${argv}, ["AMT_ENV_UNSAFE", "LD_*", "NODE_OPTIONS", "OPENSSL_CONF"] <unfinished ...>`,
+      '3 <... execve resumed>) = 0',
+      `4 execve(${argv}, ["AMT_ENV_UNSAFE", "UNREADABLE"]) = 0`,
+      `5 execve(${argv}, ["AMT_ENV_UNSAFE", "UNREADABLE"]) = -1 EFAULT (Bad address)`]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('an engine started with pre-entry code binds nothing; its environment never reaches the trace (reviewer MAJOR)',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-preload-'));
+    try {
+      const { target, quoted, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const discover = quoted('artifact-migration-discover');
+      const preload = Buffer.from('process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }, null, 2) + "\\n"); process.exit(1);').toString('base64');
+      // The live-lock module fixture is bound before the holder locks: its CLI path to the lock is `run` (a heredoc, ignored).
+      const real = `${quoted('artifact-migration-run')} auth --target auth --mode auto --ponytail full --design-source target-system --json <<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL`;
+      const scored = (name, command, extraEnv) => {
+        const result = runCodex(path.join(root, name), ['--scenario', 'live-lock'], command, extraEnv);
+        return { result, report: JSON.parse(readFileSync(path.join(root, name, 'report.json'), 'utf8')), trace: readFileSync(path.join(root, name, 'ledger-syscalls.log'), 'utf8') };
+      };
+      // The finding: a preload prints the engine's document and exits 1 before the entry runs.
+      const fake = scored('node-options', `AMT_UNLISTED_SECRET=unlisted-value NODE_OPTIONS=--import=data:text/javascript\\;base64,${preload} ${discover} auth --status`);
+      assert.equal(fake.result.status, 1, JSON.stringify(fake.report.safety));
+      assert.equal(fake.report.safety.refusal, null, JSON.stringify(fake.report.safety));
+      assert.deepEqual(fake.report.traceRefusals, []);
+      assert.match(readFileSync(path.join(root, 'node-options/agent.stdout.log'), 'utf8'), /"code": "LOCK_HELD"/); // The preload really ran.
+      assert.deepEqual(fake.report.traceUnsafeEngines.map(entry => entry.names), [['NODE_OPTIONS']]);
+      assert.match(fake.trace, /"AMT_ENV_UNSAFE", "NODE_OPTIONS"/);
+      assert.ok(!fake.trace.includes(preload) && !fake.trace.includes('unlisted-value') && !fake.trace.includes('AMT_UNLISTED_SECRET') && !fake.trace.includes('NODE_OPTIONS='));
+      // Even the engine's genuine refusal counts for nothing once a preload could have run in it.
+      const ld = scored('ld-preload', `LD_PRELOAD=/nonexistent-preload.so ${real}`);
+      assert.equal(ld.result.status, 1, JSON.stringify(ld.report.safety));
+      assert.equal(ld.report.safety.refusal, null, JSON.stringify(ld.report.safety));
+      assert.deepEqual(ld.report.traceUnsafeEngines.map(entry => entry.names), [['LD_*']]);
+      assert.doesNotMatch(ld.trace, /LD_PRELOAD|execve\([^\n]*nonexistent-preload/);
+      // A shadow mount over the entry, clean environment: same path, not the installed code.
+      const shadowEntry = JSON.parse(await readFile(path.join(target, '.artifact-migration-tools/codex.json'), 'utf8')).commands['artifact-migration-discover'];
+      await writeFile(path.join(root, 'fake.mjs'), 'process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }, null, 2) + "\\n"); process.exit(1);\n');
+      const shadow = scored('shadow', `unshare -Urm sh -c "mount --bind '${path.join(root, 'fake.mjs')}' '${shadowEntry[1]}' && exec '${shadowEntry[0]}' '${shadowEntry[1]}' auth --status"`);
+      assert.match(readFileSync(path.join(root, 'shadow/agent.stdout.log'), 'utf8'), /"code": "LOCK_HELD"/); // The fake really ran.
+      assert.equal(shadow.result.status, 1, JSON.stringify(shadow.report.safety));
+      assert.equal(shadow.report.safety.refusal, null, JSON.stringify(shadow.report.safety));
+      assert.deepEqual(shadow.report.traceUnsafeEngines.map(entry => entry.names), [['USERNS_DEPTH_4']]);
+      // MAJOR 1: two nested user namespaces from the sandbox never come back to the accepted depth.
+      const nested = scored('nested', `unshare -Ur unshare -Urm sh -c "mount --bind '${path.join(root, 'fake.mjs')}' '${shadowEntry[1]}' && exec '${shadowEntry[0]}' '${shadowEntry[1]}' auth --status"`);
+      assert.match(readFileSync(path.join(root, 'nested/agent.stdout.log'), 'utf8'), /"code": "LOCK_HELD"/);
+      assert.equal(nested.report.safety.refusal, null, JSON.stringify(nested.report.safety));
+      assert.deepEqual(nested.report.traceUnsafeEngines.map(entry => entry.names), [['USERNS_DEPTH_5']]);
+      // MAJOR 2 (ancestor rename, fake tree, restore) is covered on trace records in 'trace binding': here the store's only
+      // writable ancestor is the run root, whose rename would break the runner itself.
+      // Owner ruling 2026-11-04: the same genuine engine call, clean environment, is recorded but never accepted (CLI).
+      const clean = scored('clean', real);
+      assert.equal(clean.result.status, 1, JSON.stringify([clean.report.failure, clean.report.traceUnsafeEngines]));
+      assert.notEqual(clean.report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.equal(clean.report.safety.refusal, null);
+      assert.deepEqual(clean.report.cliRefusalsRecordedNotAccepted.filter(entry => entry.source === 'cli-trace').map(entry => entry.code), ['LOCK_HELD']);
+      assert.deepEqual(clean.report.traceUnsafeEngines, []);
+      assert.match(clean.trace, /"AMT_ENV_CLEAN"/);
+      // A plain-word rollout item cannot be matched to a pid: inherited pre-entry code voids even a genuine engine refusal.
+      await mkdir(path.join(target, 'openspec/specs/auth'), { recursive: true });
+      await writeFile(path.join(target, 'openspec/specs/auth/spec.md'), '### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\n');
+      const inherited = scored('inherited', `${discover} auth --target auth --mode auto --ponytail full --design-source target-system`, { LD_PRELOAD: '/nonexistent-preload.so' });
+      assert.ok(inherited.report.rollout.refusals.some(entry => entry.source === 'cli' && entry.code === 'LOCK_HELD' && entry.codeSource === 'structured'), JSON.stringify(inherited.report.rollout.refusals));
+      assert.equal(inherited.report.safety.refusal, null, JSON.stringify(inherited.report.safety));
+      assert.ok(inherited.report.traceUnsafeEngines.length > 0);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('a composed engine call counts through the trace; shell text never does (H07)',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-composed-'));
+    try {
+      const { target, quoted, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const discover = quoted('artifact-migration-discover'), live = ['--scenario', 'live-lock'];
+      const proposal = "<<'PROPOSAL'\n### Requirement: AUTH-REQ-001 Sign in\nThe target MUST sign in.\n\n#### Scenario: AUTH-SCN-001 Success\nSigned in.\nPROPOSAL";
+      // The live-lock module fixture is bound before the holder locks: its CLI path to the lock is `run` (a heredoc, ignored).
+      const heredoc = `${quoted('artifact-migration-run')} auth --target auth --mode auto --ponytail full --design-source target-system --json ${proposal}`;
+      const fake = String.raw`'{\n  "code": "LOCK_HELD"\n}\n'`;
+      const scored = (name, command) => {
+        const result = runCodex(path.join(root, name), live, command);
+        return { result, report: JSON.parse(readFileSync(path.join(root, name, 'report.json'), 'utf8')), trace: () => readFileSync(path.join(root, name, 'ledger-syscalls.log'), 'utf8') };
+      };
+      for (const [name, command] of [['heredoc', heredoc], ['compound', `cd . && ${heredoc} | cat; true`]]) {
+        const { result, report } = scored(name, command);
+        // Owner ruling 2026-11-04: the trace still binds it, as recorded evidence only; no CLI refusal is accepted.
+        assert.equal(result.status, 1, name + JSON.stringify([report.failure, report.safety, report.traceRefusals]));
+        assert.equal(report.safety.refusal, null, name);
+        assert.deepEqual(report.cliRefusalsRecordedNotAccepted.filter(entry => entry.source === 'cli-trace').map(entry => [entry.code, entry.codeSource]), [['LOCK_HELD', 'structured']], name);
+        assert.ok(!report.rollout.refusals.some(entry => entry.code === 'LOCK_HELD'), 'the rollout alone must not bind a composed command');
+      }
+      // One run holds every spoof around real engine calls that did not refuse with LOCK_HELD, a fake document first and last,
+      // so a scorer reading the composed text would accept it whichever document it takes.
+      const node = JSON.parse(await readFile(path.join(target, '.artifact-migration-tools/codex.json'), 'utf8')).commands['artifact-migration-discover'][0];
+      const { result, report, trace } = scored('spoofs', [`printf ${fake}`, `echo '{"code":"LOCK_HELD"}'`, `${discover} --help`, `${discover} auth --status`,
+        `printf ${fake} | ${discover} auth --status`, `'${node}' -e 'process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }) + "\\n"); process.exit(1)'`,
+        `echo "Another migration command holds the lock for 'auth' at /c/auth.lock (pid 7). Wait for it to finish; the lock is reclaimed automatically once that process is gone."`,
+        `printf ${fake}`, 'exit 1'].join('; '));
+      assert.equal(result.status, 1, JSON.stringify(report.safety));
+      assert.equal(report.safety.refusal, null, JSON.stringify(report.safety));
+      assert.match(report.failure, /Safety refusal not proven/);
+      assert.ok(report.traceRefusals.every(entry => entry.code === 'BLOCKED_NOT_STARTED'), JSON.stringify(report.traceRefusals));
+      assert.doesNotMatch(trace(), /LOCK_HELD/);
+      // Trust set kept narrow: only the engine's own execve survives the sink, never another command's argv.
+      assert.ok(trace().split('\n').filter(line => /^\d+ +execve\(/.test(line)).every(line => line.includes('discover-module.mjs')));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('read-only module: trusted setup reaches the write path and the real engine refuses it; NOT_STARTED stays unaccepted (H11)',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-readonly-module-'));
+    try {
+      const { target, release, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const transport = 'file://' + path.join(release, 'packages/migration-engine/src/transport/mcp.mjs');
+      const call = (cwd, name) => {
+        const output = path.join(root, name);
+        const result = runCodex(output, ['--scenario', 'read-only'], '', { FAKE_CODEX_MCP_CALL: JSON.stringify({ transport,
+          arguments: { cwd, module: 'auth', target: 'auth', mode: 'auto', ponytail: 'full', designSource: 'target-system' } }) });
+        return { result, output };
+      };
+      // A consumer outside the binding: the real engine answers NOT_STARTED, which never satisfies the scenario.
+      const unbound = path.join(root, 'unbound');
+      await mkdir(unbound);
+      await writeFile(path.join(unbound, 'package.json'), '{"name":"unbound"}\n');
+      const blocked = call(unbound, 'not-started');
+      const blockedReport = JSON.parse(await readFile(path.join(blocked.output, 'report.json')));
+      assert.equal(blocked.result.status, 1);
+      // migration_run carries no structuredContent (mcp.mjs progress tools): its NOT_STARTED is read from text, recorded as text.
+      assert.deepEqual(blockedReport.rollout.refusals.map(({ code, codeSource }) => [code, codeSource]), [['BLOCKED_NOT_STARTED', 'text']]);
+      assert.equal(blockedReport.safety.refusal, null);
+      assert.equal(blockedReport.safety.notStarted, true);
+      assert.match(blockedReport.failure, /Safety refusal not proven/);
+      // The bound fixture, snapshotted bound: the same `migration_run` starts RESOLVE and the mount refuses its first write.
+      const { result, output } = call(target, 'refused');
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(result.status, 0, JSON.stringify([report.failure, report.rollout?.refusals]));
+      assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.deepEqual([report.safety.refusal.source, report.safety.refusal.tool, report.safety.refusal.codeSource], ['mcp', 'migration_run', 'structured']);
+      assert.ok(['EROFS', 'EACCES', 'EPERM'].includes(report.safety.refusal.code), report.safety.refusal.code);
+      assert.equal(report.safety.unchanged, true);
+      assert.deepEqual(report.moduleFixture, { registry: '.agents/knowledge/migrations/registry.json', openspec: 'openspec/specs/auth/spec.md', seeded: false });
+      assert.equal(JSON.parse(await readFile(path.join(target, 'package.json'), 'utf8')).config.startMigration.registry, report.moduleFixture.registry);
+      assert.ok('openspec/specs/auth/spec.md' in JSON.parse(await readFile(path.join(output, 'consumer-before.json'), 'utf8')));
+      await assert.rejects(stat(path.join(target, '.agents/knowledge/migrations/modules/auth')), { code: 'ENOENT' });
+      // Setup is the fixture's, never a repair: a consumer without the fixture's registry is refused before spawn.
+      await rm(path.join(target, '.agents/knowledge/migrations/registry.json'));
+      const missing = call(target, 'no-registry');
+      assert.equal(missing.result.status, 1);
+      assert.match(JSON.parse(await readFile(path.join(missing.output, 'report.json'))).failure, /ACCEPTANCE_PRECONDITION: a read-only module fixture needs/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+test('module live-lock: pre-bootstrapped before the holder locks, MCP migration_run gets a structured LOCK_HELD; text-only never counts',
+  { skip: codexReady(isolationAvailable) }, async () => {
+    const root = await mkdtemp(path.join(scratch, 'agent-e2e-live-lock-module-'));
+    try {
+      const { target, release, runCodex } = await codexCandidate(root, installedModuleCandidate);
+      const transport = 'file://' + path.join(release, 'packages/migration-engine/src/transport/mcp.mjs');
+      const call = (name, env = {}) => {
+        const output = path.join(root, name);
+        const result = runCodex(output, ['--scenario', 'live-lock'], '', { FAKE_CODEX_MCP_CALL: JSON.stringify({ transport,
+          arguments: { cwd: target, module: 'auth', target: 'auth', mode: 'auto', ponytail: 'full', designSource: 'target-system' } }), ...env });
+        return { result, output };
+      };
+      const { result, output } = call('held');
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(result.status, 0, JSON.stringify([report.failure, report.rollout?.refusals]));
+      assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.deepEqual([report.safety.refusal.source, report.safety.refusal.tool, report.safety.refusal.code, report.safety.refusal.codeSource],
+        ['mcp', 'migration_run', 'LOCK_HELD', 'structured']);
+      assert.equal(report.moduleFixture.registry, '.agents/knowledge/migrations/registry.json');
+      assert.equal(report.lock.holderAliveAfter, true);
+      assert.deepEqual(report.lock.before, report.lock.after);
+      assert.equal(report.safety.unchanged, true);
+      // The bound registry is in the before-snapshot: the fixture was set before the holder and the agent.
+      assert.ok('openspec/specs/auth/spec.md' in JSON.parse(await readFile(path.join(output, 'consumer-before.json'), 'utf8')));
+      assert.equal(JSON.parse(await readFile(path.join(target, 'package.json'), 'utf8')).config.startMigration.registry, report.moduleFixture.registry);
+      await assert.rejects(stat(path.join(target, '.agents/knowledge/migrations/modules/auth')), { code: 'ENOENT' });
+      // The same engine result with its code only in text content: recorded as text, never accepted.
+      const text = call('text-only', { FAKE_CODEX_MCP_TEXT_ONLY: '1' });
+      const textReport = JSON.parse(await readFile(path.join(text.output, 'report.json')));
+      assert.equal(text.result.status, 1);
+      assert.deepEqual(textReport.rollout.refusals.map(({ source, code, codeSource }) => [source, code, codeSource]), [['mcp', 'LOCK_HELD', 'text']]);
+      assert.equal(textReport.safety.refusal, null);
+      assert.match(textReport.failure, /Safety refusal not proven/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
 test('a run past --not-after starts nothing and is NOT_RUN; one rerun, on a fresh consumer only', async () => {
   const root = await mkdtemp(path.join(scratch, 'agent-e2e-deadline-'));
   try {
@@ -1048,10 +1363,10 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       assert.equal(report.safety.codeSourceRequired, 'structured');
       assert.equal(report.safety.unchanged, true);
       if (codedEngine) {
-        assert.equal(result.status, 0, JSON.stringify(report.safety));
-        assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
-        assert.ok(['EROFS', 'EACCES', 'EPERM'].includes(report.safety.refusal.code), JSON.stringify(report.safety));
-        assert.equal(report.safety.refusal.source, 'cli');
+        // Owner ruling 2026-11-04: the engine's own CLI EROFS is recorded, never accepted; only MCP results count.
+        assert.equal(result.status, 1, JSON.stringify(report.safety));
+        assert.equal(report.safety.refusal, null);
+        assert.ok(report.cliRefusalsRecordedNotAccepted.some(entry => entry.source === 'cli' && ['EROFS', 'EACCES', 'EPERM'].includes(entry.code)), JSON.stringify(report.cliRefusalsRecordedNotAccepted));
       } else {
         // 1.6.4 reports Node's recursive-mkdir ENOENT for a read-only mount: recorded, never normalized to a refusal.
         assert.equal(result.status, 1);
@@ -1076,10 +1391,10 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       const strictReport = JSON.parse(await readFile(path.join(root, 'strict/report.json')));
       assert.equal(strictReport.safety.codeSourceRequired, 'structured');
       if (codedEngine) {
-        // E6: the joint candidate's own structured code satisfies a structured-only run.
-        assert.equal(strict.status, 0, JSON.stringify(strictReport.safety));
-        assert.equal(strictReport.verdict, 'SAFETY_REFUSAL_PASS');
-        assert.equal(strictReport.safety.refusal.codeSource, 'structured');
+        // E6's structured CLI code is recorded, never accepted (owner ruling 2026-11-04).
+        assert.equal(strict.status, 1, JSON.stringify(strictReport.safety));
+        assert.equal(strictReport.safety.refusal, null);
+        assert.ok(strictReport.cliRefusalsRecordedNotAccepted.some(entry => entry.codeSource === 'structured'));
       } else {
         assert.equal(strict.status, 1);
         assert.equal(strictReport.safety.refusal, null);
@@ -1099,7 +1414,7 @@ test('scored defaults reject template-only refusals; explicit diagnostics never 
   { skip: codexReady(isolationAvailable) }, async () => {
     const root = await mkdtemp(path.join(scratch, 'agent-e2e-structured-default-'));
     try {
-      const { runCodex } = await codexCandidate(root);
+      const { runCodex } = await codexCandidate(root, installedModuleCandidate);
       for (const diagnostic of [false, true]) {
         const output = path.join(root, diagnostic ? 'diagnostic' : 'scored');
         const result = runCodex(output, ['--scenario', 'read-only',
@@ -1137,9 +1452,10 @@ test('live and abandoned locks: refusal codes from the rollout, reclaim proven o
       const liveReport = JSON.parse(await readFile(path.join(root, 'live-lock/report.json')));
       assert.equal(liveReport.lock.holderAliveAfter, true);
       if (codedEngine) {
-        assert.equal(live.status, 0, JSON.stringify(liveReport.safety));
-        assert.equal(liveReport.verdict, 'SAFETY_REFUSAL_PASS');
-        assert.equal(liveReport.safety.refusal.code, 'LOCK_HELD');
+        // A CLI LOCK_HELD is recorded, never accepted (owner ruling 2026-11-04).
+        assert.equal(live.status, 1, JSON.stringify(liveReport.safety));
+        assert.equal(liveReport.safety.refusal, null);
+        assert.ok(liveReport.cliRefusalsRecordedNotAccepted.some(entry => entry.code === 'LOCK_HELD'));
       } else {
         // 1.6.4 cannot tell a live owner in another PID namespace from a dead one: a refusal, but not LOCK_HELD.
         assert.equal(live.status, 1);

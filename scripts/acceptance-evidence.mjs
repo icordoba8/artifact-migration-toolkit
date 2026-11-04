@@ -86,14 +86,16 @@ export async function startLedgerObserver(root, { timeoutMs = 30_000, python = '
  * runner's SIGTERM/SIGKILL still reach it. no-io-uring.py installs an inherited seccomp denial of io_uring.
  */
 const quote = arg => "'" + arg.replaceAll("'", "'\\''") + "'";
-export const ledgerTraced = ({ command, argv }, trace, { strace = process.env.LEDGER_TRACE_STRACE || 'strace', python = 'python3' } = {}) => ({
+export const ledgerTraced = ({ command, argv }, trace, { strace = process.env.LEDGER_TRACE_STRACE || 'strace', python = 'python3', engines = [] } = {}) => ({
   command: strace,
-  argv: ['-DD', '-f', '-yy', '-s', String(1 << 24), '--pidns-translation', '--kill-on-exit', '--seccomp-bpf', '-e',
-    'trace=read,readv,pread64,preadv,preadv2,write,writev,pwrite64,pwritev,pwritev2,copy_file_range,splice,sendfile,process_vm_writev,open,openat,openat2,creat,truncate,ftruncate,fallocate,link,linkat,unlink,unlinkat,rename,' +
+  // abbrev=!execve shows the sink every execve environment; it persists only a verdict (ledger-trace.py).
+  argv: ['-DD', '-f', '-yy', '-s', String(1 << 24), '--pidns-translation', '--kill-on-exit', '--seccomp-bpf', '-e', 'abbrev=!execve', '-e',
+    'trace=execve,read,readv,pread64,preadv,preadv2,write,writev,pwrite64,pwritev,pwritev2,copy_file_range,splice,sendfile,process_vm_writev,open,openat,openat2,creat,truncate,ftruncate,fallocate,link,linkat,unlink,unlinkat,rename,' +
     'renameat,renameat2,symlink,symlinkat,fcntl,mmap,io_uring_setup,open_by_handle_at,mount,umount2,move_mount,' +
     'open_tree,fsmount,mount_setattr,pivot_root,chroot,setns,unshare,clone,clone3,fork,vfork',
-    // Non-ledger read/write buffers are dropped by the trusted sink before anything is persisted.
-    '-o', '|' + [python, fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'filter', trace].map(quote).join(' '), '--', python, fileURLToPath(new URL('./no-io-uring.py', import.meta.url)), command, ...argv],
+    // Non-ledger read/write buffers are dropped by the trusted sink before anything is persisted; only an
+    // installed engine's own execve and structured stdout survive it (G1).
+    '-o', '|' + [python, fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'filter', trace, JSON.stringify(engines)].map(quote).join(' '), '--', python, fileURLToPath(new URL('./no-io-uring.py', import.meta.url)), command, ...argv],
 });
 /** Gate verdict for a finished ledgerTraced run (rootPid = the spawned child's pid). No namespace is trusted: every ledger read's bytes are inspected. */
 export const ledgerTraceVerdict = (trace, rootPid, { python = 'python3' } = {}) => {
@@ -209,17 +211,23 @@ const structured = doc => typeof doc?.code === 'string' ? doc.code
   : doc?.outcome === 'BLOCKED' && doc?.status === 'NOT_STARTED' ? 'BLOCKED_NOT_STARTED' : null;
 
 const mcpRefusal = item => {
+  const result = item.result ?? {}, refused = item.status === 'failed' || result.isError;
+  // Only `structuredContent.code` is structured. Codex marks an isError result "failed" with error null: its structured code
+  // is still the engine's.
+  const code = structured(result.structuredContent);
+  if (code && (refused || code === 'BLOCKED_NOT_STARTED')) return { code, codeSource: 'structured' };
+  // A code parsed from text content is recorded as "text", never structured and never accepted (owner ruling 2026-11-04).
+  const textCode = result.structuredContent ? null : structured(parseJson(result.content?.at(-1)?.text));
+  if (textCode && (refused || textCode === 'BLOCKED_NOT_STARTED')) return { code: textCode, codeSource: 'text' };
   if (item.status === 'failed') // Codex drops error.data: only the message after its JSON-RPC prefix is the engine's.
     return { code: templateCode(String(item.error?.message ?? '').replace(/^[\s\S]*?Mcp error: -?\d+: /, '')), codeSource: 'template' };
-  const result = item.result ?? {}, doc = result.structuredContent ?? parseJson(result.content?.at(-1)?.text);
-  const code = structured(doc);
-  if (code && (result.isError || code === 'BLOCKED_NOT_STARTED')) return { code, codeSource: 'structured' };
   return result.isError ? { code: templateCode((result.content ?? []).map(part => part.text ?? '').join('\n')), codeSource: 'template' } : null;
 };
 
 // Minimal POSIX word splitter. Returns null on anything but plain words and quotes (pipes, lists,
 // redirections, substitutions, globs), so a bound command's exit code is the engine's own.
 // ponytail: `cd x && engine ...`, env prefixes and heredocs are never bound; widen only with a real parser.
+// A composed command is bound by the syscall trace instead (traceRefusals).
 const shellWords = line => {
   const words = [];
   let word = null;
@@ -259,6 +267,21 @@ const cliRefusal = (item, engineCommands) => {
   const code = structured(parseJson(output.match(/^\{\n[\s\S]*?\n\}$/m)?.[0]));
   if (code && (code !== 'BLOCKED_NOT_STARTED' || item.exit_code === 2)) return { code, codeSource: 'structured' };
   return { code: templateCode(output), codeSource: 'template' };
+};
+
+/**
+ * G1, any shell composition: a refusal from the outside-sandbox trace (ledger-trace.py engine-documents), never from text.
+ * Throws rather than read as no refusal: the trace already passed the ledger gate, so an unreadable one is a harness fault.
+ */
+export const traceRefusals = (trace, engines, { python = 'python3' } = {}) => {
+  const run = spawnSync(python, [fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'engine-documents', trace, JSON.stringify(engines)],
+    { encoding: 'utf8', timeout: 120_000, maxBuffer: 1 << 26 });
+  if (run.status !== 0) throw new Error('ACCEPTANCE_TRACE_UNREADABLE: ' + (run.error?.message ?? run.stderr));
+  const { documents, unsafeEngines } = JSON.parse(run.stdout);
+  return { unsafeEngines, refusals: documents.flatMap(({ pid, entry, exitCode, document }) => {
+    const code = structured(document);
+    return code && (code !== 'BLOCKED_NOT_STARTED' || exitCode === 2) ? [{ source: 'cli-trace', pid, entry, exitCode, code, codeSource: 'structured' }] : [];
+  }) };
 };
 
 /**
