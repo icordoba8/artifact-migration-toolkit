@@ -1023,15 +1023,20 @@ test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zer
   const exec = (pid, env = clean) => `${pid} execve("${node}", ["${node}", "${entry}", "auth"], ${env}) = 0`;
   const held = String.raw`"{\n  \"code\": \"LOCK_HELD\"\n}\n"`;
   const write = (pid, fd = 1) => `${pid} write(${fd}<pipe:[1]>, ${held}, 26) = 26`;
+  // The runner's isolation: pid 1 creates one user namespace; every test pid is its child.
+  const lineage = ['1 unshare(CLONE_NEWNS|CLONE_NEWUSER|CLONE_NEWPID) = 0', ...[6, 7].map(pid => `1 clone(child_stack=NULL, flags=SIGCHLD) = ${pid}`)];
   const accepted = (...lines) => {
     const trace = path.join(scratch, 'agent-e2e-binding-' + process.pid + '.trace');
-    return writeFile(trace, lines.join('\n') + '\n').then(() => traceRefusals(trace, [[node, entry]]).refusals.map(({ pid, exitCode, code }) => [pid, exitCode, code]))
+    return writeFile(trace, [...lineage, ...lines].join('\n') + '\n').then(() => traceRefusals(trace, [[node, entry]]).refusals.map(({ pid, exitCode, code }) => [pid, exitCode, code]))
       .finally(() => rm(trace, { force: true }));
   };
   const exited = (pid, code = 1) => `${pid} +++ exited with ${code} +++`;
   assert.deepEqual(await accepted(exec(7), write(7), '7 --- SIGCHLD {si_signo=SIGCHLD} ---', exited(7)), [['7', 1, 'LOCK_HELD']]);
   assert.deepEqual(await accepted(`7 execve("${node}", ["${node}", "${entry}"], ${clean} <unfinished ...>`, '8 +++ exited with 0 +++', '7 <... execve resumed>) = 0',
     String.raw`7 writev(1<pipe:[1]>, [{iov_base="{\"code\":\"EROFS\"}", iov_len=16}], 1) = 16`, exited(7, 3)), [['7', 3, 'EROFS']]);
+  assert.deepEqual(await accepted('6 clone3({flags=CLONE_NEWUSER|CLONE_NEWNS, exit_signal=SIGCHLD}, 88) = 8', '8 unshare(CLONE_NEWUSER) = 0', exec(8), write(8), exited(8)),
+    [['8', 1, 'LOCK_HELD']], 'the Codex baseline binds');
+  assert.deepEqual(await accepted(exec(7), write(7), exited(7), '1 unshare(CLONE_NEWUSER) = 0'), [['7', 1, 'LOCK_HELD']], 'a parent\'s later unshare is not in the child\'s lineage');
   const rejected = {
     'engine exit 0': [exec(7), write(7), exited(7, 0)],
     'engine killed': [exec(7), write(7), '7 +++ killed by SIGKILL +++'],
@@ -1043,6 +1048,9 @@ test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zer
     'a node flag before the entry': [`7 execve("${node}", ["${node}", "--import", "${entry}"], ${clean}) = 0`, write(7), exited(7)],
     'another node binary': [`7 execve("/tmp/node", ["/tmp/node", "${entry}"], ${clean}) = 0`, write(7), exited(7)],
     'an unsafe environment': [exec(7, '["AMT_ENV_UNSAFE", "NODE_OPTIONS"]'), write(7), exited(7)],
+    'one namespace above the baseline': ['7 unshare(CLONE_NEWUSER|CLONE_NEWNS) = 0', exec(7), write(7), exited(7)],
+    'one above the Codex baseline': ['7 clone3({flags=CLONE_NEWUSER|CLONE_NEWNS, exit_signal=SIGCHLD}, 88) = 8', '8 unshare(CLONE_NEWUSER) = 0',
+      '8 unshare(CLONE_NEWUSER) = 0', '8 clone(child_stack=NULL, flags=SIGCHLD) = 9', exec(9), write(9), exited(9)],
     'a record without a verdict': [exec(7, '0x7ffd /* 9 vars */'), write(7), exited(7)],
     'a spoofed verdict in argv': [`7 execve("${node}", ["${node}", "${entry}", "[\\"AMT_ENV_CLEAN\\"]"], 0x7ffd /* 9 vars */) = 0`, write(7), exited(7)],
     'a document split across writes': [exec(7), String.raw`7 write(1<pipe:[1]>, "{\"code\":", 8) = 8`, String.raw`7 write(1<pipe:[1]>, "\"LOCK_HELD\"}", 12) = 12`, exited(7)],
@@ -1110,6 +1118,14 @@ test('an engine started with pre-entry code binds nothing; its environment never
       assert.equal(ld.report.safety.refusal, null, JSON.stringify(ld.report.safety));
       assert.deepEqual(ld.report.traceUnsafeEngines.map(entry => entry.names), [['LD_*']]);
       assert.doesNotMatch(ld.trace, /LD_PRELOAD|execve\([^\n]*nonexistent-preload/);
+      // A shadow mount over the entry, clean environment: same path, not the installed code.
+      const shadowEntry = JSON.parse(await readFile(path.join(target, '.artifact-migration-tools/codex.json'), 'utf8')).commands['artifact-migration-discover'];
+      await writeFile(path.join(root, 'fake.mjs'), 'process.stdout.write(JSON.stringify({ code: "LOCK_HELD" }, null, 2) + "\\n"); process.exit(1);\n');
+      const shadow = scored('shadow', `unshare -Urm sh -c "mount --bind '${path.join(root, 'fake.mjs')}' '${shadowEntry[1]}' && exec '${shadowEntry[0]}' '${shadowEntry[1]}' auth --status"`);
+      assert.match(readFileSync(path.join(root, 'shadow/agent.stdout.log'), 'utf8'), /"code": "LOCK_HELD"/); // The fake really ran.
+      assert.equal(shadow.result.status, 1, JSON.stringify(shadow.report.safety));
+      assert.equal(shadow.report.safety.refusal, null, JSON.stringify(shadow.report.safety));
+      assert.deepEqual(shadow.report.traceUnsafeEngines.map(entry => entry.names), [['USERNS_DEPTH_2']]);
       // The same engine call with a clean environment still binds.
       const clean = scored('clean', real);
       assert.equal(clean.result.status, 0, JSON.stringify([clean.report.failure, clean.report.traceUnsafeEngines]));

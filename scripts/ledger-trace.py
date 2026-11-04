@@ -15,6 +15,9 @@ another process prints, in any shell composition, can be attributed to the engin
 strace shows this sink every execve environment (-e abbrev=!execve). It is reduced here to a verdict and never persisted:
 the kept execve carries ["AMT_ENV_CLEAN"] or ["AMT_ENV_UNSAFE", <names from UNSAFE_ENV only>] in its place, and an engine
 started with an unsafe environment binds nothing, because that code runs before the entry.
+Shadowing the node binary, the entry or a library at the same path needs CAP_SYS_ADMIN, which the sandbox holds only in a user
+namespace it creates (setns already fails the gate). So an engine also binds nothing unless the user namespaces created along
+its own lineage number exactly USERNS_DEPTHS.
 
 No namespace is trusted: mounts are allowed anywhere (Codex bubblewrap), so every read or append of an fd whose canonical -yy path
 names the ledger has its bytes inspected (any namespace, per shared-fd-table stream, unicode escapes decoded): a relay line read
@@ -63,6 +66,17 @@ def engine_pair(text, engines):
     """True if this execve record's path and argv[1] are a receipt-installed (node, entry) pair."""
     match = EXECVE.match(text)
     return bool(match) and list(match.groups()) in engines
+
+
+def userns_depth(pid, born, unshared):
+    """User namespaces created along pid's lineage; `born[child]` = (parent, parent's unshares at the clone, clone created one)."""
+    depth, count, seen = 0, unshared.get(pid, 0), set()
+    while pid in born and pid not in seen:
+        seen.add(pid)
+        parent, at_clone, created = born[pid]
+        depth += count + created
+        pid, count = parent, at_clone
+    return depth + count
 
 
 def unsafe_names(entries):
@@ -146,6 +160,9 @@ def filter_stream(trace, engines):
             out.flush()
 
 
+# The runner's isolation alone (1), or inside Codex 0.165.0's bwrap (3, measured on real scored runs, whose every shell
+# process sits at 1 or 3). The runner pins that Codex version; a shadowing namespace adds at least one.
+USERNS_DEPTHS = {1, 3}
 LEDGER = re.compile(r'(?:operator|auto)-decisions\.ndjson')  # human and AUTO ledgers: both are consumed as decisions
 DESTRUCTIVE = {'creat', 'truncate', 'ftruncate', 'fallocate', 'link', 'linkat', 'unlink', 'unlinkat', 'rename',
                'renameat', 'renameat2', 'symlink', 'symlinkat'}
@@ -277,10 +294,14 @@ def verify(trace, root_pid):
 
 def engine_documents(trace, engines):
     """JSON objects an installed engine process wrote whole to its own fd 1 and then exited non-zero."""
-    found, unsafe, running = [], [], {}
+    found, unsafe, running, started, born, unshared = [], [], {}, [], {}, {}
     with open(trace, errors='surrogateescape') as handle:
         for pid, name, text in calls(handle):
-            if name == 'execve' and not FAILED.search(text):
+            if name == 'unshare' and not FAILED.search(text) and 'CLONE_NEWUSER' in bare(text):
+                unshared[pid] = unshared.get(pid, 0) + 1
+            elif name in ('clone', 'clone3', 'fork', 'vfork') and not FAILED.search(text) and child_of(text):
+                born[child_of(text)] = (pid, unshared.get(pid, 0), 'CLONE_NEWUSER' in bare(text))
+            elif name == 'execve' and not FAILED.search(text):
                 running.pop(pid, None)
                 if engine_pair(text, engines):
                     head = EXEC_HEAD.match(text)
@@ -290,6 +311,7 @@ def engine_documents(trace, engines):
                         unsafe.append({'pid': pid, 'entry': EXECVE.match(text).group(2), 'names': names})
                     else:
                         running[pid] = {'entry': EXECVE.match(text).group(2), 'documents': []}
+                        started.append(pid)
             elif name == 'status' and text.startswith('+++'):
                 process = running.pop(pid, None)
                 status = re.match(r'\+\+\+ exited with (\d+) \+\+\+', text)
@@ -303,7 +325,11 @@ def engine_documents(trace, engines):
                     continue
                 if isinstance(document, dict):
                     running[pid]['documents'].append(document)
-    return {'documents': found, 'unsafeEngines': unsafe}
+    # Completion order puts a vforked child's exec before its clone record: lineage is read once the whole trace is in.
+    shadowed = {pid: userns_depth(pid, born, unshared) for pid in started}
+    shadowed = {pid: depth for pid, depth in shadowed.items() if depth not in USERNS_DEPTHS}
+    unsafe += [{'pid': pid, 'names': ['USERNS_DEPTH_%d' % depth]} for pid, depth in shadowed.items()]
+    return {'documents': [item for item in found if item['pid'] not in shadowed], 'unsafeEngines': unsafe}
 
 
 def tracer_done(trace, seconds=10):

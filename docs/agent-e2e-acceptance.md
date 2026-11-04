@@ -337,10 +337,13 @@ name outside the list, is persisted. An engine started with `NODE_OPTIONS`, `NOD
 `NODE_PRESERVE_SYMLINKS[_MAIN]`, `NODE_REPL_EXTERNAL_MODULE`, `OPENSSL_CONF[_INCLUDE]`, `OPENSSL_MODULES`,
 `OPENSSL_ENGINES`, `GLIBC_TUNABLES`, `GCONV_PATH` or any `LD_*`, or with a cut or unreadable environment, can run
 code before its entry: it binds nothing, is listed by name in `report.traceUnsafeEngines`, and voids every
-plain-word `cli` refusal of that run. Argv between node and the entry fails closed the same way. Named remaining
-paths, not excluded by the trace: a private mount namespace that shadows the node binary, the entry or a shared
-library at the same path (a `mount` is legitimate here, Codex's own sandbox uses it), and Node's legacy
-`$HOME/.node_modules` / `.node_libraries` fallback for a CommonJS `require` nothing else resolves. Scored runs default to
+plain-word `cli` refusal of that run. Argv between node and the entry fails closed the same way. A shadow mount over
+the node binary, the entry or a library needs a user namespace of its own, because the sandbox holds no capability
+and `setns` fails the gate, so an engine also binds nothing unless its lineage created exactly 1 user namespace (the
+runner's isolation) or 3 (inside Codex 0.165.0's bwrap, measured on real runs): `USERNS_DEPTH_<n>` in
+`report.traceUnsafeEngines`. A Codex upgrade must re-measure that baseline. Named remaining path: Node's legacy
+`$HOME/.node_modules` / `.node_libraries` fallback, used only by a CommonJS `require` nothing else resolves.
+Scored runs default to
 `--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
 `read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
 `ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.
