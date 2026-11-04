@@ -325,7 +325,11 @@ traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13
 Refusal scoring (G1). `read-only`, `live-lock` and `abandoned-lock` require `--provider codex`: a refusal is
 read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.jsonl`), bound to the run by the
 `thread.started` id (headless) or by consumer cwd and launch window (native), copied to
-`codex-rollout.jsonl` and hashed. Only an engine tool result counts: a failed `start-migration` MCP call (its
+`codex-rollout.jsonl` and hashed. Owner ruling 2026-11-04: a scored refusal is accepted only from a structured result of the verified, sealed
+`start-migration` MCP server (`structuredContent.code`, even on a call Codex records `failed`). Every CLI refusal, plain
+or trace-bound, is recorded in `report.cliRefusalsRecordedNotAccepted` (and `report.traceRefusals`) and never accepted
+toward any verdict: no trace rule below proves the executed file and mount view of a CLI process. The CLI rules that follow
+describe what is recorded. Recorded engine tool results: a failed `start-migration` MCP call (its
 `structuredContent.code` counts even when Codex records the call `failed`), or a non-zero shell call whose argv
 is a receipt-installed engine command (no pipes, lists or substitutions). A composed shell command (heredoc,
 pipe, list) is bound by the outside-sandbox trace instead, as `traceRefusals` in `report.traceRefusals`

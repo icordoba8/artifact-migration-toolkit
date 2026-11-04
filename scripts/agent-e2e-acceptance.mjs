@@ -808,8 +808,11 @@ async function score(options, root, output, report) {
       if (createHash("sha256").update(await readFile(node).catch(() => "")).digest("hex") !== PINNED_NODE_SHA256) unpinned.push({ node, names: ["NODE_UNPINNED"] });
     if (options.provider === "codex" && unpinned.length) traced = { refusals: [], unsafeEngines: [...traced.unsafeEngines, ...unpinned] };
     Object.assign(report, { traceRefusals: traced.refusals, traceUnsafeEngines: traced.unsafeEngines });
-    // A rollout shell item cannot be matched to a pid: once any engine ran with pre-entry code, none of them binds.
-    const refusals = [...(rollout?.refusals ?? []).filter(entry => entry.source !== "cli" || !traced.unsafeEngines.length), ...traced.refusals];
+    // G1 (owner ruling 2026-11-04): a refusal is accepted only as a structured result of the verified, sealed MCP server
+    // (source "mcp"). No trace rule proves the executed file and mount view of a CLI process, so every CLI refusal, plain or
+    // trace-bound, is recorded here as evidence and never accepted toward any verdict.
+    const refusals = (rollout?.refusals ?? []).filter(entry => entry.source === "mcp");
+    report.cliRefusalsRecordedNotAccepted = [...(rollout?.refusals ?? []).filter(entry => entry.source !== "mcp"), ...traced.refusals];
     // Lock-removal review leads from both the provider transcript and the bound rollout.
     const removalLeads = () => [...lockRemovals(combined), ...lockRemovals(rolloutText).map(lead => ({ ...lead, source: "codex-rollout.jsonl" }))];
     report.openspec = { status: "NOT_TESTED", reviewRequired: true, candidates: openspecLeads(agent.stdout) };

@@ -1144,11 +1144,12 @@ test('an engine started with pre-entry code binds nothing; its environment never
       assert.deepEqual(nested.report.traceUnsafeEngines.map(entry => entry.names), [['USERNS_DEPTH_5']]);
       // MAJOR 2 (ancestor rename, fake tree, restore) is covered on trace records in 'trace binding': here the store's only
       // writable ancestor is the run root, whose rename would break the runner itself.
-      // The same engine call with a clean environment still binds.
+      // Owner ruling 2026-11-04: the same genuine engine call, clean environment, is recorded but never accepted (CLI).
       const clean = scored('clean', real);
-      assert.equal(clean.result.status, 0, JSON.stringify([clean.report.failure, clean.report.traceUnsafeEngines]));
-      assert.equal(clean.report.verdict, 'SAFETY_REFUSAL_PASS');
-      assert.deepEqual([clean.report.safety.refusal.source, clean.report.safety.refusal.code], ['cli-trace', 'LOCK_HELD']);
+      assert.equal(clean.result.status, 1, JSON.stringify([clean.report.failure, clean.report.traceUnsafeEngines]));
+      assert.notEqual(clean.report.verdict, 'SAFETY_REFUSAL_PASS');
+      assert.equal(clean.report.safety.refusal, null);
+      assert.deepEqual(clean.report.cliRefusalsRecordedNotAccepted.filter(entry => entry.source === 'cli-trace').map(entry => entry.code), ['LOCK_HELD']);
       assert.deepEqual(clean.report.traceUnsafeEngines, []);
       assert.match(clean.trace, /"AMT_ENV_CLEAN"/);
       // A plain-word rollout item cannot be matched to a pid: inherited pre-entry code voids even a genuine engine refusal.
@@ -1177,9 +1178,10 @@ test('a composed engine call counts through the trace; shell text never does (H0
       };
       for (const [name, command] of [['heredoc', heredoc], ['compound', `cd . && ${heredoc} | cat; true`]]) {
         const { result, report } = scored(name, command);
-        assert.equal(result.status, 0, name + JSON.stringify([report.failure, report.safety, report.traceRefusals]));
-        assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS', name);
-        assert.deepEqual([report.safety.refusal.source, report.safety.refusal.code, report.safety.refusal.codeSource], ['cli-trace', 'LOCK_HELD', 'structured'], name);
+        // Owner ruling 2026-11-04: the trace still binds it, as recorded evidence only; no CLI refusal is accepted.
+        assert.equal(result.status, 1, name + JSON.stringify([report.failure, report.safety, report.traceRefusals]));
+        assert.equal(report.safety.refusal, null, name);
+        assert.deepEqual(report.cliRefusalsRecordedNotAccepted.filter(entry => entry.source === 'cli-trace').map(entry => [entry.code, entry.codeSource]), [['LOCK_HELD', 'structured']], name);
         assert.ok(!report.rollout.refusals.some(entry => entry.code === 'LOCK_HELD'), 'the rollout alone must not bind a composed command');
       }
       // One run holds every spoof around real engine calls that did not refuse with LOCK_HELD, a fake document first and last,
@@ -1309,10 +1311,10 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       assert.equal(report.safety.codeSourceRequired, 'structured');
       assert.equal(report.safety.unchanged, true);
       if (codedEngine) {
-        assert.equal(result.status, 0, JSON.stringify(report.safety));
-        assert.equal(report.verdict, 'SAFETY_REFUSAL_PASS');
-        assert.ok(['EROFS', 'EACCES', 'EPERM'].includes(report.safety.refusal.code), JSON.stringify(report.safety));
-        assert.equal(report.safety.refusal.source, 'cli');
+        // Owner ruling 2026-11-04: the engine's own CLI EROFS is recorded, never accepted; only MCP results count.
+        assert.equal(result.status, 1, JSON.stringify(report.safety));
+        assert.equal(report.safety.refusal, null);
+        assert.ok(report.cliRefusalsRecordedNotAccepted.some(entry => entry.source === 'cli' && ['EROFS', 'EACCES', 'EPERM'].includes(entry.code)), JSON.stringify(report.cliRefusalsRecordedNotAccepted));
       } else {
         // 1.6.4 reports Node's recursive-mkdir ENOENT for a read-only mount: recorded, never normalized to a refusal.
         assert.equal(result.status, 1);
@@ -1337,10 +1339,10 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
       const strictReport = JSON.parse(await readFile(path.join(root, 'strict/report.json')));
       assert.equal(strictReport.safety.codeSourceRequired, 'structured');
       if (codedEngine) {
-        // E6: the joint candidate's own structured code satisfies a structured-only run.
-        assert.equal(strict.status, 0, JSON.stringify(strictReport.safety));
-        assert.equal(strictReport.verdict, 'SAFETY_REFUSAL_PASS');
-        assert.equal(strictReport.safety.refusal.codeSource, 'structured');
+        // E6's structured CLI code is recorded, never accepted (owner ruling 2026-11-04).
+        assert.equal(strict.status, 1, JSON.stringify(strictReport.safety));
+        assert.equal(strictReport.safety.refusal, null);
+        assert.ok(strictReport.cliRefusalsRecordedNotAccepted.some(entry => entry.codeSource === 'structured'));
       } else {
         assert.equal(strict.status, 1);
         assert.equal(strictReport.safety.refusal, null);
@@ -1398,9 +1400,10 @@ test('live and abandoned locks: refusal codes from the rollout, reclaim proven o
       const liveReport = JSON.parse(await readFile(path.join(root, 'live-lock/report.json')));
       assert.equal(liveReport.lock.holderAliveAfter, true);
       if (codedEngine) {
-        assert.equal(live.status, 0, JSON.stringify(liveReport.safety));
-        assert.equal(liveReport.verdict, 'SAFETY_REFUSAL_PASS');
-        assert.equal(liveReport.safety.refusal.code, 'LOCK_HELD');
+        // A CLI LOCK_HELD is recorded, never accepted (owner ruling 2026-11-04).
+        assert.equal(live.status, 1, JSON.stringify(liveReport.safety));
+        assert.equal(liveReport.safety.refusal, null);
+        assert.ok(liveReport.cliRefusalsRecordedNotAccepted.some(entry => entry.code === 'LOCK_HELD'));
       } else {
         // 1.6.4 cannot tell a live owner in another PID namespace from a dead one: a refusal, but not LOCK_HELD.
         assert.equal(live.status, 1);
