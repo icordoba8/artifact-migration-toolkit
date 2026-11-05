@@ -290,6 +290,8 @@ export const traceRefusals = (trace, engines, { python = 'python3' } = {}) => {
  */
 export function codexRollout(text, engineCommands) {
   const rollout = { meta: null, turns: 0, prompts: [], refusals: [] };
+  const promptsBySource = { response: [], event: [], legacy: [] };
+  const started = { task: 0, turn: 0 };
   text.split('\n').forEach((line, index) => {
     if (!line) return;
     const event = JSON.parse(line), payload = event.payload ?? {};
@@ -297,16 +299,32 @@ export function codexRollout(text, engineCommands) {
       if (rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one session in a rollout');
       rollout.meta = { id: payload.id, cwd: payload.cwd, timestamp: payload.timestamp };
     }
+    // Codex 0.165 persists native user input as a response_item message, not
+    // an item_completed/UserMessage. Keep the older event forms for historical
+    // diagnostics, but never count duplicate representations as extra turns.
+    if (event.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+      promptsBySource.response.push((payload.content ?? []).filter(part => part.type === 'input_text')
+        .map(part => part.text).join(''));
+    }
     if (event.type !== 'event_msg') return;
-    if (payload.type === 'task_started') rollout.turns += 1;
+    if (payload.type === 'task_started') started.task += 1;
+    if (payload.type === 'turn_started') started.turn += 1;
+    if (payload.type === 'user_message') promptsBySource.event.push(payload.message);
     const item = payload.type === 'item_completed' ? payload.item : null;
-    if (item?.type === 'UserMessage') rollout.prompts.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+    if (item?.type === 'UserMessage') promptsBySource.legacy.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
     const refusal = item?.type === 'McpToolCall' && item.server === 'start-migration' ? mcpRefusal(item)
       : item?.type === 'CommandExecution' ? cliRefusal(item, engineCommands) : null;
     if (refusal) rollout.refusals.push({ line: index + 1, sha256: sha256(line),
       source: item.type === 'McpToolCall' ? 'mcp' : 'cli', tool: item.tool ?? null, exitCode: item.exit_code ?? null, ...refusal });
   });
   if (!rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: rollout has no session_meta');
+  const sources = Object.values(promptsBySource).filter(prompts => prompts.length);
+  if (sources.length > 1 && sources.some(prompts => JSON.stringify(prompts) !== JSON.stringify(sources[0])))
+    throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: conflicting user-message records across rollout schemas');
+  rollout.prompts = sources[0] ?? [];
+  // A missing started event cannot erase a recorded user turn; conversely an
+  // extra started event must not be hidden by a single user-message record.
+  rollout.turns = Math.max(started.task, started.turn, rollout.prompts.length);
   return rollout;
 }
 

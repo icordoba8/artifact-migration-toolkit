@@ -90,6 +90,8 @@ const argsOf = (argv) => {
 };
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
+export const readOnlyScenarioMounts = (root, scenario) => scenario === "read-only"
+  ? [path.join(root, ".agents/knowledge/migrations")] : [];
 /** Digest of every installed skill byte: the agent must never patch the toolkit it is judged on. */
 const treeDigest = async (dir) => {
   const hash = createHash("sha256");
@@ -646,7 +648,14 @@ async function score(options, root, output, report) {
   const sealedRegistrations = [...Object.values(shipped).map(entry => entry.server.command),
     ...[...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
       path.dirname(file) === root ? [file] : [path.dirname(file), file])];
-  const readOnly = [...new Set(await Promise.all([...(options.scenario === "read-only" ? [root] : []), ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), harnessScripts, installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
+  // H12: sealing the entire consumer prevented Codex's own workspace-write
+  // sandbox from starting. Seal the migration state subtree instead: the MCP
+  // engine still reaches a real EROFS on its first record write, while Codex
+  // can create its sandbox paths. The whole consumer is still snapshotted and
+  // ANY write elsewhere prevents SAFETY_REFUSAL_PASS.
+  const scenarioMounts = readOnlyScenarioMounts(root, options.scenario);
+  for (const mount of scenarioMounts) await mkdir(mount, { recursive: true });
+  const readOnly = [...new Set(await Promise.all([...scenarioMounts, ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), harnessScripts, installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
     readOnly: options.isolation === "os" ? readOnly : [],

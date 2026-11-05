@@ -8,7 +8,7 @@ import test, { after } from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
-import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants } from "../scripts/agent-e2e-acceptance.mjs";
+import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants, readOnlyScenarioMounts } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 import "./support/ledger-observer-tests.mjs";
 
@@ -124,7 +124,8 @@ else {
 }
 for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.FAKE_CODEX_PROMPTS || '[]')).entries()) {
   log('event_msg', { type: 'task_started' });
-  item({ type: 'UserMessage', content: [{ type: 'text', text }] });
+  if (headless) item({ type: 'UserMessage', content: [{ type: 'text', text }] });
+  else log('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
   if (process.env.FAKE_CODEX_TEMPLATE_REFUSAL) item({
     type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'completed',
     result: { isError: true, content: [{ type: 'text', text: "EROFS: read-only file system, mkdir '/fixture'" }] }
@@ -1009,6 +1010,33 @@ test('classifier: only engine tool results carry refusal codes; structured codes
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test('Codex 0.165 native response_item input is counted exactly once, with rescue and conflicts rejected', () => {
+  const meta = { type: 'session_meta', payload: { id: 'native', cwd: '/consumer', timestamp: '2026-11-04T20:00:00Z' } };
+  const start = { type: 'event_msg', payload: { type: 'task_started' } };
+  const response = message => ({ type: 'response_item', payload: { type: 'message', role: 'user',
+    content: [{ type: 'input_text', text: message }] } });
+  const event = message => ({ type: 'event_msg', payload: { type: 'user_message', message } });
+  const assistant = { type: 'response_item', payload: { type: 'message', role: 'assistant',
+    content: [{ type: 'output_text', text: 'done' }] } };
+  const parse = (...items) => codexRollout([meta, ...items].map(x => JSON.stringify(x)).join('\n') + '\n', []);
+  assert.deepEqual([parse(start, response('$start-migration auth'), assistant).turns,
+    parse(start, response('$start-migration auth'), assistant).prompts], [1, ['$start-migration auth']]);
+  assert.deepEqual(parse(start, response('$start-migration auth'), event('$start-migration auth')).prompts,
+    ['$start-migration auth']); // duplicated schema events do not create another turn
+  assert.deepEqual(parse(start, event('$start-migration auth')).prompts, ['$start-migration auth']);
+  assert.equal(parse(start, response('$start-migration auth'), start, response('continue')).turns, 2);
+  assert.equal(parse(start, start, response('$start-migration auth')).turns, 2);
+  assert.equal(parse(start, { type: 'event_msg', payload: { type: 'turn_started' } }, response('$start-migration auth')).turns, 1);
+  assert.throws(() => parse(start, response('$start-migration auth'), event('continue')), /conflicting user-message records/);
+});
+
+test('read-only safety fixture seals migration state, not the provider sandbox root (H12)', () => {
+  const root = '/consumer';
+  assert.deepEqual(readOnlyScenarioMounts(root, 'read-only'), ['/consumer/.agents/knowledge/migrations']);
+  assert.deepEqual(readOnlyScenarioMounts(root, 'live-lock'), []);
+  assert.deepEqual(readOnlyScenarioMounts(root, 'fresh'), []);
+});
+
 test('classifier: a failed MCP call keeps its structured code; without one it is never structured', () => {
   const failed = (structuredContent, text) => ({ type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'failed', error: null,
     result: { isError: true, content: [{ type: 'text', text }], ...(structuredContent ? { structuredContent } : {}) } });
@@ -1372,7 +1400,8 @@ test('read-only refusal is scored from a bound engine tool result, never from pr
         assert.equal(result.status, 1);
         assert.deepEqual(report.rollout.refusals.map(entry => entry.code), ['ENOENT']);
       }
-      assert.ok(report.security.readOnly.includes(target));
+      assert.ok(report.security.readOnly.includes(path.join(target, '.agents/knowledge/migrations')));
+      assert.ok(!report.security.readOnly.includes(target));
       assert.equal(report.security.certified, false);
       assert.equal(report.rollout.sha256, sha256(await readFile(path.join(output, 'codex-rollout.jsonl'))));
       // The last stdout line is the driver summary, on every verdict.
