@@ -13,6 +13,7 @@ import {
   assertLegacyDiscoveryChecklist,
   assertLegacyEvidenceAttributes,
   assertLegacyEvidenceWithinBoundary,
+  assertPinnedVisualApplicability,
   assertTargetAssessmentChecklist,
   featureLocalPrefix,
   isBrownfield,
@@ -1168,11 +1169,8 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
   if (step === "ASSESS_TARGET") {
     const legacy = await validateLegacyInventory(root, roots, state);
     await validateTargetInventory(root, roots, legacy, state);
-    await assertTargetAssessmentChecklist(
-      root,
-      roots,
-      state?.requirementsAuthority,
-    );
+    await assertTargetAssessmentChecklist(root, roots, state?.requirementsAuthority);
+    await assertPinnedVisualApplicability(root, roots, legacy, state);
     // Runs before completedArtifactHashes pins the file, so an absent or
     // unbound authority context fails here instead of as a raw ENOENT out of
     // hashFile -- the fail-closed ordering, now for either authority.

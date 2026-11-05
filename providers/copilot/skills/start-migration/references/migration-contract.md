@@ -1268,11 +1268,12 @@ observed mismatch in `uiMismatches`.
 makes it required. The two cannot disagree with what discovery found — a visible
 inventory with no UI behaviors, and a non-UI inventory with visible components,
 are both refused. Closing `DISCOVERY_COMPLETENESS` also reads the code: a
-production-reachable owned file that renders or may render (JSX, a rendering
-API under any alias, a DOM markup write, a UI-runtime or CSS-in-JS import, a
-`.vue`/`.svelte`/`.html` document) under `hasVisibleUi: false` is
+production-reachable owned file with rendering evidence (JSX, a rendering
+export of a UI, DOM or canvas library, the browser's `document`, a DOM-only
+member, a canvas context, CSS-in-JS, a `.vue`/`.svelte`/`.html` document) under `hasVisibleUi: false` is
 refused with `VISUAL_APPLICABILITY_MISMATCH`, whatever its extension. A record
-already past that checkpoint keeps the value its history consumed.
+that closed that checkpoint before the rule is held to it at `ASSESS_TARGET`,
+from the pinned discovery scan; recover it with `--reopen-discovery`.
 
 A `uiBehaviors` row is an interaction inventory, not a component census:
 

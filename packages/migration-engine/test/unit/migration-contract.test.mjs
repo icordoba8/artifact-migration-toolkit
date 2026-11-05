@@ -24394,3 +24394,64 @@ test("visual applicability: a reachable module file that renders cannot ride has
     await fixture.cleanup();
   }
 });
+
+// The same rule for a record that closed DISCOVERY_COMPLETENESS before it held:
+// ASSESS_TARGET classifies the pinned scan's reachable files again, so a
+// rendering file under `hasVisibleUi: false` reaches neither `{"frames": []}`
+// nor a migration without visual acceptance. A nonrendering module passes, with
+// no browser, under either design source.
+for (const designSource of ["target-system", "legacy-runtime"]) {
+  test(`visual applicability (${designSource}): a module past DISCOVERY_COMPLETENESS whose reachable file renders is refused at ASSESS_TARGET`, async () => {
+    const fixture = await createFixture();
+    try {
+      const nonVisual = { ...LEGACY_INVENTORY, hasVisibleUi: false, uiBehaviors: [] };
+      await driveTo(fixture, "DISCOVER_LEGACY", advance, {
+        legacy: nonVisual,
+        ...(designSource === "legacy-runtime" ? { bootstrap: { designSource } } : {}),
+      });
+      await completeStepDoc(fixture, "DISCOVERY_COMPLETENESS");
+      const file = path.join(fixture.legacyRoot, "auth/LoginForm.tsx");
+      const hook = "export const useLogin = (name: string) => name.trim();\n";
+      await writeFile(file, hook);
+      await writeClassification(fixture, {
+        ...MODULE_CLASSIFICATION,
+        declaredEntryPoints: [{ path: "auth/LoginForm.tsx", reason: "Module entry." }],
+        files: [
+          MODULE_CLASSIFICATION.files[0],
+          {
+            path: "auth/LoginForm.tsx",
+            scope: "OWNED",
+            reachability: "REACHABLE_FROM_ENTRY",
+            reachedFrom: [],
+            kind: "COMPONENT",
+            disposition: "BEHAVIOR_BACKED",
+            behaviorIds: ["LB-1"],
+            routeFlowIds: [],
+            rationale: "The sign-in entry.",
+            evidence: [],
+          },
+        ],
+      });
+      await advance(fixture);
+      assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+      await completeStepDoc(fixture, "ASSESS_TARGET");
+      await writeJson(path.join(fixture.migrationRoot, "inventories/target.json"),
+        { ...TARGET_INVENTORY, hasVisibleUi: false, uiComponents: [], uiMismatches: [] });
+      if (designSource === "legacy-runtime") {
+        await writeJson(path.join(fixture.migrationRoot, "inventories/legacy-runtime-context.json"), { version: 2, frames: [] });
+      }
+      // The pinned scan reaches the file; its bytes now render.
+      await writeFile(file, "export const LoginForm = () => <form />;\n");
+      await assert.rejects(
+        advance(fixture),
+        /VISUAL_APPLICABILITY_MISMATCH: the pinned inventories\/legacy\.json declares hasVisibleUi false, .*auth\/LoginForm\.tsx: JSX element.*--reopen-discovery/,
+      );
+      assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+      await writeFile(file, hook);
+      await advance(fixture);
+      assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}

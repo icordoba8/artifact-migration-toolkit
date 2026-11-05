@@ -14,7 +14,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { createRequire as requireFrom } from "node:module";
+import { createRequire as requireFrom, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -6716,7 +6716,7 @@ const refusedAtDiscovery = async (fixture, ui) => {
   return result.reason ?? "";
 };
 
-for (const [name, relative, text] of [
+for (const [name, relative, text, dependency] of [
   ["a simple .ts interface", "widget/user.ts", "export interface User {\n  id: string;\n  name: string;\n}\n"],
   ["a nonvisual TS service", "widget/user-service.ts",
     "export class UserService {\n  constructor(private readonly http: { get(path: string): Promise<unknown> }) {}\n  list() {\n    return this.http.get(\"users\");\n  }\n}\n"],
@@ -6724,15 +6724,26 @@ for (const [name, relative, text] of [
   ["a plain .js utility", "widget/format.js", "export const format = (name) => name.trim();\n"],
   ["a .mjs service that writes streams and form data", "widget/upload.mjs",
     "export const upload = (stream, form) => {\n  stream.write(\"x\");\n  form.append(\"file\", \"x\");\n};\n"],
+  // The reviewed false positives: look-alike names on nonvisual receivers.
+  ["a Mustache email body builder", "widget/email.js",
+    "import Mustache from \"mustache\";\nexport const body = (template, view) => Mustache.render(template, view);\n", "mustache"],
+  ["an XML document builder", "widget/xml.js",
+    "export const add = (text, name) => {\n  const doc = new DOMParser().parseFromString(text, \"application/xml\");\n  doc.documentElement.appendChild(doc.createElement(name));\n  return doc;\n};\n"],
 ]) {
-  test(`visual applicability: ${name} is NON_VISUAL and completes with no browser evidence`, async () => {
+  test(`visual applicability: ${name} is CONFIRMED_NONVISUAL and completes with no browser evidence`, async () => {
     const fixture = await visualFixture(relative, text);
     try {
-      await driveToComplete(fixture, "TARGET_EXTEND", { units: await censusOf(fixture) });
+      const requirements = dependency
+        ? [{ element: `EXTERNAL ${dependency}`, disposition: "EXTERNAL_DEPENDENCY", ref: dependency }] : [];
+      if (dependency) {
+        await writeJson(fixture.targetRoot, "package.json", { name: "target", private: true, dependencies: { [dependency]: "1.0.0" } });
+      }
+      await driveToComplete(fixture, "TARGET_EXTEND", { units: await censusOf(fixture), requirements });
       await assertNoRuntimeCapture(fixture);
       const status = await getArtifactStatus(fixture.options);
       assert.equal(status.status, "COMPLETE");
       assert.equal(status.visualApplicability.classification, "NON_VISUAL");
+      assert.equal(status.visualApplicability.applicability, "CONFIRMED_NONVISUAL");
       assert.equal(status.visualApplicability.verification, "NOT_APPLICABLE");
     } finally {
       await fixture.cleanup();
@@ -6796,7 +6807,7 @@ test("visual applicability: CSS consumed by a React component is verified by tha
     // The consuming component: VISUAL_UI, so it cannot be declared invisible,
     // and it carries the stylesheet into its visible behavior.
     const component = visualCase(base, "widget/consumer-a.ts", "src/widget.ts");
-    assert.match(await refusedAtDiscovery(component, false), /VISUAL_UI \(widget\/consumer-a\.ts: createElement reference\)/);
+    assert.match(await refusedAtDiscovery(component, false), /VISUAL_UI \(widget\/consumer-a\.ts: imports createElement from 'react'\)/);
     const requirements = [react, { element: "widget/theme.css", disposition: "MIGRATED_BEHAVIOR", ref: "B-1" }];
     await advanceDiscovery(component, { ui: true, units: await censusOf(component), requirements });
     assert.equal((await ownership()).consumers[0].status, "PENDING");
@@ -6812,7 +6823,9 @@ test("visual applicability: CSS consumed by a React component is verified by tha
     assert.equal((await runArtifact(component.options)).outcome, "COMPLETE");
     assert.deepEqual(await ownership(), {
       classification: "VISUAL_DEPENDENCY",
-      files: [{ path: "widget/theme.css", classification: "VISUAL_DEPENDENCY", reason: "style" }],
+      applicability: "CONFIRMED_NONVISUAL",
+      conclusive: true,
+      files: [{ path: "widget/theme.css", classification: "VISUAL_DEPENDENCY", reason: "style", conclusive: true, applicability: "CONFIRMED_NONVISUAL" }],
       verification: "CONSUMERS",
       consumers: [{ dependency: "widget/theme.css", consumer: "widget/consumer-a.ts", owner: component.id, status: "VERIFIED" }],
       consumerCoverage: "VERIFIED",
@@ -6921,17 +6934,27 @@ test("visual applicability: legacy-runtime still demands captured frames for a V
   }
 });
 
-// Classifier false negatives found in review. Every one used to read
-// NON_VISUAL, which let `hasVisibleUi: false` skip all visual evidence and
-// refused the honest `true`. A doubtful file must ask for evidence, never skip it.
-test("visual applicability: aliased renderers, CSS-in-JS and JS/JSX/MJS components classify VISUAL_UI", async () => {
+// The classifier's three states, each on provenance. CONFIRMED_VISUAL needs a
+// rendering signal from a known origin; a DOM-shaped name on a receiver of
+// unknown provenance is INCONCLUSIVE, never proof either way; a receiver from an
+// XML document or a nonvisual module clears that doubt.
+test("visual applicability: the classifier's three states, each on provenance", async () => {
   const parser = await structuralParser();
   for (const [file, text, reason] of [
-    ["a.js", "import { createElement as h } from \"react\";\nexport const A = () => h(\"div\");\n", "createElement reference"],
+    // React, its aliases and runtimes, ReactDOM.
+    ["a.js", "import { createElement as h } from \"react\";\nexport const A = () => h(\"div\");\n", "imports createElement from 'react'"],
     ["a.mjs", "import React from \"react\";\nconst h = React.createElement;\nexport const A = () => h(\"div\");\n", "createElement reference"],
-    ["a.js", "import React from \"react\";\nconst { createElement: h } = React;\nexport const A = () => h(\"div\");\n", "createElement reference"],
-    ["a.js", "import { jsx as _jsx } from \"react/jsx-runtime\";\nexport const A = () => _jsx(\"div\", {});\n", "jsx reference"],
+    ["a.js", "import React from \"react\";\nconst { createElement: h } = React;\nexport const A = () => h(\"div\");\n", "imports createElement from 'react'"],
+    ["a.cjs", "const { createElement } = require(\"react\");\nmodule.exports = () => createElement(\"div\");\n", "imports createElement from 'react'"],
+    ["a.js", "import { jsx as _jsx } from \"react/jsx-runtime\";\nexport const A = () => _jsx(\"div\", {});\n", "imports jsx from 'react/jsx-runtime'"],
     ["a.js", "import ReactDOM from \"react-dom\";\nReactDOM.render(null, document.body);\n", "imports default from 'react-dom'"],
+    ["a.js", "import { createRoot } from \"react-dom/client\";\nexport const mount = (el, app) => createRoot(el).render(app);\n", "imports createRoot from 'react-dom/client'"],
+    ["a.js", "export const A = () => React.createElement(\"div\");\n", "React.createElement global of 'react'"],
+    ["a.js", "ReactDOM.render(app, document.getElementById(\"root\"));\n", "ReactDOM.render global of 'react-dom'"],
+    ["a.js", "export const A = () => <div />;\n", "JSX element"],
+    ["a.jsx", "export const A = () => <><span /></>;\n", "JSX element"],
+    ["a.mjs", "export const A = () => <div />;\n", "JSX element"],
+    // Preact, Vue, Lit, Svelte, CSS-in-JS.
     ["a.mjs", "import { h as v } from \"preact\";\nexport const A = () => v(\"div\");\n", "imports h from 'preact'"],
     ["a.js", "import { h } from \"vue\";\nexport default { setup: () => () => h(\"div\") };\n", "imports h from 'vue'"],
     ["a.mjs", "import { html } from \"lit\";\nexport const A = () => html`<p>hi</p>`;\n", "imports html from 'lit'"],
@@ -6939,31 +6962,121 @@ test("visual applicability: aliased renderers, CSS-in-JS and JS/JSX/MJS componen
     ["a.jsx", "import { css } from \"@emotion/react\";\nexport const card = css`padding: 4px;`;\n", "imports css from '@emotion/react'"],
     ["a.js", "import styled from \"@emotion/styled\";\nexport const Card = styled(\"div\")({ padding: 4 });\n", "imports default from '@emotion/styled'"],
     ["a.js", "export const Button = styled.button`color: red;`;\n", "styled tagged template"],
+    // jQuery and D3, imported or as script-tag globals.
+    ["a.js", "import $ from \"jquery\";\nexport const show = () => $(\"#x\").html(\"<b>hi</b>\").show();\n", "$ from 'jquery'"],
+    ["a.js", "export const show = () => $(\"#x\").addClass(\"open\");\n", "$ global of 'jquery'"],
+    ["a.js", "jQuery(\".x\").hide();\n", "jQuery global of 'jquery'"],
+    ["a.js", "import * as d3 from \"d3\";\nexport const draw = (node) => d3.select(node).append(\"svg\");\n", "select reference"],
+    ["a.js", "import { select } from \"d3-selection\";\nexport const draw = (node) => select(node).append(\"svg\");\n", "imports select from 'd3-selection'"],
+    ["a.js", "export const draw = (node) => d3.select(node).append(\"svg\");\n", "d3.select global of 'd3'"],
+    // Canvas, DOM mutation through the browser's own handles.
+    ["a.js", "export const draw = (c) => { const g = c.getContext(\"2d\"); g.fillRect(0, 0, 10, 10); };\n", "canvas getContext('2d')"],
+    ["a.js", "export const label = (el, n) => { el.textContent = `${n}`; el.classList.toggle(\"empty\", n === 0); };\n", "classList reference"],
+    ["a.js", "export const label = (n) => { document.getElementById(\"count\").textContent = `${n}`; };\n", "document.getElementById reference"],
+    ["a.js", "export const tint = () => { document.querySelector(\".badge\").style.color = \"red\"; };\n", "document.querySelector reference"],
     ["a.js", "export const A = (el) => { el.innerHTML += \"<b>x</b>\"; };\n", "innerHTML reference"],
     ["a.mjs", "export const A = (el) => { el[\"outerHTML\"] = \"<b>x</b>\"; };\n", "outerHTML reference"],
-    ["a.js", "export const A = (el, child) => el.appendChild(child);\n", "appendChild reference"],
     ["a.js", "document.write(\"<p>x</p>\");\n", "document.write reference"],
+    ["a.js", "export const mount = (child) => document.body.appendChild(child);\n", "document.body reference"],
+    ["a.js", "export const mount = () => window.document.getElementById(\"root\");\n", "document.getElementById reference"],
+    // Chart.js, Three.js (and its subpaths), snabbdom, mithril.
+    ["a.js", "import Chart from \"chart.js/auto\";\nexport const chart = (el) => new Chart(el, { type: \"bar\" });\n", "Chart from 'chart.js/auto'"],
+    ["a.cjs", "const $ = require(\"jquery\");\nmodule.exports = () => $(\"#x\").hide();\n", "$ from 'jquery'"],
+    ["a.js", "export const chart = (el) => new Chart(el, { type: \"bar\" });\n", "Chart global of 'chart.js'"],
+    ["a.js", "import * as THREE from \"three\";\nexport const renderer = () => new THREE.WebGLRenderer();\n", "WebGLRenderer reference"],
+    ["a.js", "import { WebGPURenderer } from \"three/webgpu\";\nexport const renderer = () => new WebGPURenderer();\n", "imports WebGPURenderer from 'three/webgpu'"],
+    ["a.mjs", "import * as THREE from \"three/webgpu\";\nexport const renderer = () => new THREE.WebGPURenderer();\n", "WebGPURenderer reference"],
+    ["a.js", "export const renderer = () => new THREE.WebGLRenderer();\n", "THREE.WebGLRenderer global of 'three'"],
+    ["a.js", "import { init, h } from \"snabbdom\";\nconst patch = init([]);\nexport const mount = (el) => patch(el, h(\"div\"));\n", "imports init from 'snabbdom'"],
+    ["a.js", "import m from \"mithril\";\nexport const mount = (el) => m.render(el, m(\"div\"));\n", "imports default from 'mithril'"],
+    // Web components and template documents.
     ["a.mjs", "customElements.define(\"x-a\", class extends HTMLElement {});\n", "customElements reference"],
-    ["a.js", "export const A = () => <div />;\n", "JSX element"],
-    ["a.jsx", "export const A = () => <><span /></>;\n", "JSX element"],
-    ["a.mjs", "export const A = () => <div />;\n", "JSX element"],
+    ["a.ts", "export class Badge extends HTMLElement {}\n", "HTMLElement reference"],
     ["a.vue", "<template><div /></template>\n", "markup document"],
     ["a.svelte", "<div />\n", "markup document"],
     ["a.html", "<p>x</p>\n", "markup document"],
   ]) {
-    assert.deepEqual(classifyVisualFile(parser, file, text), { classification: "VISUAL_UI", reason }, `${file}: ${text}`);
+    assert.deepEqual(classifyVisualFile(parser, file, text),
+      { classification: "VISUAL_UI", reason, conclusive: true, applicability: "CONFIRMED_VISUAL" }, `${file}: ${text}`);
   }
-  // Nonvisual code using the same packages or look-alike APIs stays NON_VISUAL.
+  // Nothing renders and nothing is in doubt: the same packages' nonvisual APIs,
+  // services and utilities, and DOM-shaped calls on values whose provenance is
+  // an XML document or a nonvisual module.
   for (const [file, text] of [
     ["a.jsx", "import { useState } from \"react\";\nexport const useA = () => useState(0);\n"],
+    ["a.js", "import React from \"react\";\nexport const useA = () => React.useState(0);\n"],
     ["a.mjs", "import { ref, computed } from \"vue\";\nexport const useA = () => computed(() => ref(1).value);\n"],
     ["a.js", "import { Injectable } from \"@angular/core\";\nexport const A = Injectable;\n"],
-    ["a.ts", "import type { Root } from \"react-dom/client\";\nimport { type Container } from \"react-dom/client\";\nexport type A = Root | Container;\n"],
     ["a.js", "const sql = (s) => s;\nexport const q = sql`select 1`;\n"],
     ["a.cjs", "module.exports = { add: (a, b) => a + b };\n"],
+    ["a.js", "export const save = (document) => document.body.trim();\n"],
+    ["a.js", "import { createRoot } from \"solid-js\";\nexport const root = createRoot(() => 1);\n"],
+    ["a.js", "import { scaleLinear } from \"d3\";\nexport const scale = scaleLinear();\n"],
+    ["a.js", "import { Vector3 } from \"three\";\nexport const v = () => new Vector3();\n"],
+    ["a.js", "import { color } from \"chart.js/helpers\";\nexport const red = color(\"red\");\n"],
+    ["a.js", "import \"jquery\";\nexport const ready = true;\n"],
+    ["a.js", "export default { esbuild: { jsx: \"automatic\" }, render: true, appendChild: 1 };\n"],
+    ["a.ts", "export const id = (el: HTMLElement) => el.id;\n"],
+    ["a.mjs", "export const upload = (stream, form) => {\n  stream.write(\"x\");\n  form.append(\"file\", \"x\");\n};\n"],
+    ["a.js", "import fs from \"node:fs\";\nexport const log = (file) => fs.createWriteStream(file).write(\"x\");\n"],
+    // Mustache.render in an email builder: imported, or required.
+    ["a.js", "import Mustache from \"mustache\";\nexport const body = (t, v) => Mustache.render(t, v);\n"],
+    ["a.cjs", "const Mustache = require(\"mustache\");\nmodule.exports = (t, v) => Mustache.render(t, v);\n"],
+    // An XML document's appendChild/createElement/textContent: parsed, built, or from xmldom.
+    ["a.js", "export const add = (text, name) => {\n  const doc = new DOMParser().parseFromString(text, \"application/xml\");\n  doc.documentElement.appendChild(doc.createElement(name));\n  return doc;\n};\n"],
+    ["a.js", "export const blank = () => {\n  const doc = document.implementation.createDocument(null, \"root\");\n  const root = doc.documentElement;\n  root.appendChild(doc.createElement(\"item\")).textContent = \"x\";\n  return doc;\n};\n"],
+    ["a.mjs", "import { DOMParser } from \"@xmldom/xmldom\";\nconst parser = new DOMParser();\nexport const add = (text) => {\n  const doc = parser.parseFromString(text, \"text/xml\");\n  doc.documentElement.setAttribute(\"v\", \"1\");\n};\n"],
+    // DOM-only members on an XML document or a server-side DOM: no screen either.
+    ["a.js", "export const toText = (text) => {\n  const doc = new DOMParser().parseFromString(text, \"text/xml\");\n  return doc.documentElement.outerHTML;\n};\n"],
+    ["a.js", "import { JSDOM } from \"jsdom\";\nexport const clean = (html) => {\n  const dom = new JSDOM(html);\n  return dom.window.document.body.innerHTML;\n};\n"],
+    // An inline `type` specifier keeps the import statement, which may still load the module.
+    ["a.ts", "import { type Container } from \"react-dom/client\";\nexport type A = Container;\n"],
   ]) {
-    assert.deepEqual(classifyVisualFile(parser, file, text), { classification: "NON_VISUAL", reason: "renders nothing" }, `${file}: ${text}`);
+    assert.deepEqual(classifyVisualFile(parser, file, text),
+      { classification: "NON_VISUAL", reason: "no rendering signal recognized", conclusive: false, applicability: "CONFIRMED_NONVISUAL" },
+      `${file}: ${text}`);
   }
+  // A name alone is not proof, and an unknown receiver is not proof either.
+  for (const [file, text, reason] of [
+    ["a.js", "export const attach = (el, child) => el.appendChild(child);\n", "appendChild() on a receiver of unknown provenance"],
+    ["a.js", "export const show = (view, data) => view.render(data);\n", "render() on a receiver of unknown provenance"],
+    ["a.js", "export const label = (node, value) => {\n  node.textContent = value;\n};\n", "textContent written on a receiver of unknown provenance"],
+    ["a.ts", "export const tint = (node: { style: { color: string } }) => {\n  node.style.color = \"red\";\n};\n", "style written on a receiver of unknown provenance"],
+    ["a.mjs", "export class View {\n  show() {\n    this.el.replaceChildren();\n  }\n}\n", "replaceChildren() on a receiver of unknown provenance"],
+    ["a.js", "export const add = (doc, name) => doc.documentElement.appendChild(doc.createElement(name));\n", "appendChild() on a receiver of unknown provenance"],
+    ["a.js", "export const page = (req, res) => res.render(\"home\", {});\n", "render() on a receiver of unknown provenance"],
+    ["a.js", "import { render } from \"./view\";\nexport const show = (data) => render(data);\n", "render() imported from './view'"],
+    // A DOM library's utility members: not proof of a screen, not proof against one.
+    ["a.js", "import $ from \"jquery\";\nexport const load = () => $.ajax(\"/users\");\n", "$.ajax of 'jquery', a DOM library"],
+    ["a.js", "export const load = () => $.ajax(\"/users\");\n", "$.ajax of 'jquery', a DOM library"],
+    ["a.js", "import { Chart, registerables } from \"chart.js\";\nChart.register(...registerables);\n", "Chart.register of 'chart.js', a DOM library"],
+    // A DOM class asked about, not extended or built; a document from an unknown factory.
+    ["a.js", "export const valueOf = (event) => event.target instanceof HTMLInputElement ? event.target.value : null;\n", "HTMLInputElement reference"],
+    ["a.js", "export const open = (Editor, el) => {\n  const editor = Editor.createDocument(el);\n  editor.render();\n};\n", "render() on a receiver of unknown provenance"],
+    // One name, two provenances: names are not scopes, so neither declaration clears it.
+    ["a.js", "const doc = new DOMParser().parseFromString(\"<a/>\", \"text/xml\");\nexport const add = (doc, node) => doc.appendChild(node);\n", "appendChild() on a receiver of unknown provenance"],
+  ]) {
+    assert.deepEqual(classifyVisualFile(parser, file, text),
+      { classification: "NON_VISUAL", reason, conclusive: false, applicability: "INCONCLUSIVE" }, `${file}: ${text}`);
+  }
+  // Erased at compile time: conclusively nonrendering.
+  for (const [file, text] of [
+    ["a.ts", "import type { Root } from \"react-dom/client\";\nexport type A = Root;\n"],
+    ["a.ts", "export interface Badge extends HTMLElement {\n  label: string;\n}\ndeclare const tag: string;\nexport {};\n"],
+    ["a.d.ts", "export declare function render(): HTMLElement;\n"],
+  ]) {
+    assert.deepEqual(classifyVisualFile(parser, file, text),
+      { classification: "NON_VISUAL", reason: "type declarations only", conclusive: true, applicability: "CONFIRMED_NONVISUAL" }, `${file}: ${text}`);
+  }
+  // A stylesheet or asset is a dependency its consumers verify; a script that only loads one renders nothing itself.
+  assert.deepEqual(classifyVisualFile(parser, "a.css", ".a {}"),
+    { classification: "VISUAL_DEPENDENCY", reason: "style", conclusive: true, applicability: "CONFIRMED_NONVISUAL" });
+  assert.deepEqual(classifyVisualFile(parser, "a.js", "import \"./theme.css\";\nexport const ready = true;\n"),
+    { classification: "VISUAL_DEPENDENCY", reason: "imports a stylesheet or asset", conclusive: false, applicability: "CONFIRMED_NONVISUAL" });
+  // Data and docs are inert; a kind the engine cannot read, such as a server template, is not proof.
+  assert.deepEqual(classifyVisualFile(parser, "a.json", "{}"), { classification: "NON_VISUAL", reason: "data", conclusive: true, applicability: "CONFIRMED_NONVISUAL" });
+  assert.deepEqual(classifyVisualFile(parser, "a.md", "# x"), { classification: "NON_VISUAL", reason: "doc", conclusive: true, applicability: "CONFIRMED_NONVISUAL" });
+  assert.deepEqual(classifyVisualFile(parser, "cart.php", "<?php echo '<div>'; ?>"), { classification: "NON_VISUAL", reason: "other", conclusive: false, applicability: "INCONCLUSIVE" });
 });
 
 for (const [name, relative, text, dependency] of [
@@ -6971,23 +7084,188 @@ for (const [name, relative, text, dependency] of [
     "import { createElement as h } from \"react\";\nexport const Badge = () => h(\"span\", null, \"new\");\n", "react"],
   ["a .jsx component", "widget/Badge.jsx", "export const Badge = () => <span className=\"badge\" />;\n", null],
   ["a .mjs lit component", "widget/badge.mjs", "import { html } from \"lit\";\nexport const badge = () => html`<span>new</span>`;\n", "lit"],
+  // The reviewed false negatives: each used to refuse its honest `true` and let `false` skip evidence.
+  ["a jQuery DOM writer", "widget/panel.js", "import $ from \"jquery\";\nexport const show = () => $(\"#x\").html(\"<b>hi</b>\").show();\n", "jquery"],
+  ["a D3 chart", "widget/chart.js", "import * as d3 from \"d3\";\nexport const draw = (node) => d3.select(node).append(\"svg\");\n", "d3"],
+  ["a canvas painter", "widget/paint.js", "export const draw = (c) => { const g = c.getContext(\"2d\"); g.fillRect(0, 0, 10, 10); };\n", null],
+  ["a DOM mutation toggler", "widget/badge-toggle.js",
+    "export const label = (el, n) => { el.textContent = `${n}`; el.classList.toggle(\"empty\", n === 0); };\n", null],
+  ["a Chart.js chart", "widget/sales.js", "import { Chart } from \"chart.js\";\nexport const chart = (el) => new Chart(el, { type: \"bar\" });\n", "chart.js"],
+  ["a Three.js scene", "widget/scene.js", "import * as THREE from \"three\";\nexport const renderer = () => new THREE.WebGLRenderer();\n", "three"],
+  ["a snabbdom view", "widget/view.js",
+    "import { init, h } from \"snabbdom\";\nconst patch = init([]);\nexport const mount = (el) => patch(el, h(\"div\"));\n", "snabbdom"],
+  ["a mithril view", "widget/mview.js", "import m from \"mithril\";\nexport const mount = (el) => m.render(el, m(\"div\"));\n", "mithril"],
+  ["a React jsx-runtime view", "widget/runtime.js", "import { jsx } from \"react/jsx-runtime\";\nexport const Badge = () => jsx(\"span\", {});\n", ["react", "react/jsx-runtime"]],
+  ["a ReactDOM root", "widget/root.js", "import { createRoot } from \"react-dom/client\";\nexport const mount = (el, app) => createRoot(el).render(app);\n", ["react-dom", "react-dom/client"]],
+  ["a global jQuery writer", "widget/legacy-panel.js", "export const show = () => $(\"#panel\").addClass(\"open\");\n", null],
+  ["a global D3 chart", "widget/legacy-chart.js", "export const draw = (node) => d3.select(node).append(\"svg\");\n", null],
+  ["a Three.js subpath renderer", "widget/gpu.js", "import { WebGPURenderer } from \"three/webgpu\";\nexport const renderer = () => new WebGPURenderer();\n", ["three", "three/webgpu"]],
+  ["a styled-components button", "widget/button.js", "import styled from \"styled-components\";\nexport const Button = styled.button`color: red;`;\n", "styled-components"],
+  ["an Emotion class", "widget/card.js", "import { css } from \"@emotion/css\";\nexport const card = css`padding: 4px;`;\n", "@emotion/css"],
+  ["a Vue render function", "widget/vbadge.js", "import { h } from \"vue\";\nexport default { setup: () => () => h(\"span\") };\n", "vue"],
+  ["a DOM text writer", "widget/count.js", "export const show = (n) => { document.getElementById(\"count\").textContent = `${n}`; };\n", null],
+  ["a DOM style writer", "widget/tint.js", "export const tint = () => { document.querySelector(\".badge\").style.color = \"red\"; };\n", null],
+  ["an HTMLElement subclass", "widget/x-badge.ts", "export class XBadge extends HTMLElement {}\n", null],
 ]) {
   test(`visual applicability: ${name} cannot be declared invisible, and its honest visible declaration is accepted`, async () => {
     const fixture = await visualFixture(relative, text);
+    const [pkg, specifier = pkg] = [dependency].flat();
     try {
-      if (dependency) {
-        await writeJson(fixture.targetRoot, "package.json", { name: "target", private: true, dependencies: { [dependency]: "1.0.0" } });
+      if (pkg) {
+        await writeJson(fixture.targetRoot, "package.json", { name: "target", private: true, dependencies: { [pkg]: "1.0.0" } });
       }
       assert.match(await refusedAtDiscovery(fixture, false), /VISUAL_APPLICABILITY_MISMATCH: this artifact is VISUAL_UI.*hasVisibleUi must be true/);
-      const requirements = dependency
-        ? [{ element: `EXTERNAL ${dependency}`, disposition: "EXTERNAL_DEPENDENCY", ref: dependency }] : [];
+      const requirements = pkg
+        ? [{ element: `EXTERNAL ${specifier}`, disposition: "EXTERNAL_DEPENDENCY", ref: pkg }] : [];
       await advanceDiscovery(fixture, { ui: true, units: await censusOf(fixture), requirements });
-      assert.equal((await getArtifactStatus(fixture.options)).visualApplicability.verification, "SELF");
+      const { visualApplicability } = await getArtifactStatus(fixture.options);
+      assert.deepEqual([visualApplicability.applicability, visualApplicability.verification], ["CONFIRMED_VISUAL", "SELF"]);
     } finally {
       await fixture.cleanup();
     }
   });
 }
+
+// A heuristic that finds no renderer in executable code proves nothing: the
+// honest `true` is accepted and then owes the same evidence as any visible UI.
+test("visual applicability: an unattributed DOM script may be declared visible and then owes captured frames", async () => {
+  const fixture = await visualFixture("widget/mount.js", "export const mount = (parent, child) => parent.appendChild(child);\n");
+  try {
+    await driveLegacyRuntimeToAssessment(fixture, true);
+    assert.equal((await stateOf(fixture)).hasVisibleUi, true);
+    const status = await getArtifactStatus(fixture.options);
+    assert.equal(status.visualApplicability.classification, "NON_VISUAL");
+    assert.equal(status.visualApplicability.applicability, "INCONCLUSIVE");
+    assert.equal(status.visualApplicability.conclusive, false);
+    assert.equal(status.visualApplicability.verification, "SELF");
+    await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", { version: 2, frames: [] });
+    assert.match((await runArtifact(fixture.options)).reason, /must record a non-empty "frames" array/);
+    assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// `hasVisibleUi: true` with every behavior `visible: false` used to reach
+// `{"frames": []}` and zero visual requirements. Refused where it is decided.
+for (const designSource of ["legacy-runtime", "target-system"]) {
+  for (const [name, relative, text] of [
+    ["a VISUAL_UI component", "widget/Badge.tsx", "export const Badge = () => <span className=\"badge\" />;\n"],
+    ["an unattributed DOM script", "widget/mount.js", "export const mount = (parent, child) => parent.appendChild(child);\n"],
+  ]) {
+    test(`visual applicability (${designSource}): ${name} declared visible with no visible behavior is refused at DISCOVER_LEGACY`, async () => {
+      const fixture = await visualFixture(relative, text);
+      try {
+        await bootstrap(fixture, designSource === "legacy-runtime" ? { designSource } : {});
+        const document = await sourceInventory(fixture, { ui: true });
+        document.behaviors = document.behaviors.map(({ runtimeStates: _states, ...row }) => ({ ...row, visible: false }));
+        await writeJson(fixture.artifactRoot, "inventories/source.json", document);
+        const refused = await runArtifact(fixture.options);
+        assert.match(refused.reason, /VISUAL_APPLICABILITY_MISMATCH: source inventory\.hasVisibleUi is true but no behavior is visible/);
+        assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+        assert.equal((await stateOf(fixture)).hasVisibleUi, null);
+        // The honest document advances.
+        await advanceDiscovery(fixture, { ui: true, units: await censusOf(fixture) });
+        assert.equal((await stateOf(fixture)).hasVisibleUi, true);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+}
+
+// `--status` while DISCOVER_LEGACY is still being authored: the draft source
+// inventory is reported INVENTORY_INCOMPLETE, never thrown, through the module
+// API, the CLI and a parent module's prerequisite check alike.
+for (const [name, body] of [
+  ["malformed JSON", "{ \"globalContracts\": [ "],
+  ["a contract without consumers", JSON.stringify({ globalContracts: [{ id: "GC-1", kind: "GLOBAL_THEME", sourcePath: "widget/local.css" }] })],
+  ["contracts that are not an array", JSON.stringify({ globalContracts: { id: "GC-1" } })],
+]) {
+  test(`visual applicability: --status reads a half-authored source inventory (${name}) as INVENTORY_INCOMPLETE`, async () => {
+    const fixture = await visualFixture("widget/local.css", ".widget { color: red; }\n");
+    try {
+      await bootstrap(fixture);
+      await mkdir(path.join(fixture.artifactRoot, "inventories"), { recursive: true });
+      await writeFile(path.join(fixture.artifactRoot, "inventories/source.json"), body);
+      const before = await readFile(path.join(fixture.artifactRoot, "state.json"), "utf8");
+      const status = await getArtifactStatus(fixture.options);
+      assert.equal(status.status, "ACTIVE");
+      assert.equal(status.outcome, "CONTINUE");
+      assert.deepEqual(
+        [status.visualApplicability.classification, status.visualApplicability.consumers, status.visualApplicability.consumerCoverage],
+        ["VISUAL_DEPENDENCY", [], "INVENTORY_INCOMPLETE"],
+      );
+      let output = "";
+      const previousExitCode = process.exitCode;
+      let cli;
+      try {
+        cli = await runArtifactCli([fixture.options.source, "--type", fixture.options.type, "--target", fixture.options.target,
+          "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot, "--status"],
+        { stdout: { write: (chunk) => { output += chunk; } } });
+      } finally {
+        process.exitCode = previousExitCode;
+      }
+      assert.equal(cli.visualApplicability.consumerCoverage, "INVENTORY_INCOMPLETE", output);
+      const parent = await parentWork(fixture, 19);
+      assert.equal(parent.nextWorkKind, "RUN_ARTIFACT", JSON.stringify(parent));
+      // Read-only: nothing was written.
+      assert.equal(await readFile(path.join(fixture.artifactRoot, "state.json"), "utf8"), before);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+// Past DISCOVER_LEGACY the source inventory is pinned: corrupting it is never
+// reported as a draft, and never surfaces as a TypeError.
+test("visual applicability: a corrupted pinned source inventory is not read as INVENTORY_INCOMPLETE", async () => {
+  const fixture = await visualFixture("widget/theme.css", ":root { --accent: red; }\n");
+  try {
+    await bootstrap(fixture);
+    await advanceDiscovery(fixture, { ui: false, units: await censusOf(fixture) });
+    assert.equal((await getArtifactStatus(fixture.options)).visualApplicability.consumerCoverage, "PENDING");
+    await writeFile(path.join(fixture.artifactRoot, "inventories/source.json"),
+      JSON.stringify({ globalContracts: [{ id: "GC-1", kind: "GLOBAL_THEME", sourcePath: "widget/theme.css" }] }));
+    let outcome;
+    try {
+      const status = await getArtifactStatus(fixture.options);
+      assert.notEqual(status.visualApplicability?.consumerCoverage, "INVENTORY_INCOMPLETE");
+      outcome = `${status.status}: ${status.reason}`;
+    } catch (error) {
+      assert.ok(!(error instanceof TypeError), error.stack);
+      outcome = `threw: ${error.message}`;
+    }
+    assert.match(outcome, /^(STALE|BLOCKED): |^threw: pinned source inventory/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// A stylesheet whose contracts name no consumer has nothing to look up: status
+// never lists the sibling artifact records.
+test("visual applicability: a stylesheet with no declared consumer never scans sibling records", async () => {
+  const fixture = await visualFixture("widget/local.css", ".widget { color: red; }\n");
+  const fsp = requireFrom(import.meta.url)("node:fs/promises");
+  const realReaddir = fsp.readdir;
+  const listed = [];
+  try {
+    await bootstrap(fixture);
+    await authorSource(fixture, { ui: false });
+    fsp.readdir = async (directory, ...rest) => {
+      listed.push(path.resolve(String(directory)));
+      return realReaddir(directory, ...rest);
+    };
+    syncBuiltinESMExports();
+    const status = await getArtifactStatus(fixture.options);
+    assert.equal(status.visualApplicability.consumerCoverage, "NO_CONSUMER");
+    assert.deepEqual(listed.filter((directory) => directory === path.dirname(fixture.artifactRoot)), []);
+  } finally {
+    fsp.readdir = realReaddir;
+    syncBuiltinESMExports();
+    await fixture.cleanup();
+  }
+});
 
 test("visual applicability: CSS coverage stays PENDING while any consumer is unmigrated or stale", async () => {
   const base = await createFixture();
@@ -7025,6 +7303,17 @@ test("visual applicability: CSS coverage stays PENDING while any consumer is unm
     ]);
     assert.equal(status.visualApplicability.consumerCoverage, "PENDING");
 
+    // A consumer migrated without carrying the stylesheet into visible UI covers nothing.
+    const plain = visualCase(base, "widget/consumer-b.ts", "src/b.ts");
+    await writeFile(path.join(base.targetRoot, "src/b.ts"), "export const b = 'theme';\n");
+    await driveToComplete(plain, "TARGET_EXTEND", { units: await censusOf(plain) });
+    status = await ownership();
+    assert.deepEqual(status.visualApplicability.consumers.map((row) => [row.consumer, row.status]), [
+      ["widget/consumer-a.ts", "VERIFIED"],
+      ["widget/consumer-b.ts", "UNCOVERED"],
+    ]);
+    assert.equal(status.visualApplicability.consumerCoverage, "PENDING");
+
     // The verified consumer's source drifts: its evidence no longer covers it.
     await writeFile(path.join(base.sourceRoot, "widget/consumer-a.ts"),
       `${await readFile(path.join(base.sourceRoot, "widget/consumer-a.ts"), "utf8")}// drift\n`);
@@ -7055,6 +7344,240 @@ test("visual applicability: an artifact that renders and binds a shared styleshe
       ["pages/home.ts", null, "UNMIGRATED"],
     ]);
     assert.equal(visualApplicability.consumerCoverage, "PENDING");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+// INCONCLUSIVE: a DOM-shaped operation on a receiver the bytes cannot attribute.
+// The bare `false` is refused; the operator row stops for the operator under
+// `--mode auto` as under `--mode step` (AUTO decides nothing it holds no
+// evidence for); the honest `true` is accepted and owes its own evidence.
+const VISUAL_DECISION_ROW = { id: "visual-applicability", subject: "The receivers are XML nodes built by the export job; nothing reaches a screen." };
+
+for (const [name, relative, text, signal] of [
+  ["an unknown appendChild receiver", "widget/attach.js", "export const attach = (parent, child) => parent.appendChild(child);\n", "appendChild"],
+  ["an unknown render receiver", "widget/show.js", "export const show = (view, data) => view.render(data);\n", "render"],
+  ["an unknown textContent write", "widget/label.js", "export const label = (node, value) => {\n  node.textContent = value;\n};\n", "textContent"],
+  ["an XML builder handed its document", "widget/xml-param.js", "export const add = (doc, name) => doc.documentElement.appendChild(doc.createElement(name));\n", "appendChild"],
+]) {
+  test(`visual applicability: ${name} is INCONCLUSIVE; false needs the operator, true is accepted`, async () => {
+    const fixture = await visualFixture(relative, text);
+    try {
+      assert.match(await refusedAtDiscovery(fixture, false),
+        new RegExp(`VISUAL_APPLICABILITY_INCONCLUSIVE: .*${relative.replace(".", "\\.")}: ${signal}`));
+      const document = await sourceInventory(fixture, { ui: false });
+      await writeJson(fixture.artifactRoot, "inventories/source.json", { ...document, operatorDecisions: [VISUAL_DECISION_ROW] });
+      const before = await stateOf(fixture);
+      for (const mode of ["auto", "step"]) {
+        const pending = await runArtifact({ ...fixture.options, mode });
+        assert.equal(pending.outcome, "OPERATOR_DECISION", pending.reason);
+        assert.deepEqual(pending.pendingDecisions.map((row) => row.id), ["visual-applicability"]);
+      }
+      assert.deepEqual(await stateOf(fixture), before);
+      assert.equal(await artifactLedger(fixture), "");
+      assert.equal(await exists(path.join(fixture.artifactRoot, "decisions/auto-decisions.ndjson")), false);
+      await advanceDiscovery(fixture, { ui: true, units: await censusOf(fixture) });
+      const { visualApplicability } = await getArtifactStatus(fixture.options);
+      assert.deepEqual([visualApplicability.applicability, visualApplicability.verification], ["INCONCLUSIVE", "SELF"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+const advanceCompleteness = async (fixture, units) => {
+  await writeJson(fixture.artifactRoot, "inventories/completeness.json", {
+    version: 1,
+    sourceFiles: [fixture.options.source],
+    units,
+    requirements: [],
+  });
+  const completed = await runArtifact(fixture.options);
+  assert.equal(completed.outcome, "CONTINUE", completed.reason);
+  assert.equal((await stateOf(fixture)).currentStep, "ASSESS_TARGET");
+};
+
+test("visual applicability: an operator-approved INCONCLUSIVE artifact completes under legacy-runtime with no capture", async () => {
+  const fixture = await visualFixture("widget/attach.js", "export const attach = (parent, child) => parent.appendChild(child);\n");
+  try {
+    await bootstrap(fixture, { designSource: "legacy-runtime" });
+    const sourcePath = path.join(fixture.artifactRoot, "inventories/source.json");
+    await writeJson(fixture.artifactRoot, "inventories/source.json",
+      { ...(await sourceInventory(fixture, { ui: false })), operatorDecisions: [VISUAL_DECISION_ROW] });
+    const pending = await runArtifact(fixture.options);
+    assert.equal(pending.outcome, "OPERATOR_DECISION");
+    // Only the ledger can satisfy the row, and only through the recorder's challenge.
+    const recorded = await runRecordDecisionCli(["--artifact", fixture.options.source, "--type", fixture.options.type,
+      "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot, "--approve", pending.pendingDecisions[0].candidateId],
+    { stdout: { write: () => {} }, ask: async ({ challenge }) => challenge });
+    assert.equal(recorded.decision.kind, "ARTIFACT_DECISION");
+    const cited = JSON.parse(await readFile(sourcePath, "utf8"));
+    cited.operatorDecisions[0].decisionId = recorded.decision.id;
+    await writeJson(fixture.artifactRoot, "inventories/source.json", cited);
+    const discovered = await runArtifact(fixture.options);
+    assert.equal(discovered.outcome, "CONTINUE", discovered.reason);
+    await advanceCompleteness(fixture, await censusOf(fixture));
+    await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_EXTEND"));
+    await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", { version: 2, frames: [] });
+    const assessed = await runArtifact(fixture.options);
+    assert.equal(assessed.outcome, "CONTINUE", assessed.reason);
+    await writeBaseline(fixture, "TARGET_EXTEND");
+    await writeJson(fixture.artifactRoot, "matrices/visual-acceptance.json", { version: 2, rows: [], unbacked: [] });
+    assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+    await advancePlan(fixture, "TARGET_EXTEND");
+    await advanceImplementation(fixture, "TARGET_EXTEND");
+    await advanceVerification(fixture, { ui: false });
+    await writeBaseline(fixture, "TARGET_EXTEND", { final: true });
+    await writeJson(fixture.artifactRoot, "gates.json", await gatesDocument(fixture));
+    const complete = await runArtifact(fixture.options);
+    assert.equal(complete.outcome, "COMPLETE", complete.reason);
+    await assertNoRuntimeCapture(fixture);
+    const { visualApplicability } = await getArtifactStatus(fixture.options);
+    // The doubt stays on record; the operator's decision is what waived the evidence.
+    assert.deepEqual([visualApplicability.applicability, visualApplicability.verification], ["INCONCLUSIVE", "NOT_APPLICABLE"]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("visual applicability (artifact 14): the INCONCLUSIVE waiver is relayed as AGENT_RELAYED, and a rejection blocks", async () => {
+  return withDecisionPolicy(null, async () => {
+    for (const answer of ["APPROVE", "REJECT"]) {
+      const fixture = await visualFixture("widget/show.js", "export const show = (view, data) => view.render(data);\n");
+      try {
+        assert.equal((await runArtifact(fixture.options)).outcome, "CONTINUE");
+        assert.equal((await stateOf(fixture)).formatVersion, 14);
+        await writeJson(fixture.artifactRoot, "inventories/source.json",
+          { ...(await sourceInventory(fixture, { ui: false })), operatorDecisions: [VISUAL_DECISION_ROW] });
+        const pending = await runArtifact(fixture.options);
+        assert.equal(pending.outcome, "OPERATOR_DECISION", pending.reason);
+        assert.equal(pending.decisionProjection.state, "AWAITING_HUMAN_DECISION");
+        assert.equal(await artifactLedger(fixture), "");
+        const args = ["--artifact", fixture.options.source, "--type", fixture.options.type,
+          "--source-root", fixture.sourceRoot, "--target-root", fixture.targetRoot];
+        const [candidate] = (await runRecordDecisionCli([...args, "--pending"], { stdout: { write: () => {} } })).candidates;
+        const { decision } = await runRecordDecisionCli([...args, "--approve", candidate.id],
+          { stdout: { write: () => {} }, ask: () => answer });
+        // Relayed by the agent from the operator's answer: never HUMAN_ATTESTED.
+        assert.equal(decision.principal, "AGENT_RELAYED");
+        const next = await runArtifact(fixture.options);
+        if (answer === "APPROVE") {
+          assert.equal(next.outcome, "CONTINUE", next.reason);
+          assert.equal((await stateOf(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+          assert.equal((await stateOf(fixture)).hasVisibleUi, false);
+        } else {
+          assert.equal(next.outcome, "BLOCKED");
+          assert.equal((await stateOf(fixture)).currentStep, "DISCOVER_LEGACY");
+        }
+      } finally {
+        await fixture.cleanup();
+      }
+    }
+  });
+});
+
+// A record that closed DISCOVER_LEGACY before these rules: its pinned source
+// inventory is re-pinned exactly as such a record holds it.
+const repinSourceInventory = async (fixture, edit) => {
+  const root = fixture.artifactRoot;
+  const document = JSON.parse(await readFile(path.join(root, "inventories/source.json"), "utf8"));
+  edit(document);
+  await writeJson(root, "inventories/source.json", document);
+  const state = JSON.parse(await readFile(path.join(root, "state.json"), "utf8"));
+  state.artifactHashes["inventories/source.json"] = await pinDigest(root, "inventories/source.json");
+  state.hasVisibleUi = document.hasVisibleUi;
+  const history = await readFile(path.join(root, "history/history.ndjson"), "utf8");
+  await writeFile(path.join(root, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
+  await writeFile(path.join(root, "integrity.json"), `${JSON.stringify(integrityFor(state, history), null, 2)}\n`);
+};
+const invisible = (document) => {
+  document.behaviors = document.behaviors.map(({ runtimeStates: _states, ...row }) => ({ ...row, visible: false }));
+};
+
+for (const designSource of ["legacy-runtime", "target-system"]) {
+  for (const [name, relative, text, edit, message] of [
+    ["visible UI with no visible behavior", "widget/Badge.tsx", "export const Badge = () => <span className=\"badge\" />;\n",
+      invisible, /hasVisibleUi is true but no behavior is visible/],
+    ["a VISUAL_UI artifact declared invisible", "widget/Badge.tsx", "export const Badge = () => <span className=\"badge\" />;\n",
+      (document) => { document.hasVisibleUi = false; invisible(document); }, /this artifact is VISUAL_UI \(widget\/Badge\.tsx: JSX element\)/],
+    ["an INCONCLUSIVE artifact declared invisible with no operator decision", "widget/attach.js",
+      "export const attach = (parent, child) => parent.appendChild(child);\n",
+      (document) => { document.hasVisibleUi = false; invisible(document); }, /VISUAL_APPLICABILITY_INCONCLUSIVE/],
+  ]) {
+    test(`visual applicability (${designSource}): an ACTIVE record past discovery with ${name} is BLOCKED at ASSESS_TARGET`, async () => {
+      const fixture = await visualFixture(relative, text);
+      try {
+        await bootstrap(fixture, designSource === "legacy-runtime" ? { designSource } : {});
+        await advanceDiscovery(fixture, { ui: true, units: await censusOf(fixture) });
+        await repinSourceInventory(fixture, edit);
+        await writeJson(fixture.artifactRoot, "inventories/target.json", await targetInventory(fixture, "TARGET_EXTEND"));
+        if (designSource === "legacy-runtime") {
+          await writeJson(fixture.artifactRoot, "inventories/legacy-runtime-context.json", { version: 2, frames: [] });
+        }
+        const files = ["state.json", "integrity.json", "history/history.ndjson"];
+        const before = await Promise.all(files.map((file) => readFile(path.join(fixture.artifactRoot, file), "utf8")));
+        const status = await getArtifactStatus(fixture.options);
+        assert.equal(status.outcome, "BLOCKED");
+        assert.match(status.reason, message);
+        const run = await runArtifact(fixture.options);
+        assert.equal(run.outcome, "BLOCKED");
+        assert.match(run.reason, message);
+        assert.match(run.reason, /pinned at DISCOVER_LEGACY before the rule held/);
+        // Neither the run nor --status rewrote the record.
+        assert.deepEqual(await Promise.all(files.map((file) => readFile(path.join(fixture.artifactRoot, file), "utf8"))), before);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+}
+
+// utm_hmi-next `index-77e9a449e135` shape: a stylesheet record COMPLETE with
+// `hasVisibleUi: true` from before the gate. Its verification stays with the
+// consumers -- never SELF -- and status leaves its bytes alone.
+test("visual applicability: a historical COMPLETE stylesheet declared visible still reports CONSUMERS", async () => {
+  const base = await createFixture();
+  try {
+    const css = visualCase(base, "widget/theme.css", "src/placeholder.ts");
+    await driveToComplete(css, "TARGET_EXTEND", { units: await censusOf(css) });
+    await repinSourceInventory(css, (document) => {
+      document.hasVisibleUi = true;
+      document.behaviors = document.behaviors.map((row) => ({ ...row, visible: true, runtimeStates: ["DEFAULT"] }));
+    });
+    const files = ["state.json", "integrity.json", "history/history.ndjson", "inventories/source.json"];
+    const before = await Promise.all(files.map((file) => readFile(path.join(css.artifactRoot, file), "utf8")));
+    const status = await getArtifactStatus(css.options);
+    assert.equal(status.status, "COMPLETE", status.reason);
+    assert.equal(status.state.hasVisibleUi, true);
+    assert.deepEqual(
+      [status.visualApplicability.classification, status.visualApplicability.applicability, status.visualApplicability.verification],
+      ["VISUAL_DEPENDENCY", "CONFIRMED_NONVISUAL", "CONSUMERS"],
+    );
+    assert.equal((await runArtifact(css.options)).outcome, "COMPLETE");
+    assert.deepEqual(await Promise.all(files.map((file) => readFile(path.join(css.artifactRoot, file), "utf8"))), before);
+  } finally {
+    await base.cleanup();
+  }
+});
+
+// The MCP status tool reads the same status: a draft inventory is INVENTORY_INCOMPLETE there too.
+test("visual applicability: the MCP artifact_status tool reports a draft source inventory as INVENTORY_INCOMPLETE", async () => {
+  const fixture = await visualFixture("widget/local.css", ".widget { color: red; }\n");
+  try {
+    await bootstrap(fixture);
+    await mkdir(path.join(fixture.artifactRoot, "inventories"), { recursive: true });
+    await writeFile(path.join(fixture.artifactRoot, "inventories/source.json"), "{ \"globalContracts\": [ ");
+    const before = await readFile(path.join(fixture.artifactRoot, "state.json"), "utf8");
+    const session = createSession({});
+    await handleMessage({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "claude" }, capabilities: {} } }, session);
+    const reply = await handleMessage({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+      name: "artifact_status", arguments: { ...fixture.options, cwd: fixture.root },
+    } }, session);
+    assert.equal(reply.error, undefined, JSON.stringify(reply));
+    const status = JSON.parse(reply.result.content.at(-1).text);
+    assert.equal(status.visualApplicability.consumerCoverage, "INVENTORY_INCOMPLETE");
+    assert.equal(await readFile(path.join(fixture.artifactRoot, "state.json"), "utf8"), before);
   } finally {
     await fixture.cleanup();
   }

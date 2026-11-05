@@ -7,9 +7,9 @@ import {
   readRecordedDecisions,
   requireModuleDecision,
 } from "../decisions/index.mjs";
-import { initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage, usesUiVerification } from "../formats/index.mjs";
+import { DISCOVERY_SCAN_FILE, initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage, usesUiVerification } from "../formats/index.mjs";
 import { assertArray, assertNonEmpty, assertPlainObject, isPlainObject } from "../shared/index.mjs";
-import { readJson } from "../store/index.mjs";
+import { readJson, readOptionalJson } from "../store/index.mjs";
 import { assertApiContractCovered } from "./api.mjs";
 import {
   assertLegacyEvidenceWithinBoundary,
@@ -75,6 +75,29 @@ export const moduleDecisionCandidate = (state, projectRoot, input) =>
   usesDirectLedgerDecisions(state)
     ? createNewFormatDecisionCandidate({ projectRoot, ...input })
     : createDecisionCandidate(input);
+
+/**
+ * Visual applicability, the module side of the artifact gate: a reachable owned
+ * file that renders cannot ride `hasVisibleUi: false` past every Playwright
+ * check. Closed at DISCOVERY_COMPLETENESS from the fresh scan, and held again at
+ * ASSESS_TARGET from the pinned one (`held`), so a record that closed discovery
+ * before the rule reaches neither `{"frames": []}` nor zero visual acceptance.
+ */
+const assertNoRenderingFile = async (scan, roots, held) => {
+  const { renderingModuleFiles } = await import("./toolchain.mjs");
+  const rendering = await renderingModuleFiles(scan, roots.legacyRoot);
+  if (rendering.length > 0) {
+    throw new Error(
+      `VISUAL_APPLICABILITY_MISMATCH: ${held ? "the pinned " : ""}${initialArtifacts.legacyInventory} declares hasVisibleUi false, but production-reachable owned files render UI (${rendering.join("; ")}). ${held ? "This record closed discovery before that was refused: reopen it with --reopen-discovery and declare" : "Declare"} hasVisibleUi true with their uiBehaviors; visual, interaction and accessibility evidence is required.`,
+    );
+  }
+};
+
+export const assertPinnedVisualApplicability = async (root, roots, legacy, state) => {
+  if (state?.currentStep !== "ASSESS_TARGET" || !usesUiVerification(state) || legacy.hasVisibleUi === true) return;
+  const scan = await readOptionalJson(path.join(root, DISCOVERY_SCAN_FILE), "Discovery scan");
+  if (scan) await assertNoRenderingFile(scan, roots, true);
+};
 
 export const assertExternalUiTrace = (scan, inventory) => {
   const discovered = new Set((scan.externalUi ?? []).map((use) => JSON.stringify([use.from, use.spec, use.symbol])));
@@ -299,27 +322,8 @@ export const validateDiscoveryCompleteness = async (
     }
   }
 
-  // Visual applicability, the module side of the artifact gate: a reachable
-  // owned file that renders cannot ride `hasVisibleUi: false` past every
-  // Playwright check. Judged only while this checkpoint is being closed, so a
-  // record past it keeps what its history consumed.
   if (state.currentStep === "DISCOVERY_COMPLETENESS" && usesUiVerification(state) && inventory.hasVisibleUi !== true) {
-    const { loadTypeScript } = await import("./scan.mjs");
-    const { classifyVisualFile } = await import("./toolchain.mjs");
-    const parser = loadTypeScript();
-    const rendering = [];
-    for (const filePath of scan.census.filter((file) => PRODUCTION_REACHABILITY.has(scan.reachability[file]))) {
-      // Only a script's bytes are read; any other kind is classified by name (`.vue`, `.html` are markup).
-      const text = scan.kinds[filePath] === "MODULE" || scan.kinds[filePath] === "COMPONENT"
-        ? await readFile(path.join(roots.legacyRoot, filePath), "utf8") : "";
-      const verdict = classifyVisualFile(parser, filePath, text);
-      if (verdict.classification === "VISUAL_UI") rendering.push(`${filePath}: ${verdict.reason}`);
-    }
-    if (rendering.length > 0) {
-      throw new Error(
-        `VISUAL_APPLICABILITY_MISMATCH: ${initialArtifacts.legacyInventory} declares hasVisibleUi false, but production-reachable owned files render UI (${rendering.join("; ")}). Declare hasVisibleUi true with their uiBehaviors; visual, interaction and accessibility evidence is required.`,
-      );
-    }
+    await assertNoRenderingFile(scan, roots, false);
   }
 
   // C1: the decisive check. Every file the census found, whether anything

@@ -62,6 +62,7 @@ export {
 } from "./inventory.mjs";
 export {
   assertExternalUiTrace,
+  assertPinnedVisualApplicability,
   validateDiscoveryCompleteness,
 } from "./completeness.mjs";
 export {
@@ -105,7 +106,9 @@ export {
   structuralCensus,
   structuralParser,
   targetTypeScript,
+  VISUAL_APPLICABILITY_DECISION,
   visualApplicability,
+  visualApplicabilityProblem,
 } from "./toolchain.mjs";
 export {
   API_CONTRACT_ALGORITHM,
