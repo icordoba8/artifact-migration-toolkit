@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
@@ -22,7 +22,8 @@ import {
 } from "../../src/lifecycle/index.mjs";
 import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 import { createFixture, atDirectLedgerCompleteness, EXCLUDED_CLASSIFICATION, decisionLedger,
-  state, addLegacyFiles, extraFileNames, manyExcluded, behaviorBacked, resolutionFor } from "./approval.fixture.mjs";
+  state, addLegacyFiles, extraFileNames, manyExcluded, behaviorBacked, resolutionFor,
+  initialize, authorDiscoverLegacy, directLedgerClassification, MODULE_CLASSIFICATION, snapshot } from "./approval.fixture.mjs";
 
 const record = async (fixture, args, channel = { stdout: { write() {} } }) => {
   const cwd = process.cwd();
@@ -373,4 +374,295 @@ test("standard relay revalidates evidence and protected policy under the append 
       assert.equal(await decisionLedger(fixture), null);
     });
   } finally { process.exitCode = 0; await fixture.cleanup(); }
+});
+
+const visualClassificationPath = (fixture) => path.join(fixture.migrationRoot, "inventories/module-classification.json");
+const editVisualProposal = async (fixture, edit) => {
+  const file = visualClassificationPath(fixture);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  edit(document);
+  await writeFile(file, `${JSON.stringify(document, null, 2)}\n`);
+};
+const advanceVisual = async (fixture, extra = {}) => {
+  const input = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+  const preview = await previewAdvance(input);
+  return advanceMigration({ ...input, confirmAdvance: preview.confirmationId, ...extra });
+};
+const atVisualCompleteness = async (fixture, format = 19) => {
+  await addLegacyFiles(fixture, ["attach.js"]);
+  await writeFile(path.join(fixture.legacyRoot, "auth/attach.js"), "export const attach = (parent, child) => parent.appendChild(child);\n");
+  await initialize(fixture, { currentFormat: format === 19 ? 19 : false });
+  const classification = { ...MODULE_CLASSIFICATION,
+    declaredEntryPoints: [{ path: "auth/attach.js", reason: "Module entry." }],
+    files: [...MODULE_CLASSIFICATION.files, { ...MODULE_CLASSIFICATION.files[0], path: "auth/attach.js",
+      reachability: "REACHABLE_FROM_ENTRY", kind: "MODULE" }],
+    visualApplicability: { rationale: "The parent is an XML export node; this entry never reaches a screen." } };
+  await authorDiscoverLegacy(fixture, format === 19 ? directLedgerClassification(classification) : classification);
+  const file = path.join(fixture.migrationRoot, "inventories/legacy.json");
+  const inventory = JSON.parse(await readFile(file, "utf8"));
+  await writeFile(file, `${JSON.stringify({ ...inventory, hasVisibleUi: false, uiBehaviors: [] }, null, 2)}\n`);
+  await advanceVisual(fixture);
+  await writeFile(path.join(fixture.migrationRoot, "steps/02a-discovery-completeness.md"),
+    "# Discovery completeness\n\n- Status: `COMPLETE`\n\n## Result\n\nAuthored classification.\n");
+};
+
+for (const format of [18, 19]) {
+  test(`module visual applicability ${format}: AUTO stops, explicit decision binds and closes discovery`, async () => {
+    const fixture = await createFixture();
+    const exitCode = process.exitCode;
+    try {
+      await withDecisionPolicy(null, async () => {
+        await atVisualCompleteness(fixture, format);
+        const before = await snapshot(fixture.migrationRoot);
+        await assert.rejects(advanceVisual(fixture), /VISUAL_APPLICABILITY_INCONCLUSIVE/);
+        const [candidate] = (await record(fixture, ["--pending"])).candidates;
+        assert.equal(candidate.kind, "VISUAL_APPLICABILITY");
+        assert.equal(candidate.autoResolvable, false);
+        assert.equal(candidate.boundTo.visualApplicability.files[0].path, "auth/attach.js");
+        const reply = await handleMessage({ jsonrpc: "2.0", id: 1, method: "tools/call",
+          params: { name: "migration_run", arguments: { module: "auth", cwd: fixture.root, mode: "auto" } } }, createSession());
+        assert.equal(JSON.parse(reply.result.content.at(-1).text).outcome, "OPERATOR_DECISION");
+        // Step mode: the confirmed advance refuses and names the operator decision; it never self-approves.
+        const stepInput = { ...(await resolutionFor(fixture)), moduleName: "auth", mode: "step" };
+        const stepPreview = await previewAdvance(stepInput);
+        assert.equal(stepPreview.requiresConfirmation, true);
+        await assert.rejects(advanceMigration({ ...stepInput, confirmAdvance: stepPreview.confirmationId }),
+          /VISUAL_APPLICABILITY_INCONCLUSIVE.*VISUAL_APPLICABILITY operator decision/);
+        assert.equal((await record(fixture, ["--pending"])).candidates[0].id, candidate.id);
+        assert.equal(await decisionLedger(fixture), null);
+        assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+        const recorded = await record(fixture, ["--approve", candidate.id], {
+          stdout: { write() {} }, ask: ({ challenge }) => format === 19 ? "APPROVE" : challenge,
+        });
+        const line = recorded.decision ?? recorded.decisions[0];
+        if (format === 19) {
+          assert.equal(line.principal, "AGENT_RELAYED");
+          assert.equal(line.policyId, "engine/visual-applicability/v1");
+          assert.notEqual(line.policyDigest, DEFAULT_DECISION_POLICY_DIGEST);
+        } else {
+          const [receipt] = (await record(fixture, ["--pending"])).references;
+          await editVisualProposal(fixture, (document) => Object.assign(document.visualApplicability,
+            { decisionId: receipt.decisionId, decisionDigest: receipt.decisionDigest }));
+        }
+        if (format === 19) {
+          await assert.rejects(advanceVisual(fixture, { hooks: { afterWrite: (stage) => {
+            if (stage === "state") throw new Error("visual decision crash");
+          } } }), /visual decision crash/);
+          await recoverMigrationRecord({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+        } else await advanceVisual(fixture);
+        assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+        const historyPath = path.join(fixture.migrationRoot, "history/history.ndjson");
+        const history = await readFile(historyPath, "utf8");
+        if (format === 19) assert.equal(history.trim().split("\n").map(JSON.parse)
+          .flatMap((event) => event.consumedDecisions ?? []).filter((entry) => entry.decisionId === line.id).length, 1);
+        await recoverMigrationRecord({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+        assert.equal(await readFile(historyPath, "utf8"), history);
+        assert.equal((await record(fixture, ["--pending"])).candidates.length, 0);
+        // The approved waiver remains applicable at a later checkpoint without
+        // consuming a second identity in the discovery event or rewriting its history.
+        const { assertPinnedVisualApplicability } = await import("../../src/census/index.mjs");
+        await assertPinnedVisualApplicability(fixture.migrationRoot,
+          { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot }, undefined, await state(fixture));
+        assert.equal(await readFile(historyPath, "utf8"), history);
+        const legacy = JSON.parse(await readFile(path.join(fixture.migrationRoot, "inventories/legacy.json"), "utf8"));
+        await writeFile(path.join(fixture.migrationRoot, "inventories/target.json"), JSON.stringify({
+          version: 1, implementationState: "ABSENT", hasVisibleUi: false,
+          evidence: legacy.behaviors[0].evidence.map((item) => item.location ? { ...item, location: "target/src/placeholder.ts" } : item),
+          nativeBehaviors: [], uiComponents: [], uiMismatches: [], navigationSurfaces: [],
+        }, null, 2) + "\n");
+        await writeFile(path.join(fixture.migrationRoot, "steps/03-assess-target.md"),
+          "# Assess target\n\n- Status: `COMPLETE`\n\n## Result\n\nNonvisual target assessment.\n");
+        await advanceVisual(fixture);
+        assert.equal((await state(fixture)).currentStep, "BUILD_BASELINE");
+        const laterHistory = await readFile(historyPath, "utf8");
+        assert.ok(laterHistory.startsWith(history));
+        if (format === 19) {
+          const events = laterHistory.trim().split("\n").map(JSON.parse);
+          for (const step of ["DISCOVERY_COMPLETENESS", "ASSESS_TARGET"]) {
+            const consumed = events.filter((event) => event.step === step)
+              .flatMap((event) => event.consumedDecisions ?? []);
+            assert.equal(consumed.length, 1, `${step} consumes one applicable decision`);
+            assert.equal(consumed[0].decisionId, line.id);
+          }
+        }
+        await recoverMigrationRecord({ ...(await resolutionFor(fixture)), moduleName: "auth" });
+        assert.equal(await readFile(historyPath, "utf8"), laterHistory);
+      });
+    } finally { process.exitCode = exitCode; await fixture.cleanup(); }
+  });
+}
+
+test("module visual applicability: missing rationale, rejection, stale review, and protected policy fail closed", async () => {
+  const fixture = await createFixture();
+  const exitCode = process.exitCode;
+  try {
+    await withDecisionPolicy(null, async () => {
+      await atVisualCompleteness(fixture);
+      for (const proposal of [undefined, { rationale: " " }]) {
+        await editVisualProposal(fixture, (document) => { document.visualApplicability = proposal; });
+        await assert.rejects(advanceVisual(fixture), /VISUAL_APPLICABILITY_INCONCLUSIVE.*rationale/);
+        assert.equal((await record(fixture, ["--pending"])).candidates[0].approvable, false);
+      }
+      await editVisualProposal(fixture, (document) => { document.visualApplicability = { rationale: "XML nodes only." }; });
+      const [candidate] = (await record(fixture, ["--pending"])).candidates;
+      await assert.rejects(record(fixture, ["--approve", candidate.id], { stdout: { write() {} }, ask: async () => {
+        await editVisualProposal(fixture, (document) => { document.visualApplicability.rationale += " Revised."; });
+        return "APPROVE";
+      } }), /changed while its review was open/);
+      assert.equal(await decisionLedger(fixture), null);
+      const [fresh] = (await record(fixture, ["--pending"])).candidates;
+      await record(fixture, ["--approve", fresh.id], { stdout: { write() {} }, ask: () => "REJECT" });
+      await assert.rejects(advanceVisual(fixture), /REJECTED/);
+      await editVisualProposal(fixture, (document) => { document.visualApplicability.rationale += " Updated evidence."; });
+      assert.equal((await record(fixture, ["--pending"])).decisions.state, "STALE");
+      const [revised] = (await record(fixture, ["--pending"])).candidates;
+      await record(fixture, ["--approve", revised.id], { stdout: { write() {} }, ask: () => "APPROVE" });
+      await writeFile(path.join(fixture.legacyRoot, "auth/attach.js"), "export const attach = (parent, child) => parent.appendChild(child); // changed\n");
+      assert.equal((await record(fixture, ["--pending"])).decisions.state, "STALE");
+      await assert.rejects(advanceVisual(fixture), /stale/);
+    });
+    for (const rules of [{}, { VISUAL_APPLICABILITY: "HUMAN_ATTESTED" }]) {
+      await withDecisionPolicy(protectedPolicyDocument(fixture.targetRoot, rules), async () => {
+        const [candidate] = (await record(fixture, ["--pending"])).candidates;
+        assert.equal(candidate.requiredPrincipal, "HUMAN_ATTESTED");
+        const before = await decisionLedger(fixture);
+        const refused = await record(fixture, ["--approve", candidate.id], { stdout: { write() {} },
+          ask: () => assert.fail("Protected policy cannot fall back to relay") });
+        assert.equal(refused.blocked.state, "SIGNER_UNAVAILABLE");
+        assert.equal(await decisionLedger(fixture), before);
+      });
+    }
+  } finally { process.exitCode = exitCode; await fixture.cleanup(); }
+});
+
+test("module visual applicability: scan metadata cannot conceal rendering or doubt, and late work needs recovery", async () => {
+  const fixture = await createFixture();
+  try {
+    await atVisualCompleteness(fixture);
+    const source = path.join(fixture.legacyRoot, "auth/attach.js");
+    // Close a genuinely nonvisual module, then reproduce an older record's unseen signal.
+    await writeFile(source, "export const attach = (parent, child) => child;\n");
+    assert.equal((await record(fixture, ["--pending"])).candidates.length, 0);
+    await advanceVisual(fixture);
+    await writeFile(source, "export const attach = (parent, child) => parent.appendChild(child);\n");
+    const { validateResumableMigration, projectDecisions } = await import("../../src/lifecycle/index.mjs");
+    const { assertPinnedVisualApplicability } = await import("../../src/census/index.mjs");
+    const current = await state(fixture);
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const scanPath = path.join(fixture.migrationRoot, "inventories/discovery-scan.json");
+    const originalScan = await readFile(scanPath, "utf8");
+    for (const edit of [() => {}, (scan) => { scan.census = []; },
+      (scan) => { scan.reachability["auth/attach.js"] = "UNREACHABLE"; },
+      (scan) => { scan.kinds["auth/attach.js"] = "STYLE"; },
+      (scan) => { scan.discoveryDigest = "sha256:tampered"; }]) {
+      const scan = JSON.parse(originalScan); edit(scan);
+      await writeFile(scanPath, `${JSON.stringify(scan, null, 2)}\n`);
+      for (const step of ["ASSESS_TARGET", "BUILD_BASELINE", "PLAN", "IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE"]) {
+        await assert.rejects(assertPinnedVisualApplicability(fixture.migrationRoot, roots, undefined, { ...current, currentStep: step }),
+          /VISUAL_APPLICABILITY_RECOVERY_REQUIRED: .*--reopen-discovery/);
+      }
+    }
+    await writeFile(scanPath, originalScan);
+    for (const step of ["ASSESS_TARGET", "BUILD_BASELINE", "PLAN", "IMPLEMENT_SLICES", "VERIFY_SLICES", "FINALIZE"]) {
+      await assert.rejects(validateResumableMigration({ registryPath: fixture.registryPath, moduleName: "auth", step }),
+        /VISUAL_APPLICABILITY_RECOVERY_REQUIRED/);
+    }
+    await assert.rejects(assertPinnedVisualApplicability(fixture.migrationRoot, roots, undefined,
+      { ...current, currentStep: "FINALIZE", completedSlices: ["verified"] }),
+      /operator's --refresh --confirm-mismatch/);
+    const projection = await projectDecisions({ registryPath: fixture.registryPath, moduleName: "auth" });
+    assert.equal(projection.blocked.state, "VISUAL_APPLICABILITY_RECOVERY_REQUIRED");
+    await assert.rejects(record(fixture, ["--pending"]), /VISUAL_APPLICABILITY_RECOVERY_REQUIRED/);
+    const before = await snapshot(fixture.migrationRoot);
+    const reply = await handleMessage({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "migration_run", arguments: { module: "auth", cwd: fixture.root } } }, createSession());
+    assert.equal(JSON.parse(reply.result.content.at(-1).text).outcome, "BLOCKED");
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    // The named recovery really recovers: reopen, re-close, decide, and reach ASSESS_TARGET.
+    const { previewMigrationExecution, bootstrapMigration } = await import("../../src/lifecycle/index.mjs");
+    const resolution = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+    const reopen = await previewMigrationExecution({ ...resolution, reopenDiscovery: true });
+    assert.equal(reopen.expectedNextCheckpoint, "DISCOVER_LEGACY");
+    assert.equal((await bootstrapMigration({ ...resolution, reopenDiscovery: true,
+      boundInputs: reopen.boundInputs, registryBinding: reopen.registryBinding })).reopened, true);
+    await advanceVisual(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+    await assert.rejects(advanceVisual(fixture), /VISUAL_APPLICABILITY_INCONCLUSIVE/);
+    const [candidate] = (await record(fixture, ["--pending"])).candidates;
+    await record(fixture, ["--approve", candidate.id], { stdout: { write() {} }, ask: () => "APPROVE" });
+    await advanceVisual(fixture);
+    assert.equal((await state(fixture)).currentStep, "ASSESS_TARGET");
+  } finally { await fixture.cleanup(); }
+});
+
+test("module visual applicability: only inconclusive reachable owned files need a waiver; COMPLETE keeps history", async () => {
+  const fixture = await createFixture();
+  try {
+    await atVisualCompleteness(fixture);
+    await editVisualProposal(fixture, (document) => { document.declaredEntryPoints = []; });
+    assert.equal((await record(fixture, ["--pending"])).candidates.length, 0);
+    await editVisualProposal(fixture, (document) => { document.declaredEntryPoints = [{ path: "auth/attach.js", reason: "Entry" }]; });
+    const source = path.join(fixture.legacyRoot, "auth/attach.js");
+    await writeFile(source, "export const attach = (parent, child) => { parent.appendChild(child); document.createElement('div'); };\n");
+    await assert.rejects(record(fixture, ["--pending"]), /VISUAL_APPLICABILITY_MISMATCH/);
+    await assert.rejects(advanceVisual(fixture), /VISUAL_APPLICABILITY_MISMATCH/);
+    const { moduleVisualDecisionInput, readCanonicalModuleBoundary, assertPinnedVisualApplicability } = await import("../../src/census/index.mjs");
+    const current = await state(fixture);
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const boundary = await readCanonicalModuleBoundary(fixture.migrationRoot, current, roots);
+    assert.equal(await moduleVisualDecisionInput({ root: fixture.migrationRoot, state: current, roots, ...boundary,
+      inventory: { hasVisibleUi: true } }), null);
+    assert.equal(await moduleVisualDecisionInput({ root: fixture.migrationRoot, state: { ...current, status: "COMPLETE" }, roots, ...boundary,
+      inventory: { hasVisibleUi: false } }), null);
+    const before = await snapshot(fixture.migrationRoot);
+    await assertPinnedVisualApplicability(fixture.migrationRoot, roots, { hasVisibleUi: false },
+      { ...current, status: "COMPLETE", currentStep: "COMPLETE", completedSteps: [...current.completedSteps, "DISCOVERY_COMPLETENESS"] });
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+  } finally { await fixture.cleanup(); }
+});
+
+test("module visual applicability: pending and validation refuse coordinated pin edits and illegal late ledger appends", async () => {
+  const fixture = await createFixture();
+  const exitCode = process.exitCode;
+  try {
+    await atVisualCompleteness(fixture);
+    const [candidate] = (await record(fixture, ["--pending"])).candidates;
+    await record(fixture, ["--approve", candidate.id], { stdout: { write() {} }, ask: () => "APPROVE" });
+    await advanceVisual(fixture);
+    const { projectDecisions, validateResumableMigration } = await import("../../src/lifecycle/index.mjs");
+    const { readCanonicalModuleBoundary } = await import("../../src/census/index.mjs");
+    const input = { registryPath: fixture.registryPath, moduleName: "auth" };
+    const names = ["inventories/module-classification.json", "inventories/discovery-scan.json",
+      "inventories/legacy.json", "decisions/operator-decisions.ndjson"];
+    const originals = await Promise.all(names.map((name) => readFile(path.join(fixture.migrationRoot, name), "utf8")));
+    for (const mutate of [
+      async () => {
+        await editVisualProposal(fixture, (document) => { document.declaredEntryPoints = []; });
+        const { scan } = await readCanonicalModuleBoundary(fixture.migrationRoot, await state(fixture),
+          { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot });
+        const recorded = JSON.parse(originals[1]); recorded.discoveryDigest = scan.discoveryDigest;
+        await writeFile(path.join(fixture.migrationRoot, names[1]), JSON.stringify(recorded));
+      },
+      async () => {
+        const legacy = JSON.parse(originals[2]); legacy.hasVisibleUi = true;
+        await writeFile(path.join(fixture.migrationRoot, names[2]), JSON.stringify(legacy));
+      },
+      async () => {
+        const line = JSON.parse(originals[3].trim());
+        const { decisionLineDigest } = await import("../../src/decisions/index.mjs");
+        await appendFile(path.join(fixture.migrationRoot, names[3]), JSON.stringify({ ...line,
+          id: "DEC-002", seq: 2, prevDigest: decisionLineDigest(line) }) + "\n");
+      },
+    ]) {
+      await mutate();
+      const before = await snapshot(fixture.migrationRoot);
+      await assert.rejects(record(fixture, ["--pending"]), /changed|gained a .*decision after/);
+      await assert.rejects(projectDecisions(input), /changed|gained a .*decision after/);
+      await assert.rejects(validateResumableMigration(input), /changed|gained a .*decision after/);
+      await assert.rejects(record(fixture, ["--approve", candidate.id], { stdout: { write() {} }, ask: () => assert.fail("Corrupt pins cannot reach approval") }),
+        /changed|gained a .*decision after/);
+      assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+      for (const [index, name] of names.entries()) await writeFile(path.join(fixture.migrationRoot, name), originals[index]);
+    }
+  } finally { process.exitCode = exitCode; await fixture.cleanup(); }
 });

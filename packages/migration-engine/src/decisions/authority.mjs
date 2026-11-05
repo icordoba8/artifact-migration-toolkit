@@ -32,6 +32,7 @@ import {
   candidateDigestOf,
   createNewFormatDecisionCandidate,
   DECISION_GROUP_KIND,
+  DECISION_MODULE_BINDING,
   decisionAppliesToCandidate,
   decisionGroupMemberFact,
   decisionKindAllowed,
@@ -516,12 +517,18 @@ export const groupAuthorityFor = async (decisions, candidate, label) => {
       `${label} cites group entry '${line.id}', whose membership is not a well-formed decision group. A malformed group is never partially authoritative.`,
     );
   }
+  if (new Set(facts.map((fact) => fact?.id)).size !== facts.length || facts.some((fact) =>
+    fact?.kind !== candidate.kind || !/^APP-[0-9a-f]{20}$/.test(fact?.id ?? "") ||
+    DECISION_MODULE_BINDING.some((field) => fact.boundTo?.[field] !== binding[field] || binding[field] !== candidate.boundTo[field]))) {
+    throw new Error(`${label} cites group entry '${line.id}' without unique, homogeneous members sharing the candidate's module binding.`);
+  }
   const rebuilt = await createNewFormatDecisionCandidate({
     projectRoot: candidate.projectRoot,
-    policyKind: facts[0]?.kind,
+    policyKind: candidate.kind,
     ...groupCandidateInput({ first: facts[0], binding, lifecycle, facts }),
   });
-  if (candidateDigestOf(rebuilt) !== line.candidateDigest) {
+  if (candidateDigestOf(rebuilt) !== line.candidateDigest ||
+      ["policyId", "policyDigest", "requiredPrincipal"].some((field) => rebuilt[field] !== candidate[field])) {
     throw new Error(
       `${label} cites group entry '${line.id}', whose recorded member set does not re-derive to the candidate digest it was decided over (${line.candidateDigest}). The group's membership or policy binding changed after the decision; nothing in it is authoritative.`,
     );
@@ -630,6 +637,7 @@ export const assertDirectLedgerClassificationSchema = (classification, state) =>
     );
   }
   const bearers = [
+    ["visualApplicability", classification.visualApplicability],
     ...(Array.isArray(classification.moduleRoots) ? classification.moduleRoots : []).map(
       (row, index) => [`moduleRoots[${index}]`, row],
     ),

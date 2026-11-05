@@ -43,7 +43,7 @@ export const PROTECTED_DECISION_POLICY_FILE = "/etc/artifact-migration-tools/dec
 
 export const JUDGMENT_KINDS = new Set([
   "EXCLUSION", "DEAD_CONFIRMATION", "EDGE_RESOLUTION", "ROOT_DECLARATION",
-  "TARGET_DRIFT_ACCEPTED", "VISUAL_UNBACKED", "ARTIFACT_DECISION",
+  "TARGET_DRIFT_ACCEPTED", "VISUAL_UNBACKED", "ARTIFACT_DECISION", "VISUAL_APPLICABILITY",
 ]);
 
 export const canonicalPolicy = ({ policyId, projectRoot, revision, rules }) => ({
@@ -53,10 +53,18 @@ export const canonicalPolicy = ({ policyId, projectRoot, revision, rules }) => (
 
 export const STANDARD_LOCAL = Object.freeze(canonicalPolicy({
   policyId: DEFAULT_DECISION_POLICY_ID, projectRoot: null, revision: 1,
-  rules: Object.fromEntries([...JUDGMENT_KINDS].map((kind) => [kind, "AGENT_RELAYED"])),
+  // ponytail: historical policy bytes are fixed; new kinds get their own pin.
+  rules: Object.fromEntries(["EXCLUSION", "DEAD_CONFIRMATION", "EDGE_RESOLUTION", "ROOT_DECLARATION",
+    "TARGET_DRIFT_ACCEPTED", "VISUAL_UNBACKED", "ARTIFACT_DECISION"].map((kind) => [kind, "AGENT_RELAYED"])),
 }));
 
 export const DEFAULT_DECISION_POLICY_DIGEST = sha256Json(STANDARD_LOCAL);
+
+const VISUAL_APPLICABILITY_POLICY = Object.freeze(canonicalPolicy({
+  policyId: "engine/visual-applicability/v1", projectRoot: null, revision: 1,
+  rules: { VISUAL_APPLICABILITY: "AGENT_RELAYED" },
+}));
+const VISUAL_APPLICABILITY_POLICY_DIGEST = sha256Json(VISUAL_APPLICABILITY_POLICY);
 
 // The former default remains a historical pin, never reinterpreted as local authority.
 export const LEGACY_DECISION_POLICY_ID = "engine/judgment/v1";
@@ -110,7 +118,7 @@ export const validateProtectedDecisionPolicy = (document, projectRoot) => {
   }
   if (policy.revision === 1) {
     if (document.previous !== undefined ||
-        ![DEFAULT_DECISION_POLICY_DIGEST, LEGACY_DECISION_POLICY_DIGEST].includes(audit.previousPolicyDigest)) {
+        ![DEFAULT_DECISION_POLICY_DIGEST, LEGACY_DECISION_POLICY_DIGEST, VISUAL_APPLICABILITY_POLICY_DIGEST].includes(audit.previousPolicyDigest)) {
       throw new Error("Protected decision policy genesis provenance does not match the engine default.");
     }
   } else {
@@ -165,11 +173,12 @@ export const resolveRequiredPrincipal = async (kind, projectRoot) => {
     throw new Error("A canonical absolute project root is required for decision policy.");
   }
   const canonicalRoot = path.resolve(projectRoot);
-  const policy = await trustedPolicyFor(canonicalRoot) ?? STANDARD_LOCAL;
+  const policy = await trustedPolicyFor(canonicalRoot) ??
+    (kind === "VISUAL_APPLICABILITY" ? VISUAL_APPLICABILITY_POLICY : STANDARD_LOCAL);
   return {
     projectRoot: canonicalRoot,
     policyId: policy.policyId,
-    policyDigest: policy.policyDigest ?? DEFAULT_DECISION_POLICY_DIGEST,
+    policyDigest: policy.policyDigest ?? sha256Json(policy),
     requiredPrincipal: policyPrincipal(policy, kind),
   };
 };
@@ -179,10 +188,13 @@ export const resolveHistoricalRequiredPrincipal = async (kind, projectRoot, poli
     throw new Error("A known decision kind and canonical absolute project root are required.");
   }
   if (policyId === DEFAULT_DECISION_POLICY_ID && policyDigest === DEFAULT_DECISION_POLICY_DIGEST) {
-    return policyPrincipal(STANDARD_LOCAL, kind);
+    return STANDARD_LOCAL.rules[kind] ?? null;
+  }
+  if (policyId === VISUAL_APPLICABILITY_POLICY.policyId && policyDigest === VISUAL_APPLICABILITY_POLICY_DIGEST) {
+    return VISUAL_APPLICABILITY_POLICY.rules[kind] ?? null;
   }
   if (policyId === LEGACY_DECISION_POLICY_ID && policyDigest === LEGACY_DECISION_POLICY_DIGEST) {
-    return "HUMAN_ATTESTED";
+    return kind === "VISUAL_APPLICABILITY" ? null : "HUMAN_ATTESTED";
   }
   let policy = await trustedPolicyFor(path.resolve(projectRoot));
   while (policy) {

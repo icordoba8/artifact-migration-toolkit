@@ -737,21 +737,20 @@ export const visualApplicabilityProblem = (applicability, { hasVisibleUi, behavi
 };
 
 /**
- * The module side: the production-reachable files of a discovery scan that
- * render, as `path: reason`. Read at DISCOVERY_COMPLETENESS from the fresh scan
- * and at ASSESS_TARGET from the pinned one.
+ * The module side: classify only production-reachable owned files. Callers
+ * supply a canonical scan, never the unauthenticated stored reachability map.
  */
-export const renderingModuleFiles = async (scan, legacyRoot) => {
+export const moduleVisualFiles = async (scan, legacyRoot) => {
   const parser = loadTypeScript();
-  const rendering = [];
-  for (const file of scan.census.filter((item) => PRODUCTION_REACHABILITY.has(scan.reachability[item]))) {
+  const files = [];
+  for (const file of scan.census.filter((item) => PRODUCTION_REACHABILITY.has(scan.reachability[item])).sort()) {
     // Only a script's bytes are read; any other kind is classified by name (`.vue`, `.html` are markup).
     const text = ["MODULE", "COMPONENT"].includes(scan.kinds[file])
       ? await readFile(path.join(legacyRoot, file), "utf8") : "";
     const verdict = classifyVisualFile(parser, file, text);
-    if (verdict.applicability === "CONFIRMED_VISUAL") rendering.push(`${file}: ${verdict.reason}`);
+    files.push({ path: file, ...verdict });
   }
-  return rendering;
+  return files;
 };
 
 // The machine structural census over the completeness universe's files. It is

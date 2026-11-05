@@ -164,6 +164,7 @@ export const REVIEW_EFFECTS = {
   ROOT_DECLARATION: "Authorize the proposed additional module root.",
   TARGET_DRIFT_ACCEPTED: "Authorize acceptance of the currently observed target drift.",
   VISUAL_UNBACKED: "Authorize the proposed visual-unbacked exception for this subject.",
+  VISUAL_APPLICABILITY: "Confirm that these inconclusive legacy files render no UI; visual evidence will not be required.",
 };
 
 /** Review data comes only from the already derived, policy-bound candidate. */
@@ -860,6 +861,7 @@ export const deriveModuleDecisions = async ({
   ledger: { decisions, byId },
   targetDrift,
   visualUnbacked,
+  visualApplicability,
   approveCommand,
 }) => {
   // Which decision format this record derives is read off the persisted record,
@@ -995,6 +997,9 @@ export const deriveModuleDecisions = async ({
     });
     candidates.push(pending);
   };
+
+  if (visualApplicability) await addCandidate({ ...visualApplicability,
+    boundToOverride: visualApplicability.boundTo, autoResolvable: false });
 
   const roots = Array.isArray(classification.moduleRoots)
     ? classification.moduleRoots

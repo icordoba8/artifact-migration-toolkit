@@ -1210,6 +1210,13 @@ Only for `hasVisibleUi: true`. When it is `false`, UI runtime evidence is
 source. `hasVisibleUi` follows what the code does, not file extensions: a
 reachable owned file that renders cannot be declared `false`
 (`VISUAL_APPLICABILITY_MISMATCH` at `DISCOVERY_COMPLETENESS`).
+An `INCONCLUSIVE` reachable owned file under `false` requires a
+`VISUAL_APPLICABILITY` operator decision: author `visualApplicability.rationale`
+in the module classification, answering the engine's signals, and relay the
+operator's explicit decision. AUTO cannot supply it. The same check holds at
+every ACTIVE checkpoint after discovery; a recovery blocker names
+`--reopen-discovery`, or the operator's `--refresh --confirm-mismatch` when
+verified slices exist. Historical COMPLETE records retain their approvals.
 
 Use the repository's already-registered `playwright` MCP server (`.mcp.json`,
 `@playwright/mcp`) through its `browser_*` tools. Do not add a second browser

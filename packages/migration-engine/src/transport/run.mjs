@@ -116,6 +116,7 @@ const advanceArguments = ({ moduleName, mode, slice }) => [
  * prose.
  */
 const TERMINAL_VALIDATION_REFUSALS = [
+  /^VISUAL_APPLICABILITY_RECOVERY_REQUIRED:/,
   /\bREWORK_EVIDENCE_MISSING\b/,
   /\bREOPEN_EVIDENCE_MISSING\b/,
   /^Unresolved verification blocks FINALIZE/,

@@ -63,6 +63,7 @@ export {
 export {
   assertExternalUiTrace,
   assertPinnedVisualApplicability,
+  moduleVisualDecisionInput,
   validateDiscoveryCompleteness,
 } from "./completeness.mjs";
 export {

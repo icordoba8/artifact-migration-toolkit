@@ -1147,6 +1147,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
   if (!MIGRATION_STEPS.includes(step)) {
     throw new Error(`Unknown migration step '${step}'.`);
   }
+  await assertPinnedVisualApplicability(root, roots, undefined, state);
   await assertStepDocumentComplete(root, step, state, sliceId);
   if (step === "DISCOVER_LEGACY") {
     const inventory = await validateLegacyInventory(root, roots, state);
@@ -1170,7 +1171,6 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
     const legacy = await validateLegacyInventory(root, roots, state);
     await validateTargetInventory(root, roots, legacy, state);
     await assertTargetAssessmentChecklist(root, roots, state?.requirementsAuthority);
-    await assertPinnedVisualApplicability(root, roots, legacy, state);
     // Runs before completedArtifactHashes pins the file, so an absent or
     // unbound authority context fails here instead of as a raw ENOENT out of
     // hashFile -- the fail-closed ordering, now for either authority.
