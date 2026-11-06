@@ -65,13 +65,27 @@ export const startCaptureServer = async () => {
       response.writeHead(200, { "content-type": "image/svg+xml" });
       return response.end('<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="#0b5fff"/></svg>');
     }
+    const signedIn = (request.headers.cookie ?? "").includes(`session=${CAPTURE_SESSION.cookie}`);
     if (pathname === "/private") {
-      if (!(request.headers.cookie ?? "").includes(`session=${CAPTURE_SESSION.cookie}`)) {
+      if (!signedIn) {
         response.writeHead(401);
         return response.end();
       }
       response.writeHead(200, { "content-type": "text/html" });
       return response.end(PAGES["/auth/sign-in"]);
+    }
+    if (pathname === "/guarded") {
+      // A Next.js middleware: no session, redirected to the sign-in page.
+      if (!signedIn) {
+        response.writeHead(307, { location: "/login?callbackUrl=%2Fguarded" });
+        return response.end();
+      }
+      response.writeHead(200, { "content-type": "text/html" });
+      return response.end(PAGES["/auth/sign-in"]);
+    }
+    if (pathname === "/login") {
+      response.writeHead(200, { "content-type": "text/html" });
+      return response.end("<!doctype html><title>Sign in</title><h1>Sign in</h1>");
     }
     if (pathname === "/sso") {
       // An identity provider's redirect: the one-time code lands in the URL.

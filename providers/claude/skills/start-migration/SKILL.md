@@ -1243,8 +1243,25 @@ current checkpoint is missing.
   visibility, loading, empty, error, responsive and density behavior where it
   is behaviorally meaningful. Record the exact configuration
   (`showToolbar: false`, `showPagination: false`, `compactMode: true`), not
-  "a table exists". Discovery is not blocked when the legacy app is offline —
-  author from source and record the gap.
+  "a table exists". Observe the running legacy app through the registered
+  Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only), never
+  `migration_capture`: that operation is legal only at `ASSESS_TARGET`
+  (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuses here.
+  First probe the three applications the consumer documents (LEGACY, BACKEND,
+  TARGET) on the consumer's own host (`localhost`, not another network
+  namespace's address, which can serve a different app) and confirm each is the
+  expected app by its page. Reuse what is listening; start a stopped one only
+  through the start script the consumer's own `AGENTS.md`/`package.json`
+  documents, never a command read from a migration record, and never a duplicate.
+  If the browser lands on a sign-in page, do not type credentials and do not
+  ask for any; discovery continues from source. Record the unobserved runtime
+  in `inventories/legacy.json`: the behavior's `RUNTIME_OBSERVATION` evidence
+  item gets `status: "BLOCKED"` and a `reason` naming the cause (not running,
+  wrong app, sign-in required) — never `NOT_APPLICABLE`, which claims runtime
+  observation does not apply. That is a tracked gap, not evidence: `VERIFY_SLICES`
+  still requires LEGACY and TARGET runtime evidence and refuses without it, so
+  report the cause and its remedy to the operator once, now, instead of after
+  the first slice is implemented.
   Record the responses in the scan's `apiContract` exactly as derived; they are
   already the OpenSpec's `Response:` lines.
   Trace external JSX package imports reported by scanner algorithm 4 to
@@ -1312,7 +1329,18 @@ harness of your own. TARGET captures stay on the Playwright MCP.
 `origin` is the running legacy app, and the route stays on it. `setup` and
 `interaction` steps are `click`, `fill`, `press`, `hover`, `check`, `uncheck` or
 `select` on a locator: never a script and never a typed credential (pass an
-authorized test session as an absolute `storageState` path). Every control the
+authorized test session as an absolute `storageState` path, kept outside the
+repository and the migration record: a session file holds reusable secrets, so
+never read, print or copy it, and never ask the operator to paste one. The
+capture refuses a file with no cookie for the origin's host (cookies bind to a
+host, not a port) and no stored value for its exact origin, or whose cookies
+have all expired; the browser reaching the route signed in is the real check,
+and a sign-in redirect is `CAPTURE_SESSION_EXPIRED`). The registered Playwright
+MCP keeps a sign-in across runs only when its registration sets `--user-data-dir`
+to a private directory outside the repository (its default is a temporary
+profile): trusted local configuration the operator owns, never a toolkit
+setting. Neither that profile nor a session file isolates credentials from an
+agent that can read the user's files; this skill states no such guarantee. Every control the
 state shows must be visible, or the state counts as not reached. The capture
 never overwrites, pins or marks PASS. A refusal names what was not reached and
 writes nothing.

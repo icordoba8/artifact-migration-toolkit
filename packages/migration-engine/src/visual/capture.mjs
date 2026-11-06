@@ -29,6 +29,42 @@ export const refuseCapture = (code, message) => {
 
 const invalid = (message) => refuseCapture("CAPTURE_REQUEST_INVALID", message);
 
+/**
+ * An unauthenticated answer is not an unreachable server: a 401/403 or a
+ * same-origin redirect to a sign-in path says "log in", and with a session in
+ * hand it says the session no longer works.
+ */
+const AUTH_PATH = /(^|\/)(log-?in|sign-?in|auth)(\/|$)/i;
+const authRefusal = (plan, what) => refuseCapture(plan.storageState ? "CAPTURE_SESSION_EXPIRED" : "CAPTURE_AUTH_REQUIRED",
+  `${what}. ${plan.storageState ? "The supplied storageState no longer authenticates this origin: sign in again and replace the session file." : "Supply an authorized test session as an absolute storageState path."} No credential is ever typed or stored.`);
+
+/**
+ * Cheap pre-flight on an authorized session file, before a browser starts. It
+ * is NOT origin binding: a cookie is scoped to a host, so localhost:11080 and
+ * localhost:11088 share it. It refuses a file that names neither this host (any
+ * port, by cookie) nor this exact origin (by stored value), or whose cookies for
+ * the host have all expired. Whether the session still authenticates is decided
+ * by the browser reaching the route (authRefusal). Values are never reported.
+ */
+export const assertSessionUsable = (document, origin) => {
+  const bound = new URL(origin);
+  const cookies = Array.isArray(document?.cookies) ? document.cookies : [];
+  const stored = Array.isArray(document?.origins) ? document.origins : [];
+  const host = bound.hostname.replace(/^\[|\]$/g, "");
+  // A leading dot is a domain cookie: it reaches this host and its subdomains.
+  const reachesHost = (domain) => domain === host || (domain.startsWith(".") && `.${host}`.endsWith(domain));
+  const forHost = cookies.filter((cookie) => typeof cookie.domain === "string" && reachesHost(cookie.domain));
+  const storedHere = stored.filter((entry) => entry?.origin === bound.origin);
+  if (forHost.length === 0 && storedHere.length === 0) {
+    refuseCapture("CAPTURE_SESSION_HOST", `The supplied storageState holds no cookie for host ${bound.hostname} and no stored value for ${bound.origin}.`);
+  }
+  // expires -1 is a browser-session cookie: live as long as its file is current.
+  const live = forHost.some((cookie) => !(cookie.expires > 0) || cookie.expires > Date.now() / 1000);
+  if (!live && storedHere.length === 0) {
+    refuseCapture("CAPTURE_SESSION_EXPIRED", `Every cookie in the supplied storageState for ${bound.origin} has expired: sign in again and replace the session file.`);
+  }
+};
+
 const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "timeoutMs"];
 const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction"] };
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
@@ -359,8 +395,13 @@ export const captureInBrowser = async (plan) => {
       if (blocked.length > 0) onOrigin(`'${plan.url}'`);
       if (!(status >= 400)) refuseCapture("CAPTURE_UNREACHABLE", `'${plan.url}' could not be loaded: ${firstLine(error)}. Start the legacy application at the authorized origin first.`);
     }
+    if (status === 401 || status === 403) authRefusal(plan, `'${plan.route}' answered HTTP ${status}`);
     if (!(status < 400)) refuseCapture("CAPTURE_UNREACHABLE", `'${plan.url}' answered HTTP ${status ?? "nothing"}.`);
     onOrigin(`'${plan.url}'`);
+    const landed = new URL(page.url()).pathname;
+    if (landed.replace(/\/$/, "") !== plan.route.split(/[?#]/)[0].replace(/\/$/, "") && AUTH_PATH.test(landed)) {
+      authRefusal(plan, `'${plan.route}' redirected to the sign-in path '${landed}'`);
+    }
     await settle();
     const act = async (step, label) => {
       const target = locate(page, step.target);
