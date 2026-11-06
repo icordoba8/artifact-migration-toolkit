@@ -33,14 +33,14 @@ export const MODULES = ["transport", "lifecycle", "slices", "visual", "census", 
  */
 export const TIERS = [
   // Installed executables and the package aggregator (`.` export). Nothing in the engine imports them.
-  ["entry", ["core.mjs", "migration-policy.mjs", "operator-signer-service.mjs", "record-decision.mjs", "mcp-server.mjs",
+  ["entry", ["core.mjs", "migration-policy.mjs", "operator-signer-service.mjs", "session-broker.mjs", "record-decision.mjs", "mcp-server.mjs",
     "artifact/run-artifact.mjs", "upgrades/upgrade-migration.mjs", "cli/advance-migration.mjs", "cli/discover-module.mjs",
     "cli/run-migration.mjs", "cli/toolkit-identity.mjs", "cli/update-migration-registry.mjs", "cli/validate-migration.mjs"]],
   ["transport"],
   // Historical paths over the modules (A1-A8 facades) and the two live files that sit above lifecycle.
   ["compat", ["resumable-migration.mjs", "artifact/artifact-migration.mjs", "decision-recorder.mjs", "operator-approval.mjs",
     "lifecycle-policy.mjs", "module-lock.mjs", "migration-utils.mjs", "upgrades/upgrade-coordinator.mjs", "discovery-scan.mjs",
-    "visual-evidence.mjs", "format-upgrade.mjs", "operation-sequence.mjs", "operator-signer-host.mjs"]],
+    "visual-evidence.mjs", "format-upgrade.mjs", "operation-sequence.mjs", "operator-signer-host.mjs", "session-broker-host.mjs"]],
   ["lifecycle"],
   ["slices"],
   ["visual"],
@@ -74,6 +74,7 @@ export const BIN_FRONTS = {
   "upgrades/upgrade-migration.mjs": "transport/upgrade.mjs",
   "record-decision.mjs": null,
   "operator-signer-service.mjs": null,
+  "session-broker.mjs": null,
 };
 
 /**

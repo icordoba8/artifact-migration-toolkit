@@ -34,7 +34,7 @@ import {
   removeDurably,
   statePathFor,
 } from "../store/index.mjs";
-import { AUTH_PATH } from "../visual/index.mjs";
+import { AUTH_PATH, refuseCapture } from "../visual/index.mjs";
 import { readContext } from "./context.mjs";
 import { withModuleLock } from "./lock.mjs";
 
@@ -313,10 +313,26 @@ const readConfiguration = async (targetRoot) => {
     for (const role of ROLES.filter((name) => document.applications[name])) {
       applications.push(await parseApplication(role, document.applications[role], targetRoot));
     }
-    return { namespace: document.namespace, applications };
+    if (document.sessionBroker !== undefined && !/^http:\/\/127\.0\.0\.1:\d+$/.test(document.sessionBroker)) {
+      throw new Error("sessionBroker must be exactly http://127.0.0.1:<port>.");
+    }
+    return { namespace: document.namespace, sessionBroker: document.sessionBroker, applications };
   } catch (error) {
     return { problem: error.message };
   }
+};
+
+/** Where the session broker listens, for a capture that asked for its session. */
+export const sessionBrokerOf = async (targetRoot) => {
+  const { problem, sessionBroker } = await readConfiguration(targetRoot);
+  if (problem || !sessionBroker) refuseCapture("CAPTURE_BROKER_UNCONFIGURED", `No session broker is configured in ${APP_RUNTIME_CONFIG}${problem ? `: ${problem}` : "."}`);
+  return sessionBroker;
+};
+
+/** Each role's session word, so an AUTH_REQUIRED row says whether a capture can continue. */
+const sessionStates = async (broker) => {
+  const response = await fetch(new URL("/status", broker), { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(5_000) }).catch(() => null);
+  return response?.ok ? response.json() : "UNAVAILABLE";
 };
 
 /** A finished migration, and one whose closed discovery found no visible UI, have nothing to observe. The template seeds `hasVisibleUi: false`, so before that it means nothing. */
@@ -456,5 +472,5 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
     : await inspectOrEnsure();
   const states = applications.map((row) => row.state);
   const state = ["CONFIGURATION_MISSING", ...STATE_RANK].find((name) => states.includes(name));
-  return { ...base, required: true, state, applications };
+  return { ...base, required: true, state, applications, ...(configuration.sessionBroker ? { sessions: await sessionStates(configuration.sessionBroker) } : {}) };
 };

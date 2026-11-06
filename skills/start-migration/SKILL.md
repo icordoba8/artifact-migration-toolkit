@@ -1378,6 +1378,13 @@ harness of your own. TARGET captures stay on the Playwright MCP.
   interaction?}`. It writes the claim's LEGACY proof and PNG and its LEGACY
   `uiEvidence` row. `result` and the interaction's `actual`/`outcome` stay yours.
 
+When `migration_app_runtime` reports a `sessions` word of `PRESENT` for LEGACY,
+pass `"session": true` instead of `storageState`: the capture then runs in the
+session broker's own OS account (`docs/session-broker.md` in the toolkit), and
+no session reaches this agent. `NONE` or `EXPIRED` means the operator signs in
+through the broker; say so once and record the gap. Never start a broker as this
+agent's own account, and never claim isolation the deployment does not provide.
+
 `origin` is the running legacy app, and the route stays on it. `setup` and
 `interaction` steps are `click`, `fill`, `press`, `hover`, `check`, `uncheck` or
 `select` on a locator: never a script and never a typed credential (pass an

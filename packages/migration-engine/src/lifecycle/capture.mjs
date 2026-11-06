@@ -37,6 +37,7 @@ import {
 } from "../store/index.mjs";
 import {
   captureInBrowser,
+  captureThroughBroker,
   claimCapturePlan,
   HARDENED_VISUAL_VERSION,
   LEGACY_RUNTIME_EVIDENCE_ROOT,
@@ -48,6 +49,7 @@ import {
   validateLegacyRuntimeContext,
   visualAuthorityOf,
 } from "../visual/index.mjs";
+import { sessionBrokerOf } from "./app-runtime.mjs";
 import { readContext } from "./context.mjs";
 import { withModuleLock } from "./lock.mjs";
 import { assertCurrentOpenSpecAuthority } from "./openspec.mjs";
@@ -296,7 +298,7 @@ export const captureLegacyRuntimeEvidence = async ({ registryPath, moduleName, r
   const { targetRoot } = registryData;
   const input = { targetRoot, moduleName: resolved.canonical, request: parsed };
   const before = await prepare(input);
-  const captured = await captureInBrowser(before.plan);
+  const captured = await (parsed.session ? captureThroughBroker(await sessionBrokerOf(targetRoot), before.plan) : captureInBrowser(before.plan));
   return withModuleLock(targetRoot, resolved.canonical, async () => {
     const prepared = await prepare(input);
     if (prepared.fingerprint !== before.fingerprint) {

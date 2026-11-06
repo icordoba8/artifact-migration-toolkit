@@ -65,7 +65,7 @@ export const assertSessionUsable = (document, origin) => {
   }
 };
 
-const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "timeoutMs"];
+const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "session", "timeoutMs"];
 const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction"] };
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
 const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
@@ -140,12 +140,15 @@ export const parseCaptureRequest = (request) => {
   if (request.storageState !== undefined && !path.isAbsolute(text(request.storageState, "storageState", 4096))) {
     invalid("storageState must be an absolute path to a Playwright storage-state file.");
   }
+  if (request.session !== undefined && (request.session !== true || request.storageState !== undefined)) {
+    invalid("session must be true, and replaces storageState: the broker's session never leaves its account.");
+  }
   const timeoutMs = request.timeoutMs ?? 15000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) invalid("timeoutMs must be an integer from 1000 to 120000.");
   const common = {
     mode, origin: origin.origin, url: url.href, route, viewport: { width: viewport.width, height: viewport.height },
     controls, setup: list(request.setup, "setup", 20).map((step, index) => action(step, `setup[${index}]`)),
-    colorScheme, matte: matte.toLowerCase(), browser: request.browser, storageState: request.storageState, timeoutMs,
+    colorScheme, matte: matte.toLowerCase(), browser: request.browser, storageState: request.storageState, session: request.session, timeoutMs,
   };
   if (mode === "claim") {
     return { ...common, appearanceClaimId: id(request.appearanceClaimId, "appearanceClaimId"),
@@ -541,6 +544,36 @@ export const captureInBrowser = async (plan) => {
   } finally {
     await browser.close();
   }
+};
+
+const BROKERED_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "timeoutMs"];
+
+/**
+ * A plan that crossed the session boundary, rebuilt from what parsing accepts.
+ * Its client is not trusted: every step and locator is checked again, and
+ * `browser`, `storageState` and any other key simply do not survive.
+ */
+export const parseBrokeredPlan = (plan) => {
+  if (!isPlainObject(plan) || !["frame", "claim"].includes(plan.mode)) invalid("plan must be a capture plan.");
+  const shared = Object.fromEntries(BROKERED_KEYS.filter((key) => plan[key] !== undefined).map((key) => [key, plan[key]]));
+  const { uiBehaviorId, state, rootLocator } = plan;
+  const checked = parseCaptureRequest({ ...shared, uiBehaviorId, state, rootLocator, counts: plan.mode === "frame" ? plan.counts : { claimRoot: rootLocator } });
+  if (plan.mode === "frame") return checked;
+  const { interaction } = plan;
+  return {
+    ...checked, mode: "claim", counts: undefined, appearanceClaimId: id(plan.appearanceClaimId, "appearanceClaimId"),
+    interaction: interaction === undefined ? undefined : { id: id(interaction?.id, "interaction.id"), action: action(interaction?.action, "interaction.action") },
+  };
+};
+
+/** The agent's side of the boundary: the plan goes in, the sanitized capture comes back, no session either way. */
+export const captureThroughBroker = async (broker, plan) => {
+  const response = await fetch(new URL("/capture", broker), {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ role: "LEGACY", plan }),
+  }).catch(() => refuseCapture("CAPTURE_BROKER_UNAVAILABLE", `No session broker answers at ${broker}; the operator starts it.`));
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(body.message ?? `The session broker refused the capture (${body.code ?? response.status}).`), { validationCode: body.code ?? "CAPTURE_BROKER_FAILED" });
+  return { ...body, screenshot: Buffer.from(body.screenshot, "base64") };
 };
 
 /**
