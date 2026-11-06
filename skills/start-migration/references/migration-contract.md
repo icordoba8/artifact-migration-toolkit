@@ -622,13 +622,19 @@ read-only projection (`checkpointAdvanced` is separate), so a newly appended
 decision is visible in the same session without a restart or copied receipt.
 The built-in `STANDARD_LOCAL` policy (`engine/STANDARD_LOCAL/v1`, revision 1,
 digest `sha256:f38ec59bad6a56b15e7c5c1a87f9a003591644de0203bd5a7ff91df82af81042`)
-requires `AGENT_RELAYED` for judgment decisions, including complete module groups.
+requires `AGENT_RELAYED` for the original judgment kinds, including complete module groups.
 It is deterministic and independent of repository files, environment, argv,
 provider capabilities and the signer. Missing protected policy means this
 standard policy. The operator explicitly chooses `APPROVE` or `REJECT` through
 the current engine review; missing response, cancellation, dismissal, timeout or
 transport failure appends nothing. Model reasoning, prior conversation,
 auto-permission and tool arguments are never operator decisions.
+
+The module `VISUAL_APPLICABILITY` kind has its own built-in default pin,
+`engine/visual-applicability/v1` (revision 1), requiring `AGENT_RELAYED`.
+The original default policy bytes, digests and old-kind candidate identities
+stay unchanged. Under a protected policy, an omitted rule for the new kind
+requires `HUMAN_ATTESTED`; it never falls back to the local default.
 
 Optional protected policy can require `HUMAN_ATTESTED`; the retained protected
 WebAuthn signer must cryptographically verify it. Missing signer or invalid
@@ -828,6 +834,10 @@ evidence never resolves under `inventories/legacy-runtime/`; a declared
 `capture.role` must match the slot it is cited from (`TARGET_VERIFICATION` for
 slice evidence). Byte-identical authority and target screenshots at disjoint
 paths are a perfect 1:1 match and pass — no rule compares them for inequality.
+A record whose discovery found no UI behavior has nothing to capture: its
+context is exactly `{"version": 2, "frames": []}` and its visual acceptance
+`{"version": 2, "rows": [], "unbacked": []}`, authored without a browser.
+`frames` may be empty only then; with any UI behavior it must be non-empty.
 **Engine capture.** `migration_capture` (CLI
 `artifact-migration-validate <module> --capture <request.json>`) drives a real
 Chromium-family browser against the explicit `origin` and `route` and persists
@@ -1263,7 +1273,34 @@ observed mismatch in `uiMismatches`.
 `uiBehaviors`, no visible `uiComponents`, and no Playwright. `hasVisibleUi: true`
 makes it required. The two cannot disagree with what discovery found — a visible
 inventory with no UI behaviors, and a non-UI inventory with visible components,
-are both refused.
+are both refused. Closing `DISCOVERY_COMPLETENESS` also reads the code: a
+production-reachable owned file with rendering evidence (JSX, a rendering
+export of a UI, DOM or canvas library, the browser's `document`, a DOM-only
+member, a canvas context, CSS-in-JS, a `.vue`/`.svelte`/`.html` document) under `hasVisibleUi: false` is
+refused with `VISUAL_APPLICABILITY_MISMATCH`, whatever its extension.
+An `INCONCLUSIVE` reachable owned file (for example, `parent.appendChild(child)`
+without receiver provenance) under `false` needs a module classification proposal:
+
+```json
+"visualApplicability": {
+  "rationale": "Explain why each reported signal cannot reach a screen."
+}
+```
+
+The engine derives one `VISUAL_APPLICABILITY` candidate bound to the module,
+source revision and dirty bytes, discovery digest/version, classifier findings
+and rationale. Module 19+ resolves an explicit APPROVE/REJECT from the ledger;
+module ≤18 cites the recorder's `decisionId` and `decisionDigest` on this row.
+AUTO receipts never authorize this kind. Confirmed rendering cannot be waived.
+Conclusive nonvisual, unreachable and supporting-only files need no such decision.
+
+Every ACTIVE post-discovery checkpoint rechecks using a canonical scan from the
+pinned classification and compares its digest to the discovery pin; stored
+reachability/kind labels are not authority. An absent or stale approval yields
+`VISUAL_APPLICABILITY_RECOVERY_REQUIRED`, not a late decision offer. Recover with
+`--reopen-discovery` before any slice is verified; afterwards the existing
+operator-controlled recovery is `--refresh --confirm-mismatch`. Historical
+COMPLETE records, their approvals and policy pins remain unchanged.
 
 A `uiBehaviors` row is an interaction inventory, not a component census:
 

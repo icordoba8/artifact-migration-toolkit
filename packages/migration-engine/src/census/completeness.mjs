@@ -7,7 +7,7 @@ import {
   readRecordedDecisions,
   requireModuleDecision,
 } from "../decisions/index.mjs";
-import { initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage } from "../formats/index.mjs";
+import { DISCOVERY_SCAN_FILE, initialArtifacts, requirementsSourceFor, usesApiContract, usesDirectLedgerDecisions, usesUiCoverage, usesUiVerification } from "../formats/index.mjs";
 import { assertArray, assertNonEmpty, assertPlainObject, isPlainObject } from "../shared/index.mjs";
 import { readJson } from "../store/index.mjs";
 import { assertApiContractCovered } from "./api.mjs";
@@ -16,7 +16,7 @@ import {
   implicitModuleRoots,
   readCanonicalModuleBoundary,
 } from "./boundary.mjs";
-import { assertEvidenceChecklist } from "./inventory.mjs";
+import { assertEvidenceChecklist, withUiRemediation } from "./inventory.mjs";
 import { legacySourceBinding } from "./sources.mjs";
 
 /* ------------------------------------------------------------------ *
@@ -75,6 +75,64 @@ export const moduleDecisionCandidate = (state, projectRoot, input) =>
   usesDirectLedgerDecisions(state)
     ? createNewFormatDecisionCandidate({ projectRoot, ...input })
     : createDecisionCandidate(input);
+
+/** One candidate input for the gate and recorder; authoring a row never makes it necessary. */
+export const moduleVisualDecisionInput = async ({ root, state, roots, scan, classification, inventory }) => {
+  if (!usesUiVerification(state) || state.status === "COMPLETE") return null;
+  inventory ??= await withUiRemediation(root, state,
+    await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory"), "uiBehaviors");
+  if (inventory.hasVisibleUi === true) return null;
+  const { moduleVisualFiles } = await import("./toolchain.mjs");
+  const files = await moduleVisualFiles(scan, roots.legacyRoot);
+  const rendering = files.filter((file) => file.applicability === "CONFIRMED_VISUAL")
+    .map((file) => `${file.path}: ${file.reason}`);
+  const held = state.completedSteps?.includes("DISCOVERY_COMPLETENESS");
+  if (rendering.length > 0) {
+    throw new Error(
+      `VISUAL_APPLICABILITY_MISMATCH: ${held ? "the pinned " : ""}${initialArtifacts.legacyInventory} declares hasVisibleUi false, but production-reachable owned files render UI (${rendering.join("; ")}). ${held ? "This record closed discovery before that was refused: reopen it with --reopen-discovery and declare" : "Declare"} hasVisibleUi true with their uiBehaviors; visual, interaction and accessibility evidence is required.`,
+    );
+  }
+  const inconclusive = files.filter((file) => file.applicability === "INCONCLUSIVE");
+  if (!inconclusive.length) return null;
+  const row = classification.visualApplicability;
+  if (row !== undefined) assertPlainObject(row, "visualApplicability");
+  return {
+    kind: "VISUAL_APPLICABILITY", subjectType: "MODULE", subjectPath: state.migrationId,
+    rationale: row?.rationale ?? "", decisionId: row?.decisionId,
+    boundTo: { module: state.migrationId, ...(await legacySourceBinding(roots.legacyRoot)),
+      discoveryDigest: scan.discoveryDigest, algorithmVersion: scan.algorithmVersion,
+      visualApplicability: { hasVisibleUi: false, files: inconclusive } },
+  };
+};
+
+const assertModuleVisualDecision = async (input) => {
+  const proposal = await moduleVisualDecisionInput(input);
+  if (!proposal) return;
+  const { root, state, roots, classification } = input;
+  const label = `VISUAL_APPLICABILITY_INCONCLUSIVE: ${proposal.boundTo.visualApplicability.files.map((file) => `${file.path}: ${file.reason}`).join("; ")}. Declare hasVisibleUi true with uiBehaviors, or obtain a VISUAL_APPLICABILITY operator decision for module classification.visualApplicability`;
+  assertNonEmpty(proposal.rationale, `${label}.rationale`);
+  await requireModuleDecision({ state, ...(await readRecordedDecisions(root)),
+    row: classification.visualApplicability, label,
+    candidate: await moduleDecisionCandidate(state, roots.targetRoot, proposal) });
+};
+
+export const assertPinnedVisualApplicability = async (root, roots, legacy, state) => {
+  if (state?.status !== "ACTIVE" || !usesUiVerification(state) || !state.completedSteps.includes("DISCOVERY_COMPLETENESS")) return;
+  legacy ??= await withUiRemediation(root, state,
+    await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory"), "uiBehaviors");
+  if (legacy.hasVisibleUi === true) return;
+  try {
+    const recorded = await readJson(path.join(root, DISCOVERY_SCAN_FILE), "Discovery scan");
+    // ponytail: re-scan with the pinned classification; historical digests omit reachability/kinds.
+    const boundary = await readCanonicalModuleBoundary(root, state, roots);
+    if (boundary.scan.discoveryDigest !== recorded.discoveryDigest) throw new Error("The legacy module changed after DISCOVERY_COMPLETENESS closed.");
+    await assertModuleVisualDecision({ root, state, roots, ...boundary, inventory: legacy });
+  } catch (error) {
+    const recovery = state.completedSlices.length ? "the operator's --refresh --confirm-mismatch" : "--reopen-discovery";
+    throw Object.assign(new Error(`VISUAL_APPLICABILITY_RECOVERY_REQUIRED: ${error.message} Closed discovery cannot gain a new approval; recover with ${recovery}.`),
+      { code: "VISUAL_APPLICABILITY_RECOVERY_REQUIRED", directLedger: usesDirectLedgerDecisions(state) });
+  }
+};
 
 export const assertExternalUiTrace = (scan, inventory) => {
   const discovered = new Set((scan.externalUi ?? []).map((use) => JSON.stringify([use.from, use.spec, use.symbol])));
@@ -297,6 +355,10 @@ export const validateDiscoveryCompleteness = async (
         `${label} is DEAD but records no PRESENT RUNTIME_OBSERVATION evidence. "Nothing imports it" is a graph fact, not proof it never runs.`,
       );
     }
+  }
+
+  if (state.currentStep === "DISCOVERY_COMPLETENESS" && usesUiVerification(state) && inventory.hasVisibleUi !== true) {
+    await assertModuleVisualDecision({ root, state, roots, scan, classification, inventory });
   }
 
   // C1: the decisive check. Every file the census found, whether anything

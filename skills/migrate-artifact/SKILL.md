@@ -137,6 +137,43 @@ module state. Existing target behavior is resolved as `TARGET_REUSE`,
 `TARGET_EXTEND`, or `MIGRATE_NEW`; reuse requires verified target evidence and
 extend keeps every target-native row through finalization.
 
+The engine classifies the bound source files by what they do, not their
+extension, into one of three states, reported by `--status` as
+`visualApplicability.applicability` with each file's reason. `CONFIRMED_VISUAL`:
+a file renders — JSX, a rendering export of a UI, DOM or canvas library such as
+React, D3 or Three.js (imported, or through its script-tag global), jQuery or
+Chart.js called (`$("#x")`, `new Chart(el)`), the browser's `document`, a
+DOM-only member, a canvas context, CSS-in-JS, or a template or component
+document such as `.vue` or `.html`. `CONFIRMED_NONVISUAL`: nothing renders and
+nothing is in doubt — a stylesheet or asset, or a script that only loads one
+(`VISUAL_DEPENDENCY`), data, types, or a script with no rendering signal; a
+DOM-shaped call or DOM-only member on a value from an XML document, a
+server-side DOM such as jsdom, or a template engine such as Mustache proves
+nothing either way. `INCONCLUSIVE`: the bytes cannot decide — `appendChild`,
+`render`, `textContent =` or `style` on a receiver of unknown provenance, a
+jQuery or Chart.js utility member such as `$.ajax`, or a kind the engine cannot
+read such as `.php`. The classifier is a syntax heuristic, not proof.
+`DISCOVER_LEGACY` refuses a contradicting `hasVisibleUi`
+(`VISUAL_APPLICABILITY_MISMATCH`): `CONFIRMED_VISUAL` must be `true`; files that
+are all stylesheets, assets, data or types must be `false` and use no browser,
+Playwright MCP or screenshot; and `hasVisibleUi` must equal whether any behavior
+is `visible`. `INCONCLUSIVE` declared `false` is refused
+(`VISUAL_APPLICABILITY_INCONCLUSIVE`) unless `operatorDecisions` carries `{"id":
+"visual-applicability", "subject": "<why nothing reaches a screen, answering
+each signal>"}`; that row stops at `OPERATOR_DECISION`, under `--mode auto` too,
+and only the operator decides it. Otherwise declare `true` and capture the
+visible behaviors. `ASSESS_TARGET` holds the pinned source inventory to the same
+rules (except refusing an over-declared `true`) and returns `BLOCKED` for a
+record that closed discovery without them. Never wrap a stylesheet in temporary
+markup to capture it: its visual verification belongs to the UI migrations its
+global contracts name as consumers, and `--status` reports each one under
+`visualApplicability.consumers` (`VERIFIED`, `PENDING`, `STALE`, `UNCOVERED`,
+`UNMIGRATED`); `consumerCoverage` is `VERIFIED` only when every consumer is,
+`NO_CONSUMER` when none is named, and `INVENTORY_INCOMPLETE` while the source
+inventory is still being authored. With `--design-source legacy-runtime` and
+`hasVisibleUi: false`, author `{"version": 2, "frames": []}` and `{"version": 2,
+"rows": [], "unbacked": []}` — no capture.
+
 Visible UI requires hashed Playwright runtime records at `VERIFY_SLICES` and
 fresh references to those records at `FINALIZE`. Each visible behavior declares
 its required `runtimeStates`, and each runtime record carries an `origin`

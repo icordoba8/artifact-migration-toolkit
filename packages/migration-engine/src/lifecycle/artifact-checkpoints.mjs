@@ -49,6 +49,9 @@ import {
   UI_RUNTIME_STATES,
   validateEvidenceFile,
   validateSourceInventoryDocument,
+  VISUAL_APPLICABILITY_DECISION,
+  visualApplicability,
+  visualApplicabilityProblem,
 } from "../census/index.mjs";
 import { engineCommand } from "../engine-paths.mjs";
 import {
@@ -134,7 +137,8 @@ export const validateSourceInventory = async (root, state) => {
             sourceDecision: row,
           },
         })
-      : artifactDecisionCandidate(state, row);
+      // AUTO decides from evidence it holds; a waiver of visual evidence has none.
+      : { ...artifactDecisionCandidate(state, row), ...(id === VISUAL_APPLICABILITY_DECISION ? { autoResolvable: false } : {}) };
     const projection = historical ? null : usesArtifactDirectLedger(state.formatVersion)
       ? await projectArtifactDecision({ decisions: ledger, candidate, label: `operator decision '${id}'`, row })
       : null;
@@ -1044,6 +1048,8 @@ const runCheckpointValidation = async (root, state, capability) => {
     switch (state.currentStep) {
       case "DISCOVER_LEGACY": {
         const result = await validateSourceInventory(root, state);
+        const visual = visualApplicabilityProblem(await visualApplicability(state), result.document, result.decisions, true);
+        if (visual) throw new Error(visual);
         const reconciled = reconcileArtifactDecisions(state, result.decisions);
         if (usesArtifactDirectLedger(state.formatVersion) && reconciled.projection.state === "REJECTED") {
           return { ready: false, outcome: "BLOCKED", reason: "Current source decision is REJECTED.", decisionProjection: reconciled.projection };
@@ -1075,6 +1081,10 @@ const runCheckpointValidation = async (root, state, capability) => {
       case "DISCOVERY_COMPLETENESS": return { ready: true, result: await validateCompleteness(root, state) };
       case "ASSESS_TARGET": {
         const result = await validateTargetInventory(root, state);
+        // The pinned source inventory, held again: a record that closed discovery before
+        // these rules cannot reach `{"frames": []}` or zero visual requirements.
+        const visual = visualApplicabilityProblem(await visualApplicability(state), result.source.document, result.source.decisions, false);
+        if (visual) return { ready: false, outcome: "BLOCKED", reason: `${visual} This record's source inventory was pinned at DISCOVER_LEGACY before the rule held, so it cannot be corrected in place.` };
         const authority = artifactVisualAuthority(state);
         if (authority) {
           await authority.validateContext(

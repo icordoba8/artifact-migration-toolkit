@@ -55,12 +55,12 @@ import { engineCommand } from "../engine-paths.mjs";
 import { withModuleLock } from "./lock.mjs";
 import { previewDiscoveryScan, readMigrationContext } from "./context.mjs";
 import { BLOCKED_EXIT_CODE } from "./policy.mjs";
-import { readState } from "./record.mjs";
+import { readState, validateCompletedHashes } from "./record.mjs";
 import { assertRecordToolkitIdentity } from "./toolkit-identity.mjs";
 import { sliceDriftFacts } from "./validation.mjs";
 import { artifactOperatorDecisions } from "./artifact-status.mjs";
 import { reconcileArtifactDecisions } from "./artifact-checkpoints.mjs";
-import { implicitModuleRoots, legacySourceBinding } from "../census/index.mjs";
+import { assertPinnedVisualApplicability, implicitModuleRoots, legacySourceBinding, moduleVisualDecisionInput } from "../census/index.mjs";
 import { pendingTargetDriftCandidates } from "../slices/index.mjs";
 import { pendingVisualUnbackedCandidates } from "../visual/index.mjs";
 import {
@@ -179,6 +179,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     registryData.targetRoot,
     resolved.canonical,
   );
+  await validateCompletedHashes(root, state);
   assertDiscoveryCompletenessFormat(
     state,
     resolved.canonical,
@@ -214,6 +215,8 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
     await sliceDriftFacts(state, driftRoots),
   );
   const visualUnbacked = await pendingVisualUnbackedCandidates(root, state);
+  await assertPinnedVisualApplicability(root, driftRoots, undefined, state);
+  const visualApplicability = await moduleVisualDecisionInput({ root, state, roots: driftRoots, scan, classification });
   return {
     public: await deriveModuleDecisions({
       module: resolved.canonical,
@@ -227,6 +230,7 @@ const derivePendingDecisions = async ({ registryPath, moduleName }) => {
       ledger,
       targetDrift,
       visualUnbacked,
+      visualApplicability,
       approveCommand: (candidateId) =>
         engineCommand("record-decision.mjs", resolved.canonical, "--approve", candidateId),
     }),
@@ -264,6 +268,10 @@ export const projectDecisions = async ({ registryPath, moduleName }) => {
     return (await derivePendingDecisions({ registryPath, moduleName })).public
       .decisions;
   } catch (error) {
+    if (error.code === "VISUAL_APPLICABILITY_RECOVERY_REQUIRED") return {
+      directLedger: error.directLedger, checkpoint: "DISCOVERY_COMPLETENESS", checkpointAdvanced: true,
+      state: "STALE", candidates: [], blocked: { state: error.code, reason: error.message },
+    };
     return legacyCompatibilityProjection(error);
   }
 };

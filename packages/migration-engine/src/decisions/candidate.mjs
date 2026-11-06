@@ -10,7 +10,7 @@ import path from "node:path";
 import { ARTIFACT_WORKFLOW_VERSION } from "../formats/index.mjs";
 import { canonicalJson as canonical, sha256Hex as sha256 } from "../shared/index.mjs";
 import { hashFile } from "../store/index.mjs";
-import { principalSatisfiesRequirement, resolveRequiredPrincipal } from "./policy.mjs";
+import { decisionChannelOf, principalSatisfiesRequirement, resolveRequiredPrincipal } from "./policy.mjs";
 
 /**
  * The only decision kinds a record may gain after DISCOVERY_COMPLETENESS
@@ -257,6 +257,8 @@ export const resolveGroupDecision = (decisions, candidate) => {
 
 export const decisionAppliesToCandidate = (decision, candidate) =>
   Boolean(decision && candidate) &&
+  (candidate.kind !== "VISUAL_APPLICABILITY" ||
+    (decisionChannelOf(decision) !== "AUTO" && decision.principal !== "AUTO")) &&
   // A policy-bound candidate cannot shed one field and fall back to legacy.
   ((candidate.policyId === undefined && candidate.policyDigest === undefined &&
     candidate.requiredPrincipal === undefined) ||
@@ -303,6 +305,7 @@ export const DECISION_KINDS = [
   // be left without visual acceptance only by an operator, bound to the Figma
   // context and visual contract the operator was shown.
   "VISUAL_UNBACKED",
+  "VISUAL_APPLICABILITY",
 ];
 
 // An artifact operator decision reuses the module candidate shape verbatim, so

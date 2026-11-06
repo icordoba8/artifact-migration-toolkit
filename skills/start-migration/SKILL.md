@@ -508,7 +508,8 @@ override state. On first setup only, add `--registry
   `/make/`; FigJam and Slides are refused) and makes Figma the visual/UX
   authority. `legacy-runtime` makes the *running legacy app* the visual
   authority, refuses `--figma` links, and obliges ASSESS_TARGET to pin
-  `inventories/legacy-runtime-context.json`. Under either, legacy stays
+  `inventories/legacy-runtime-context.json` — `{"version": 2, "frames": []}`,
+  with no browser, when discovery found no UI behavior. Under either, legacy stays
   authoritative for behavior, routes, and business rules and the target stays
   authoritative for architecture and design-system components. Like `--mock` it
   is fixed for the migration's lifetime: naming a different design source on
@@ -1204,7 +1205,17 @@ Resume command: /start-migration <module>
 ## Runtime UI evidence (Playwright MCP)
 
 Only for `hasVisibleUi: true`. When it is `false`, UI runtime evidence is
-`NOT_APPLICABLE` and Playwright is not used at all.
+`NOT_APPLICABLE` and Playwright is not used at all — under every design
+source. `hasVisibleUi` follows what the code does, not file extensions: a
+reachable owned file that renders cannot be declared `false`
+(`VISUAL_APPLICABILITY_MISMATCH` at `DISCOVERY_COMPLETENESS`).
+An `INCONCLUSIVE` reachable owned file under `false` requires a
+`VISUAL_APPLICABILITY` operator decision: author `visualApplicability.rationale`
+in the module classification, answering the engine's signals, and relay the
+operator's explicit decision. AUTO cannot supply it. The same check holds at
+every ACTIVE checkpoint after discovery; a recovery blocker names
+`--reopen-discovery`, or the operator's `--refresh --confirm-mismatch` when
+verified slices exist. Historical COMPLETE records retain their approvals.
 
 Use the repository's already-registered `playwright` MCP server (`.mcp.json`,
 `@playwright/mcp`) through its `browser_*` tools. Do not add a second browser

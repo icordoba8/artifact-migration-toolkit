@@ -29,6 +29,30 @@ also declares its required `runtimeStates` (a subset of the engine's
 uses `{id, kind, sourcePath, consumers}`; all consumers must later appear in
 the global-contract matrix. Feature-local visual IDs are forbidden there.
 
+`hasVisibleUi` must not contradict the engine's classification of the bound
+files (`visualApplicability.applicability`): `CONFIRMED_VISUAL` requires `true`;
+files that are all stylesheets, assets, data or types require `false`; and
+`hasVisibleUi` equals whether any behavior is `visible`
+(`VISUAL_APPLICABILITY_MISMATCH`). `INCONCLUSIVE` — a DOM-shaped operation on a
+receiver of unknown provenance, a DOM library's utility member such as
+`$.ajax`, or an unreadable kind — may be declared `false` only with the operator decision row
+`{"id": "visual-applicability", "subject": "..."}`
+(`VISUAL_APPLICABILITY_INCONCLUSIVE` otherwise); its candidate is never
+AUTO-resolvable. `CONFIRMED_NONVISUAL` scripts may be declared either way.
+`DISCOVER_LEGACY` applies every rule; `ASSESS_TARGET` re-applies all but the
+refusal of `true` to the pinned inventory and returns `BLOCKED` on a violation.
+A `VISUAL_DEPENDENCY` is verified by its consumers: a
+consumer is `VERIFIED` once a sibling record binding it is `COMPLETE`, fresh,
+visible, and binds the dependency or disposes it `MIGRATED_BEHAVIOR` onto a
+visible behavior; `PENDING` while that record is active, `STALE` when it
+drifted, `UNCOVERED` when it completed without carrying the dependency into a
+visible behavior, `UNMIGRATED` when no record binds it. `--status` reports this
+as `visualApplicability`; a record that renders and also binds a dependency
+reports its consumers too, and `consumerCoverage` is `VERIFIED` only when every
+consumer is, `NO_CONSUMER` when no contract names one, and
+`INVENTORY_INCOMPLETE` while `DISCOVER_LEGACY`'s source inventory does not yet
+validate.
+
 Each artifact-13 `operatorDecisions` row is `{id, subject, decisionId?}`. It has no `status`
 field: a row is satisfied only when its `decisionId` names a ledger line in
 `decisions/operator-decisions.ndjson` whose recomputed candidate matches the

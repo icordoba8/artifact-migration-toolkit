@@ -729,3 +729,24 @@ test("v2: a state cannot be waived while its sibling was captured", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("legacy-runtime is no reason to open a browser: a module with no UI behavior pins an empty authority", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "legacy-authority-"));
+  try {
+    const nonVisual = { ...legacyInventory, hasVisibleUi: false, uiBehaviors: [] };
+    await write(root, "inventories/legacy.json", nonVisual);
+    await writeContext(root, []);
+    const frames = await validateLegacyRuntimeContext(root, state());
+    assert.equal(frames.size, 0);
+    await write(root, VISUAL_ACCEPTANCE_FILE, { version: 2, rows: [], unbacked: [] });
+    assert.deepEqual(
+      await validateVisualAcceptance(root, state(), nonVisual, { uiMismatches: [] }, undefined, { projectRoot: root }),
+      [],
+    );
+    // The same empty authority is refused the moment discovery found UI.
+    await write(root, "inventories/legacy.json", legacyInventory);
+    await assert.rejects(() => validateLegacyRuntimeContext(root, state()), /must record a non-empty "frames" array/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

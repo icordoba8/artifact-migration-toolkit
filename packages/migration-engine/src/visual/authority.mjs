@@ -761,9 +761,7 @@ export const validateLegacyRuntimeContext = async (
     fail(`is invalid JSON: ${error.message}`);
   }
   if (!isPlainObject(context)) fail("must be a JSON object");
-  if (!Array.isArray(context.frames) || context.frames.length === 0) {
-    fail('must record a non-empty "frames" array');
-  }
+  if (!Array.isArray(context.frames)) fail('must record a non-empty "frames" array');
   const hardened = hardenedVisual(state, contextFile, context, contextFile);
   const inventory =
     legacy ??
@@ -776,6 +774,8 @@ export const validateLegacyRuntimeContext = async (
       uiBehavior.runtimeStates ?? [],
     ]),
   );
+  // No discovered UI behavior, nothing to capture: `{"frames": []}` needs no browser.
+  if (context.frames.length === 0 && discovered.size > 0) fail('must record a non-empty "frames" array');
   const frames = new Map();
   for (const [index, frame] of context.frames.entries()) {
     const at = `frames[${index}]`;

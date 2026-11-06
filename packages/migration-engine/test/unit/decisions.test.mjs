@@ -12,6 +12,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import * as decisions from "../../src/decisions/index.mjs";
+import { withDecisionPolicy, protectedPolicyDocument } from "../support/decision-policy-fixture.mjs";
 
 const {
   autoApprovalChannel,
@@ -159,6 +160,79 @@ test("A3: only an exact APPROVE or REJECT is a format-19 answer; anything else r
   assert.deepEqual(await operatorAnswer({ selected: candidate, stdout: silent(), ask: async () => "APPROVE" }), { result: "APPROVED" });
 });
 function challengeless() { return { decision: "APPROVE" }; }
+
+test("module visual applicability: a matching legacy AUTO receipt never authorizes or projects as approved", async () => {
+  const candidate = decisions.createDecisionCandidate({ kind: "VISUAL_APPLICABILITY", subjectType: "MODULE",
+    subjectPath: "orders", rationale: "XML only", boundTo });
+  const line = buildDecision({ kind: candidate.kind, subjectType: candidate.subject.type,
+    subject: candidate.subject.path, rationale: candidate.rationale, candidateId: candidate.id,
+    boundTo, targets: [], statement: "Fixture decision" });
+  for (const authorization of [{ channel: "AUTO" }, { channel: "AUTO", groupId: "APP-group", index: 1, members: 2 }]) {
+    const auto = { ...line, id: "AUTO-001", authorizedBy: authorization };
+    assert.equal(decisions.decisionAppliesToCandidate(auto, candidate), false);
+    await assert.rejects(decisions.requireModuleDecision({ state: { formatVersion: 18 },
+      byId: new Map([[auto.id, auto]]), decisions: [auto], candidate, label: "visual applicability",
+      row: { decisionId: auto.id, decisionDigest: decisions.decisionLineDigest(auto) } }), /not bound/);
+  }
+  assert.equal(decisions.decisionAppliesToCandidate(line, candidate), true);
+  await decisions.requireModuleDecision({ state: { formatVersion: 18 }, byId: new Map([[line.id, line]]),
+    decisions: [line], candidate, label: "visual applicability",
+    row: { decisionId: line.id, decisionDigest: decisions.decisionLineDigest(line) } });
+  assert.equal(decisions.decisionKindAllowed(candidate.kind, true), false);
+});
+
+test("module visual applicability: its own default pin preserves historical policies and cannot authorize other kinds", async () => {
+  const root = path.resolve(os.tmpdir(), "visual-policy-project");
+  await withDecisionPolicy(null, async () => {
+    const old = await decisions.resolveRequiredPrincipal("EXCLUSION", root);
+    assert.equal(old.policyDigest, "sha256:f38ec59bad6a56b15e7c5c1a87f9a003591644de0203bd5a7ff91df82af81042");
+    const visual = await decisions.resolveRequiredPrincipal("VISUAL_APPLICABILITY", root);
+    assert.equal(visual.policyId, "engine/visual-applicability/v1");
+    assert.equal(visual.requiredPrincipal, "AGENT_RELAYED");
+    assert.equal(await decisions.resolveHistoricalRequiredPrincipal("VISUAL_APPLICABILITY", root, visual.policyId, visual.policyDigest), "AGENT_RELAYED");
+    assert.equal(await decisions.resolveHistoricalRequiredPrincipal("EXCLUSION", root, visual.policyId, visual.policyDigest), null);
+    assert.equal(await decisions.resolveHistoricalRequiredPrincipal("VISUAL_APPLICABILITY", root, old.policyId, old.policyDigest), null);
+    // An approval re-pinned to STANDARD_LOCAL never satisfies a visual-applicability candidate.
+    const candidate = await createNewFormatDecisionCandidate({ projectRoot: root, kind: "VISUAL_APPLICABILITY",
+      subjectType: "MODULE", subjectPath: "orders", rationale: "XML only", boundTo });
+    const approval = buildDecision({ kind: candidate.kind, subjectType: candidate.subject.type, subject: candidate.subject.path,
+      rationale: candidate.rationale, candidateId: candidate.id, candidateDigest: candidateDigestOf(candidate),
+      boundTo: candidate.boundTo, targets: candidate.targets, statement: "Fixture", principal: "AGENT_RELAYED",
+      result: "APPROVED", policyId: candidate.policyId, policyDigest: candidate.policyDigest });
+    assert.equal(decisions.decisionAppliesToCandidate(approval, candidate), true);
+    assert.equal(decisions.decisionAppliesToCandidate({ ...approval, policyId: old.policyId, policyDigest: old.policyDigest }, candidate), false);
+    const protectedDocument = protectedPolicyDocument(root, { VISUAL_APPLICABILITY: "HUMAN_ATTESTED" });
+    protectedDocument.provenance.previousPolicyDigest = visual.policyDigest;
+    assert.equal(decisions.validateProtectedDecisionPolicy(protectedDocument, root).rules.VISUAL_APPLICABILITY, "HUMAN_ATTESTED");
+  });
+  assert.throws(() => decisions.assertDirectLedgerClassificationSchema({ version: 2,
+    visualApplicability: { rationale: "Unused proposal", decisionId: "DEC-001" } }, { formatVersion: 19 }), /authorization receipts on visualApplicability/);
+});
+
+test("module visual applicability: a mixed-kind group cannot borrow a weaker protected principal", async () => {
+  const root = path.resolve(os.tmpdir(), "visual-group-project");
+  await withDecisionPolicy(protectedPolicyDocument(root, { EXCLUSION: "AGENT_RELAYED" }), async () => {
+    const input = { projectRoot: root, subjectType: "MODULE", subjectPath: "orders", rationale: "XML only", boundTo };
+    const visual = await createNewFormatDecisionCandidate({ ...input, kind: "VISUAL_APPLICABILITY" });
+    const exclusion = await createNewFormatDecisionCandidate({ ...input, kind: "EXCLUSION" });
+    assert.equal(visual.requiredPrincipal, "HUMAN_ATTESTED");
+    // A valid digest is not proof that the writer's homogeneous grouping rule was followed.
+    const members = [exclusion, visual].map((candidate) => ({ id: candidate.id, kind: candidate.kind,
+      subject: candidate.subject, rationaleDigest: candidate.rationaleDigest, targets: candidate.targets,
+      pathDigest: null, boundTo: candidate.boundTo }));
+    const group = await createNewFormatDecisionCandidate({ projectRoot: root, policyKind: "EXCLUSION",
+      kind: "GROUP_APPROVAL", subjectType: "DECISION_GROUP", subjectPath: "EXCLUSION@discovery",
+      rationale: members.map((fact, index) => `${index + 1}. ${fact.id} ${fact.kind} ${fact.subject.path}`).join("\n"),
+      boundTo: { ...boundTo, groupKind: "DECISION_CANDIDATES", lifecycle: {}, members } });
+    const line = buildDecision({ kind: group.kind, subjectType: group.subject.type, subject: group.subject.path,
+      rationale: group.rationale, candidateId: group.id, candidateDigest: candidateDigestOf(group),
+      boundTo: group.boundTo, targets: group.targets, statement: "Forged mixed group fixture",
+      principal: "AGENT_RELAYED", result: "APPROVED", policyId: group.policyId, policyDigest: group.policyDigest });
+    const request = { candidate: visual, decisions: [line], label: "Visual waiver" };
+    await assert.rejects(projectModuleDecision(request), /homogeneous/);
+    await assert.rejects(decisions.requireModuleDecision({ ...request, state: { formatVersion: 19 }, row: {} }), /homogeneous/);
+  });
+});
 
 test("A3: a legacy challenge accepts only its exact phrase, and AUTO is never asked about an underivable candidate", async () => {
   const legacy = { id: "APP-1", kind: "EXCLUSION", subject: { type: "FILE", path: "a.ts" }, approvable: true, blockers: [], boundTo };

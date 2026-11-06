@@ -9,7 +9,7 @@
  * toolchain is what raises them, and the lifecycle reads them from here.
  */
 import { lstat, readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import path from "node:path";
 
 import {
@@ -27,6 +27,7 @@ import {
   hardcodedUiText,
   metrics,
   moduleSpecifiersIn,
+  packageNameOf,
   resolveCompilerBinary,
   SCANNER_REQUIREMENT_KEYS,
   STRUCTURAL_SCRIPT_EXTENSIONS,
@@ -34,7 +35,7 @@ import {
   targetCodeFiles,
   TEST_UNDER_SRC,
 } from "./artifact.mjs";
-import { parserResolutionError, runDiscoveryScan, structuralUnits } from "./scan.mjs";
+import { kindOf, loadTypeScript, parserResolutionError, PRODUCTION_REACHABILITY, runDiscoveryScan, structuralUnits } from "./scan.mjs";
 
 // The parser still resolves from the artifact engine's installed location,
 // `src/artifact/artifact-migration.mjs`, and its refusal names that file,
@@ -385,6 +386,372 @@ export const sourceRequirements = (state) =>
       ].sort(),
     };
   });
+
+// Modules whose import is the rendering signal. `null`: every export renders
+// (UI runtimes, DOM/canvas libraries, CSS-in-JS). A Set: the package also ships
+// nonvisual APIs, so only these exports count -- imported by name, destructured,
+// or read off its default/namespace binding (`React.createElement`, `d3.select`).
+// Provenance, not spelling: `Mustache.render` or `solid-js`'s `createRoot` is not
+// a renderer because no module here exported it.
+const RENDERERS = new Map([
+  ...["react-dom", "react-dom/client", "react-dom/server", "react/jsx-runtime", "react/jsx-dev-runtime",
+    "preact/jsx-runtime", "vue/jsx-runtime", "lit", "lit-html", "lit-element", "svelte", "solid-js/web",
+    "mithril",
+    "styled-components", "@emotion/styled", "@emotion/react", "@emotion/css", "@stitches/react", "goober",
+    "@linaria/core", "@linaria/react", "@vanilla-extract/css", "react-jss", "styled-jsx"].map((name) => [name, null]),
+  ["react", new Set(["createElement", "cloneElement", "createFactory"])],
+  ["vue", new Set(["h", "render", "createApp", "createSSRApp", "defineComponent", "createVNode"])],
+  ["preact", new Set(["h", "createElement", "cloneElement", "render", "hydrate", "Fragment", "Component"])],
+  ["@angular/core", new Set(["Component", "Directive"])],
+  ["snabbdom", new Set(["init", "h", "jsx", "toVNode"])],
+  ["d3", new Set(["select", "selectAll", "create"])],
+  ["d3-selection", new Set(["select", "selectAll", "create"])],
+  ["three", new Set(["WebGLRenderer", "WebGL1Renderer", "WebGPURenderer"])],
+]);
+// A subpath of a package listed by export name (`three/webgpu`) carries the same
+// names; a subpath of an all-rendering package (`chart.js/helpers`) counts only
+// when it is listed itself.
+const rendererOf = (specifier) => {
+  if (typeof specifier !== "string") return undefined;
+  if (RENDERERS.has(specifier)) return RENDERERS.get(specifier);
+  const named = RENDERERS.get(packageNameOf(specifier));
+  return named instanceof Set ? named : undefined;
+};
+// DOM and canvas libraries that are also utility belts: calling or constructing
+// the binding (`$("#x")`, `new Chart(el)`) renders; any other use (`$.ajax`,
+// `Chart.register`) is doubt; importing one renders nothing by itself.
+const CALLED_RENDERERS = new Set(["jquery", "chart.js", "chart.js/auto"]);
+// Script-tag globals of these modules, read only where the file never declares the name.
+const GLOBAL_RENDERERS = new Map([["$", "jquery"], ["jQuery", "jquery"], ["d3", "d3"], ["Chart", "chart.js"],
+  ["THREE", "three"], ["React", "react"], ["ReactDOM", "react-dom"], ["Vue", "vue"]]);
+// Values from these never reach a screen: string templating, an XML DOM, Node built-ins.
+// shortcut: a short list; any other nonvisual package leaves DOM-shaped names on its
+// values INCONCLUSIVE -- add it here when a real artifact needs it.
+const NONVISUAL_MODULES = new Set(["mustache", "handlebars", "@xmldom/xmldom", "xmldom", "jsdom"]);
+const nonvisualModule = (specifier) =>
+  typeof specifier === "string" && (NONVISUAL_MODULES.has(packageNameOf(specifier)) || isBuiltin(specifier));
+// DOM-shaped operations an XML node, a template engine or any object may also
+// have. On a receiver of unknown provenance they are doubt, never proof either way.
+const AMBIGUOUS_CALLS = new Set(["appendChild", "insertBefore", "replaceChild", "replaceChildren", "removeChild",
+  "insertAdjacentElement", "insertAdjacentText", "createElement", "createElementNS", "createTextNode",
+  "setAttribute", "setAttributeNS", "setProperty", "render", "hydrate", "mount"]);
+const AMBIGUOUS_WRITES = new Set(["textContent", "nodeValue", "className", "style"]);
+// `parseFromString(text, "text/xml")`, `document.implementation.createDocument(...)`: a document no screen shows.
+const XML_MIME = /(^|[/+])xml$/;
+// Members only an HTML element or the browser has, whatever the receiver.
+const DOM_ONLY_NAMES = new Set(["innerHTML", "outerHTML", "innerText", "insertAdjacentHTML", "createContextualFragment",
+  "attachShadow", "customElements", "classList"]);
+// The browser's own `document` (never a local of that name) putting markup on screen.
+const DOCUMENT_UI = new Set(["write", "writeln", "body", "head", "documentElement", "createElement", "createElementNS",
+  "createTextNode", "createDocumentFragment", "getElementById", "getElementsByClassName", "getElementsByTagName",
+  "getElementsByName", "querySelector", "querySelectorAll", "adoptedStyleSheets"]);
+const CANVAS_CONTEXTS = new Set(["2d", "webgl", "webgl2", "experimental-webgl", "bitmaprenderer", "webgpu"]);
+const DOM_CONSTRUCTOR = /^(HTML|SVG)\w*Element$/;
+// Tags whose template is markup or a style: lit `html`, styled-components, emotion.
+const RENDERING_TAGS = new Set(["html", "svg", "css", "styled", "keyframes", "createGlobalStyle", "injectGlobal"]);
+// Template and component documents are markup whatever they contain.
+const MARKUP_EXTENSIONS = new Set([".mdx", ".vue", ".svelte", ".astro", ".html", ".htm", ".hbs", ".handlebars", ".ejs",
+  ".pug", ".njk", ".liquid", ".mustache", ".twig", ".marko"]);
+const visualKind = (specifier) => ["STYLE", "ASSET"].includes(kindOf(specifier));
+const rootName = (parser, node) => {
+  while (parser.isPropertyAccessExpression(node) || parser.isCallExpression(node) || parser.isElementAccessExpression(node) ||
+      parser.isNewExpression(node) || parser.isParenthesizedExpression(node) || parser.isAsExpression(node) ||
+      parser.isNonNullExpression(node)) node = node.expression;
+  return parser.isIdentifier(node) ? node.text : null;
+};
+// `x.style.color = v`, `x.textContent += v`: the member is assigned, directly or through a deeper member.
+const written = (parser, node) => {
+  while ((parser.isPropertyAccessExpression(node.parent) || parser.isElementAccessExpression(node.parent)) &&
+    node.parent.expression === node) node = node.parent;
+  const { parent } = node;
+  return parser.isBinaryExpression(parent) && parent.left === node &&
+    parent.operatorToken.kind >= parser.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= parser.SyntaxKind.LastAssignment;
+};
+const xmlDocument = (parser, node) => parser.isCallExpression(node) && parser.isPropertyAccessExpression(node.expression) &&
+  ((node.expression.name.text === "createDocument" && parser.isPropertyAccessExpression(node.expression.expression) &&
+    node.expression.expression.name.text === "implementation") || (node.expression.name.text === "parseFromString" &&
+    parser.isStringLiteralLike(node.arguments[1] ?? {}) && XML_MIME.test(node.arguments[1].text)));
+// Erased at compile time: types, ambient declarations, type-only imports, `export {}`.
+const typeOnly = (parser, statement) =>
+  parser.isInterfaceDeclaration(statement) || parser.isTypeAliasDeclaration(statement) ||
+  (statement.modifiers ?? []).some((modifier) => modifier.kind === parser.SyntaxKind.DeclareKeyword) ||
+  ((parser.isImportDeclaration(statement) || parser.isExportDeclaration(statement)) &&
+    (statement.isTypeOnly || statement.importClause?.isTypeOnly === true)) ||
+  (parser.isExportDeclaration(statement) && !statement.moduleSpecifier && statement.exportClause?.elements?.length === 0);
+
+/**
+ * What a file does, not what it is named, as one of three applicability states:
+ * - `CONFIRMED_VISUAL`: positive evidence that it renders (`VISUAL_UI`).
+ * - `CONFIRMED_NONVISUAL`: it owes no visible-UI evidence of its own -- a
+ *   stylesheet or asset, or a script that only loads one (`VISUAL_DEPENDENCY`,
+ *   verified by its consumers), data, docs, types, or a script with no
+ *   rendering signal and nothing in doubt.
+ * - `INCONCLUSIVE`: the bytes cannot decide -- a DOM-shaped operation on a
+ *   receiver of unknown provenance (`el.appendChild`, `view.render(data)`,
+ *   `node.textContent = v`), or a kind the engine cannot read (`.php`).
+ * Every verdict needs provenance. Rendering: JSX, a rendering export of a module
+ * in RENDERERS (imported, or its script-tag global), the browser's `document`, a
+ * DOM-only member, a canvas context, a DOM element class extended or built, a
+ * markup/style tagged template. Clearing doubt -- and a DOM-only member -- needs
+ * the same provenance: a receiver derived from an XML document or from a
+ * NONVISUAL_MODULES value (`Mustache.render`, a jsdom document).
+ * `conclusive` is narrower: proven by kind or signal (markup, a stylesheet, data,
+ * types, a rendering signal). Only files that are all conclusive and render
+ * nothing may refuse an honest `hasVisibleUi: true`.
+ * shortcut: syntax only -- no type checker, names not scopes; a renderer reached
+ * with no DOM-shaped name (`new Widget(container)` from an unlisted package) or
+ * through a local re-export reads CONFIRMED_NONVISUAL -- add the rule here when a
+ * real artifact needs it.
+ */
+export const classifyVisualFile = (parser, file, text) => {
+  const kind = kindOf(file);
+  const extension = path.extname(file).toLowerCase();
+  const verdict = (classification, reason, applicability, conclusive) => ({ classification, reason, conclusive, applicability });
+  if (kind === "STYLE" || kind === "ASSET") return verdict("VISUAL_DEPENDENCY", kind.toLowerCase(), "CONFIRMED_NONVISUAL", true);
+  if (MARKUP_EXTENSIONS.has(extension)) return verdict("VISUAL_UI", "markup document", "CONFIRMED_VISUAL", true);
+  // Only data and docs are proven inert; an unknown kind (`.php`, `.erb`) may be a page.
+  if (!STRUCTURAL_SCRIPT_EXTENSIONS.has(extension)) {
+    const inert = kind === "DATA" || kind === "DOC";
+    return verdict("NON_VISUAL", kind.toLowerCase(), inert ? "CONFIRMED_NONVISUAL" : "INCONCLUSIVE", inert);
+  }
+  const sourceFile = parser.createSourceFile(file, text, parser.ScriptTarget.Latest, true);
+  const declared = new Set();
+  // `bound`: default/namespace/require bindings, whose members are the module's exports.
+  // `imported`: every value binding to a module. `origin`: a local's one initializer.
+  const bound = new Map();
+  const imported = new Map();
+  const origin = new Map();
+  const opaque = new Set();
+  const requireOf = (node) => node && parser.isCallExpression(node) && parser.isIdentifier(node.expression) &&
+    node.expression.text === "require" && parser.isStringLiteralLike(node.arguments[0] ?? {}) ? node.arguments[0].text : null;
+  // Pass 1: local names, module bindings, and where each local's value came from.
+  const collect = (node) => {
+    if ((parser.isVariableDeclaration(node) || parser.isParameter(node) || parser.isBindingElement(node) ||
+        parser.isFunctionDeclaration(node) || parser.isClassLike(node) || parser.isImportClause(node) ||
+        parser.isImportSpecifier(node) || parser.isNamespaceImport(node)) && node.name && parser.isIdentifier(node.name)) {
+      declared.add(node.name.text);
+      // A name declared twice, or by anything but one initialized variable, has no single provenance.
+      if (!parser.isVariableDeclaration(node) || !node.initializer || origin.has(node.name.text)) opaque.add(node.name.text);
+      else origin.set(node.name.text, node.initializer);
+    }
+    if (parser.isImportDeclaration(node) && parser.isStringLiteralLike(node.moduleSpecifier) && !node.importClause?.isTypeOnly) {
+      const clause = node.importClause;
+      const from = node.moduleSpecifier.text;
+      if (clause?.name) bound.set(clause.name.text, from);
+      if (clause?.namedBindings && parser.isNamespaceImport(clause.namedBindings)) bound.set(clause.namedBindings.name.text, from);
+      for (const element of clause?.namedBindings?.elements ?? []) imported.set(element.name.text, from);
+    } else if (parser.isVariableDeclaration(node) && parser.isIdentifier(node.name) && requireOf(node.initializer)) {
+      bound.set(node.name.text, requireOf(node.initializer));
+    }
+    parser.forEachChild(node, collect);
+  };
+  parser.forEachChild(sourceFile, collect);
+  for (const [name, from] of bound) imported.set(name, from);
+  const global = (node, names) => parser.isIdentifier(node) && names.includes(node.text) && !declared.has(node.text);
+  // A receiver holds no DOM when its root came from a nonvisual module or an XML document.
+  const resolved = (name, seen = new Set()) => {
+    if (name === null || seen.has(name)) return false;
+    seen.add(name);
+    if (nonvisualModule(imported.get(name))) return true;
+    const value = !opaque.has(name) && origin.get(name);
+    return Boolean(value) && (xmlDocument(parser, value) || resolved(rootName(parser, value), seen));
+  };
+  const doubtOf = (node) => {
+    if (parser.isCallExpression(node) && parser.isPropertyAccessExpression(node.expression) &&
+        AMBIGUOUS_CALLS.has(node.expression.name.text) && !resolved(rootName(parser, node.expression.expression))) {
+      return `${node.expression.name.text}() on a receiver of unknown provenance`;
+    }
+    if (parser.isPropertyAccessExpression(node) && AMBIGUOUS_WRITES.has(node.name.text) && written(parser, node) &&
+        !resolved(rootName(parser, node.expression))) {
+      return `${node.name.text} written on a receiver of unknown provenance`;
+    }
+    if (parser.isCallExpression(node) && parser.isIdentifier(node.expression) && AMBIGUOUS_CALLS.has(node.expression.text) &&
+        imported.has(node.expression.text) && !nonvisualModule(imported.get(node.expression.text))) {
+      return `${node.expression.text}() imported from '${imported.get(node.expression.text)}'`;
+    }
+    return null;
+  };
+  let renders = null;
+  let doubt = null;
+  let styled = false;
+  const loaded = (specifier, names) => {
+    if (typeof specifier !== "string") return;
+    if (visualKind(specifier)) styled = true;
+    const rendering = rendererOf(specifier);
+    if (rendering === undefined) return;
+    // `names` is null for a bare or dynamic load: everything the package runs.
+    const hit = names === null ? (rendering ? null : "*") : names.find((name) => !rendering || rendering.has(name));
+    if (hit) renders = `imports ${hit === "*" ? "" : `${hit} from `}'${specifier}'`;
+  };
+  const visit = (node) => {
+    if (renders) return;
+    // Types are erased; only a class's `extends` clause survives as a value.
+    if (parser.isInterfaceDeclaration(node) || parser.isTypeAliasDeclaration(node) ||
+        (parser.isTypeNode(node) && !(parser.isExpressionWithTypeArguments(node) && parser.isClassLike(node.parent.parent)))) return;
+    if (parser.isJsxElement(node) || parser.isJsxSelfClosingElement(node) || parser.isJsxFragment(node)) {
+      renders = "JSX element";
+    } else if (parser.isIdentifier(node) && DOM_ONLY_NAMES.has(node.text) && parser.isPropertyAccessExpression(node.parent) &&
+        !resolved(rootName(parser, node.parent.expression))) {
+      renders = `${node.text} reference`;
+    } else if (parser.isIdentifier(node) && DOM_CONSTRUCTOR.test(node.text) && !declared.has(node.text)) {
+      // `extends HTMLElement` or `new HTMLImageElement()` defines or builds DOM; `instanceof` only asks.
+      if (parser.isExpressionWithTypeArguments(node.parent) || (parser.isNewExpression(node.parent) && node.parent.expression === node)) {
+        renders = `${node.text} reference`;
+      } else {
+        doubt ??= `${node.text} reference`;
+      }
+    } else if (parser.isIdentifier(node) && (parser.isCallExpression(node.parent) || parser.isNewExpression(node.parent) ||
+        parser.isPropertyAccessExpression(node.parent)) && node.parent.expression === node &&
+        (declared.has(node.text) ? CALLED_RENDERERS.has(imported.get(node.text)) : GLOBAL_RENDERERS.has(node.text))) {
+      // A binding to a library above, imported or global: an all-rendering one used
+      // at all, a utility belt called, or a rendering member (`d3.select`).
+      const from = declared.has(node.text) ? imported.get(node.text) : GLOBAL_RENDERERS.get(node.text);
+      const member = parser.isPropertyAccessExpression(node.parent) ? node.parent.name.text : null;
+      const rendering = RENDERERS.get(from);
+      if (rendering === null || (member === null ? CALLED_RENDERERS.has(from) : rendering?.has(member))) {
+        renders = `${node.text}${member === null ? "" : `.${member}`} ${declared.has(node.text) ? "from" : "global of"} '${from}'`;
+      } else if (CALLED_RENDERERS.has(from)) {
+        doubt ??= `${node.text}.${member} of '${from}', a DOM library`;
+      }
+    } else if (parser.isElementAccessExpression(node) && parser.isStringLiteralLike(node.argumentExpression) &&
+        DOM_ONLY_NAMES.has(node.argumentExpression.text) && !resolved(rootName(parser, node.expression))) {
+      renders = `${node.argumentExpression.text} reference`;
+    } else if (parser.isPropertyAccessExpression(node) && DOCUMENT_UI.has(node.name.text) &&
+        (global(node.expression, ["document"]) || (parser.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === "document" && global(node.expression.expression, ["window", "globalThis", "self"])))) {
+      renders = `document.${node.name.text} reference`;
+    } else if (parser.isPropertyAccessExpression(node) && parser.isIdentifier(node.expression) &&
+        rendererOf(bound.get(node.expression.text))?.has(node.name.text)) {
+      renders = `${node.name.text} reference`;
+    } else if (parser.isCallExpression(node) && parser.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "getContext" && parser.isStringLiteralLike(node.arguments[0] ?? {}) &&
+        CANVAS_CONTEXTS.has(node.arguments[0].text)) {
+      renders = `canvas getContext('${node.arguments[0].text}')`;
+    } else if (parser.isTaggedTemplateExpression(node) && RENDERING_TAGS.has(rootName(parser, node.tag))) {
+      renders = `${rootName(parser, node.tag)} tagged template`;
+    } else if ((parser.isImportDeclaration(node) || parser.isExportDeclaration(node)) &&
+        !node.isTypeOnly && !node.importClause?.isTypeOnly) {
+      // A type-only import is erased; it cannot render.
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings ?? node.exportClause;
+      const names = !clause && !node.exportClause ? null : [
+        ...(clause?.name ? ["default"] : []),
+        ...(bindings && !bindings.elements ? ["*"] : []),
+        ...(bindings?.elements ?? []).filter((element) => !element.isTypeOnly)
+          .map((element) => (element.propertyName ?? element.name).text),
+      ];
+      loaded(node.moduleSpecifier?.text, names);
+    } else if (parser.isVariableDeclaration(node) && parser.isObjectBindingPattern(node.name) && node.initializer) {
+      // `const { createElement: h } = React` or `= require("react")`: the names taken.
+      const from = requireOf(node.initializer) ?? (parser.isIdentifier(node.initializer) ? bound.get(node.initializer.text) : null);
+      loaded(from, node.name.elements.map((element) => (element.propertyName ?? element.name).text));
+    } else if (parser.isCallExpression(node) &&
+        (node.expression.kind === parser.SyntaxKind.ImportKeyword || rootName(parser, node.expression) === "require")) {
+      loaded(parser.isStringLiteralLike(node.arguments[0] ?? {}) ? node.arguments[0].text : null, null);
+    }
+    doubt ??= doubtOf(node);
+    parser.forEachChild(node, visit);
+  };
+  parser.forEachChild(sourceFile, visit);
+  if (renders) return verdict("VISUAL_UI", renders, "CONFIRMED_VISUAL", true);
+  if (sourceFile.isDeclarationFile || sourceFile.statements.every((statement) => typeOnly(parser, statement))) {
+    return verdict("NON_VISUAL", "type declarations only", "CONFIRMED_NONVISUAL", true);
+  }
+  // Loading a stylesheet or asset renders nothing itself: its consumers verify it.
+  const applicability = doubt ? "INCONCLUSIVE" : "CONFIRMED_NONVISUAL";
+  return styled
+    ? verdict("VISUAL_DEPENDENCY", doubt ?? "imports a stylesheet or asset", applicability, false)
+    : verdict("NON_VISUAL", doubt ?? "no rendering signal recognized", applicability, false);
+};
+
+const VISUAL_RANK = ["NON_VISUAL", "VISUAL_DEPENDENCY", "VISUAL_UI"];
+const APPLICABILITY_RANK = ["CONFIRMED_NONVISUAL", "INCONCLUSIVE", "CONFIRMED_VISUAL"];
+
+/**
+ * The artifact's visual applicability, derived from the bound source files'
+ * own bytes: the strongest classification and applicability of any of them,
+ * `conclusive` when that verdict is proof (any file renders, or every file is
+ * conclusive). Read where `hasVisibleUi` is decided (DISCOVER_LEGACY), held
+ * again at ASSESS_TARGET, and reported by `--status`.
+ */
+export const visualApplicability = async (state) => {
+  const parser = await structuralParser();
+  const files = [];
+  for (const entry of state.bindings.source.entries.filter((item) => item.kind === "FILE")) {
+    const script = STRUCTURAL_SCRIPT_EXTENSIONS.has(path.extname(entry.path).toLowerCase());
+    const text = script
+      ? await asEngineFault(`Cannot read source file '${entry.path}'`, () =>
+          readFile(path.join(state.source.root, entry.path), "utf8"))
+      : "";
+    files.push({ path: entry.path, ...classifyVisualFile(parser, entry.path, text) });
+  }
+  const strongest = (rank, field) => rank[Math.max(0, ...files.map((file) => rank.indexOf(file[field])))];
+  const classification = strongest(VISUAL_RANK, "classification");
+  return {
+    classification,
+    applicability: strongest(APPLICABILITY_RANK, "applicability"),
+    conclusive: classification === "VISUAL_UI" || files.every((file) => file.conclusive),
+    files,
+  };
+};
+
+/** The operator decision row that records an INCONCLUSIVE artifact as rendering nothing. */
+export const VISUAL_APPLICABILITY_DECISION = "visual-applicability";
+
+/**
+ * Why a source inventory's `hasVisibleUi` and visible behaviors cannot stand
+ * against what its bound files show, or null. The claim is the agent's; the
+ * bytes and the operator are the evidence:
+ * - CONFIRMED_VISUAL cannot be declared invisible (that skips every Playwright check);
+ * - `hasVisibleUi` must equal whether any behavior is visible, so `true` cannot reach
+ *   `{"frames": []}` or zero TARGET captures, and `false` cannot carry visible rows;
+ * - INCONCLUSIVE may be declared invisible only through the `visual-applicability`
+ *   operator decision -- the agent's word alone never waives visual evidence;
+ * - and, only where the claim is made (`deciding`, DISCOVER_LEGACY), files that are
+ *   all conclusive and render nothing refuse `true`: no markup is fabricated around a
+ *   stylesheet to capture it. ASSESS_TARGET re-reads the pinned inventory with the
+ *   bypass rules alone, so a record that closed discovery before them is held to them
+ *   while an over-declared stylesheet keeps the evidence it already owes.
+ */
+export const visualApplicabilityProblem = (applicability, { hasVisibleUi, behaviors }, decisions, deciding) => {
+  const files = (state) => applicability.files.filter((file) => file.applicability === state)
+    .map((file) => `${file.path}: ${file.reason}`).join("; ");
+  if (applicability.applicability === "CONFIRMED_VISUAL" && !hasVisibleUi) {
+    return `VISUAL_APPLICABILITY_MISMATCH: this artifact is VISUAL_UI (${files("CONFIRMED_VISUAL")}), so source inventory.hasVisibleUi must be true and its rendered behaviors visible with runtimeStates. Visual, interaction and accessibility evidence is required.`;
+  }
+  if (deciding && applicability.applicability !== "CONFIRMED_VISUAL" && hasVisibleUi && applicability.conclusive) {
+    return `VISUAL_APPLICABILITY_MISMATCH: this artifact is ${applicability.classification}; no bound file renders UI, so source inventory.hasVisibleUi must be false and no behavior visible. ${applicability.classification === "VISUAL_DEPENDENCY" ? "Its visual verification belongs to the UI migrations that consume it; never wrap it in temporary markup to capture it." : "No browser, Playwright or screenshot evidence applies."}`;
+  }
+  const visible = behaviors.filter((row) => row.visible === true).map((row) => row.id);
+  if (hasVisibleUi && visible.length === 0) {
+    return `VISUAL_APPLICABILITY_MISMATCH: source inventory.hasVisibleUi is true but no behavior is visible${applicability.applicability === "CONFIRMED_VISUAL" ? ` although this artifact is VISUAL_UI (${files("CONFIRMED_VISUAL")})` : ""}. Mark each rendered behavior visible with its runtimeStates; visual, interaction and accessibility evidence is required.`;
+  }
+  if (!hasVisibleUi && visible.length > 0) {
+    return `VISUAL_APPLICABILITY_MISMATCH: source inventory.hasVisibleUi is false but behavior(s) ${visible.join(", ")} are visible. Declare hasVisibleUi true, or mark them visible: false.`;
+  }
+  if (applicability.applicability === "INCONCLUSIVE" && !hasVisibleUi &&
+      !decisions.some((row) => row.id === VISUAL_APPLICABILITY_DECISION && (deciding || row.satisfied))) {
+    return `VISUAL_APPLICABILITY_INCONCLUSIVE: source inventory.hasVisibleUi is false, but the bound source neither proves nor rules out rendering (${files("INCONCLUSIVE")}). An unsupported claim cannot waive visual evidence: declare hasVisibleUi true with its rendered behaviors visible, or add {"id": "${VISUAL_APPLICABILITY_DECISION}", "subject": "<why nothing here reaches a screen, answering each signal above>"} to source inventory.operatorDecisions for the operator to decide.`;
+  }
+  return null;
+};
+
+/**
+ * The module side: classify only production-reachable owned files. Callers
+ * supply a canonical scan, never the unauthenticated stored reachability map.
+ */
+export const moduleVisualFiles = async (scan, legacyRoot) => {
+  const parser = loadTypeScript();
+  const files = [];
+  for (const file of scan.census.filter((item) => PRODUCTION_REACHABILITY.has(scan.reachability[item])).sort()) {
+    // Only a script's bytes are read; any other kind is classified by name (`.vue`, `.html` are markup).
+    const text = ["MODULE", "COMPONENT"].includes(scan.kinds[file])
+      ? await readFile(path.join(legacyRoot, file), "utf8") : "";
+    const verdict = classifyVisualFile(parser, file, text);
+    files.push({ path: file, ...verdict });
+  }
+  return files;
+};
 
 // The machine structural census over the completeness universe's files. It is
 // derived from the source bytes every time it is needed -- at

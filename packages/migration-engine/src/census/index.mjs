@@ -62,6 +62,8 @@ export {
 } from "./inventory.mjs";
 export {
   assertExternalUiTrace,
+  assertPinnedVisualApplicability,
+  moduleVisualDecisionInput,
   validateDiscoveryCompleteness,
 } from "./completeness.mjs";
 export {
@@ -97,6 +99,7 @@ export {
   architectureFindings,
   assertStructuralCoverage,
   asEngineFault,
+  classifyVisualFile,
   engineFault,
   legacyDependencies,
   pathKey,
@@ -104,6 +107,9 @@ export {
   structuralCensus,
   structuralParser,
   targetTypeScript,
+  VISUAL_APPLICABILITY_DECISION,
+  visualApplicability,
+  visualApplicabilityProblem,
 } from "./toolchain.mjs";
 export {
   API_CONTRACT_ALGORITHM,

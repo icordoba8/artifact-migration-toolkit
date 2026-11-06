@@ -3,6 +3,7 @@
  * completion readers the recorder and the module lifecycle call. Moved verbatim
  * from `artifact/artifact-migration.mjs` (Track A8).
  */
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import {
   artifactFormatUpgrade,
@@ -12,10 +13,10 @@ import {
   TRANSACTION_FILE,
   usesArtifactDirectLedger,
 } from "../formats/index.mjs";
-import { captureBinding, metrics, resolveArtifact } from "../census/index.mjs";
+import { captureBinding, metrics, resolveArtifact, validateSourceInventoryDocument, visualApplicability } from "../census/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
-import { canonicalJson as canonical, sha256Hex as sha256 } from "../shared/index.mjs";
-import { fileExists as exists } from "../store/index.mjs";
+import { assertArray, canonicalJson as canonical, samePath, sha256Hex as sha256 } from "../shared/index.mjs";
+import { artifactRoot, fileExists as exists, readOptionalJson, STATE_ROOT } from "../store/index.mjs";
 import {
   artifactVisualDecisions,
   checkpointArtifacts,
@@ -285,6 +286,7 @@ const readArtifactStatus = async (options = {}) => {
     progress,
     progressChecklist: renderProgress(progress),
     ...ponytailReport(ponytailEvidence),
+    visualApplicability: await visualOwnership(location, state),
     // Same protocol as a module migration's `formatUpgrade`, and read-only like
     // the rest of this function: projected from the record's own cursor, never
     // committed here. `null` whenever the record is at the runtime format, which
@@ -300,6 +302,80 @@ const readArtifactStatus = async (options = {}) => {
       activeToolkitIdentity(),
     ),
   };
+};
+
+/**
+ * What visual verification this artifact owes, and who owes it. `VISUAL_UI`
+ * -- or an accepted `hasVisibleUi: true` over a script the classifier could not
+ * prove either way -- owes its own Playwright evidence; `NON_VISUAL` owes none.
+ * A bound `VISUAL_DEPENDENCY` file (a stylesheet, an asset) has no UI of its
+ * own, so its visual verification is owned by each consumer its global
+ * contracts name: an artifact record -- this one included -- that binds that
+ * consumer, is COMPLETE and fresh with visible UI, and carries the dependency
+ * into a visible behavior -- by binding it, or by disposing it
+ * MIGRATED_BEHAVIOR onto a visible behavior. Those rows are reported even when
+ * the artifact also renders, so a `SELF` verdict never hides a consumer still
+ * owed. Read-only.
+ */
+const visualOwnership = async (location, state) => {
+  const applicability = await visualApplicability(state);
+  const dependencies = applicability.files
+    .filter((file) => file.classification === "VISUAL_DEPENDENCY").map((file) => file.path);
+  // A declared `true` decides only what the classifier could not prove.
+  const verification = state.hasVisibleUi === true && !applicability.conclusive ? "SELF"
+    : { VISUAL_UI: "SELF", VISUAL_DEPENDENCY: "CONSUMERS", NON_VISUAL: "NOT_APPLICABLE" }[applicability.classification];
+  if (dependencies.length === 0) return { ...applicability, verification };
+  // Until DISCOVER_LEGACY closes, the source inventory is a draft the agent is
+  // still writing: only a document that validates is read, anything else is
+  // INVENTORY_INCOMPLETE. Past it the document is pinned, and a malformed one is
+  // corruption that must surface, never be skipped.
+  let source;
+  if (state.currentStep === "DISCOVER_LEGACY" && state.status !== "COMPLETE") {
+    source = await validateSourceInventoryDocument(location.root, state).then((result) => result.document, () => null);
+    if (!source) return { ...applicability, verification, consumers: [], consumerCoverage: "INVENTORY_INCOMPLETE" };
+  } else {
+    source = await readOptionalJson(path.join(location.root, "inventories/source.json"), "source inventory");
+  }
+  // Two contracts on one stylesheet may name the same consumer: one obligation.
+  const contracts = source ? assertArray(source.globalContracts, "pinned source inventory.globalContracts") : [];
+  const pairs = [...new Map(contracts.filter((contract) => dependencies.includes(contract.sourcePath))
+    .flatMap((contract) => assertArray(contract.consumers, `pinned source inventory global contract '${contract.id}' consumers`)
+      .map((consumer) => [`${contract.sourcePath}\0${consumer}`, { dependency: contract.sourcePath, consumer }])))
+    .values()];
+  // No consumer named, nothing to look up: sibling records are never read.
+  if (pairs.length === 0) return { ...applicability, verification, consumers: [], consumerCoverage: "NO_CONSUMER" };
+  const records = [];
+  for (const id of await readdir(path.join(location.targetRoot, STATE_ROOT)).catch(() => [])) {
+    const owner = id === state.artifactId ? state : await readArtifactState(location.targetRoot, id).catch(() => null);
+    if (owner && samePath(owner.source.root, state.source.root)) records.push(owner);
+  }
+  const consumers = [];
+  for (const { dependency, consumer } of pairs) {
+    const owner = records.find((record) => record.bindings.source.entries.some((entry) => entry.path === consumer));
+    const root = owner && artifactRoot(location.targetRoot, owner.artifactId);
+    const status = !owner ? "UNMIGRATED"
+      : owner.status !== "COMPLETE" ? "PENDING"
+        : (await freshness(root, owner)).stale ? "STALE"
+          : owner.hasVisibleUi && await carriesVisually(root, owner, dependency) ? "VERIFIED" : "UNCOVERED";
+    consumers.push({ dependency, consumer, owner: owner?.artifactId ?? null, status });
+  }
+  return {
+    ...applicability,
+    verification,
+    consumers,
+    consumerCoverage: consumers.every((row) => row.status === "VERIFIED") ? "VERIFIED" : "PENDING",
+  };
+};
+
+const carriesVisually = async (root, owner, dependency) => {
+  if (owner.bindings.source.entries.some((entry) => entry.path === dependency)) return true;
+  const [source, completeness] = await Promise.all([
+    readOptionalJson(path.join(root, "inventories/source.json"), "source inventory"),
+    readOptionalJson(path.join(root, "inventories/completeness.json"), "completeness inventory"),
+  ]);
+  const visible = new Set((source?.behaviors ?? []).filter((row) => row.visible).map((row) => row.id));
+  return (completeness?.requirements ?? []).some((row) =>
+    row.element === dependency && row.disposition === "MIGRATED_BEHAVIOR" && visible.has(row.ref));
 };
 
 export const artifactOperatorDecisions = async (options = {}) => {
