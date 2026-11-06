@@ -405,7 +405,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
       requested: { provider, scope, root, store, mode },
     });
   }
-  if (!['install', 'update', 'rollback', 'remove', 'doctor'].includes(action)) throw new Error(`Unknown action: ${action}`);
+  if (!['install', 'update', 'rollback', 'remove', 'doctor', 'inspect'].includes(action)) throw new Error(`Unknown action: ${action}`);
   const installed = previous ? await validateSelection(previous, provider, layout) : null;
   const history = previous ? await historicalOwned(previous, provider, layout) : [];
   const historical = history.map(item => item.native);
@@ -426,7 +426,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     if (!ownedPath(relative, provider, layout)) throw new Error(`Invalid ownership manifest: ${relative}`);
     if (digest(await readFile(await safePath(root, relative))) !== hash) throw new Error(`Owned file modified: ${relative}`);
   }
-  if (action === 'doctor') {
+  if (action === 'doctor' || action === 'inspect') {
     // `exec` and repair would run or re-register a protocol-1 engine whose
     // writers ignore this installer's locks: refused, as selection refuses it.
     if (installed && installed.writerLockProtocol !== WRITER_LOCK_PROTOCOL) {
@@ -439,6 +439,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     const cli = previous.cliConfigOwned ? mergeConfig(rawCli, copilotCli, previous.cliConfigOwned, previous.cliConfigOwned) : null;
     let mcpRepair = null;
     if (merged.missing || merged.stale || agents || cli?.missing) {
+      if (action === 'inspect') throw refuse('INSTALL_REPAIR_REQUIRED', 'MCP registration needs a locked repair');
       try {
         if (agents) await replace(agentsFile, agents);
         if (cli?.missing) await replace(cliFile, cli.bytes);
@@ -694,6 +695,19 @@ const reclaim = async (lock) => {
   await rmdirIfEmpty(lock);
   return 'dead';
 };
+
+/** Verify a healthy installation without creating a writer lock or repairing files. */
+export async function inspectInstallation(provider, options = {}) {
+  const lock = await safePath(options.root, '.artifact-migration-tools/install.lock');
+  const unlocked = async () => {
+    if (await lstat(lock).catch(error => { if (error.code === 'ENOENT') return null; throw error; }))
+      throw refuse('LOCK_HELD', 'Installation locked: inspection cannot prove a stable selection', { lock });
+  };
+  await unlocked();
+  const result = await applyAdapter(provider, { ...options, action: 'inspect' });
+  await unlocked();
+  return result;
+}
 
 // Doctor repairs a missing registration, so it is a config writer too and takes
 // the same single lock per host root instead of racing an install.

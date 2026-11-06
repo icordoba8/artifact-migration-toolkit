@@ -402,13 +402,29 @@ async function legacyKnowledgeRootOnly(receipt, doctor) {
 async function localPreflight(receipt) {
   await validateReceiptLauncher(receipt);
   const runtimeOnly = receipt.mode === 'runtime';
-  const adapterDoctor = await adapterRun(receipt.provider, receipt.release,
-    { action: 'doctor', scope: receipt.scope, root: receipt.root, store: receipt.store, runtimeOnly });
+  const support = await import(pathToFileURL(path.join(receipt.release, 'providers/install-support.mjs')).href);
+  const options = { action: 'doctor', scope: receipt.scope, root: receipt.root, store: receipt.store, runtimeOnly };
+  let adapterDoctor;
+  try {
+    adapterDoctor = await (support.inspectInstallation ?? support.adapter)(receipt.provider, options);
+  } catch (error) {
+    if (!['INSTALL_REPAIR_REQUIRED', 'LOCK_HELD'].includes(error.code)) throw error;
+    adapterDoctor = await support.adapter(receipt.provider, options);
+  }
   const command = receipt.commands['artifact-migration-discover'];
   if (!command) throw new Error('Runtime receipt has no discovery command');
   const { runDoctor } = await import(pathToFileURL(path.join(receipt.release, 'packages/migration-engine/src/migration-utils.mjs')).href);
   const engineDoctor = await runDoctor({ cwd: receipt.root });
   if (engineDoctor.outcome === 'OK') return { adapterDoctor, engineDoctor };
+  const blocked = engineDoctor.checks?.filter(check => check.blocking);
+  // This shell's view is not the MCP server's, so it proves nothing about what
+  // the server may write. The skill's one diagnostic call is the engine's own
+  // unconfirmed step mode, which writes nothing and checks writability itself.
+  if (blocked?.length === 1 && blocked[0].name === 'knowledge-root' && blocked[0].code === 'EROFS') {
+    throw new RuntimeSelectionError('ENGINE_FILESYSTEM_BLOCKED', `Engine doctor blocked: ${engineDoctor.blockers.join('; ')}`, {
+      engineDoctor, commands: receipt.commands, mcp: receipt.mcp,
+    });
+  }
   if (!(await legacyKnowledgeRootOnly(receipt, engineDoctor))) throw new Error(`Engine doctor blocked: ${engineDoctor.blockers.join('; ')}`);
   // Reported as waived rather than dropped: the legacy verdict stays on the record.
   return { adapterDoctor, engineDoctor: { ...engineDoctor, outcome: 'OK', blockers: [], waived: engineDoctor.blockers } };

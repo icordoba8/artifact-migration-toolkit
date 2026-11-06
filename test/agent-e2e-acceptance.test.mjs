@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { appendFile, chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile, link } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test, { after } from "node:test";
+import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRelease } from "../scripts/release.mjs";
-import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants } from "../scripts/agent-e2e-acceptance.mjs";
+import { CODEX_MCP_TOOLS, commandFor, acceptanceVerdict, run, isolated, installedGrants, readOnlyScenarioMounts, checkReadOnlyConsumer } from "../scripts/agent-e2e-acceptance.mjs";
 import { candidateReleaseRoot } from "../packages/migration-engine/test/support/candidate-release-root.mjs";
 import "./support/ledger-observer-tests.mjs";
 
@@ -18,8 +18,10 @@ import { acquireModuleLock, lockPathFor } from '../packages/migration-engine/src
 const script = new URL("../scripts/agent-e2e-acceptance.mjs", import.meta.url);
 // The runner refuses evidence inside TMPDIR, so runner children get their own TMPDIR; test roots live beside it.
 const scratch = os.tmpdir();
-process.env.TMPDIR = mkdtempSync(path.join(scratch, "agent-e2e-child-tmp-"));
-after(() => rmSync(process.env.TMPDIR, { recursive: true, force: true }));
+const childTmp = mkdtempSync(path.join(scratch, "agent-e2e-child-tmp-"));
+process.env.TMPDIR = childTmp;
+// Node 22 can finish imported tests before this file registers its tests.
+process.once('exit', () => rmSync(childTmp, { recursive: true, force: true }));
 
 // Harness-only MCP stand-in: the branch's real 1.6.4 transport ignores --without-relay.
 // Agent lifecycle commands still use the real candidate engine.
@@ -108,7 +110,7 @@ const installedModuleCandidate = async root => {
  */
 const FAKE_CODEX = `#!${process.execPath}
 const fs = require('node:fs'), path = require('node:path'), { spawnSync } = require('node:child_process');
-const args = process.argv.slice(2);
+const args = process.argv.slice(2).filter(arg => arg !== '--no-daemon');
 if (args[0] === '--version') { console.log('codex-cli 0.165.0'); process.exit(0); }
 const id = require('node:crypto').randomUUID(), now = new Date().toISOString(), headless = args[0] === 'exec';
 const dir = path.join(process.env.CODEX_HOME, 'sessions', now.slice(0, 10).replaceAll('-', '/'));
@@ -122,9 +124,10 @@ else {
   if (process.stdin.isTTY) console.log('LOCAL_TEST_PTY_VISIBLE');
   if (args.some(arg => arg.startsWith('mcp_servers.start-migration.command='))) console.log('TRANSPORT_RESTATED');
 }
-for (const [index, text] of (headless ? [args.at(-1)] : JSON.parse(process.env.FAKE_CODEX_PROMPTS || '[]')).entries()) {
+for (const [index, text] of (headless ? JSON.parse(process.env.FAKE_CODEX_HEADLESS_PROMPTS || JSON.stringify([args.at(-1)])) : JSON.parse(process.env.FAKE_CODEX_PROMPTS || '[]')).entries()) {
   log('event_msg', { type: 'task_started' });
-  item({ type: 'UserMessage', content: [{ type: 'text', text }] });
+  if (headless) item({ type: 'UserMessage', content: [{ type: 'text', text }] });
+  else log('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
   if (process.env.FAKE_CODEX_TEMPLATE_REFUSAL) item({
     type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'completed',
     result: { isError: true, content: [{ type: 'text', text: "EROFS: read-only file system, mkdir '/fixture'" }] }
@@ -167,6 +170,8 @@ const codexCandidate = async (root, install = installedCandidate) => {
   await writeFile(path.join(installed.target, '.codex/config.toml'), codexEntry(receipt));
   await writeFile(path.join(installed.bin, 'codex'), FAKE_CODEX, { mode: 0o755 });
   const quoted = name => receipt.commands[name].map(x => "'" + x + "'").join(' ');
+  await mkdir(path.join(root, 'codex-home'));
+  await mkdir(os.tmpdir(), { recursive: true });
   const env = { ...process.env, PATH: installed.bin + path.delimiter + process.env.PATH, CODEX_HOME: path.join(root, 'codex-home') };
   for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH']) delete env[name]; // The launcher's env -i, not the host's.
   const runCodex = (output, argv, cmd, extraEnv = {}) => spawnSync(process.execPath, [script.pathname, '--provider', 'codex', '--cwd', installed.target,
@@ -1004,9 +1009,246 @@ test('classifier: only engine tool results carry refusal codes; structured codes
     assert.equal((await findCodexRollout(home, { threadId: 't1', cwd: '/c' })).text, lines.join('\n') + '\n');
     await assert.rejects(findCodexRollout(home, { threadId: 't1', cwd: '/other' }), /another thread or consumer/);
     assert.equal(await findCodexRollout(home, { threadId: 't2', cwd: '/c' }), null);
+    await assert.rejects(findCodexRollout(home, { threadId: 't1', cwd: '/c', startedAt: '2026-11-02T20:00:01Z', endedAt: '2026-11-02T20:01:00Z' }), /outside this launch window/);
     assert.equal((await findCodexRollout(home, { cwd: '/c', startedAt: '2026-11-02T19:59:00Z', endedAt: '2026-11-02T20:01:00Z' })).text.length > 0, true);
     assert.equal(await findCodexRollout(home, { cwd: '/c', startedAt: '2026-11-02T20:00:01Z', endedAt: '2026-11-02T20:01:00Z' }), null);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('Codex 0.165 native response_item input is counted exactly once, with rescue and conflicts rejected', () => {
+  const meta = { type: 'session_meta', payload: { id: 'native', cwd: '/consumer', timestamp: '2026-11-04T20:00:00Z' } };
+  const start = { type: 'event_msg', payload: { type: 'task_started' } };
+  const response = message => ({ type: 'response_item', payload: { type: 'message', role: 'user',
+    content: [{ type: 'input_text', text: message }] } });
+  const event = message => ({ type: 'event_msg', payload: { type: 'user_message', message } });
+  const assistant = { type: 'response_item', payload: { type: 'message', role: 'assistant',
+    content: [{ type: 'output_text', text: 'done' }] } };
+  const parse = (...items) => codexRollout([meta, ...items].map(x => JSON.stringify(x)).join('\n') + '\n', []);
+  assert.deepEqual([parse(start, response('$start-migration auth'), assistant).turns,
+    parse(start, response('$start-migration auth'), assistant).prompts], [1, ['$start-migration auth']]);
+  assert.deepEqual(parse(start, response('$start-migration auth'), event('$start-migration auth')).prompts,
+    ['$start-migration auth']); // duplicated schema events do not create another turn
+  assert.deepEqual(parse(start, event('$start-migration auth')).prompts, ['$start-migration auth']);
+  assert.equal(parse(start, response('$start-migration auth'), start, response('continue')).turns, 2);
+  assert.equal(parse(start, start, response('$start-migration auth')).turns, 2);
+  assert.equal(parse(start, { type: 'event_msg', payload: { type: 'turn_started' } }, response('$start-migration auth')).turns, 1);
+  assert.throws(() => parse(start, response('$start-migration auth'), event('continue')), /conflicting user-message records/);
+});
+
+test('Codex 0.165 injected context is not operator input; ordered input and schema conflicts stay strict', () => {
+  const meta = { type: 'session_meta', payload: { id: 't', cwd: '/consumer', timestamp: '2026-11-05T19:04:31Z' } };
+  const response = (text, order) => ({ type: 'response_item', payload: { type: 'message', role: 'user',
+    content: [{ type: 'input_text', text }] }, ...(order === undefined ? {} : { metadata: { user_input_order: order } }) });
+  const prompt = 'Invoke the installed start-migration skill';
+  const context = response('# AGENTS.md instructions for /consumer\n\n<INSTRUCTIONS>rules</INSTRUCTIONS>');
+  const environment = response('<environment_context>context</environment_context>');
+  const legacy = text => ({ type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text }] } } });
+  const parse = (...items) => codexRollout([meta, ...items].map(x => JSON.stringify(x)).join('\n'), []);
+  assert.deepEqual(parse(context, environment, response(prompt, 0), legacy(prompt)).prompts, [prompt]);
+  assert.deepEqual(parse(context, response(prompt)).prompts, [context.payload.content[0].text, prompt]);
+  assert.equal(parse(context, response(prompt, 0), response('continue', 1)).turns, 2);
+  assert.equal(parse(response(environment.payload.content[0].text, 0)).turns, 1);
+  assert.throws(() => parse(context, response(prompt, 0), legacy('different')), /conflicting user-message records/);
+  assert.throws(() => parse(response('unrecognized injected input'), response(prompt, 0), legacy(prompt)), /conflicting user-message records/);
+});
+
+test('Codex 0.165 native skill injection counts only when no matching legacy skill part vouches for it', () => {
+  const cwd = '/consumer', skillPath = name => cwd + '/.agents/skills/' + name + '/SKILL.md';
+  const meta = { type: 'session_meta', payload: { id: 'native', cwd, timestamp: '2026-11-04T00:00:00Z' } };
+  const start = { type: 'event_msg', payload: { type: 'task_started' } };
+  const input = (text, order) => ({ type: 'response_item', payload: { type: 'message', role: 'user',
+    content: [{ type: 'input_text', text }] }, ...(order === undefined ? {} : { metadata: { user_input_order: order } }) });
+  const legacy = (text, ...skills) => ({ type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage',
+    content: [{ type: 'text', text, text_elements: [] }, ...skills.map(([name, path]) => ({ type: 'skill', name, path }))] } } });
+  const injected = (name, path = skillPath(name), body = '---\nname: ' + name + '\ndescription: x\n---\n# Skill\n') =>
+    input('<skill>\n<name>' + name + '</name>\n<path>' + path + '</path>\n' + body + '\n</skill>');
+  const parse = (...items) => codexRollout([meta, ...items].map(x => JSON.stringify(x)).join('\n') + '\n', []);
+  const invocation = '$migrate-artifact legacy/strings.cjs --mode auto';
+  const vouched = ['migrate-artifact', skillPath('migrate-artifact')];
+  // The genuine shape (R30b): ordered input, legacy text + typed skill part, then the injection.
+  const genuine = parse(start, input(invocation, 0), legacy(invocation, vouched), injected('migrate-artifact'));
+  assert.deepEqual([genuine.turns, genuine.prompts], [1, [invocation]]);
+  const startMigration = parse(start, input('$start-migration auth', 0),
+    legacy('$start-migration auth', ['start-migration', skillPath('start-migration')]), injected('start-migration'));
+  assert.deepEqual(startMigration.prompts, ['$start-migration auth']);
+  // Ordered operator input stays counted: a rescue turn is still a second turn.
+  assert.equal(parse(start, input(invocation, 0), legacy(invocation, vouched), injected('migrate-artifact'),
+    start, input('continue', 1), legacy('continue')).turns, 2);
+  const conflict = /conflicting user-message records/;
+  for (const [label, items] of [
+    ['no legacy skill part', [input(invocation, 0), legacy(invocation), injected('migrate-artifact')]],
+    ['foreign skill name', [input(invocation, 0), legacy(invocation, ['other-skill', skillPath('other-skill')]), injected('other-skill')]],
+    ['wrong installed path', [input(invocation, 0), legacy(invocation, ['migrate-artifact', '/elsewhere/SKILL.md']), injected('migrate-artifact', '/elsewhere/SKILL.md')]],
+    ['name mismatch', [input(invocation, 0), legacy(invocation, ['start-migration', skillPath('start-migration')]), injected('migrate-artifact')]],
+    ['body is not this skill', [input(invocation, 0), legacy(invocation, vouched), injected('migrate-artifact', undefined, 'arbitrary operator text')]],
+    ['injection before its legacy part', [input(invocation, 0), injected('migrate-artifact'), legacy(invocation, vouched)]],
+    ['duplicate injection', [input(invocation, 0), legacy(invocation, vouched), injected('migrate-artifact'), injected('migrate-artifact')]],
+    ['skill text typed as operator input', [input(invocation, 0), legacy(invocation, vouched), { ...injected('migrate-artifact'), metadata: { user_input_order: 1 } }]],
+  ]) assert.throws(() => parse(start, ...items), conflict, label);
+});
+
+test('H12 seals the whole consumer and uses the read-only Codex shell policy', () => {
+  const root = '/consumer';
+  assert.deepEqual(readOnlyScenarioMounts(root, 'read-only'), [root]);
+  assert.deepEqual(readOnlyScenarioMounts(root, 'live-lock'), []);
+  assert.deepEqual(readOnlyScenarioMounts(root, 'fresh'), []);
+  const h12 = commandFor('codex', '$start-migration auth', root, false, null, 'read-only').argv;
+  assert.equal(h12[h12.indexOf('--sandbox') + 1], 'read-only');
+  assert.deepEqual(h12.slice(0, 3), ['--no-daemon', 'exec', '--json']);
+  assert.ok(!h12.includes('--add-dir'));
+  const fresh = commandFor('codex', '$start-migration auth', root).argv;
+  assert.equal(fresh[fresh.indexOf('--sandbox') + 1], 'workspace-write');
+});
+
+test('H12 prevents a protected package.json write-and-restore with identical final hashes',
+  { skip: isolationAvailable ? false : 'unprivileged user/mount/PID namespaces are unavailable on this host' }, async (t) => {
+    const root = await mkdtemp(path.join(scratch, 'h12-readonly-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const file = path.join(root, 'package.json');
+    await writeFile(file, '{}\n');
+    await mkdir(os.tmpdir(), { recursive: true });
+    await checkReadOnlyConsumer(root);
+    const before = sha256(await readFile(file));
+    const result = await run({ ...isolated({ command: process.execPath, argv: ['--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
+      const file = process.argv[1], original = readFileSync(file);
+      for (const act of [() => writeFileSync(file, 'changed'), () => writeFileSync(file, original),
+        () => chmodSync(file, 0o600), () => unlinkSync(file)]) assert.throws(act, { code: 'EROFS' });
+      assert.deepEqual(readFileSync(file), original);
+      console.log('WRITE_AND_RESTORE_PREVENTED');
+    `, file] }, readOnlyScenarioMounts(root, 'read-only')), cwd: root, timeoutMs: 30000 });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /WRITE_AND_RESTORE_PREVENTED/);
+    const remount = await run({ ...isolated({ command: 'unshare', argv: ['--user', '--map-root-user', '--mount', 'sh', '-c',
+      'mount --bind "$1" "$1" && mount -o remount,bind,rw "$1" && printf changed > "$1/package.json"', 'attack', root] },
+    readOnlyScenarioMounts(root, 'read-only')), cwd: root, timeoutMs: 30000 });
+    assert.notEqual(remount.code, 0, 'a nested namespace must not reopen the consumer for writes');
+    assert.equal(sha256(await readFile(file)), before);
+  });
+
+test('H12 refuses external symlinks and hard-link aliases before provider execution', async (t) => {
+  const base = await mkdtemp(path.join(scratch, 'h12-alias-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, 'consumer');
+  await mkdir(root);
+  await mkdir(os.tmpdir(), { recursive: true });
+  await writeFile(path.join(root, 'package.json'), '{}\n');
+  await link(path.join(root, 'package.json'), path.join(base, 'outside-alias'));
+  await assert.rejects(checkReadOnlyConsumer(root), /ACCEPTANCE_READ_ONLY_ALIAS.*hard-link/);
+  await rm(path.join(base, 'outside-alias'));
+  await symlink(path.join(base, 'outside'), path.join(root, 'link'));
+  await writeFile(path.join(base, 'outside'), 'protected-through-link');
+  await assert.rejects(checkReadOnlyConsumer(root), /ACCEPTANCE_READ_ONLY_ALIAS.*symlink/);
+  await rm(path.join(root, 'link'));
+  await symlink(path.join(root, 'package.json'), path.join(root, 'internal-link'));
+  await checkReadOnlyConsumer(root);
+  const runtime = path.join(root, 'runtime');
+  await mkdir(runtime);
+  const scratchCheck = await run({ command: process.execPath, argv: ['--input-type=module', '-e',
+    `import { checkReadOnlyConsumer } from ${JSON.stringify(script.href)}; await checkReadOnlyConsumer(process.argv[1]);`, root],
+    cwd: base, timeoutMs: 30000, env: { ...process.env, CODEX_HOME: runtime } });
+  assert.notEqual(scratchCheck.code, 0);
+  assert.match(scratchCheck.stderr, /ACCEPTANCE_READ_ONLY_SCRATCH/);
+});
+
+// Subprocess with disposable HOME/CODEX_HOME/TMPDIR: never reads the operator's real ~/.codex.
+async function preflightIn(t, arrange) {
+  const base = await mkdtemp(path.join(scratch, 'h12-env-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, 'consumer'), home = path.join(base, 'home'), tmp = path.join(base, 'tmp');
+  for (const dir of [root, home, tmp]) await mkdir(dir);
+  await writeFile(path.join(root, 'package.json'), '{}\n');
+  const env = { ...process.env, HOME: home, TMPDIR: tmp };
+  delete env.CODEX_HOME;
+  Object.assign(env, await arrange({ base, root, home, tmp }));
+  const result = await run({ command: process.execPath, argv: ['--input-type=module', '-e',
+    `import { checkReadOnlyConsumer } from ${JSON.stringify(script.href)}; await checkReadOnlyConsumer(process.argv[1]);`, root],
+  cwd: base, timeoutMs: 30000, env });
+  return { result, home };
+}
+const scratchRefused = (r) => { assert.notEqual(r.code, 0); assert.match(r.stderr, /ACCEPTANCE_READ_ONLY_SCRATCH/); };
+
+test('H12 preflight: an absent implicit ~/.codex is accepted, nothing is created', async (t) => {
+  const { result, home } = await preflightIn(t, () => ({}));
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(await readdir(home), []);
+});
+
+test('H12 preflight: an existing ~/.codex outside the consumer is accepted', async (t) => {
+  const { result } = await preflightIn(t, async ({ home }) => { await mkdir(path.join(home, '.codex')); return {}; });
+  assert.equal(result.code, 0, result.stderr);
+});
+
+test('H12 preflight: an explicit CODEX_HOME that is missing is refused, not defaulted or created', async (t) => {
+  const { result, home } = await preflightIn(t, ({ base }) => ({ CODEX_HOME: path.join(base, 'missing') }));
+  scratchRefused(result);
+  assert.match(result.stderr, /missing/);
+  assert.deepEqual(await readdir(home), []);
+});
+
+test('H12 preflight: an explicit CODEX_HOME inside the consumer is refused', async (t) => {
+  const { result } = await preflightIn(t, async ({ root }) => {
+    await mkdir(path.join(root, 'runtime'));
+    return { CODEX_HOME: path.join(root, 'runtime') };
+  });
+  scratchRefused(result);
+});
+
+test('H12 preflight: ~/.codex resolving inside the consumer is refused', async (t) => {
+  const { result } = await preflightIn(t, async ({ root, home }) => {
+    await mkdir(path.join(root, 'runtime'));
+    await symlink(path.join(root, 'runtime'), path.join(home, '.codex'));
+    return {};
+  });
+  scratchRefused(result);
+});
+
+test('H12 preflight: a dangling ~/.codex symlink is not an absent directory', async (t) => {
+  const { result } = await preflightIn(t, async ({ base, home }) => {
+    await symlink(path.join(base, 'nowhere'), path.join(home, '.codex'));
+    return {};
+  });
+  scratchRefused(result);
+});
+
+test('H12 preflight: HOME or TMPDIR inside the consumer is refused', async (t) => {
+  scratchRefused((await preflightIn(t, async ({ root }) => {
+    await mkdir(path.join(root, 'home'));
+    return { HOME: path.join(root, 'home') };
+  })).result);
+  scratchRefused((await preflightIn(t, async ({ root }) => {
+    await mkdir(path.join(root, 'tmp'));
+    return { TMPDIR: path.join(root, 'tmp') };
+  })).result);
+});
+
+test('H12 preflight: only the CODEX_HOME slot may be absent: TMPDIR naming the absent default is refused', async (t) => {
+  const { result } = await preflightIn(t, ({ home }) => ({ TMPDIR: path.join(home, '.codex') }));
+  scratchRefused(result);
+});
+
+test('H12 preflight: a non-ENOENT failure on the default ~/.codex stays fatal (HOME is a file: ENOTDIR)', async (t) => {
+  const { result } = await preflightIn(t, async ({ base }) => {
+    await writeFile(path.join(base, 'home-file'), 'x');
+    return { HOME: path.join(base, 'home-file') };
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /ACCEPTANCE_READ_ONLY_SCRATCH.*ENOTDIR/);
+});
+
+test('H12 preflight: an unresolvable HOME stays fatal even with no ~/.codex', async (t) => {
+  const { result } = await preflightIn(t, ({ base }) => ({ HOME: path.join(base, 'no-home') }));
+  scratchRefused(result);
+});
+
+test('H12 preflight: symlink and hard-link aliases are refused under a clean HOME', async (t) => {
+  const hard = await preflightIn(t, async ({ root, base }) => { await link(path.join(root, 'package.json'), path.join(base, 'outside-alias')); return {}; });
+  assert.notEqual(hard.result.code, 0);
+  assert.match(hard.result.stderr, /ACCEPTANCE_READ_ONLY_ALIAS.*hard-link/);
+  const soft = await preflightIn(t, async ({ root, base }) => { await writeFile(path.join(base, 'outside'), 'x'); await symlink(path.join(base, 'outside'), path.join(root, 'link')); return {}; });
+  assert.notEqual(soft.result.code, 0);
+  assert.match(soft.result.stderr, /ACCEPTANCE_READ_ONLY_ALIAS.*symlink/);
 });
 
 test('classifier: a failed MCP call keeps its structured code; without one it is never structured', () => {
@@ -2111,3 +2353,186 @@ test('the verified pinned pnpm tarball starts pnpm 11.21.0 and pnpx, and refuses
   assert.match(other.stdout + other.stderr, /This project is configured to use 10\.0\.0 of pnpm\. Your current pnpm is v11\.21\.0/);
   assert.doesNotMatch(other.stdout + other.stderr, /127\.0\.0\.1:9|SCRIPT_RAN/);
 });
+
+// Host-only positive regression with the exact pinned AMT_CODEX_CLI; no authentication. Always registered:
+// without the CLI it is a visible, reasoned SKIP (CI allows exactly this one), never an absent test.
+test('H12 real Codex sandbox initializes over a sealed consumer with external runtime scratch',
+  { skip: process.env.AMT_CODEX_CLI ? false : 'host-only (H12): AMT_CODEX_CLI names no pinned Codex 0.165.0 CLI' }, async (t) => {
+  assert.equal(process.version, 'v22.13.0');
+  const cli = process.env.AMT_CODEX_CLI;
+  assert.equal(sha256(await readFile(cli)), 'c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5');
+  const base = await mkdtemp(path.join(scratch, 'h12-real-sandbox-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, 'consumer'), runtime = path.join(base, 'runtime');
+  await mkdir(root);
+  await mkdir(runtime);
+  await writeFile(path.join(root, 'package.json'), '{}\n');
+  const before = await snapshotTree(root);
+  const argv = commandFor('codex', '$start-migration auth', root, false, null, 'read-only').argv;
+  assert.equal(argv[argv.indexOf('--sandbox') + 1], 'read-only');
+  // The pinned local sandbox command takes a named permissions profile. It has no writable consumer paths.
+  const command = { command: cli, argv: ['--no-daemon', 'sandbox', '-P', 'h12', '-C', root,
+    '-c', 'permissions.h12={filesystem={":root"="read"}}', '--', '/bin/sh', '-c', 'set -e; cat package.json; if printf changed > package.json; then exit 91; fi; printf REAL_CODEX_SANDBOX_INITIALIZED'] };
+  const result = await run({ ...isolated(command, readOnlyScenarioMounts(root, 'read-only')),
+    cwd: root, timeoutMs: 30000,
+    env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: runtime, CODEX_HOME: runtime, LANG: 'C.UTF-8' } });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /REAL_CODEX_SANDBOX_INITIALIZED/);
+  assert.ok(sameTree(before, await snapshotTree(root)));
+});
+
+
+// B1/B4: the installed runtime and its real MCP server, both kinds. The diagnostic call is the
+// skill's: one unconfirmed `mode: "step"` run. A sealed server refuses with the kernel's errno; a
+// server that can write (split view: only the shell is sealed) answers AWAITING_CONFIRMATION and
+// writes nothing. Neither path may change one consumer byte or one metadata field.
+test('H12 diagnostic step call: sealed server refuses with the kernel errno; a writable server writes nothing',
+  { skip: isolationAvailable ? false : 'unprivileged user/mount/PID namespaces are unavailable on this host' }, async (t) => {
+  assert.equal(process.version, 'v22.13.0');
+  const base = await mkdtemp(path.join(scratch, 'h12-installed-runtime-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, 'consumer'), store = path.join(base, 'store'), runtime = path.join(base, 'runtime');
+  await mkdir(path.join(root, '.agents/knowledge/migrations'), { recursive: true });
+  await mkdir(path.join(base, 'legacy/src/features/auth'), { recursive: true });
+  await mkdir(path.join(root, 'openspec/specs/auth'), { recursive: true });
+  await mkdir(path.join(root, 'legacy'), { recursive: true });
+  await mkdir(runtime);
+  await writeFile(path.join(base, 'legacy/src/features/auth/index.js'), 'export const login = () => true;\n');
+  await writeFile(path.join(base, 'legacy/package.json'), '{"name":"legacy"}\n');
+  await writeFile(path.join(root, 'legacy/strings.cjs'), 'module.exports.upper = (value) => String(value).toUpperCase();\n');
+  await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'target', type: 'module',
+    config: { startMigration: { registry: '.agents/knowledge/migrations/registry.json' } } }) + '\n');
+  await writeFile(path.join(root, '.agents/knowledge/migrations/registry.json'), JSON.stringify({ version: 1,
+    projects: { legacy: { root: '../../../../legacy' }, target: { root: '../../..' } }, modules: {} }) + '\n');
+  await writeFile(path.join(root, 'openspec/specs/auth/spec.md'),
+    '### Requirement: FIXTURE-REQ-001 Safety\nThe engine MUST refuse protected writes.\n\n#### Scenario: FIXTURE-SCN-001 Read-only\nThe consumer stays unchanged.\n');
+  for (const args of [['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Fixture']])
+    execFileSync('git', args, { cwd: base });
+  const candidate = await candidateReleaseRoot(base);
+  const built = await buildRelease({ root: candidate, force: true });
+  const pin = 'sha256:' + sha256(await readFile(path.join(built.stagingRoot, 'release-manifest.json')));
+  const support = await import('../providers/install-support.mjs');
+  const receipt = await support.adapter('codex', { action: 'install', scope: 'project', root, store, bundle: built.stagingRoot, pin });
+  // Tampering and a concurrent writer still stop the write-free inspection.
+  const options = { scope: 'project', root, store };
+  await mkdir(path.join(root, '.artifact-migration-tools/install.lock'));
+  await assert.rejects(support.inspectInstallation('codex', options), { code: 'LOCK_HELD' });
+  await rm(path.join(root, '.artifact-migration-tools/install.lock'), { recursive: true });
+  const config = path.join(root, '.codex/config.toml'), configBytes = await readFile(config);
+  await rm(config);
+  await assert.rejects(support.inspectInstallation('codex', options), { code: 'INSTALL_REPAIR_REQUIRED' });
+  await assert.rejects(stat(config), { code: 'ENOENT' });
+  await writeFile(config, configBytes);
+  const before = await snapshotTree(root);
+  const metadata = async () => Object.fromEntries(await Promise.all(Object.keys(before).concat('', '.agents/knowledge/migrations').map(async relative => {
+    const info = await stat(path.join(root, relative), { bigint: true });
+    return [relative, Object.fromEntries(['mode', 'uid', 'gid', 'ino', 'dev', 'nlink', 'size', 'mtimeNs', 'ctimeNs'].map(key => [key, String(info[key])]))];
+  })));
+  const metadataBefore = await metadata();
+  const server = path.join(receipt.release, 'packages/migration-engine/src/mcp-server.mjs');
+  const diagnostic = mode => [
+    { name: 'migration_run', arguments: { cwd: root, module: 'auth', target: 'auth', mode, ponytail: 'full', designSource: 'target-system' } },
+    { name: 'artifact_run', arguments: { cwd: root, source: 'legacy/strings.cjs', sourceRoot: root, targetRoot: root, target: 'src/utils/strings.js', mode, ponytail: 'full' } },
+  ];
+  // One real installed server per call, over files, exactly as a host would speak to it.
+  const callCode = `
+    import fs from 'node:fs';
+    import path from 'node:path';
+    import { spawnSync } from 'node:child_process';
+    const [server, root, runtime, call] = process.argv.slice(1);
+    const names = ['input', 'stdout', 'stderr'].map(name => path.join(runtime, name));
+    fs.writeFileSync(names[0], [{ id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'h12-regression', version: '1' } } },
+      { method: 'notifications/initialized' }, { id: 2, method: 'tools/call', params: JSON.parse(call) }]
+      .map(message => JSON.stringify({ jsonrpc: '2.0', ...message })).join('\\n') + '\\n');
+    const fds = names.map((name, index) => fs.openSync(name, index ? 'w+' : 'r'));
+    let child;
+    try { child = spawnSync(process.execPath, [server, '--without-relay'], { cwd: root, stdio: fds, timeout: 60000 }); }
+    finally { for (const fd of fds) fs.closeSync(fd); }
+    const replies = fs.readFileSync(names[1], 'utf8').trim().split('\\n').map(line => JSON.parse(line));
+    for (const name of names) fs.unlinkSync(name);
+    console.log(JSON.stringify({ status: child.status, reply: replies.find(reply => reply.id === 2) }));
+  `;
+  const env = { PATH: path.dirname(process.execPath) + ':/usr/local/bin:/usr/bin:/bin', HOME: runtime, CODEX_HOME: runtime, TMPDIR: runtime,
+    ARTIFACT_MIGRATION_TOOLS_STORE: store, LANG: 'C.UTF-8' };
+  const call = async (params, sealed) => {
+    const command = { command: process.execPath, argv: ['--input-type=module', '-e', callCode, server, root, runtime, JSON.stringify(params)] };
+    const result = await run({ ...(sealed ? isolated(command, [root, store]) : command), cwd: root, timeoutMs: 90000, env });
+    assert.equal(result.code, 0, result.stderr);
+    const { status, reply } = JSON.parse(result.stdout);
+    assert.equal(status, 0);
+    assert.deepEqual(await readdir(runtime), []);
+    return reply.result;
+  };
+  // The shell's preflight, sealed: typed ENGINE_FILESYSTEM_BLOCKED, and it claims nothing about the server.
+  const preflight = await run({ ...isolated({ command: process.execPath, argv: ['--input-type=module', '-e', `
+    const { ensureRuntime } = await import('file://' + process.argv[1] + '/.agents/skills/start-migration/scripts/runtime.mjs');
+    await ensureRuntime({ provider: 'codex', root: process.argv[1], store: process.argv[2] }).then(() => { throw new Error('preflight passed'); }, error => {
+      if (error.code !== 'ENGINE_FILESYSTEM_BLOCKED' || 'consumerReadOnly' in error.state || error.state.engineDoctor.outcome !== 'BLOCKED') throw error;
+      console.log('SHELL_PREFLIGHT_BLOCKED');
+    });`, root, store] }, [root, store]), cwd: root, timeoutMs: 60000, env });
+  assert.equal(preflight.code, 0, preflight.stderr);
+  assert.match(preflight.stdout, /SHELL_PREFLIGHT_BLOCKED/);
+  const accepted = ['EROFS', 'EACCES', 'EPERM'];
+  // Positive: the server's own view is sealed. Both kinds refuse with the kernel's errno, structured.
+  for (const params of diagnostic('step')) {
+    const result = await call(params, true);
+    assert.equal(result.isError, true, JSON.stringify(result));
+    assert.ok(accepted.includes(result.structuredContent?.code), JSON.stringify(result));
+    t.diagnostic(JSON.stringify({ sealed: params.name, refusal: result.structuredContent }));
+  }
+  assert.ok(sameTree(before, await snapshotTree(root)));
+  assert.deepEqual(await metadata(), metadataBefore);
+  // Negative, split view: the shell saw the consumer sealed, this server can write it. The same
+  // diagnostic call writes nothing and carries no accepted refusal code.
+  for (const params of diagnostic('step')) {
+    const result = await call(params, false);
+    const document = result.structuredContent ?? JSON.parse(result.content.at(-1).text);
+    assert.equal(document.outcome, 'AWAITING_CONFIRMATION', JSON.stringify(result));
+    assert.ok(!accepted.includes(result.structuredContent?.code));
+    t.diagnostic(JSON.stringify({ splitView: params.name, outcome: document.outcome }));
+  }
+  assert.ok(sameTree(before, await snapshotTree(root)));
+  assert.deepEqual(await metadata(), metadataBefore);
+  // Control: the earlier auto-mode exception, in the same split view, does write the consumer.
+  await call(diagnostic('auto')[1], false);
+  assert.ok(!sameTree(before, await snapshotTree(root)), 'an auto diagnostic call mutates a writable consumer');
+});
+
+test('ENGINE_FILESYSTEM_BLOCKED is typed only for an EROFS knowledge root; other doctor blocks stay plain failures',
+  { skip: process.getuid?.() === 0 ? 'root bypasses directory permissions' : false }, async (t) => {
+  const base = await mkdtemp(path.join(scratch, 'h12-preflight-negative-'));
+  t.after(async () => { await chmod(path.join(base, 'consumer/.agents/knowledge/migrations'), 0o755).catch(() => {}); await rm(base, { recursive: true, force: true }); });
+  const root = path.join(base, 'consumer'), store = path.join(base, 'store');
+  await mkdir(path.join(root, '.agents/knowledge/migrations'), { recursive: true });
+  await writeFile(path.join(root, 'package.json'), '{"name":"target"}\n');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const candidate = await candidateReleaseRoot(base);
+  const built = await buildRelease({ root: candidate, force: true });
+  const pin = 'sha256:' + sha256(await readFile(path.join(built.stagingRoot, 'release-manifest.json')));
+  const { adapter } = await import('../providers/install-support.mjs');
+  await adapter('codex', { action: 'install', scope: 'project', root, store, bundle: built.stagingRoot, pin });
+  await chmod(path.join(root, '.agents/knowledge/migrations'), 0o555);
+  const result = await run({ command: process.execPath, argv: ['--input-type=module', '-e', `
+    const { ensureRuntime } = await import('file://' + process.argv[1] + '/.agents/skills/start-migration/scripts/runtime.mjs');
+    await ensureRuntime({ provider: 'codex', root: process.argv[1], store: process.argv[2] }).then(() => { throw new Error('preflight passed'); }, error => {
+      if (error.code === 'ENGINE_FILESYSTEM_BLOCKED' || !/Engine doctor blocked: knowledge-root: EACCES/.test(error.message)) throw error;
+      console.log('PLAIN_PREFLIGHT_FAILURE');
+    });`, root, store], cwd: root, timeoutMs: 60000 });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /PLAIN_PREFLIGHT_FAILURE/);
+});
+
+test('headless rollout rejects a foreign prompt or rescue turn even when the CLI exits zero',
+  { skip: codexReady(isolationAvailable) }, async (t) => {
+    const base = await mkdtemp(path.join(scratch, 'h12-headless-binding-'));
+    t.after(() => rm(base, { recursive: true, force: true }));
+    const { runCodex } = await codexCandidate(base, installedModuleCandidate);
+    for (const [name, prompts] of [['foreign', ['other invocation']], ['rescue', ['other invocation', 'continue']]]) {
+      const output = path.join(base, name);
+      const result = runCodex(output, [], '', { FAKE_CODEX_HEADLESS_PROMPTS: JSON.stringify(prompts) });
+      assert.equal(result.status, 1);
+      const report = JSON.parse(await readFile(path.join(output, 'report.json')));
+      assert.equal(report.agent.exitCode, 0);
+      assert.match(report.failure, /ACCEPTANCE_ROLLOUT_UNBOUND: headless rollout must contain exactly this invocation and one turn/);
+    }
+  });

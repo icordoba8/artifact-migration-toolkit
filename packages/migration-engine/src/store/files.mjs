@@ -72,6 +72,21 @@ const mkdirCause = async (directory, error) => {
   );
 };
 
+/**
+ * Asks the kernel, from this process's own view and writing nothing, whether
+ * `directory` could be created: `access(W_OK)` on its nearest existing
+ * ancestor. The kernel's refusal (EROFS, EACCES, EPERM, ...) is thrown as is.
+ */
+export const assertCreatable = async (directory) => {
+  for (let current = path.resolve(directory); ; current = path.dirname(current)) {
+    try {
+      return await access(current, fsConstants.W_OK);
+    } catch (error) {
+      if (error.code !== "ENOENT" || path.dirname(current) === current) throw error;
+    }
+  }
+};
+
 /** A rename made durable in both directories it changes. */
 export const renameDurably = async (from, to) => {
   await rename(from, to);

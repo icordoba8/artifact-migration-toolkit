@@ -60,6 +60,21 @@ commands as the fallback for the rest of this invocation when it is not —
 must stop. Stop on preflight failure; never fall back to a checkout, branch,
 `latest` URL, package-manager install, or ambient `PATH`.
 
+If preflight fails with typed `ENGINE_FILESYSTEM_BLOCKED`, the verified runtime
+is usable but the engine doctor, run from this shell, cannot write the knowledge
+root (EROFS). This shell's view does not prove what the MCP server can write. Do
+not repair permissions or continue migration. For a mutating invocation only, if
+the installed `start-migration` MCP server is connected, make exactly one
+diagnostic call: `migration_run` with this invocation's arguments and
+`mode: "step"`. Unconfirmed step mode executes nothing; the engine checks from
+its own process whether it could write and, if not, returns the kernel's
+structured refusal. Then stop and report both results. Never confirm, retry or
+switch to `auto`: `AWAITING_CONFIRMATION` means the server can write this
+consumer, so stop with the preflight failure. Only a structured
+`EROFS`/`EACCES`/`EPERM` from that call is the engine's refusal; a startup error
+or preflight errno never is. If MCP is unavailable, stop with the preflight
+failure; do not substitute shell output or invent a refusal code.
+
 When the preflight returns `bootstrapped: true` because the required identity
 changed, run `artifact-migration-toolkit status` before resuming an existing
 migration, so a record still stamped with the previous toolkit identity surfaces

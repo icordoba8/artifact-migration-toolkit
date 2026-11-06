@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { runDoctor } from "../migration-utils.mjs";
-import { resolveRegistryPath } from "../store/index.mjs";
+import { assertCreatable, resolveRegistryPath } from "../store/index.mjs";
 import { assertOptionCombination } from "./arguments.mjs";
 import {
   adoptUiObservations,
@@ -292,6 +292,10 @@ export const runDiscoverCli = async (
     // `--mode step` only. The process exits at this line, so it states the ID
     // and stops rather than asking a question it will not be present to hear
     // the answer to; the front end that chose `step` owns that conversation.
+    // Never ask to confirm what this process could not write (the doctor's
+    // knowledge root holds its lock and record): the kernel's own refusal
+    // instead, and still nothing written.
+    await assertCreatable(path.join(preview.targetRoot, ".agents/knowledge/migrations"));
     stdout.write(
       `Confirmation ID: ${preview.confirmationId}\n` +
         "Mode: step — awaiting explicit confirmation. No execution has started.\n",
