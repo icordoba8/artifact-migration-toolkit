@@ -109,7 +109,11 @@ export async function checkReadOnlyConsumer(root) {
       fail("ACCEPTANCE_READ_ONLY_ALIAS: unsupported consumer entry: " + file);
     }
   };
-  for (const dir of [os.homedir(), process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), os.tmpdir()]) {
+  const home = os.homedir(), implicitCodexHome = !process.env.CODEX_HOME;
+  const codexHome = process.env.CODEX_HOME || path.join(home, ".codex");
+  for (const [slot, dir] of [home, codexHome, os.tmpdir()].entries()) {
+    // Only the CODEX_HOME slot, and only an absent default ~/.codex, is tolerated (home is resolved and checked first; a dangling symlink still lstat-succeeds and fails below).
+    if (slot === 1 && implicitCodexHome && (await lstat(dir).catch(error => error)).code === "ENOENT") continue;
     const scratch = await realpath(dir).catch(error =>
       fail("ACCEPTANCE_READ_ONLY_SCRATCH: cannot resolve provider runtime scratch " + dir + ": " + error.message));
     if (scratch === root || scratch.startsWith(root + path.sep))

@@ -1152,6 +1152,105 @@ test('H12 refuses external symlinks and hard-link aliases before provider execut
   assert.match(scratchCheck.stderr, /ACCEPTANCE_READ_ONLY_SCRATCH/);
 });
 
+// Subprocess with disposable HOME/CODEX_HOME/TMPDIR: never reads the operator's real ~/.codex.
+async function preflightIn(t, arrange) {
+  const base = await mkdtemp(path.join(scratch, 'h12-env-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = path.join(base, 'consumer'), home = path.join(base, 'home'), tmp = path.join(base, 'tmp');
+  for (const dir of [root, home, tmp]) await mkdir(dir);
+  await writeFile(path.join(root, 'package.json'), '{}\n');
+  const env = { ...process.env, HOME: home, TMPDIR: tmp };
+  delete env.CODEX_HOME;
+  Object.assign(env, await arrange({ base, root, home, tmp }));
+  const result = await run({ command: process.execPath, argv: ['--input-type=module', '-e',
+    `import { checkReadOnlyConsumer } from ${JSON.stringify(script.href)}; await checkReadOnlyConsumer(process.argv[1]);`, root],
+  cwd: base, timeoutMs: 30000, env });
+  return { result, home };
+}
+const scratchRefused = (r) => { assert.notEqual(r.code, 0); assert.match(r.stderr, /ACCEPTANCE_READ_ONLY_SCRATCH/); };
+
+test('H12 preflight: an absent implicit ~/.codex is accepted, nothing is created', async (t) => {
+  const { result, home } = await preflightIn(t, () => ({}));
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(await readdir(home), []);
+});
+
+test('H12 preflight: an existing ~/.codex outside the consumer is accepted', async (t) => {
+  const { result } = await preflightIn(t, async ({ home }) => { await mkdir(path.join(home, '.codex')); return {}; });
+  assert.equal(result.code, 0, result.stderr);
+});
+
+test('H12 preflight: an explicit CODEX_HOME that is missing is refused, not defaulted or created', async (t) => {
+  const { result, home } = await preflightIn(t, ({ base }) => ({ CODEX_HOME: path.join(base, 'missing') }));
+  scratchRefused(result);
+  assert.match(result.stderr, /missing/);
+  assert.deepEqual(await readdir(home), []);
+});
+
+test('H12 preflight: an explicit CODEX_HOME inside the consumer is refused', async (t) => {
+  const { result } = await preflightIn(t, async ({ root }) => {
+    await mkdir(path.join(root, 'runtime'));
+    return { CODEX_HOME: path.join(root, 'runtime') };
+  });
+  scratchRefused(result);
+});
+
+test('H12 preflight: ~/.codex resolving inside the consumer is refused', async (t) => {
+  const { result } = await preflightIn(t, async ({ root, home }) => {
+    await mkdir(path.join(root, 'runtime'));
+    await symlink(path.join(root, 'runtime'), path.join(home, '.codex'));
+    return {};
+  });
+  scratchRefused(result);
+});
+
+test('H12 preflight: a dangling ~/.codex symlink is not an absent directory', async (t) => {
+  const { result } = await preflightIn(t, async ({ base, home }) => {
+    await symlink(path.join(base, 'nowhere'), path.join(home, '.codex'));
+    return {};
+  });
+  scratchRefused(result);
+});
+
+test('H12 preflight: HOME or TMPDIR inside the consumer is refused', async (t) => {
+  scratchRefused((await preflightIn(t, async ({ root }) => {
+    await mkdir(path.join(root, 'home'));
+    return { HOME: path.join(root, 'home') };
+  })).result);
+  scratchRefused((await preflightIn(t, async ({ root }) => {
+    await mkdir(path.join(root, 'tmp'));
+    return { TMPDIR: path.join(root, 'tmp') };
+  })).result);
+});
+
+test('H12 preflight: only the CODEX_HOME slot may be absent: TMPDIR naming the absent default is refused', async (t) => {
+  const { result } = await preflightIn(t, ({ home }) => ({ TMPDIR: path.join(home, '.codex') }));
+  scratchRefused(result);
+});
+
+test('H12 preflight: a non-ENOENT failure on the default ~/.codex stays fatal (HOME is a file: ENOTDIR)', async (t) => {
+  const { result } = await preflightIn(t, async ({ base }) => {
+    await writeFile(path.join(base, 'home-file'), 'x');
+    return { HOME: path.join(base, 'home-file') };
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /ACCEPTANCE_READ_ONLY_SCRATCH.*ENOTDIR/);
+});
+
+test('H12 preflight: an unresolvable HOME stays fatal even with no ~/.codex', async (t) => {
+  const { result } = await preflightIn(t, ({ base }) => ({ HOME: path.join(base, 'no-home') }));
+  scratchRefused(result);
+});
+
+test('H12 preflight: symlink and hard-link aliases are refused under a clean HOME', async (t) => {
+  const hard = await preflightIn(t, async ({ root, base }) => { await link(path.join(root, 'package.json'), path.join(base, 'outside-alias')); return {}; });
+  assert.notEqual(hard.result.code, 0);
+  assert.match(hard.result.stderr, /ACCEPTANCE_READ_ONLY_ALIAS.*hard-link/);
+  const soft = await preflightIn(t, async ({ root, base }) => { await writeFile(path.join(base, 'outside'), 'x'); await symlink(path.join(base, 'outside'), path.join(root, 'link')); return {}; });
+  assert.notEqual(soft.result.code, 0);
+  assert.match(soft.result.stderr, /ACCEPTANCE_READ_ONLY_ALIAS.*symlink/);
+});
+
 test('classifier: a failed MCP call keeps its structured code; without one it is never structured', () => {
   const failed = (structuredContent, text) => ({ type: 'McpToolCall', server: 'start-migration', tool: 'artifact_run', status: 'failed', error: null,
     result: { isError: true, content: [{ type: 'text', text }], ...(structuredContent ? { structuredContent } : {}) } });
