@@ -24,6 +24,8 @@ import {
   runsProject,
 } from "../../src/lifecycle/index.mjs";
 import { parseValidateArguments } from "../../src/cli/validate-migration.mjs";
+import { dirtyManifest } from "../../src/shared/index.mjs";
+import { TARGET_DIRTY_SCOPE } from "../../src/slices/index.mjs";
 import { createUnstampedRecord } from "../support/consumer-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -415,6 +417,10 @@ test("an ACTIVE record is untouched by every action, status is unchanged, and it
     TARGET: application("../target-app", sibling, { start: NPM_START }),
   } }));
   await execFileAsync("git", ["-C", consumer.root, "add", "-N", "legacy-app"]); // A dirty tree is no reason to refuse.
+
+  // A consumer that does not ignore the directory must not see the file as slice drift.
+  const dirty = await dirtyManifest(consumer.targetRoot, TARGET_DIRTY_SCOPE);
+  assert.ok(!dirty.entries.some((entry) => entry.path === APP_RUNTIME_CONFIG), "the configuration is no slice's work");
 
   const record = await treeDigest(consumer.recordRoot);
   const whole = await treeDigest(consumer.targetRoot);
