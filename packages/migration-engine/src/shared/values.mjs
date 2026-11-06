@@ -49,6 +49,10 @@ export const assertIsoTimestamp = (value, label) => {
 
 const SAFE_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/** What may reach a shell as `<manager> run <script>`: nothing author-controlled. */
+export const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn"]);
+export const SCRIPT_NAME = /^[A-Za-z0-9_.:-]+$/;
+
 export const assertSafeName = (value, label = "module") => {
   if (typeof value !== "string" || !SAFE_NAME.test(value)) {
     throw new Error(

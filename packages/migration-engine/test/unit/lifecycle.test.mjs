@@ -48,7 +48,7 @@ const targets = (file, sf, { dynamic = true } = {}) => {
 const load = (file) => import(pathToFileURL(path.join(src, file)).href);
 
 const LIFECYCLE_FILES = [
-  "adoption.mjs", "advance.mjs", "api-evidence.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-gates.mjs", "artifact-record.mjs",
+  "adoption.mjs", "advance.mjs", "api-evidence.mjs", "app-runtime.mjs", "approval.mjs", "artifact-checkpoints.mjs", "artifact-execution.mjs", "artifact-gates.mjs", "artifact-record.mjs",
   "artifact-run.mjs", "artifact-status.mjs", "artifact-transaction.mjs", "bootstrap.mjs", "capture.mjs", "checkpoints.mjs", "context.mjs",
   "contract-upgrade.mjs", "discovery-reopen.mjs", "format-upgrade.mjs", "gates.mjs", "index.mjs", "initialization.mjs", "journal.mjs", "lock.mjs", "openspec.mjs", "policy.mjs", "prefill.mjs", "preview.mjs",
   "progress.mjs", "record.mjs", "recorder.mjs", "registry.mjs", "reopen.mjs", "status.mjs", "templates.mjs",
@@ -75,7 +75,7 @@ const FACADES = {
 // Generated from BASE 0a87bbc: every export name, and its arity when it is a function.
 const BASE_EXPORTS = {
   "resumable-migration.mjs": {
-    ADOPTION_ROOT: null, ARTIFACT_DELEGATION_FORMAT: null, AUTO_DECISIONS_FILE: null, BASELINE_ROWS_PIN: null,
+    ADOPTION_ROOT: null, APP_RUNTIME_ACTIONS: null, APP_RUNTIME_CONFIG: null, ARTIFACT_DELEGATION_FORMAT: null, AUTO_DECISIONS_FILE: null, BASELINE_ROWS_PIN: null,
     BLOCKED_EXIT_CODE: null, CAPABILITY_OWNERSHIP_FILE: null, CAPABILITY_OWNERSHIP_FORMAT: null,
     CHECKPOINT_STATES: null, DECISIONS_FILE: null, DECISION_GROUP_KIND: null, DECISION_PRINCIPALS: null,
     DECISION_PROJECTION_STATES: null, DECISION_RESULTS: null, DEFAULT_DECISION_POLICY_DIGEST: null,
@@ -116,7 +116,7 @@ const BASE_EXPORTS = {
     // Added after BASE (QW3), deliberately: the read-only gate evidence binding.
     previewEvidenceBinding: 1,
     // Added after BASE (MC1), deliberately: the explicit checkpoint-draft prefill.
-    captureLegacyRuntimeEvidence: 1,
+    captureLegacyRuntimeEvidence: 1, childEnvironment: 0, holdersOf: 2, parseLsofListeners: 1, parseNetstatListeners: 2, runAppRuntime: 1, runsProject: 2,
     prefillCheckpointDraft: 1,
     previewMigrationExecution: 0, previewUiObservationsAdoption: 1, principalSatisfiesRequirement: 2,
     projectModuleDecision: 1, rawDecisionLedgerBytes: 1, rawDecisionLedgerDigest: 1, readAutoDecisions: 1,
@@ -205,7 +205,7 @@ test("A8-ARCH-1: lifecycle has one public entry, which only re-exports the BASE 
     for (const name of Object.values(renamed)) assert.ok(taken.has(name), `${facade} takes ${name}`);
   }
   assert.deepEqual(Object.keys(lifecycle).sort(), [...taken].sort());
-  assert.equal(Object.keys(lifecycle).length, 109);
+  assert.equal(Object.keys(lifecycle).length, 117);
 });
 
 test("A8-ARCH-2: outside lifecycle/, only lifecycle/index.mjs is named; old lifecycle paths are named only by facades and the aggregator", async () => {

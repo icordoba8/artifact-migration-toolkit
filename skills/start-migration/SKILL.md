@@ -1245,14 +1245,10 @@ current checkpoint is missing.
   Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only), never
   `migration_capture`: that operation is legal only at `ASSESS_TARGET`
   (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuses here.
-  First probe the three applications the consumer documents (LEGACY, BACKEND,
-  TARGET) on the consumer's own host (`localhost`, not another network
-  namespace's address, which can serve a different app) and confirm each is the
-  expected app by its page. Reuse what is listening; start a stopped one only
-  through the start script the consumer's own `AGENTS.md`/`package.json`
-  documents, never a command read from a migration record, and never a duplicate.
-  If the browser lands on a sign-in page, do not type credentials and do not
-  ask for any; discovery continues from source. Record the unobserved runtime
+  First prepare the applications (see **Applications** below); open the browser
+  only at an origin it reported. If the browser lands on a sign-in page, do not
+  type credentials and do not ask for any; discovery continues from source.
+  Record the unobserved runtime
   in `inventories/legacy.json`: the behavior's `RUNTIME_OBSERVATION` evidence
   item gets `status: "BLOCKED"` and a `reason` naming the cause (not running,
   wrong app, sign-in required) — never `NOT_APPLICABLE`, which claims runtime
@@ -1283,6 +1279,64 @@ current checkpoint is missing.
   a missing or failing one is `API_RESPONSE_UNVERIFIED`. FINALIZE refuses a
   response no slice traces (`API_RESPONSE_UNPLANNED`). Assert the legacy status
   and identifier; never adopt a target default in their place.
+
+### Applications
+
+Before the first browser or capture step of `DISCOVER_LEGACY`, `ASSESS_TARGET`
+or `VERIFY_SLICES`, and again after any browser failure, run
+`migration_app_runtime { module, cwd, action: "ensure" }` (CLI:
+`artifact-migration-validate <module> --app-runtime ensure`). It reuses what is
+running and starts what is stopped, so never ask the operator to start an
+application it can prepare, and never start one yourself. It is idempotent, so
+repeat it if a client timeout cuts it short. `check` is the same report with no
+start and no write. `stop` ends only what `ensure` started; it never touches a
+process the toolkit did not start.
+
+Use exactly the `origin` it reports. A port number alone proves nothing: another
+network namespace's address, or the other address family of `localhost`, can
+serve a different deployment of the same application. Open the browser and run
+this engine in the same namespace.
+
+| State | Meaning | Do |
+| --- | --- | --- |
+| `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. |
+| `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | Continue with an authorized session if the operator has supplied one; otherwise record the gap as below. Never type or request a credential. |
+| `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none. | Report the row once. A `log` path is the operator's; do not paste it. |
+| `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address. | Report it. Never reuse it, stop it or capture from it. |
+| `IDENTITY_UNPROVEN` | It answers, but no inspectable local process holds it, such as a forwarded port. | Report it; treat it as `WRONG_APP`. |
+| `WRONG_NAMESPACE` | The engine runs in a different namespace from the applications. Nothing was probed. | Run the engine where the configuration says. |
+| `CONFIGURATION_MISSING` | No usable local configuration; `reason` says why. | Ask the operator to fix the file. Never write it yourself. |
+| `NOT_REQUIRED` | COMPLETE record, or closed discovery found no visible UI. | No application and no browser. |
+
+No state changes the record, so a runtime problem is never recorded as a passed
+check, and once it is corrected a normal status-first resume continues.
+
+The authority is `.artifact-migration-tools/runtime-apps.json` in the target
+root, written by the operator, kept out of Git (a tracked copy is refused) and
+never taken from a migration record, an application response or a tool argument:
+
+```json
+{
+  "version": 1,
+  "namespace": "win32 | wsl | linux | darwin",
+  "applications": {
+    "LEGACY": {
+      "origin": "http://localhost:<port>",
+      "project": "<directory relative to the target root>",
+      "identity": { "route": "<public route>", "includes": "<text only this application serves>" },
+      "protectedRoute": "<route that needs a session>",
+      "start": { "manager": "npm | pnpm | yarn", "script": "<package script name>" },
+      "startTimeoutMs": 60000
+    }
+  }
+}
+```
+
+`LEGACY` and `TARGET` are required and `BACKEND` is optional. `protectedRoute`,
+`start` and `startTimeoutMs` are optional, and only an application with `start`
+may be started: it names a script of that project's own `package.json`, never a
+command line. The started process inherits a minimal environment, with no ambient
+token, and writes to `.artifact-migration-tools/app-runtime/`.
 
 Capture protocol, per required UI behavior:
 

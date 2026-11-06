@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 
 import { resolveRegistryPath } from "../store/index.mjs";
 import { assertOptionCombination } from "./arguments.mjs";
-import { captureLegacyRuntimeEvidence, prefillCheckpointDraft, previewEvidenceBinding, validateResumableMigration } from "../lifecycle/index.mjs";
+import { BLOCKED_EXIT_CODE, captureLegacyRuntimeEvidence, prefillCheckpointDraft, previewEvidenceBinding, runAppRuntime, validateResumableMigration } from "../lifecycle/index.mjs";
 
 export const parseValidateArguments = (arguments_) => {
   const { positionals, values } = parseArgs({
@@ -13,6 +13,7 @@ export const parseValidateArguments = (arguments_) => {
     allowPositionals: true,
     strict: true,
     options: {
+      "app-runtime": { type: "string" },
       capture: { type: "string" },
       complete: { type: "boolean", default: false },
       "evidence-binding": { type: "boolean", default: false },
@@ -25,13 +26,13 @@ export const parseValidateArguments = (arguments_) => {
   });
   if (
     positionals.length > 1 ||
-    ((values.complete || values.step || values["evidence-binding"] || values.prefill || values.capture) && positionals.length !== 1) ||
-    [values.complete, values.step, values["evidence-binding"], values.prefill, values.capture].filter(Boolean).length > 1 ||
-    ((values["evidence-binding"] || values.prefill || values.capture) && values.slice) ||
+    ((values.complete || values.step || values["evidence-binding"] || values.prefill || values.capture || values["app-runtime"]) && positionals.length !== 1) ||
+    [values.complete, values.step, values["evidence-binding"], values.prefill, values.capture, values["app-runtime"]].filter(Boolean).length > 1 ||
+    ((values["evidence-binding"] || values.prefill || values.capture || values["app-runtime"]) && values.slice) ||
     (values.reference && !values["evidence-binding"])
   ) {
     throw new Error(
-      "Usage: validate-migration.mjs [<module>] [--registry <path>] [--step <step> [--slice <id>] | --complete | --evidence-binding [--reference <path>]... | --prefill | --capture <request.json>]",
+      "Usage: validate-migration.mjs [<module>] [--registry <path>] [--step <step> [--slice <id>] | --complete | --evidence-binding [--reference <path>]... | --prefill | --capture <request.json> | --app-runtime check|ensure|stop]",
     );
   }
   assertOptionCombination("validate", { positionals, values });
@@ -41,6 +42,7 @@ export const parseValidateArguments = (arguments_) => {
     evidenceBinding: values["evidence-binding"],
     prefill: values.prefill,
     capture: values.capture,
+    appRuntime: values["app-runtime"],
     references: values.reference ?? [],
     slice: values.slice,
     step: values.step,
@@ -75,6 +77,13 @@ export const runValidateCli = async (arguments_) => {
     const summary = await captureLegacyRuntimeEvidence({ ...options, request });
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
     return summary;
+  }
+  if (options.appRuntime) {
+    // The same call as `migration_app_runtime`; the JSON is the answer, the exit code its summary.
+    const report = await runAppRuntime({ ...options, action: options.appRuntime });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    if (report.state !== undefined && report.state !== "READY" && report.state !== "NOT_REQUIRED") process.exitCode = BLOCKED_EXIT_CODE;
+    return report;
   }
   const result = await validateResumableMigration(options);
   const message = result.complete

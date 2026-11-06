@@ -138,6 +138,8 @@ export const FS_WRITERS = {
   "lifecycle/bootstrap.mjs": ["link", "mkdir", "open", "rm"],
   "lifecycle/initialization.mjs": ["rm"],
   "lifecycle/contract-upgrade.mjs": ["rm"],
+  // The append-only log descriptor a started application inherits; every other write goes through store/.
+  "lifecycle/app-runtime.mjs": ["open"],
   // Synchronous refusal/result bytes to fd 1 before exit, not a file write.
   "lifecycle/recorder.mjs": ["writeSync"],
   "transport/artifact.mjs": ["writeSync"],

@@ -76,6 +76,7 @@ export {
   parseCaptureRequest,
   parseLocator,
   assertSessionUsable,
+  AUTH_PATH,
   refuseCapture,
   taxonomyValues,
 } from "./capture.mjs";
