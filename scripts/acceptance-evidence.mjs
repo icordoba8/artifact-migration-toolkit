@@ -292,6 +292,7 @@ export function codexRollout(text, engineCommands) {
   const rollout = { meta: null, turns: 0, prompts: [], refusals: [] };
   const promptsBySource = { response: [], event: [], legacy: [] };
   const started = { task: 0, turn: 0 };
+  const responses = [], skills = [];
   text.split('\n').forEach((line, index) => {
     if (!line) return;
     const event = JSON.parse(line), payload = event.payload ?? {};
@@ -303,21 +304,45 @@ export function codexRollout(text, engineCommands) {
     // an item_completed/UserMessage. Keep the older event forms for historical
     // diagnostics, but never count duplicate representations as extra turns.
     if (event.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
-      promptsBySource.response.push((payload.content ?? []).filter(part => part.type === 'input_text')
-        .map(part => part.text).join(''));
+      responses.push({ payload, metadata: event.metadata, index });
     }
     if (event.type !== 'event_msg') return;
     if (payload.type === 'task_started') started.task += 1;
     if (payload.type === 'turn_started') started.turn += 1;
     if (payload.type === 'user_message') promptsBySource.event.push(payload.message);
     const item = payload.type === 'item_completed' ? payload.item : null;
-    if (item?.type === 'UserMessage') promptsBySource.legacy.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+    if (item?.type === 'UserMessage') {
+      promptsBySource.legacy.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+      for (const part of item.content ?? []) if (part.type === 'skill') skills.push({ name: part.name, path: part.path, index });
+    }
     const refusal = item?.type === 'McpToolCall' && item.server === 'start-migration' ? mcpRefusal(item)
       : item?.type === 'CommandExecution' ? cliRefusal(item, engineCommands) : null;
     if (refusal) rollout.refusals.push({ line: index + 1, sha256: sha256(line),
       source: item.type === 'McpToolCall' ? 'mcp' : 'cli', tool: item.tool ?? null, exitCode: item.exit_code ?? null, ...refusal });
   });
   if (!rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: rollout has no session_meta');
+  // 0.165 also persists injected AGENTS/environment context as role=user. Only
+  // exclude its known shape when this rollout identifies actual operator input.
+  const ordered = responses.some(({ metadata }) => Number.isInteger(metadata?.user_input_order));
+  // It also injects an invoked skill's SKILL.md as an unordered role=user message.
+  // Excluded only when an earlier legacy typed skill part names this toolkit skill
+  // at its installed path; each part vouches for one injection, so a duplicate counts.
+  const injectedSkill = (content, index) => {
+    const match = content.length === 1 && content[0].type === 'input_text' &&
+      /^<skill>\n<name>(start-migration|migrate-artifact)<\/name>\n<path>([^<\n]+)<\/path>\n---\nname: \1\n[\s\S]*\n<\/skill>$/.exec(content[0].text);
+    if (!match || typeof rollout.meta.cwd !== 'string' ||
+        match[2] !== path.join(rollout.meta.cwd, '.agents/skills', match[1], 'SKILL.md')) return false;
+    const vouch = skills.findIndex(part => part.index < index && part.name === match[1] && part.path === match[2]);
+    return vouch !== -1 && skills.splice(vouch, 1).length === 1;
+  };
+  for (const { payload, metadata, index } of responses) {
+    const content = payload.content ?? [];
+    const context = ordered && !Number.isInteger(metadata?.user_input_order) && content.length > 0 &&
+      (content.every(part => part.type === 'input_text' &&
+        (/^# AGENTS\.md instructions for [^\n]+\n\n<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*$/.test(part.text) ||
+         /^<environment_context>[\s\S]*<\/environment_context>\s*$/.test(part.text))) || injectedSkill(content, index));
+    if (!context) promptsBySource.response.push(content.filter(part => part.type === 'input_text').map(part => part.text).join(''));
+  }
   const sources = Object.values(promptsBySource).filter(prompts => prompts.length);
   if (sources.length > 1 && sources.some(prompts => JSON.stringify(prompts) !== JSON.stringify(sources[0])))
     throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: conflicting user-message records across rollout schemas');
@@ -345,6 +370,8 @@ export async function findCodexRollout(codexHome, { threadId, cwd, startedAt, en
     const meta = JSON.parse(text.slice(0, text.indexOf('\n'))).payload ?? {};
     if (threadId && (meta.id !== threadId || meta.cwd !== cwd))
       throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: ' + name + ' belongs to another thread or consumer');
+    if (threadId && startedAt && endedAt && !(meta.timestamp >= startedAt && meta.timestamp <= endedAt))
+      throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: thread rollout is outside this launch window');
     if (threadId || (meta.cwd === cwd && meta.timestamp >= startedAt && meta.timestamp <= endedAt)) found.push({ file, text });
   }
   if (found.length > 1) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one rollout matches this run');

@@ -17,9 +17,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict, traceRefusals } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { probeMcpTools } from "./mcp-preflight-transport.mjs";
 import { constants as fsConstants, readlinkSync, watch } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { open, readdir, readFile, realpath, mkdir, unlink, writeFile } from "node:fs/promises";
+import { open, readdir, readFile, realpath, mkdir, unlink, writeFile, lstat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { verifyBundle } from "../providers/install-support.mjs";
@@ -91,7 +92,31 @@ const argsOf = (argv) => {
 
 const SKILL_DIRS = { claude: ".claude/skills", codex: ".agents/skills", opencode: ".opencode/skills" };
 export const readOnlyScenarioMounts = (root, scenario) => scenario === "read-only"
-  ? [path.join(root, ".agents/knowledge/migrations")] : [];
+  ? [root] : [];
+/** A read-only bind cannot protect file aliases through an external writable path. */
+export async function checkReadOnlyConsumer(root) {
+  const visit = async file => {
+    const info = await lstat(file);
+    if (info.isSymbolicLink()) {
+      const target = await realpath(file);
+      if (target !== root && !target.startsWith(root + path.sep))
+        fail("ACCEPTANCE_READ_ONLY_ALIAS: consumer symlink escapes its read-only mount: " + file);
+    } else if (info.isFile() && info.nlink !== 1) {
+      fail("ACCEPTANCE_READ_ONLY_ALIAS: consumer file has a writable hard-link alias: " + file);
+    } else if (info.isDirectory()) {
+      for (const name of await readdir(file)) await visit(path.join(file, name));
+    } else if (!info.isFile()) {
+      fail("ACCEPTANCE_READ_ONLY_ALIAS: unsupported consumer entry: " + file);
+    }
+  };
+  for (const dir of [os.homedir(), process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), os.tmpdir()]) {
+    const scratch = await realpath(dir).catch(error =>
+      fail("ACCEPTANCE_READ_ONLY_SCRATCH: cannot resolve provider runtime scratch " + dir + ": " + error.message));
+    if (scratch === root || scratch.startsWith(root + path.sep))
+      fail("ACCEPTANCE_READ_ONLY_SCRATCH: provider runtime scratch must be outside the protected consumer: " + scratch);
+  }
+  await visit(root);
+}
 /** Digest of every installed skill byte: the agent must never patch the toolkit it is judged on. */
 const treeDigest = async (dir) => {
   const hash = createHash("sha256");
@@ -217,7 +242,7 @@ const observeRecordDirectory = async (record) => {
 // Each host's headless permission model, granting only the installed
 // registration, the consumer's own Playwright MCP server (the skill's UI evidence
 // provider) and its state directory -- never a sandbox bypass.
-export const commandFor = (provider, invocation, root, native = false, mcpServer = null) => {
+export const commandFor = (provider, invocation, root, native = false, mcpServer = null, scenario = "fresh") => {
   const ask = "Invoke the installed " + (invocation.startsWith("/migrate-artifact") ? "migrate-artifact" : "start-migration") + " skill with exactly these arguments: " +
     invocation + ". Follow its existing contract; do not repair or modify the installed toolkit.";
   if (provider === "claude") return { command: "claude",
@@ -231,7 +256,9 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
   // E7: preflight requires the installed server itself to expose exactly CODEX_MCP_TOOLS. exec never
   // prompts, so an MCP call needing approval is refused: approve those same tools, per tool.
   return { command: "codex",
-    argv: [...(native ? ["--no-daemon"] : ["exec", "--json"]), "--sandbox", "workspace-write", "--add-dir", path.join(root, ".agents"),
+    argv: [...(native || scenario === "read-only" ? ["--no-daemon"] : []), ...(native ? [] : ["exec", "--json"]),
+      "--sandbox", scenario === "read-only" ? "read-only" : "workspace-write",
+      ...(scenario === "read-only" ? [] : ["--add-dir", path.join(root, ".agents")]),
       "-c", `projects={ ${JSON.stringify(root)} = { trust_level = "trusted" } }`, "-c", 'approval_policy="never"',
       ...CODEX_MCP_TOOLS.flatMap((tool) => ["-c", `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`]),
       // Codex hands an MCP server only an env allowlist; forward the launcher's pnpm refusal to the engine's validators.
@@ -247,10 +274,17 @@ export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_st
   "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
 
 /** Probe the installed stdio transport before applying the provider's installed filters. */
-const advertisedGrants = (root, server) => new Promise((resolve, reject) => {
+const advertisedGrants = (root, server) => {
   if (typeof server.command !== "string" || !server.command ||
       !Array.isArray(server.args) || !server.args.every(arg => typeof arg === "string"))
-    return reject(new Error("Unreadable installed command/args"));
+    return Promise.reject(new Error("Unreadable installed command/args"));
+  return process.platform === "linux"
+    ? probeMcpTools({ command: server.command, args: server.args, cwd: root,
+        scratchRoot: os.tmpdir(), timeoutMs: 10000 })
+    : advertisedGrantsWithNodePipes(root, server);
+};
+
+const advertisedGrantsWithNodePipes = (root, server) => new Promise((resolve, reject) => {
   const child = spawn(server.command, server.args, { cwd: root, env: { ...process.env, PWD: root },
     stdio: ["pipe", "pipe", "ignore"] });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -579,7 +613,7 @@ async function score(options, root, output, report) {
   }
   // Both UIs are bound before tools/list is probed; native only restates the verified installed transport.
   const mcpServer = shipped.codex?.server ?? null;
-  const invocationCommand = commandFor(options.provider, invocation, root, native, mcpServer);
+  const invocationCommand = commandFor(options.provider, invocation, root, native, mcpServer, options.scenario);
   report.trusted = {
     marker: { path: markerPath, sha256: sha256(markerBytes) },
     receipt: { path: receiptPath, sha256: sha256(receiptBytes), store: installed.store, release: installed.release },
@@ -648,13 +682,10 @@ async function score(options, root, output, report) {
   const sealedRegistrations = [...Object.values(shipped).map(entry => entry.server.command),
     ...[...registrations].filter(([, bytes]) => bytes !== null).flatMap(([file]) =>
       path.dirname(file) === root ? [file] : [path.dirname(file), file])];
-  // H12: sealing the entire consumer prevented Codex's own workspace-write
-  // sandbox from starting. Seal the migration state subtree instead: the MCP
-  // engine still reaches a real EROFS on its first record write, while Codex
-  // can create its sandbox paths. The whole consumer is still snapshotted and
-  // ANY write elsewhere prevents SAFETY_REFUSAL_PASS.
+  // H12 uses Codex's read-only shell policy: no workspace-write guard paths
+  // need creation under this mount. The MCP engine shares the sealed consumer.
   const scenarioMounts = readOnlyScenarioMounts(root, options.scenario);
-  for (const mount of scenarioMounts) await mkdir(mount, { recursive: true });
+  if (options.scenario === "read-only") await checkReadOnlyConsumer(root);
   const readOnly = [...new Set(await Promise.all([...scenarioMounts, ...(options.sourceRoot ? [options.kind === "artifact" ? path.join(options.sourceRoot, options.source) : options.sourceRoot] : []), ...(options.resumeFrom ? [options.resumeFrom] : []), ...(process.env.AMT_PNPM_DIR ? [process.env.AMT_PNPM_DIR] : []), harnessScripts, installed.store, ...sealedVerifier, ...sealedRegistrations, receiptPath, markerPath, skills, output]
     .map((entry) => realpath(entry))))].sort();
   report.security = { isolation: options.isolation === "os" ? "OS_NAMESPACE" : "NONE",
@@ -809,6 +840,9 @@ async function score(options, root, output, report) {
         rollout = codexRollout(found.text, engines);
         report.rollout = { source: found.file, copy: "codex-rollout.jsonl", sha256: sha256(found.text), threadId: rollout.meta.id,
           turns: rollout.turns, prompts: rollout.prompts.length, refusals: rollout.refusals };
+        if (!native && (rollout.turns !== 1 || rollout.prompts.length !== 1 ||
+            rollout.prompts[0] !== commandFor('codex', invocation, root, false, null, options.scenario).argv.at(-1)))
+          fail("ACCEPTANCE_ROLLOUT_UNBOUND: headless rollout must contain exactly this invocation and one turn");
       }
     }
     // G1: the rollout's tool results plus every structured refusal the outside-sandbox trace binds to an engine process.
