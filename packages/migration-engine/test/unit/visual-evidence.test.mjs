@@ -10,6 +10,7 @@ import pixelmatch from "pixelmatch";
 
 import {
   assertRequiredAppearance,
+  assertSessionUsable,
   compareScrollContract,
   compareAppearanceCoverage,
   validateUiRuntimeEvidence,
@@ -1256,4 +1257,33 @@ test("MC2: format-20 LEGACY claim captures satisfy the claim, scroll and pixel v
     await rm(root, { recursive: true, force: true });
     await server.close();
   }
+});
+
+test("session pre-flight: cookies bind a host not a port; irrelevant storage proves nothing; expiry is refused", () => {
+  const cookie = (domain, expires = -1) => ({ name: "s", value: "x", domain, path: "/", expires });
+  const session = (cookies, origins = []) => ({ cookies, origins });
+  const code = (document, origin) => { try { assertSessionUsable(document, origin); return "OK"; } catch (error) { return error.validationCode; } };
+  // Same host, different port: the cookie is shared, so the pre-flight cannot refuse it;
+  // only the browser reaching the route signed in can (see the MC2 sign-in redirect test).
+  assert.equal(code(session([cookie("localhost")]), "http://localhost:11088"), "OK");
+  assert.equal(code(session([cookie("localhost")]), "http://localhost:11080"), "OK");
+  assert.equal(code(session([cookie(".localhost")]), "http://localhost:11080"), "OK");
+  // A domain cookie reaches its subdomains; a suffix that is not a label boundary does not.
+  assert.equal(code(session([cookie(".example.com")]), "https://app.example.com"), "OK");
+  assert.equal(code(session([cookie(".evil.com")]), "https://notevil.com"), "CAPTURE_SESSION_HOST");
+  assert.equal(code(session([cookie("example.com")]), "https://app.example.com"), "CAPTURE_SESSION_HOST");
+  // Wrong host, even with the same port.
+  assert.equal(code(session([cookie("127.0.0.1")]), "http://localhost:11080"), "CAPTURE_SESSION_HOST");
+  // Expired cookies for the host.
+  assert.equal(code(session([cookie("localhost", 1000)]), "http://localhost:11080"), "CAPTURE_SESSION_EXPIRED");
+  assert.equal(code(session([cookie("localhost", Date.now() / 1000 + 3600)]), "http://localhost:11080"), "OK");
+  // localStorage for another origin proves nothing, with or without an expired cookie.
+  const other = [{ origin: "http://localhost:11088", localStorage: [{ name: "t", value: "x" }] }];
+  assert.equal(code(session([], other), "http://localhost:11080"), "CAPTURE_SESSION_HOST");
+  assert.equal(code(session([cookie("localhost", 1000)], other), "http://localhost:11080"), "CAPTURE_SESSION_EXPIRED");
+  // localStorage for this exact origin is accepted; its validity is the browser's to decide.
+  assert.equal(code(session([], other), "http://localhost:11088"), "OK");
+  // IPv6 hosts are bracketed in a URL and bare in a cookie domain.
+  assert.equal(code(session([cookie("::1")]), "http://[::1]:11080"), "OK");
+  assert.equal(code({}, "http://localhost:11080"), "CAPTURE_SESSION_HOST");
 });

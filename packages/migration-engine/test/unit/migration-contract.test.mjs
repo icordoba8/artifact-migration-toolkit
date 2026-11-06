@@ -24115,11 +24115,13 @@ browserTest("MC2: a sign-in redirect is AUTH_REQUIRED, an unusable session is re
     // A session that does not authenticate is expired, not "unreachable".
     const stale = path.join(fixture.root, "stale-session.json");
     await writeJson(stale, { cookies: [{ name: "session", value: "WRONG", domain: "127.0.0.1", path: "/", expires: -1 }], origins: [] });
-    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: stale })), /CAPTURE_SESSION_EXPIRED: .*no longer authenticates/);
+    const refusal = await captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: stale })).catch((error) => error);
+    assert.match(refusal.message, /CAPTURE_SESSION_EXPIRED: .*no longer authenticates/);
+    assert.doesNotMatch(refusal.message, /WRONG|SECRET-COOKIE-VALUE|callbackUrl/); // no session value or query reaches the message
     // Another origin's session, an all-expired cookie jar: refused before launch.
     const foreign = path.join(fixture.root, "foreign-session.json");
     await writeJson(foreign, { cookies: [{ name: "session", value: "X", domain: "example.test", path: "/", expires: -1 }], origins: [] });
-    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: foreign })), /CAPTURE_SESSION_ORIGIN/);
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: foreign })), /CAPTURE_SESSION_HOST/);
     const old = path.join(fixture.root, "old-session.json");
     await writeJson(old, { cookies: [{ name: "session", value: "X", domain: "127.0.0.1", path: "/", expires: 1000 }], origins: [] });
     await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: old })), /CAPTURE_SESSION_EXPIRED: .*expired/);
@@ -24132,6 +24134,45 @@ browserTest("MC2: a sign-in redirect is AUTH_REQUIRED, an unusable session is re
     await fixture.cleanup();
     await server.close();
   }
+});
+
+test("MC2: the discovery instruction is legal at DISCOVER_LEGACY: no engine capture there, a BLOCKED runtime item is the supported gap", async () => {
+  const unobserved = {
+    ...LEGACY_INVENTORY,
+    behaviors: LEGACY_INVENTORY.behaviors.map((behavior) => ({
+      ...behavior,
+      evidence: behavior.evidence.map((item) => item.category === "RUNTIME_OBSERVATION"
+        ? { ...item, status: "BLOCKED", reason: "LEGACY answered with a sign-in page; no session was available." }
+        : item),
+    })),
+  };
+  const fixture = await createFixture();
+  try {
+    // At DISCOVER_LEGACY the engine refuses both capture modes before any browser starts.
+    await initialize(fixture);
+    const before = await snapshot(fixture.migrationRoot);
+    await assert.rejects(captureFrame(fixture, frameRequest("http://127.0.0.1:9")), /authority frame is captured for a designSource legacy-runtime record at ASSESS_TARGET; this record is 'target-system' at DISCOVER_LEGACY/);
+    await assert.rejects(captureFrame(fixture, { origin: "http://127.0.0.1:9", route: "/x", viewport: CAPTURE_VIEWPORT, appearanceClaimId: "APP-1" }),
+      /appearance-claim capture needs a format-20 record at VERIFY_SLICES/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+  } finally {
+    await fixture.cleanup();
+  }
+  // The supported gap: a BLOCKED RUNTIME_OBSERVATION item with a reason advances the checkpoint.
+  const gapped = await createFixture();
+  try {
+    await driveTo(gapped, "DISCOVER_LEGACY", advance, { legacy: unobserved });
+    assert.equal((await state(gapped)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    await gapped.cleanup();
+  }
+  // The skill's discovery instruction matches that contract: it names no capture here and records the gap as BLOCKED.
+  const skill = await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8");
+  const discovery = skill.slice(skill.indexOf("- `DISCOVER_LEGACY` —"), skill.indexOf("- `VERIFY_SLICES` — drive the target runtime"));
+  assert.ok(discovery.length > 500);
+  assert.match(discovery, /never\s+`migration_capture`/);
+  assert.match(discovery, /`RUNTIME_OBSERVATION` evidence\s+item gets `status: "BLOCKED"`/);
+  assert.doesNotMatch(discovery, /uiEvidenceLimitations|NOT_AVAILABLE/);
 });
 
 const FORMAT20_LEGACY = {
