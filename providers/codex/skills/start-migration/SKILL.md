@@ -1242,8 +1242,19 @@ current checkpoint is missing.
   visibility, loading, empty, error, responsive and density behavior where it
   is behaviorally meaningful. Record the exact configuration
   (`showToolbar: false`, `showPagination: false`, `compactMode: true`), not
-  "a table exists". Discovery is not blocked when the legacy app is offline —
-  author from source and record the gap.
+  "a table exists". Try the runtime first: one `migration_capture` of the
+  discovered route on the LEGACY origin from the application's own start
+  instructions (`localhost` on the consumer's own host, not another network
+  namespace's address: a wrong address can serve a different app). Its typed
+  refusal tells the cause: `CAPTURE_UNREACHABLE` (not running or wrong address),
+  `CAPTURE_AUTH_REQUIRED` (sign-in redirect or 401/403), `CAPTURE_SESSION_EXPIRED`
+  or `CAPTURE_SESSION_ORIGIN` (supplied session unusable). Discovery is not blocked
+  by any of them — author from source — but an unobserved runtime is a
+  `uiEvidenceLimitations` entry with `availability: "NOT_AVAILABLE"` and the
+  refusal code, never `NOT_APPLICABLE`: that value means no visible UI.
+  `VERIFY_SLICES` still needs LEGACY and TARGET runtime evidence, so a typed
+  refusal is reported to the operator once, with its remedy, instead of
+  discovering it after the first slice is implemented.
   Record the responses in the scan's `apiContract` exactly as derived; they are
   already the OpenSpec's `Response:` lines.
   Trace external JSX package imports reported by scanner algorithm 4 to
@@ -1311,7 +1322,10 @@ harness of your own. TARGET captures stay on the Playwright MCP.
 `origin` is the running legacy app, and the route stays on it. `setup` and
 `interaction` steps are `click`, `fill`, `press`, `hover`, `check`, `uncheck` or
 `select` on a locator: never a script and never a typed credential (pass an
-authorized test session as an absolute `storageState` path). Every control the
+authorized test session as an absolute `storageState` path, kept outside the
+repository and the migration record, bound to that origin and not expired: a
+session file holds reusable secrets, so never read, print or copy it, and never
+ask the operator to paste one; ask them to sign in once and replace the file). Every control the
 state shows must be visible, or the state counts as not reached. The capture
 never overwrites, pins or marks PASS. A refusal names what was not reached and
 writes nothing.

@@ -29,6 +29,36 @@ export const refuseCapture = (code, message) => {
 
 const invalid = (message) => refuseCapture("CAPTURE_REQUEST_INVALID", message);
 
+/**
+ * An unauthenticated answer is not an unreachable server: a 401/403 or a
+ * same-origin redirect to a sign-in path says "log in", and with a session in
+ * hand it says the session no longer works.
+ */
+const AUTH_PATH = /(^|\/)(log-?in|sign-?in|auth)(\/|$)/i;
+const authRefusal = (plan, what) => refuseCapture(plan.storageState ? "CAPTURE_SESSION_EXPIRED" : "CAPTURE_AUTH_REQUIRED",
+  `${what}. ${plan.storageState ? "The supplied storageState no longer authenticates this origin: sign in again and replace the session file." : "Supply an authorized test session as an absolute storageState path."} No credential is ever typed or stored.`);
+
+/**
+ * Check an authorized session file before a browser starts: it must name this
+ * origin and hold at least one live cookie or stored value. Cookie and storage
+ * values are never read out or reported.
+ */
+export const assertSessionUsable = (document, origin) => {
+  const bound = new URL(origin);
+  const cookies = Array.isArray(document?.cookies) ? document.cookies : [];
+  const stored = Array.isArray(document?.origins) ? document.origins : [];
+  const forOrigin = cookies.filter((cookie) => typeof cookie.domain === "string" && cookie.domain.replace(/^\./, "") === bound.hostname);
+  const storedHere = stored.filter((entry) => entry?.origin === bound.origin);
+  if (forOrigin.length === 0 && storedHere.length === 0) {
+    refuseCapture("CAPTURE_SESSION_ORIGIN", `The supplied storageState holds no cookie or storage for ${bound.origin}; a session is bound to one origin.`);
+  }
+  // expires -1 is a browser-session cookie: live as long as its file is current.
+  const live = forOrigin.some((cookie) => !(cookie.expires > 0) || cookie.expires > Date.now() / 1000);
+  if (!live && storedHere.length === 0) {
+    refuseCapture("CAPTURE_SESSION_EXPIRED", `Every cookie in the supplied storageState for ${bound.origin} has expired: sign in again and replace the session file.`);
+  }
+};
+
 const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "timeoutMs"];
 const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction"] };
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
@@ -359,8 +389,13 @@ export const captureInBrowser = async (plan) => {
       if (blocked.length > 0) onOrigin(`'${plan.url}'`);
       if (!(status >= 400)) refuseCapture("CAPTURE_UNREACHABLE", `'${plan.url}' could not be loaded: ${firstLine(error)}. Start the legacy application at the authorized origin first.`);
     }
+    if (status === 401 || status === 403) authRefusal(plan, `'${plan.route}' answered HTTP ${status}`);
     if (!(status < 400)) refuseCapture("CAPTURE_UNREACHABLE", `'${plan.url}' answered HTTP ${status ?? "nothing"}.`);
     onOrigin(`'${plan.url}'`);
+    const landed = new URL(page.url()).pathname;
+    if (landed.replace(/\/$/, "") !== plan.route.split(/[?#]/)[0].replace(/\/$/, "") && AUTH_PATH.test(landed)) {
+      authRefusal(plan, `'${plan.route}' redirected to the sign-in path '${landed}'`);
+    }
     await settle();
     const act = async (step, label) => {
       const target = locate(page, step.target);

@@ -24077,7 +24077,7 @@ browserTest("MC2: CLI and MCP run the same capture; an authorized session is use
     const request = frameRequest(server.origin, { route: "/private", storageState: sessionFile });
     await writeJson(requestFile, request);
     // Without the session the private page is refused, not captured.
-    await assert.rejects(captureFrame(cli, { ...request, storageState: undefined }), /CAPTURE_UNREACHABLE: .*answered HTTP 401/);
+    await assert.rejects(captureFrame(cli, { ...request, storageState: undefined }), /CAPTURE_AUTH_REQUIRED: .*answered HTTP 401/);
     const fromCli = JSON.parse((await runCli(cli, () => runValidateCli(["auth", "--capture", requestFile]))).stdout);
     const response = await rpc(mcp, { jsonrpc: "2.0", id: 1, method: "tools/call",
       params: { name: "migration_capture", arguments: { module: "auth", request } } });
@@ -24100,6 +24100,36 @@ browserTest("MC2: CLI and MCP run the same capture; an authorized session is use
   } finally {
     await cli.cleanup();
     await mcp.cleanup();
+    await server.close();
+  }
+});
+
+browserTest("MC2: a sign-in redirect is AUTH_REQUIRED, an unusable session is refused before a browser starts, nothing is written", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    await legacyAtAssessTarget(fixture);
+    const before = await snapshot(fixture.migrationRoot);
+    // LEGACY running but unauthenticated: a typed blocker, not a captured login page.
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded" })), /CAPTURE_AUTH_REQUIRED: .*sign-in path '\/login'/);
+    // A session that does not authenticate is expired, not "unreachable".
+    const stale = path.join(fixture.root, "stale-session.json");
+    await writeJson(stale, { cookies: [{ name: "session", value: "WRONG", domain: "127.0.0.1", path: "/", expires: -1 }], origins: [] });
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: stale })), /CAPTURE_SESSION_EXPIRED: .*no longer authenticates/);
+    // Another origin's session, an all-expired cookie jar: refused before launch.
+    const foreign = path.join(fixture.root, "foreign-session.json");
+    await writeJson(foreign, { cookies: [{ name: "session", value: "X", domain: "example.test", path: "/", expires: -1 }], origins: [] });
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: foreign })), /CAPTURE_SESSION_ORIGIN/);
+    const old = path.join(fixture.root, "old-session.json");
+    await writeJson(old, { cookies: [{ name: "session", value: "X", domain: "127.0.0.1", path: "/", expires: 1000 }], origins: [] });
+    await assert.rejects(captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: old })), /CAPTURE_SESSION_EXPIRED: .*expired/);
+    assert.deepEqual(await snapshot(fixture.migrationRoot), before);
+    // The valid session still reaches the guarded page (a redirect is not blanket-refused).
+    const good = path.join(fixture.root, "good-session.json");
+    await writeJson(good, server.storageState());
+    await captureFrame(fixture, frameRequest(server.origin, { route: "/guarded", storageState: good }));
+  } finally {
+    await fixture.cleanup();
     await server.close();
   }
 });

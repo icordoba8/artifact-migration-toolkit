@@ -75,6 +75,7 @@ export {
   legacyAppearanceRow,
   parseCaptureRequest,
   parseLocator,
+  assertSessionUsable,
   refuseCapture,
   taxonomyValues,
 } from "./capture.mjs";

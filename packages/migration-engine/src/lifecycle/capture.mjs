@@ -42,6 +42,7 @@ import {
   LEGACY_RUNTIME_EVIDENCE_ROOT,
   legacyAppearanceRow,
   parseCaptureRequest,
+  assertSessionUsable,
   refuseCapture,
   usesVisualContract,
   validateLegacyRuntimeContext,
@@ -162,6 +163,7 @@ const prepare = async ({ targetRoot, moduleName, request }) => {
     if (portablePath(path.relative(await realpath(root), session)).split("/")[0] !== "..") {
       refused("storageState lives inside the migration record; an authorized session file is read, never persisted as evidence.");
     }
+    assertSessionUsable(await readJson(session, "storageState").catch(() => refused("storageState is not valid JSON.")), request.origin);
   }
   // The validator's own view: an adopted UI remediation replaces the UI rows.
   const legacy = await withUiRemediation(root, state,
