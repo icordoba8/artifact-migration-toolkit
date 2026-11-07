@@ -55,47 +55,56 @@ untouched.
 
 ### 1. Install, once, from an elevated PowerShell
 
-Set the first two lines, read the block, then paste it whole. It works in
-ConstrainedLanguage mode, names groups by SID because names are localized,
-and stops before changing anything unless it runs elevated, the archive
-matches, and neither the directory nor the account exists yet. Any later
-failure removes the account and the directory it created, so a failed run
-leaves no account or store behind.
+Set the first two lines, read the block, then paste it whole. It is one
+statement, `& { ... }`, because a pasted line that throws does not stop the
+lines after it. It works in ConstrainedLanguage mode, names groups by SID
+because names are localized, and changes nothing unless it runs elevated, the
+archive matches, and neither the directory nor the account exists yet. A later
+failure removes exactly the account and directory this run created, and says
+so loudly if that cleanup fails.
 
 ```powershell
-$candidate = 'C:\path\to\artifact-migration-tools-<candidate>.tar.gz'
-$expected = '<candidate SHA-256, as reported with the candidate>'
-$root = 'C:\ProgramData\amt-session-broker'
-$account = 'amt-broker'
-$ErrorActionPreference = 'Stop'
-if (-not ((whoami /groups) -match 'S-1-16-12288')) { throw 'Run this from an elevated PowerShell.' }
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $candidate).Hash -ne $expected) { throw 'The candidate archive does not match its SHA-256.' }
-if (Test-Path -LiteralPath $root) { throw "$root already exists." }
-if (Get-LocalUser -Name $account -ErrorAction SilentlyContinue) { throw "The account $account already exists." }
-$created = $false
-try {
-  New-Item -ItemType Directory -Path $root | Out-Null
-  icacls $root /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'icacls could not protect the directory.' }
-  tar -xzf $candidate -C $root
-  if ($LASTEXITCODE -ne 0) { throw 'The candidate archive did not extract.' }
-  $password = Read-Host -AsSecureString "Password for $account (keep it out of any file)"
-  New-LocalUser -Name $account -Password $password -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
-  $created = $true
-  Add-LocalGroupMember -SID S-1-5-32-545 -Member $account
-  New-Item -ItemType Directory -Path "$root\store" | Out-Null
-  icacls "$root\store" /inheritance:r /grant:r "${account}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'icacls could not make the store private.' }
-  $tokenFile = "$env:LOCALAPPDATA\artifact-migration-tools\session-broker.token"
-  New-Item -ItemType Directory -Force -Path (Split-Path $tokenFile) | Out-Null
-  Set-Content -NoNewline -LiteralPath $tokenFile -Value ((New-Guid).Guid + (New-Guid).Guid)
-  $tokenHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $tokenFile).Hash
-  "token file: $tokenFile"
-  "token hash: $tokenHash"
-} catch {
-  if ($created) { Remove-LocalUser -Name $account }
-  Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
-  throw
+& {
+  $candidate = 'C:\path\to\artifact-migration-tools-v<version>.tar.gz'
+  $expected = '<candidate SHA-256, as reported with the candidate>'
+  $root = 'C:\ProgramData\amt-session-broker'
+  $account = 'amt-broker'
+  $ErrorActionPreference = 'Stop'
+  if (-not ((whoami /groups) -match 'S-1-16-12288')) { throw 'Run this from an elevated PowerShell. Nothing was changed.' }
+  if ((Get-FileHash -Algorithm SHA256 -LiteralPath $candidate).Hash -ne $expected) { throw 'The candidate archive does not match its SHA-256. Nothing was changed.' }
+  if (Test-Path -LiteralPath $root) { throw "$root already exists. Nothing was changed." }
+  if (Get-LocalUser -Name $account -ErrorAction SilentlyContinue) { throw "The account $account already exists. Nothing was changed." }
+  $made = $false
+  $created = $false
+  try {
+    New-Item -ItemType Directory -Path $root | Out-Null
+    $made = $true
+    icacls $root /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'icacls could not protect the directory.' }
+    tar -xzf $candidate -C $root
+    if ($LASTEXITCODE -ne 0) { throw 'The candidate archive did not extract.' }
+    $password = Read-Host -AsSecureString "Password for $account (keep it out of any file)"
+    New-LocalUser -Name $account -Password $password -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+    $created = $true
+    Add-LocalGroupMember -SID S-1-5-32-545 -Member $account
+    New-Item -ItemType Directory -Path "$root\store" | Out-Null
+    icacls "$root\store" /inheritance:r /grant:r "${account}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'icacls could not make the store private.' }
+    $tokenFile = "$env:LOCALAPPDATA\artifact-migration-tools\session-broker.token"
+    New-Item -ItemType Directory -Force -Path (Split-Path $tokenFile) | Out-Null
+    Set-Content -NoNewline -LiteralPath $tokenFile -Value ((New-Guid).Guid + (New-Guid).Guid)
+    "token file: $tokenFile"
+    "token hash: " + (Get-FileHash -Algorithm SHA256 -LiteralPath $tokenFile).Hash
+  } catch {
+    $failure = $_
+    try {
+      if ($created) { Remove-LocalUser -Name $account }
+      if ($made) { Remove-Item -LiteralPath $root -Recurse -Force }
+    } catch {
+      Write-Warning "ROLLBACK INCOMPLETE: remove the account $account and $root by hand. $_"
+    }
+    throw $failure
+  }
 }
 ```
 
