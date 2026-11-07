@@ -114,5 +114,9 @@
   {
     "version": "1.6.5",
     "contentHash": "sha256:02eb13fd03875c3d4b48ff787146fcbc639a73b3855f3eb47bbc1730d9056a78"
+  },
+  {
+    "version": "1.7.0",
+    "contentHash": "sha256:4d767184f6d8238178ed8d9f0987ca63476305e101331942774d34451a922b27"
   }
 ]
