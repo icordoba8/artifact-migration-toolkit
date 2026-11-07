@@ -950,6 +950,7 @@ test("R-W2-e: no argv option, environment variable, or tool argument can produce
     "migration_evidence_binding",
     "migration_prefill",
     "migration_capture",
+    "migration_app_runtime",
     "migration_pending_decisions",
     "migration_run",
     "artifact_run",

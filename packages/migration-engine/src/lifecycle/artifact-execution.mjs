@@ -13,7 +13,7 @@ import {
   pathKey,
   targetTypeScript,
 } from "../census/index.mjs";
-import { assertSecurePath, canonicalJson, execFileAsync, normalizeRelative, samePath, sha256Hex } from "../shared/index.mjs";
+import { assertSecurePath, canonicalJson, execFileAsync, normalizeRelative, PACKAGE_MANAGERS, samePath, SCRIPT_NAME, sha256Hex } from "../shared/index.mjs";
 import { fileExists as exists, fileHash, secureHash } from "../store/index.mjs";
 
 const JS_FILE_EXTENSIONS = new Set([".js", ".jsx", ".mjs"]);
@@ -202,10 +202,6 @@ export const assertTargetProvides = async (targetRoot, packageName, label) => {
 // A generic check is a prose claim by default. When it names one of the target's
 // own package scripts it is an executable build/test command, so it is executed
 // rather than trusted: an unexecuted "PASS" proved nothing.
-const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn"]);
-
-const SCRIPT_NAME = /^[A-Za-z0-9_.:-]+$/;
-
 // The syntactic half: which package script a command names, if any.
 const scriptInvocation = (command) => {
   const [manager, ...rest] = command.trim().split(/\s+/);

@@ -34,7 +34,7 @@ const invalid = (message) => refuseCapture("CAPTURE_REQUEST_INVALID", message);
  * same-origin redirect to a sign-in path says "log in", and with a session in
  * hand it says the session no longer works.
  */
-const AUTH_PATH = /(^|\/)(log-?in|sign-?in|auth)(\/|$)/i;
+export const AUTH_PATH = /(^|\/)(log-?in|sign-?in|auth)(\/|$)/i;
 const authRefusal = (plan, what) => refuseCapture(plan.storageState ? "CAPTURE_SESSION_EXPIRED" : "CAPTURE_AUTH_REQUIRED",
   `${what}. ${plan.storageState ? "The supplied storageState no longer authenticates this origin: sign in again and replace the session file." : "Supply an authorized test session as an absolute storageState path."} No credential is ever typed or stored.`);
 

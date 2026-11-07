@@ -62,6 +62,16 @@ export {
 } from "./openspec.mjs";
 export { previewEvidenceBinding } from "./gates.mjs";
 export { captureLegacyRuntimeEvidence } from "./capture.mjs";
+export {
+  APP_RUNTIME_ACTIONS,
+  APP_RUNTIME_CONFIG,
+  childEnvironment,
+  holdersOf,
+  parseLsofListeners,
+  parseNetstatListeners,
+  runAppRuntime,
+  runsProject,
+} from "./app-runtime.mjs";
 export { prefillCheckpointDraft } from "./prefill.mjs";
 export {
   previewDiscoveryScan,

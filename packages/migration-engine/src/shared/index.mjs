@@ -50,6 +50,8 @@ export {
   assertNonEmpty,
   assertPlainObject,
   assertSafeName,
+  PACKAGE_MANAGERS,
+  SCRIPT_NAME,
   assertUniqueIds,
   exactObject,
   isPlainObject,

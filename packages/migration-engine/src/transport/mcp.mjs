@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 
 import { engineCommand } from "../engine-paths.mjs";
 import {
+  APP_RUNTIME_ACTIONS,
   exitCodeFor,
   getArtifactStatus,
   getMigrationStatus,
@@ -50,6 +51,7 @@ import {
   relayOperatorDecision,
   renderLoopDirective,
   renderProgressBlock,
+  runAppRuntime,
   runArtifact,
   runRecordDecisionCli,
   upgradeCommandFor,
@@ -524,6 +526,19 @@ const TOOLS = [
     },
     call: async (arguments_) =>
       captureLegacyRuntimeEvidence({ ...(await registryFor(arguments_)), request: arguments_.request }),
+  },
+  {
+    name: "migration_app_runtime",
+    description:
+      "Classify the LEGACY, BACKEND and TARGET applications from the operator's local configuration as READY, AUTH_REQUIRED, RUNTIME_DOWN, WRONG_APP, IDENTITY_UNPROVEN, WRONG_NAMESPACE or CONFIGURATION_MISSING. `check` writes nothing; `ensure` also starts a stopped application through its authorized package script and reuses a running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
+    inputSchema: {
+      ...INPUT_SCHEMA,
+      properties: {
+        ...INPUT_SCHEMA.properties,
+        action: { type: "string", enum: [...APP_RUNTIME_ACTIONS], description: "check (default), ensure or stop." },
+      },
+    },
+    call: async (arguments_) => runAppRuntime({ ...(await registryFor(arguments_)), action: arguments_.action }),
   },
   {
     name: "migration_pending_decisions",

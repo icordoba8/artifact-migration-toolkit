@@ -31,7 +31,8 @@ import {
 // and the lock/journal files this transaction itself creates live there, so
 // including them would invalidate every confirmation the moment it is used.
 export const TARGET_DIRTY_SCOPE = {
-  exclude: [".agents/knowledge/migrations/"],
+  // The operator's local application configuration is no slice's work.
+  exclude: [".agents/knowledge/migrations/", ".artifact-migration-tools/runtime-apps.json"],
 };
 
 export const portableRoot = (value) => path.resolve(value).split(path.sep).join("/");

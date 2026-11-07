@@ -159,6 +159,7 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
     "artifact_run",
     "artifact_status",
+    "migration_app_runtime",
     "migration_capture",
     "migration_evidence_binding",
     "migration_pending_decisions",
@@ -185,7 +186,11 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
   const capture = tools.find((tool) => tool.name === "migration_capture");
   assert.deepEqual(Object.keys(capture.inputSchema.properties).sort(), ["cwd", "module", "registry", "request", "slice", "target"]);
   assert.deepEqual(capture.inputSchema.required, ["module"]);
-  const readOnlyTools = tools.filter((tool) => tool !== run && tool !== prefill && tool !== capture && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
+  // The runtime's one extra argument is a closed action: no tool argument can carry a command.
+  const appRuntime = tools.find((tool) => tool.name === "migration_app_runtime");
+  assert.deepEqual(Object.keys(appRuntime.inputSchema.properties).sort(), ["action", "cwd", "module", "registry", "slice", "target"]);
+  assert.deepEqual(appRuntime.inputSchema.properties.action.enum, ["check", "ensure", "stop"]);
+  const readOnlyTools = tools.filter((tool) => tool !== run && tool !== prefill && tool !== capture && tool !== appRuntime && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
   for (const tool of readOnlyTools) {
     assert.equal(typeof tool.description, "string");
     assert.deepEqual(tool.inputSchema.required, ["module"]);
@@ -413,7 +418,7 @@ test("a malformed frame is a parse error and the connection survives", async () 
   assert.equal(raw.length, 2);
   assert.equal(raw[0].error.code, -32700);
   assert.equal(raw[0].id, null);
-  assert.equal(raw[1].result.tools.length, 10);
+  assert.equal(raw[1].result.tools.length, 11);
 });
 
 // --- §11.6 no approval path --------------------------------------------------
@@ -430,6 +435,7 @@ test("no sequence of tool calls appends to the operator decisions ledger", async
       "migration_evidence_binding",
       "migration_prefill",
       "migration_capture",
+      "migration_app_runtime",
       "migration_pending_decisions",
       "migration_run",
       "migration_approve",
@@ -1235,7 +1241,7 @@ test("an unresponsive MCP provider times out, cleans pending, and ignores a late
     await serving;
     assert.ok(Date.now() - started < 15000, "an unresponsive provider stalled the server");
     assert.equal(JSON.parse(frames.find((frame) => frame.id === 2).result.content.at(-1).text).outcome, "OPERATOR_DECISION");
-    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 10);
+    assert.equal(frames.find((frame) => frame.id === 3).result.tools.length, 11);
     assert.equal(frames.filter((frame) => frame.id === 2).length, 1);
     assert.equal(await decisionLedger(fixture), null);
   } finally {
