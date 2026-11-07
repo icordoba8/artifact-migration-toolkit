@@ -12,10 +12,11 @@
  * code.
  */
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { UI_PROOF_FORMAT } from "../formats/index.mjs";
 import { isPlainObject, sha256Hex } from "../shared/index.mjs";
-import { LEGACY_AUTHORITY_ROLE } from "./authority.mjs";
+import { LEGACY_AUTHORITY_ROLE, TARGET_VERIFICATION_ROLE, visualAuthorityOf } from "./authority.mjs";
 import { decodePng, normalizeVisualValue, REQUIRED_FACT_KINDS, REQUIRED_FACT_NAMES } from "./evidence.mjs";
 import { assertNoUiSecret, uiContractDigestOf } from "./proof.mjs";
 
@@ -66,7 +67,7 @@ export const assertSessionUsable = (document, origin) => {
 };
 
 const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "session", "timeoutMs"];
-const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction"] };
+const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction", "role"] };
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
 const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -90,6 +91,11 @@ const list = (value, label, max) => {
   if (!Array.isArray(value) || value.length > max) invalid(`${label} must be an array of at most ${max} entries.`);
   return value;
 };
+const controlList = (value, label) => list(value, label, 50).map((control, index) => {
+  const at = `${label}[${index}]`;
+  if (!isPlainObject(control) || Object.keys(control).some((key) => !["role", "name", "locator"].includes(key))) invalid(`${at} must be {role, name, locator}.`);
+  return { role: text(control.role, `${at}.role`, 64), name: text(control.name, `${at}.name`), locator: text(control.locator, `${at}.locator`) };
+});
 const action = (step, label) => {
   if (!isPlainObject(step) || Object.keys(step).some((key) => !["type", "target", "value"].includes(key))) invalid(`${label} must be {type, target, value?}.`);
   if (!ACTIONS.has(step.type)) invalid(`${label}.type must be one of ${[...ACTIONS].join(", ")}.`);
@@ -127,11 +133,7 @@ export const parseCaptureRequest = (request) => {
       !["width", "height"].every((axis) => Number.isInteger(viewport[axis]) && viewport[axis] > 0 && viewport[axis] <= 10000)) {
     invalid("viewport must be {width, height} positive integers.");
   }
-  const controls = list(request.controls, "controls", 50).map((control, index) => {
-    const at = `controls[${index}]`;
-    if (!isPlainObject(control) || Object.keys(control).some((key) => !["role", "name", "locator"].includes(key))) invalid(`${at} must be {role, name, locator}.`);
-    return { role: text(control.role, `${at}.role`, 64), name: text(control.name, `${at}.name`), locator: text(control.locator, `${at}.locator`) };
-  });
+  const controls = controlList(request.controls, "controls");
   const colorScheme = request.colorScheme ?? "light";
   if (!["light", "dark", "no-preference"].includes(colorScheme)) invalid("colorScheme must be light, dark or no-preference.");
   const matte = request.matte ?? "#ffffff";
@@ -151,7 +153,9 @@ export const parseCaptureRequest = (request) => {
     colorScheme, matte: matte.toLowerCase(), browser: request.browser, storageState: request.storageState, session: request.session, timeoutMs,
   };
   if (mode === "claim") {
-    return { ...common, appearanceClaimId: id(request.appearanceClaimId, "appearanceClaimId"),
+    const role = request.role ?? "LEGACY";
+    if (role !== "LEGACY" && role !== "TARGET") invalid("role must be LEGACY or TARGET.");
+    return { ...common, appearanceClaimId: id(request.appearanceClaimId, "appearanceClaimId"), role,
       interaction: request.interaction === undefined ? undefined : action(request.interaction, "interaction") };
   }
   const counts = request.counts ?? {};
@@ -353,7 +357,7 @@ export const captureInBrowser = async (plan) => {
   const started = Date.now();
   const { chromium } = requireDriver("playwright-core");
   const { browser, channel } = await launch(chromium, plan.browser);
-  const operations = { navigations: 0, actions: 0, locatorQueries: 0, probes: 0, screenshots: 0 };
+  const operations = { navigations: 0, actions: 0, locatorQueries: 0, probes: 0, screenshots: 0, ...(plan.guard ? { blockedWrites: 0 } : {}) };
   try {
     const context = await browser.newContext({
       viewport: plan.viewport, deviceScaleFactor: 1, colorScheme: plan.colorScheme, reducedMotion: "reduce",
@@ -364,21 +368,40 @@ export const captureInBrowser = async (plan) => {
     context.on("page", (other) => other !== page && other.close().catch(() => undefined));
     page.setDefaultTimeout(plan.timeoutMs);
     const blocked = [];
+    let leftSignIn = false;
+    // A brokered capture acts as a real account: it stays on the operator's
+    // routes and, unless the operator allowed writes, sends no request that could
+    // change data. Navigation and every fetch count, whoever started them.
+    const { guard } = plan;
+    // A sign-in page is let through so a lost session is reported as one, not as a wrong route.
+    const allowed = (url) => url.origin === plan.origin && (!guard || AUTH_PATH.test(url.pathname) ||
+      guard.routes.some((prefix) => url.pathname === prefix || url.pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)));
     // Every top-level navigation off the origin is aborted, popups included;
     // one on the observed page refuses the capture.
     await context.route("**/*", (route) => {
       const request = route.request();
       const frame = request.isNavigationRequest() ? request.frame() : null;
-      if (frame && !frame.parentFrame() && new URL(request.url()).origin !== plan.origin) {
-        if (frame.page() === page) blocked.push(new URL(request.url()).origin);
+      if (frame && !frame.parentFrame() && !allowed(new URL(request.url()))) {
+        if (frame.page() === page) {
+          blocked.push(new URL(request.url()).origin === plan.origin ? new URL(request.url()).pathname : new URL(request.url()).origin);
+          // Read now: the aborted navigation leaves an error page behind.
+          const from = new URL(page.url());
+          leftSignIn ||= from.origin === plan.origin && AUTH_PATH.test(from.pathname) && from.pathname !== new URL(plan.url).pathname;
+        }
+        return route.abort("blockedbyclient");
+      }
+      if (guard && !guard.allowWrites && !["GET", "HEAD", "OPTIONS"].includes(request.method())) {
+        operations.blockedWrites += 1;
         return route.abort("blockedbyclient");
       }
       return route.continue();
     });
     const onOrigin = (label) => {
-      const at = new URL(page.url()).origin;
-      if (blocked.length > 0 || at !== plan.origin) {
-        refuseCapture("CAPTURE_ORIGIN_VIOLATION", `${label} navigated to '${blocked[0] ?? at}', outside the authorized origin ${plan.origin}.`);
+      const at = new URL(page.url());
+      // A sign-in page that moves on by itself (to an identity provider, say) means the session is gone.
+      if (leftSignIn) authRefusal(plan, `${label} reached a sign-in page`);
+      if (blocked.length > 0 || !allowed(at)) {
+        refuseCapture("CAPTURE_ORIGIN_VIOLATION", `${label} navigated to '${blocked[0] ?? (at.origin === plan.origin ? at.pathname : at.origin)}', outside the authorized ${guard ? "routes" : "origin"} of ${plan.origin}.`);
       }
     };
     const settle = async () => {
@@ -430,10 +453,10 @@ export const captureInBrowser = async (plan) => {
     // a control the action reveals may be absent there, or its locator may match
     // the source page's own element (a navigation's `h1`). Only the post-action
     // observation must show the claimed identity.
-    const observe = async (root, strict = true) => {
+    const observe = async (root, strict = true, observed = plan.controls) => {
       const controls = [];
       const issues = [];
-      for (const control of plan.controls) {
+      for (const control of observed) {
         const located = locate(page, control.locator);
         operations.locatorQueries += 1;
         const count = await located.count();
@@ -470,7 +493,7 @@ export const captureInBrowser = async (plan) => {
     const issues = [];
     let before;
     if (plan.interaction) {
-      before = await observe(null, false);
+      before = await observe(null, false, plan.beforeControls ?? plan.controls);
       issues.push(...before.issues);
       await act(plan.interaction.action, `interaction '${plan.interaction.id}'`);
     }
@@ -541,6 +564,11 @@ export const captureInBrowser = async (plan) => {
       limitations: main.limitations,
       durationMs: Date.now() - started,
     };
+  } catch (error) {
+    if (error.validationCode && operations.blockedWrites > 0) {
+      error.message += ` The broker blocked ${operations.blockedWrites} write request(s): this application's writes are off unless the operator sets allowWrites.`;
+    }
+    throw error;
   } finally {
     await browser.close();
   }
@@ -563,17 +591,27 @@ export const parseBrokeredPlan = (plan) => {
   return {
     ...checked, mode: "claim", counts: undefined, appearanceClaimId: id(plan.appearanceClaimId, "appearanceClaimId"),
     interaction: interaction === undefined ? undefined : { id: id(interaction?.id, "interaction.id"), action: action(interaction?.action, "interaction.action") },
+    ...(plan.beforeControls === undefined ? {} : { beforeControls: controlList(plan.beforeControls, "beforeControls") }),
   };
 };
 
-/** The agent's side of the boundary: the plan goes in, the sanitized capture comes back, no session either way. */
-export const captureThroughBroker = async (broker, plan) => {
-  const response = await fetch(new URL("/capture", broker), {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ role: "LEGACY", plan }),
-  }).catch(() => refuseCapture("CAPTURE_BROKER_UNAVAILABLE", `No session broker answers at ${broker}; the operator starts it.`));
+/**
+ * The agent's side of the boundary: the plan goes in, the sanitized capture
+ * comes back, no session either way. `token` says this client may ask; it is
+ * not a secret from the agent, only from other accounts. A broker that runs as
+ * this same account isolates nothing, so its capture is refused, not used.
+ */
+export const captureThroughBroker = async ({ url, token }, plan, role = "LEGACY") => {
+  const response = await fetch(new URL("/capture", url), {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ role, plan }),
+  }).catch(() => refuseCapture("CAPTURE_BROKER_UNAVAILABLE", `No session broker answers at ${url}; the operator starts it.`));
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error(body.message ?? `The session broker refused the capture (${body.code ?? response.status}).`), { validationCode: body.code ?? "CAPTURE_BROKER_FAILED" });
-  return { ...body, screenshot: Buffer.from(body.screenshot, "base64") };
+  if (typeof body.account !== "string" || body.account.toLowerCase() === os.userInfo().username.toLowerCase()) {
+    refuseCapture("CAPTURE_BROKER_NOT_ISOLATED", `The session broker at ${url} runs as '${body.account}', the account this engine runs as: it holds the session where the agent can read it. The operator runs it as a separate account (docs/session-broker.md).`);
+  }
+  const { account, ...captured } = body;
+  return { ...captured, screenshot: Buffer.from(captured.screenshot, "base64") };
 };
 
 /**
@@ -595,7 +633,7 @@ export const claimCapturePlan = (request, uiBehavior, claim) => {
 
 /** The `capture` block both legacy-runtime slots declare, from the decoded screenshot. */
 const captureBlock = (plan, image) => ({
-  role: LEGACY_AUTHORITY_ROLE,
+  role: plan.role === "TARGET" ? TARGET_VERIFICATION_ROLE : LEGACY_AUTHORITY_ROLE,
   mode: "element",
   rootLocator: plan.rootLocator,
   deviceScaleFactor: 1,
@@ -641,3 +679,72 @@ export const legacyAppearanceRow = ({ state, sliceId, uiBehavior, mismatch, clai
     legacyRevision: state.legacyRevision?.revision,
   },
 });
+
+const OBSERVED_FIELD = { presence: "present", visibility: "visible", text: "text", value: "value", count: "count" };
+
+/**
+ * One observation of a TARGET proof, asserted. A control's assertions are the
+ * pinned contract's own predicates for it; a control the contract does not name
+ * gets `visibility: true` only when the browser saw it visible, and is left out
+ * otherwise, because an assertion copied from what was seen proves nothing.
+ * Every predicate is then held against what was observed, as the validator
+ * will: a failing one refuses the capture, so no failing proof is written.
+ */
+const assertedObservation = (observation, required, label) => {
+  const named = (control) => required.filter((item) => item.predicate !== "url" && item.role === control.role && item.name === control.name);
+  const controls = observation.controls.flatMap((control) => {
+    const contract = named(control).map(({ predicate, expected }) => ({ predicate, expected }));
+    const assertions = contract.length > 0 ? contract : control.visible ? [{ predicate: "visibility", expected: true }] : [];
+    return assertions.length > 0 ? [{ ...control, assertions }] : [];
+  });
+  if (controls.length === 0) refuseCapture("CAPTURE_OBSERVATION_FAILED", `${label} shows no control to assert; name a control the state shows in "controls".`);
+  for (const control of controls) {
+    for (const { predicate, expected } of control.assertions) {
+      if (control[OBSERVED_FIELD[predicate]] !== expected) {
+        refuseCapture("CAPTURE_OBSERVATION_FAILED", `${label} ${control.role} '${control.name}' ${predicate} is ${JSON.stringify(control[OBSERVED_FIELD[predicate]])}, the contract expects ${JSON.stringify(expected)}.`);
+      }
+    }
+  }
+  for (const item of required) {
+    const seen = item.predicate === "url"
+      ? observation.url === item.expected
+      : controls.some((control) => control.role === item.role && control.name === item.name && control[OBSERVED_FIELD[item.predicate]] === item.expected);
+    if (!seen) refuseCapture("CAPTURE_OBSERVATION_FAILED", `${label} misses required observation '${item.id}' (${item.predicate}: ${JSON.stringify(item.expected)}).`);
+  }
+  return { ...observation, controls };
+};
+
+/** The `playwright-ui-proof/v1` TARGET proof of one capture: bound to its slice and trace, asserted by the contract. */
+export const targetProof = ({ snapshot, sliceId, traceId, uiBehavior }) => {
+  const required = (after) => (uiBehavior.requiredObservations ?? [])
+    .filter((item) => item.state === snapshot.state && (item.afterInteractionId ?? null) === after);
+  const proof = {
+    ...snapshot,
+    sliceId,
+    traceId,
+    scenarioIds: uiBehavior.scenarioIds,
+    observation: assertedObservation(snapshot.observation, required(null), snapshot.interactions.length > 0 ? "The page before the interaction" : "The captured state"),
+    interactions: snapshot.interactions.map((item) => ({ ...item, postAction: assertedObservation(item.postAction, required(item.id), `After interaction '${item.id}', the page`) })),
+  };
+  assertNoUiSecret(proof, "Captured TARGET proof");
+  return proof;
+};
+
+/**
+ * The format-20 TARGET `uiEvidence` row: the LEGACY row's shape, bound to the
+ * slice's implementation instead of the legacy revision. `result` and each
+ * interaction's outcome stay null for the agent to judge.
+ */
+export const targetAppearanceRow = ({ implementationDigest, ...input }) => {
+  const { boundTo: { legacyRevision, ...boundTo }, ...row } = legacyAppearanceRow(input);
+  const authority = visualAuthorityOf(input.state);
+  return {
+    ...row,
+    origin: "TARGET",
+    boundTo: {
+      ...boundTo,
+      implementationDigest,
+      ...(authority ? { [authority.boundToDigestField]: input.state.artifactHashes?.[authority.contextFile] } : {}),
+    },
+  };
+};

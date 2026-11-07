@@ -80,6 +80,8 @@ export {
   captureThroughBroker,
   parseBrokeredPlan,
   refuseCapture,
+  targetAppearanceRow,
+  targetProof,
   taxonomyValues,
 } from "./capture.mjs";
 export {

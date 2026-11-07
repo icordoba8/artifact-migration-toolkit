@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -16,12 +16,14 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { readBrokerConfig } from "../../src/session-broker-host.mjs";
+import { readBrokerConfig, storeIsPrivate } from "../../src/session-broker-host.mjs";
 import { captureThroughBroker, claimCapturePlan, parseBrokeredPlan, parseCaptureRequest } from "../../src/visual/index.mjs";
 
 const execFileAsync = promisify(execFile);
 const engineRoot = fileURLToPath(new URL("../..", import.meta.url));
 const CANARY = `amt-session-${randomBytes(12).toString("hex")}`;
+const TOKEN = randomBytes(24).toString("hex");
+const TOKEN_SHA256 = createHash("sha256").update(TOKEN).digest("hex");
 const suffix = randomBytes(4).toString("hex");
 const BROKER = `amtbroker${suffix}`;
 const AGENT = `amtagent${suffix}`;
@@ -47,13 +49,15 @@ const freePort = () => new Promise((resolve) => {
 
 const PAGE = `<!doctype html><html><head><title>Records</title><style>body{margin:0;font-family:Arial, sans-serif;background:#ffffff}
 main{display:flex;flex-direction:column;padding:16px;gap:12px;color:rgb(22,32,44);background:#ffffff;border:1px solid rgb(217,225,234);border-radius:4px;font-size:14px;line-height:20px;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.2);}</style></head>
-<body><main aria-label="Records"><h1>Records</h1><p class="row">One</p><p class="row">Two</p></main></body></html>`;
+<body><main aria-label="Records"><h1>Records</h1><p class="row">One</p><p class="row">Two</p>
+<button onclick="fetch('/records/delete-all',{method:'POST'}).catch(()=>{})">Delete all</button><a href="/admin">Admin</a></main></body></html>`;
 
 /** An application whose only session is an HttpOnly cookie, so a page script cannot see it either. */
 const application = async () => {
-  const controls = { maxAge: 600, revoked: false };
+  const controls = { maxAge: 600, revoked: false, writes: 0 };
   const server = http.createServer((request, response) => {
     const signedIn = !controls.revoked && (request.headers.cookie ?? "").includes(`sid=${CANARY}`);
+    if (request.method === "POST") controls.writes += 1;
     if (request.url === "/login") { response.writeHead(200, { "content-type": "text/html" }); response.end('<script>location.href="/do-login"</script>'); return; }
     if (request.url === "/do-login") {
       response.writeHead(302, { location: "/records", "set-cookie": `sid=${CANARY}; HttpOnly; Path=/; Max-Age=${controls.maxAge}` });
@@ -73,15 +77,57 @@ const plan = (origin, extra = {}) => parseCaptureRequest({
   rootLocator: "main", counts: { rows: ".row" }, controls: [{ role: "heading", name: "Records", locator: "h1" }], ...extra,
 });
 
-test("the broker refuses a store another account could read", { skip: process.platform === "win32" }, async () => {
+const ROUTES = ["/records"];
+
+test("the broker refuses a store another account could read, and any route that leaves its origin", { skip: process.platform === "win32" }, async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "amt-broker-config-"));
   await chmod(directory, 0o755);
   const file = path.join(directory, "config.json");
-  await writeFile(file, JSON.stringify({ port: 1, store: directory, applications: {} }));
+  const write = (applications, extra = {}) => writeFile(file, JSON.stringify({ port: 1, store: directory, clientTokenSha256: TOKEN_SHA256, applications, ...extra }));
+  await write({});
   await assert.rejects(readBrokerConfig(file), /must be mode 0700/);
   await chmod(directory, 0o700);
   assert.equal((await readBrokerConfig(file)).store, directory);
+  const legacy = { origin: "http://127.0.0.1:1", signInRoute: "/login", routes: ROUTES };
+  await write({ LEGACY: legacy });
+  assert.equal((await readBrokerConfig(file)).applications.LEGACY.origin, legacy.origin);
+  for (const [application, extra] of [
+    [{ ...legacy, signInRoute: "//evil.example" }],
+    [{ ...legacy, signInRoute: "/\\evil.example" }],
+    [{ ...legacy, signInRoute: "https://evil.example/login" }],
+    [{ ...legacy, routes: [] }],
+    [{ ...legacy, routes: ["//evil.example"] }],
+    [{ ...legacy, allowWrites: "yes" }],
+    [{ ...legacy, identityProviders: ["http://idp.example"] }],
+    [legacy, { clientTokenSha256: undefined }],
+  ]) {
+    await write({ LEGACY: application }, extra);
+    await assert.rejects(readBrokerConfig(file), /must be/, JSON.stringify(application));
+  }
   await rm(directory, { recursive: true, force: true });
+});
+
+test("a Windows store admits only its own account, SYSTEM and Administrators, by SID", () => {
+  const me = "S-1-5-21-1-2-3-1001";
+  assert.equal(storeIsPrivate(`O:${me}G:${me}D:PAI(A;OICI;FA;;;${me})(A;OICI;FA;;;SY)`, me), true);
+  assert.equal(storeIsPrivate(`O:BAD:P(A;OICI;FA;;;${me})(A;OICI;FA;;;S-1-5-18)(A;OICI;FA;;;BA)`, me), true);
+  assert.equal(storeIsPrivate(`O:${me}D:AI(A;OICI;FA;;;${me})(A;OICIID;0x1200a9;;;BU)`, me), false, "Users inherited");
+  assert.equal(storeIsPrivate(`O:${me}D:P(A;OICI;FA;;;${me})(A;OICI;FA;;;S-1-5-21-1-2-3-1002)`, me), false, "the agent's account");
+  assert.equal(storeIsPrivate(`O:${me}D:P(A;OICI;FA;;;WD)`, me), false, "Everyone");
+  assert.equal(storeIsPrivate(`O:${me}D:P`, me), false, "no grant at all is not a store this account can use");
+});
+
+test("a broker running as this same account is refused: it isolates nothing", async () => {
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ account: os.userInfo().username, screenshot: "" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await assert.rejects(captureThroughBroker({ url: `http://127.0.0.1:${server.address().port}`, token: TOKEN }, {}), { validationCode: "CAPTURE_BROKER_NOT_ISOLATED" });
+  } finally {
+    server.close();
+  }
 });
 
 test("a capture request cannot carry both a session file and the broker session", () => {
@@ -110,7 +156,7 @@ test("a plan crosses the boundary whole, and only what parsing accepts survives"
 });
 
 test("without a broker a capture is refused by name, not sent elsewhere", async () => {
-  await assert.rejects(captureThroughBroker(`http://127.0.0.1:${await freePort()}`, {}), { validationCode: "CAPTURE_BROKER_UNAVAILABLE" });
+  await assert.rejects(captureThroughBroker({ url: `http://127.0.0.1:${await freePort()}`, token: TOKEN }, {}), { validationCode: "CAPTURE_BROKER_UNAVAILABLE" });
 });
 
 let root;
@@ -122,7 +168,7 @@ let store;
 const stderr = [];
 
 const post = async (route, body = {}, headers = {}) => {
-  const response = await fetch(`${brokerUrl}${route}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const response = await fetch(`${brokerUrl}${route}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}`, ...headers }, body: JSON.stringify(body) });
   const text = await response.text();
   return { status: response.status, text, body: JSON.parse(text) };
 };
@@ -148,8 +194,8 @@ before(async () => {
   brokerUrl = `http://127.0.0.1:${port}`;
   const config = path.join(root, "config.json");
   await writeFile(config, JSON.stringify({
-    port, store, browser: "chrome", headless: true,
-    applications: { LEGACY: { origin: legacy.origin, signInRoute: "/login" }, TARGET: { origin: target.origin, signInRoute: "/login" } },
+    port, store, browser: "chrome", headless: true, clientTokenSha256: TOKEN_SHA256,
+    applications: { LEGACY: { origin: legacy.origin, signInRoute: "/login", routes: ROUTES }, TARGET: { origin: target.origin, signInRoute: "/login", routes: ROUTES } },
   }));
   await chmod(path.join(root, "node"), 0o755);
   await sudo("chmod", "-R", "a+rX", path.join(root, "engine"), config);
@@ -206,8 +252,31 @@ test("the agent account gets the capability and never the session", { skip: SKIP
   assert.equal(captured.status, 200, captured.text);
   assert.ok(!captured.text.includes(CANARY), "no capture field may carry the session");
   assert.ok(new URL(captured.body.url).pathname === "/records");
-  const client = await captureThroughBroker(brokerUrl, plan(legacy.origin));
+  const client = await captureThroughBroker({ url: brokerUrl, token: TOKEN }, plan(legacy.origin));
   assert.equal(client.screenshot.subarray(1, 4).toString(), "PNG");
+  assert.equal(client.capture.role, "LEGACY_AUTHORITY");
+  assert.equal(client.account, undefined, "the broker's account is checked, not passed on as evidence");
+
+  // Only a client holding the token may ask, whatever account it runs as.
+  assert.equal((await post("/status", {}, { authorization: "Bearer wrong" })).status, 401);
+  assert.equal((await post("/status", {}, { authorization: "" })).status, 401);
+  const agentAsks = await asAgent("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H", "content-type: application/json", "--data", "{}", `${brokerUrl}/status`);
+  assert.equal(agentAsks.stdout, "401");
+
+  // The test account's authority stays inside the operator's routes and writes nothing unless allowed.
+  assert.equal((await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, { route: "/admin" }) })).body.code, "CAPTURE_ORIGIN_VIOLATION");
+  const destructive = await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, { setup: [{ type: "click", target: "getByRole('button', { name: 'Delete all' })" }] }) });
+  assert.equal(destructive.status, 200, destructive.text);
+  assert.equal(destructive.body.operations.blockedWrites, 1);
+  assert.equal(legacy.controls.writes, 0, "the application never received the write");
+  const wandered = await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, { setup: [{ type: "click", target: "getByRole('link', { name: 'Admin' })" }] }) });
+  assert.equal(wandered.body.code, "CAPTURE_ORIGIN_VIOLATION", wandered.text);
+
+  // TARGET goes through the same boundary with its own session and slot.
+  assert.deepEqual((await post("/sign-in", { role: "TARGET" })).body, { state: "PRESENT" });
+  const targetCapture = await captureThroughBroker({ url: brokerUrl, token: TOKEN }, plan(target.origin), "TARGET");
+  assert.equal(targetCapture.capture.role, "TARGET_VERIFICATION");
+  assert.equal((await post("/capture", { role: "TARGET", plan: plan(legacy.origin) })).body.code, "CAPTURE_ORIGIN_VIOLATION");
 
   // Everything a client might try instead.
   const asked = plan(legacy.origin);
@@ -244,6 +313,7 @@ test("expiry is typed and one sign-in renews it", { skip: SKIP ?? false, timeout
   assert.deepEqual((await post("/status")).body.LEGACY, { state: "PRESENT" });
   const refused = await post("/capture", { role: "LEGACY", plan: plan(legacy.origin) });
   assert.equal(refused.status, 422);
+  assert.equal(refused.body.code, "CAPTURE_SESSION_EXPIRED", refused.text);
   assert.ok(!refused.text.includes(CANARY));
   assert.deepEqual(stderr.filter((line) => line.includes(CANARY)), [], "not even the broker's own log");
 });

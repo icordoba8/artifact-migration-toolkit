@@ -178,6 +178,7 @@ import {
   captureInBrowser,
   claimCapturePlan,
   parseCaptureRequest,
+  targetProof,
   validateUiRuntimeEvidence,
   visualAuthorityOf,
 } from "../../src/visual/index.mjs";
@@ -196,6 +197,7 @@ import {
   validateProtectedDecisionPolicy,
 } from "../../src/decisions/index.mjs";
 import {
+  implementationDigests,
   reconcileSliceState,
   TARGET_DIRTY_SCOPE,
 } from "../../src/slices/index.mjs";
@@ -24419,6 +24421,64 @@ browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row
     await assert.rejects(under("figma-mcp", null)(), /boundTo\.figmaContextDigest is stale/);
     await assert.rejects(under("figma-mcp", "figmaContextDigest")({ visualRows: [{ id: "VR-1", uiBehaviorId: uiBehavior.id, state: "default" }] }),
       /VISUAL_COVERAGE_MISSING: acceptance row 'VR-1' has no bound TARGET capture/);
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
+browserTest("G3: a TARGET claim capture writes the proof, PNG and row the slice validator accepts; result stays authored", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
+      classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] } });
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    const recorded = await state(fixture);
+    const root = fixture.migrationRoot;
+    const signIn = { type: "click", target: "getByRole('button', { name: 'Sign in' })" };
+    const claim = (appearanceClaimId, role, extra = {}) => captureFrame(fixture, { origin: server.origin, route: "/auth/sign-in",
+      viewport: CAPTURE_VIEWPORT, appearanceClaimId, role, ...extra });
+    await assert.rejects(claim("APP-1", "STAGING"), /role must be LEGACY or TARGET/);
+    for (const role of ["LEGACY", "TARGET"]) {
+      await claim("APP-1", role);
+      await claim("APP-2", role, { interaction: signIn });
+    }
+    await assert.rejects(claim("APP-1", "TARGET"), /CAPTURE_EXISTS: .*already records the TARGET row of claim 'APP-1'/);
+    const evidence = await readJson(path.join(root, "evidence/slice-a/result.json"));
+    const rows = evidence.uiEvidence;
+    assert.deepEqual(rows.map((row) => [row.origin, row.appearanceClaimId, row.capture.role, row.result]), [
+      ["LEGACY", "APP-1", "LEGACY_AUTHORITY", null], ["LEGACY", "APP-2", "LEGACY_AUTHORITY", null],
+      ["TARGET", "APP-1", "TARGET_VERIFICATION", null], ["TARGET", "APP-2", "TARGET_VERIFICATION", null],
+    ]);
+    const roots = { legacyRoot: fixture.legacyRoot, targetRoot: fixture.targetRoot };
+    const slice = await readJson(path.join(root, "slices/slice-a.json"));
+    assert.equal(rows[2].boundTo.implementationDigest, (await implementationDigests(slice, roots)).current);
+    assert.equal(rows[2].boundTo.legacyRevision, undefined);
+    assert.match(rows[2].reference, /evidence\/slice-a\/ui\/target\/APP-1\.proof\.json$/);
+    const proof = await readJson(path.join(fixture.targetRoot, rows[3].reference));
+    assert.deepEqual([proof.sliceId, proof.traceId, proof.scenarioIds], ["slice-a", "BR-1", ["AUTH-SCN-001"]]);
+    // The contract's own predicates, never a copy of what was seen.
+    assert.deepEqual(proof.observation.controls.find((control) => control.role === "button").assertions,
+      [{ predicate: "visibility", expected: true }, { predicate: "text", expected: "Sign in" }]);
+    assert.deepEqual(proof.interactions[0].postAction.controls[0].assertions, [{ predicate: "presence", expected: true }]);
+
+    const legacy = await readJson(path.join(root, "inventories/legacy.json"));
+    const baseline = { legacy, target: await readJson(path.join(root, "inventories/target.json")),
+      behaviorRows: (await readJson(path.join(root, "matrices/behavior-parity.json"))).rows, visualRows: null };
+    const run = (uiEvidence) => validateUiRuntimeEvidence({ evidence: { uiEvidence, uiEvidenceLimitations: [] },
+      implementation: { ...slice, traceIds: ["BR-1", "RR-1"] }, baseline, sliceId: "slice-a", state: recorded, roots, root, implementationDigests });
+    await assert.rejects(run(rows), /result must be PASS/);
+    const authored = rows.map((row) => ({ ...row, result: "PASS",
+      interactions: row.interactions.map((item) => ({ ...item, actual: "Signed in was reported.", outcome: "PASS" })) }));
+    assert.deepEqual((await run(authored)).map((item) => [item.appearanceClaimId, item.authority, item.scroll.result]),
+      [["APP-1", "TARGET_DESIGN_SYSTEM", "PASS"], ["APP-2", "TARGET_DESIGN_SYSTEM", "PASS"]]);
+    // A proof the contract would fail is refused before a byte is written.
+    const failing = { ...proof, observation: { ...proof.observation, controls: proof.observation.controls.map((control) => ({ ...control, text: "Log in" })) } };
+    assert.throws(() => targetProof({ snapshot: failing, sliceId: "slice-a", traceId: "BR-1", uiBehavior: legacy.uiBehaviors[0] }),
+      /CAPTURE_OBSERVATION_FAILED: .*'Sign in' text is "Log in", the contract expects "Sign in"/);
   } finally {
     await fixture.cleanup();
     await server.close();

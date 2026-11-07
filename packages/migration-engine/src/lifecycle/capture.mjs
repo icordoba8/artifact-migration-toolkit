@@ -7,15 +7,16 @@
  * - `frame` (designSource legacy-runtime, ASSESS_TARGET): the authority frame
  *   `<uiBehaviorId>::<state>`, its snapshot, screenshot and measurements under
  *   inventories/legacy-runtime/, added to the unpinned legacy-runtime context.
- * - `claim` (format 20, VERIFY_SLICES): the LEGACY proof and PNG of one pinned
- *   appearance claim under the active slice's evidence/, and its LEGACY
- *   uiEvidence row in that slice's result.json.
+ * - `claim` (format 20, VERIFY_SLICES): the proof and PNG of one pinned
+ *   appearance claim under the active slice's evidence/, and its uiEvidence row
+ *   in that slice's result.json, for LEGACY or (`role: "TARGET"`) the target.
  *
  * Explicit and writing. The browser runs outside the module lock; the record is
  * re-read under the lock and the write refused if anything it depends on moved.
  * Nothing is overwritten, pinned, approved, advanced or marked PASS, and a
- * refusal at any point leaves no new byte behind. TARGET verification stays the
- * agent's own capture; legacy evidence never stands in for it.
+ * refusal at any point leaves no new byte behind. A TARGET row is written only
+ * from the target's own capture, and only when it meets every predicate the
+ * pinned contract names; legacy evidence never stands in for it.
  */
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
@@ -26,6 +27,7 @@ import {
 } from "../formats/index.mjs";
 import { withUiRemediation } from "../census/index.mjs";
 import { assertPlainObject, isPlainObject, jsonBytes, portablePath } from "../shared/index.mjs";
+import { implementationDigests } from "../slices/index.mjs";
 import {
   atomicWrite,
   entryExists,
@@ -45,6 +47,8 @@ import {
   parseCaptureRequest,
   assertSessionUsable,
   refuseCapture,
+  targetAppearanceRow,
+  targetProof,
   usesVisualContract,
   validateLegacyRuntimeContext,
   visualAuthorityOf,
@@ -112,7 +116,7 @@ const framePlan = async ({ state, root, legacy, request }) => {
 };
 
 /* VERIFY_SLICES, format 20: the LEGACY half of one pinned appearance claim. */
-const claimPlan = async ({ state, root, legacy, request }) => {
+const claimPlan = async ({ state, root, legacy, request, roots }) => {
   if (!usesUiCoverage(state) || state.currentStep !== "VERIFY_SLICES" || !state.activeSlice) {
     refused(`An appearance-claim capture needs a format-20 record at VERIFY_SLICES with an active slice; this record is format ${state.formatVersion} at ${state.currentStep}.`);
   }
@@ -132,28 +136,50 @@ const claimPlan = async ({ state, root, legacy, request }) => {
       ? `Claim '${claim.id}' is observed after interaction '${claim.afterInteractionId}'; supply "interaction" {type, target, value?} that performs it. The inventory says what the interaction does, not how to drive it.`
       : `Claim '${claim.id}' is an initial-state claim; "interaction" is not allowed.`);
   }
+  const { role } = request;
   const resultFile = `evidence/${slice}/result.json`;
   const result = await readObject(path.join(root, resultFile), `Evidence for ${slice}`, {});
   if (result.uiEvidence !== undefined && !Array.isArray(result.uiEvidence)) refused(`${resultFile} uiEvidence is authored but is not an array.`);
-  if ((result.uiEvidence ?? []).some((row) => isPlainObject(row) && row.origin === "LEGACY" && row.appearanceClaimId === claim.id)) {
-    refuseCapture("CAPTURE_EXISTS", `${resultFile} already records the LEGACY row of claim '${claim.id}'; the screenshot budget allows one per origin and claim.`);
+  if ((result.uiEvidence ?? []).some((row) => isPlainObject(row) && (row.origin ?? "TARGET") === role && row.appearanceClaimId === claim.id)) {
+    refuseCapture("CAPTURE_EXISTS", `${resultFile} already records the ${role} row of claim '${claim.id}'; the screenshot budget allows one per origin and claim.`);
   }
-  const directory = `evidence/${slice}/ui/legacy`;
+  const directory = `evidence/${slice}/ui/${role.toLowerCase()}`;
   await absent(root, [`${directory}/${claim.id}.proof.json`, `${directory}/${claim.id}.png`]);
   const target = await withUiRemediation(root, state, await readObject(path.join(root, initialArtifacts.targetInventory), "Target inventory", {}), "uiMismatches");
+  const plan = claimCapturePlan(request, owner, claim);
+  let bound = {};
+  if (role === "TARGET") {
+    // Every predicate the contract checks in this proof needs its control observed;
+    // a format-20 claim pins each expected-true one, so the claims are the controls.
+    const unpinned = (owner.requiredObservations ?? []).find((item) => item.state === claim.state && item.predicate !== "url" && item.expected === false);
+    if (unpinned) refuseCapture("CAPTURE_REQUEST_INVALID", `Required observation '${unpinned.id}' expects an absent control, which no pinned claim locates; the engine capture cannot observe it.`);
+    // shortcut: expected-false observations are refused above; give them a locator in the contract when a consumer needs one.
+    const pinned = (after) => owner.requiredAppearance
+      .filter((item) => item.state === claim.state && (item.afterInteractionId ?? null) === after)
+      .map(({ role: controlRole, name, locator }) => ({ role: controlRole, name, locator }));
+    const extra = (controls) => [...controls, ...request.controls.filter((control) => !controls.some((item) => item.locator === control.locator))];
+    plan.controls = extra(pinned(claim.afterInteractionId ?? null));
+    if (claim.afterInteractionId) plan.beforeControls = extra(pinned(null));
+    const implementation = await readObject(path.join(root, `slices/${slice}.json`), `Slice ${slice}`, {});
+    bound = {
+      implementationDigest: (await implementationDigests({ changedFiles: implementation.changedFiles ?? [] }, roots)).current,
+      traceId: parity.rows.find((row) => row?.behaviorId === owner.behaviorId && traceIds.includes(row.id)).id,
+    };
+  }
   return {
-    plan: claimCapturePlan(request, owner, claim),
+    plan,
     claim,
     uiBehavior: owner,
     mismatch: (target.uiMismatches ?? []).find((row) => row?.uiBehaviorId === owner.id),
     result,
     resultFile,
     directory,
-    fingerprint: JSON.stringify([state.currentStep, slice, state.legacyRevision, state.completedSlices ?? []]),
+    bound,
+    fingerprint: JSON.stringify([state.currentStep, slice, state.legacyRevision, state.completedSlices ?? [], bound.implementationDigest ?? null]),
   };
 };
 
-const prepare = async ({ targetRoot, moduleName, request }) => {
+const prepare = async ({ targetRoot, moduleName, request, roots }) => {
   const { state, root, pendingWrite } = await readState(targetRoot, moduleName);
   if (pendingWrite) refused("An advance is in flight; recover the record before capturing.");
   if (state.status !== "ACTIVE") refused(`The record is ${state.status}; evidence is captured only for an ACTIVE checkpoint.`);
@@ -170,7 +196,7 @@ const prepare = async ({ targetRoot, moduleName, request }) => {
   // The validator's own view: an adopted UI remediation replaces the UI rows.
   const legacy = await withUiRemediation(root, state,
     assertPlainObject(await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory"), "Legacy inventory"), "uiBehaviors");
-  const planned = await (request.mode === "frame" ? framePlan : claimPlan)({ state, root, legacy, request });
+  const planned = await (request.mode === "frame" ? framePlan : claimPlan)({ state, root, legacy, request, roots });
   return { ...planned, state, root, legacy };
 };
 
@@ -268,12 +294,15 @@ const writeFrame = async ({ targetRoot, prepared, captured, publish }) => {
 };
 
 const writeClaim = async ({ targetRoot, prepared, captured, publish }) => {
-  const { plan, state, root, claim, uiBehavior, mismatch, result, resultFile, directory } = prepared;
+  const { plan, state, root, claim, uiBehavior, mismatch, result, resultFile, directory, bound } = prepared;
+  const target = plan.role === "TARGET";
   const asEvidence = (entry) => ({ ...entry, reference: portablePath(path.relative(targetRoot, path.join(root, entry.reference))) });
-  const proof = asEvidence(await publish.file(`${directory}/${claim.id}.proof.json`, jsonBytes(captured.snapshot)));
+  // Built, and refused if the contract fails, before the first byte is written.
+  const snapshot = target ? targetProof({ snapshot: captured.snapshot, sliceId: state.activeSlice, traceId: bound.traceId, uiBehavior }) : captured.snapshot;
+  const proof = asEvidence(await publish.file(`${directory}/${claim.id}.proof.json`, jsonBytes(snapshot)));
   const screenshot = asEvidence(await publish.file(`${directory}/${claim.id}.png`, captured.screenshot));
-  const row = legacyAppearanceRow({ state, sliceId: state.activeSlice, uiBehavior, mismatch, claim, plan, captured,
-    files: { snapshot: proof, screenshot } });
+  const input = { state, sliceId: state.activeSlice, uiBehavior, mismatch, claim, plan, captured, files: { snapshot: proof, screenshot } };
+  const row = target ? targetAppearanceRow({ ...input, implementationDigest: bound.implementationDigest }) : legacyAppearanceRow(input);
   await replaceDocument(targetRoot, path.join(root, resultFile), { ...result, uiEvidence: [...(result.uiEvidence ?? []), row] });
   return {
     files: [proof, screenshot],
@@ -281,10 +310,12 @@ const writeClaim = async ({ targetRoot, prepared, captured, publish }) => {
     observed: { claim: claim.id, afterInteractionId: claim.afterInteractionId ?? null },
     limitations: captured.limitations,
     unresolved: [
-      { field: "result", count: 1, need: "PASS only after confirming the LEGACY observation shows what the claim states; the capture observed it, it did not judge it." },
-      claim.afterInteractionId && { field: "interactions[].actual, interactions[].outcome", count: 2, need: "What the legacy interaction actually did, and PASS when that matches its expected outcome." },
+      { field: "result", count: 1, need: `PASS only after confirming the ${plan.role} observation shows what the claim states; the capture observed it, it did not judge it.` },
+      claim.afterInteractionId && { field: "interactions[].actual, interactions[].outcome", count: 2, need: `What the ${plan.role.toLowerCase()} interaction actually did, and PASS when that matches its expected outcome.` },
     ].filter(Boolean),
-    next: `Capture the TARGET row for claim '${claim.id}' at the same locator, compare ${captured.image.width}x${captured.image.height}, matte and color scheme; validation compares the two.`,
+    next: target
+      ? `Complete the row, then validate the slice: it re-checks the proof, the bindings and the LEGACY/TARGET pair of claim '${claim.id}'.`
+      : `Capture the TARGET row for claim '${claim.id}' with role TARGET at the same locator, compare ${captured.image.width}x${captured.image.height}, matte and color scheme; validation compares the two.`,
   };
 };
 
@@ -296,9 +327,11 @@ export const captureLegacyRuntimeEvidence = async ({ registryPath, moduleName, r
   const parsed = parseCaptureRequest(request);
   const { registryData, resolved } = await readContext({ registryPath, moduleName });
   const { targetRoot } = registryData;
-  const input = { targetRoot, moduleName: resolved.canonical, request: parsed };
+  const input = { targetRoot, moduleName: resolved.canonical, request: parsed, roots: { legacyRoot: registryData.legacyRoot, targetRoot } };
   const before = await prepare(input);
-  const captured = await (parsed.session ? captureThroughBroker(await sessionBrokerOf(targetRoot), before.plan) : captureInBrowser(before.plan));
+  const captured = await (parsed.session
+    ? captureThroughBroker(await sessionBrokerOf(targetRoot), before.plan, parsed.role ?? "LEGACY")
+    : captureInBrowser(before.plan));
   return withModuleLock(targetRoot, resolved.canonical, async () => {
     const prepared = await prepare(input);
     if (prepared.fingerprint !== before.fingerprint) {

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -548,6 +549,35 @@ test("a file another account owns and this one cannot write authorizes the start
     assert.match(row(await runReal({ registryPath: space.registryPath, moduleName: "orders", action: "ensure" }), "LEGACY").reason, /writable by the account/);
   } finally {
     await sudo("rm", "-f", file);
+  }
+});
+
+test("the session broker is asked with the client token, and a loose spelling of it is refused", async () => {
+  const space = await twoApps({});
+  await launch(space.legacy, space.port);
+  await launch(space.target, space.sibling);
+  const seen = [];
+  const broker = http.createServer((request, response) => {
+    seen.push(request.headers.authorization);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ LEGACY: { state: "PRESENT" }, TARGET: { state: "NONE" } }));
+  });
+  await new Promise((resolve) => broker.listen(0, "127.0.0.1", resolve));
+  try {
+    const tokenFile = path.join(space.root, "broker.token");
+    await writeFile(tokenFile, "client-token\n");
+    const applications = { LEGACY: application("../legacy-app", space.port), TARGET: application("../target-app", space.sibling) };
+    const url = `http://127.0.0.1:${broker.address().port}`;
+    await space.write({ version: 1, namespace: OWN_NAMESPACE, sessionBroker: { url, tokenFile }, applications });
+    const report = await space.runAppRuntime("check");
+    assert.deepEqual(report.sessions, { LEGACY: { state: "PRESENT" }, TARGET: { state: "NONE" } });
+    assert.deepEqual(seen, ["Bearer client-token"]);
+    for (const sessionBroker of [url, { url, tokenFile: "broker.token" }, { url: "http://localhost:1", tokenFile }, { url, tokenFile, extra: 1 }]) {
+      await space.write({ version: 1, namespace: OWN_NAMESPACE, sessionBroker, applications });
+      assert.match((await space.runAppRuntime("check")).reason, /sessionBroker must be exactly/);
+    }
+  } finally {
+    broker.close();
   }
 });
 

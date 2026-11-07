@@ -9,16 +9,21 @@
  * reports: never a cookie, a stored value or a page body. Running this as the
  * agent's own account isolates nothing (docs/session-broker.md).
  *
- * `config.json`, owned by that account: {port, store, browser?, headless?,
- * applications: {LEGACY: {origin, signInRoute}, TARGET: {origin, signInRoute}}}.
- * `headless` exists for the automated test; a real sign-in needs a window.
+ * `config.json`, owned by that account: {port, store, clientTokenSha256, browser?,
+ * headless?, applications: {LEGACY|TARGET: {origin, signInRoute, routes,
+ * allowWrites?}}}. A client proves it may ask with the token whose SHA-256 is
+ * configured; a capture stays inside `routes` and sends no write request unless
+ * `allowWrites` is true. `headless` exists for the automated test; a real
+ * sign-in needs a window.
  */
+import { createHash, timingSafeEqual } from "node:crypto";
 import { stat } from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 
-import { assertPlainObject, isPlainObject } from "./shared/index.mjs";
+import { assertPlainObject, execFileAsync, isPlainObject } from "./shared/index.mjs";
 import { atomicWrite, readJson, readOptionalJson } from "./store/index.mjs";
 import { assertSessionUsable, AUTH_PATH, captureInBrowser, parseBrokeredPlan, refuseCapture } from "./visual/index.mjs";
 
@@ -47,22 +52,28 @@ const sessionStatus = async (config, role) => {
   }
 };
 
+const within = (pathname, routes) => routes.some((prefix) => pathname === prefix || pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
+
 const capture = async (config, { role, plan }) => {
   const application = applicationOf(config, role);
   const checked = parseBrokeredPlan(plan);
   if (checked.origin !== application.origin) refuseCapture("CAPTURE_ORIGIN_VIOLATION", `Role ${role} is served at ${application.origin}, not ${checked.origin}.`);
+  if (!within(new URL(checked.url).pathname, application.routes)) refuseCapture("CAPTURE_ORIGIN_VIOLATION", `'${checked.route}' is outside the routes the operator opened for ${role}.`);
   const { state } = await sessionStatus(config, role);
   if (state === "NONE") refuseCapture("CAPTURE_AUTH_REQUIRED", `No session is stored for ${role}; the operator signs in through the broker once.`);
   if (state === "EXPIRED") refuseCapture("CAPTURE_SESSION_EXPIRED", `The stored ${role} session has expired; the operator signs in through the broker again.`);
-  const { screenshot, image, ...report } = await captureInBrowser({ ...checked, storageState: sessionFile(config, role), browser: config.browser });
-  return { ...report, image: { width: image.width, height: image.height }, screenshot: screenshot.toString("base64") };
+  const { screenshot, image, ...report } = await captureInBrowser({
+    ...checked, role, storageState: sessionFile(config, role), browser: config.browser,
+    guard: { routes: application.routes, allowWrites: application.allowWrites === true },
+  });
+  return { ...report, account: os.userInfo().username, image: { width: image.width, height: image.height }, screenshot: screenshot.toString("base64") };
 };
 
 const signingIn = new Set();
 
 /** First sign-in and renewal are one path: the operator types into a browser only this account can reach. */
 const signIn = async (config, { role }) => {
-  const { origin, signInRoute } = applicationOf(config, role);
+  const { origin, signInRoute, identityProviders = [] } = applicationOf(config, role);
   if (signingIn.has(role)) refuseCapture("BROKER_BUSY", `A ${role} sign-in is already open.`);
   signingIn.add(role);
   let browser;
@@ -70,6 +81,9 @@ const signIn = async (config, { role }) => {
     const { chromium } = createRequire(import.meta.url)("playwright-core");
     browser = await chromium.launch({ headless: config.headless === true, ...(config.browser ? { channel: config.browser } : {}) });
     const context = await browser.newContext();
+    // The sign-in window goes to this origin and the identity providers the operator named, nowhere else.
+    await context.route("**/*", (route) => (route.request().isNavigationRequest() && !route.request().frame().parentFrame() &&
+      ![origin, ...identityProviders].includes(new URL(route.request().url()).origin) ? route.abort("blockedbyclient") : route.continue()));
     const page = await context.newPage();
     await page.goto(new URL(signInRoute, origin).href);
     // Leaving the sign-in page on this origin is the only proof: its pre-auth cookies are not a session.
@@ -110,6 +124,9 @@ const serveBroker = async (config) => {
     // A web page cannot pass these three: this is not an API for browsers.
     if (request.headers.host !== host) return send(421, { code: "WRONG_HOST" });
     if (request.headers.origin !== undefined || !/^application\/json\b/.test(request.headers["content-type"] ?? "")) return send(403, { code: "BROKER_REQUEST_REFUSED" });
+    // Loopback is every local account; the token is what this client was given.
+    const offered = createHash("sha256").update(/^Bearer (\S+)$/.exec(request.headers.authorization ?? "")?.[1] ?? "").digest();
+    if (!timingSafeEqual(offered, config.clientToken)) return send(401, { code: "BROKER_CLIENT_UNAUTHORIZED" });
     const route = request.method === "POST" ? ROUTES[request.url] : undefined;
     if (!route) return send(404, { code: "BROKER_ROUTE_UNKNOWN" });
     try {
@@ -130,22 +147,50 @@ const serveBroker = async (config) => {
   return server;
 };
 
+/**
+ * Whether a Windows DACL, as SDDL, lets only this account, SYSTEM and
+ * Administrators in. SIDs, not names: names are localized. Administrators can
+ * take any file anyway, and UAC keeps that group deny-only in the agent's token.
+ */
+export const storeIsPrivate = (sddl, ownSid) => {
+  const dacl = sddl.slice(sddl.indexOf("D:"));
+  const allowed = [...dacl.matchAll(/\(([^)]*)\)/g)].map(([, ace]) => ace.split(";")).filter(([type]) => type === "A");
+  return allowed.length > 0 && allowed.every((ace) => [ownSid, "SY", "BA", "S-1-5-18", "S-1-5-32-544"].includes(ace[5]));
+};
+
+const windowsStorePrivate = async (store) => {
+  const own = (await execFileAsync("whoami", ["/user", "/fo", "csv", "/nh"], { windowsHide: true })).stdout.trim().split(",").at(-1).replaceAll('"', "");
+  // ConstrainedLanguage: a cmdlet, a property and ConvertTo-Json only.
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+    `Get-Acl -LiteralPath '${store.replaceAll("'", "''")}' | Select-Object Sddl | ConvertTo-Json -Compress`], { windowsHide: true, timeout: 30_000 });
+  return storeIsPrivate(JSON.parse(stdout).Sddl, own);
+};
+
 export const readBrokerConfig = async (file) => {
   const config = assertPlainObject(await readJson(file, "Session broker configuration"), "Session broker configuration");
-  if (!Number.isInteger(config.port) || typeof config.store !== "string" || !path.isAbsolute(config.store) || !isPlainObject(config.applications)) {
-    throw new Error("The broker configuration must be {port, store (absolute), applications}.");
+  if (!Number.isInteger(config.port) || typeof config.store !== "string" || !path.isAbsolute(config.store) || !isPlainObject(config.applications) ||
+      !/^[0-9a-fA-F]{64}$/.test(config.clientTokenSha256 ?? "")) {
+    throw new Error("The broker configuration must be {port, store (absolute), clientTokenSha256 (hex SHA-256 of the client token), applications}.");
   }
+  const PATH = /^\/(?![/\\])[^?#\s\\]*$/;
   for (const [role, application] of Object.entries(config.applications)) {
-    if (!ROLES.includes(role) || !isPlainObject(application) || new URL(application.origin).origin !== application.origin || !application.signInRoute?.startsWith("/")) {
-      throw new Error(`applications.${role} must be {origin, signInRoute}.`);
+    const origin = URL.canParse(application?.origin) ? new URL(application.origin).origin : null;
+    // A route is a path on this origin: `//host` and `/\host` are other hosts to a browser.
+    if (!ROLES.includes(role) || !isPlainObject(application) || origin !== application.origin || !PATH.test(application.signInRoute ?? "") ||
+        new URL(application.signInRoute, origin).origin !== origin || !Array.isArray(application.routes) || application.routes.length === 0 ||
+        !application.routes.every((route) => PATH.test(route ?? "")) || !["undefined", "boolean"].includes(typeof application.allowWrites) ||
+        !(application.identityProviders === undefined || (Array.isArray(application.identityProviders) &&
+          application.identityProviders.every((provider) => URL.canParse(provider) && new URL(provider).origin === provider && new URL(provider).protocol === "https:")))) {
+      throw new Error(`applications.${role} must be {origin, signInRoute, routes: [path prefix, ...], allowWrites?, identityProviders?: [https origin, ...]}, every path on that origin.`);
     }
   }
-  // shortcut: Windows ACLs are not read here; docs/session-broker.md sets and verifies them, read them here if that step proves skippable.
-  if (process.platform !== "win32") {
+  if (process.platform === "win32") {
+    if (!(await windowsStorePrivate(config.store))) throw new Error(`The store '${config.store}' must grant access only to this account, SYSTEM and Administrators.`);
+  } else {
     const { mode, uid } = await stat(config.store);
     if ((mode & 0o077) !== 0 || uid !== process.getuid()) throw new Error(`The store '${config.store}' must be mode 0700 and owned by this account.`);
   }
-  return config;
+  return { ...config, clientToken: Buffer.from(config.clientTokenSha256, "hex") };
 };
 
 export const runSessionBroker = async ([file]) => {
