@@ -312,6 +312,7 @@ const writeClaim = async ({ targetRoot, prepared, captured, publish }) => {
     unresolved: [
       { field: "result", count: 1, need: `PASS only after confirming the ${plan.role} observation shows what the claim states; the capture observed it, it did not judge it.` },
       claim.afterInteractionId && { field: "interactions[].actual, interactions[].outcome", count: 2, need: `What the ${plan.role.toLowerCase()} interaction actually did, and PASS when that matches its expected outcome.` },
+      target && visualAuthorityOf(state) && { field: "visualRowId", count: 1, need: "The visual acceptance row this capture answers, when one covers this behavior and state." },
     ].filter(Boolean),
     next: target
       ? `Complete the row, then validate the slice: it re-checks the proof, the bindings and the LEGACY/TARGET pair of claim '${claim.id}'.`

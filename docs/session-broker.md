@@ -83,6 +83,8 @@ so loudly if that cleanup fails.
     if ($LASTEXITCODE -ne 0) { throw 'icacls could not protect the directory.' }
     tar -xzf $candidate -C $root
     if ($LASTEXITCODE -ne 0) { throw 'The candidate archive did not extract.' }
+    # A path without spaces keeps the runas command line free of nested quotes.
+    Copy-Item -LiteralPath (Get-Command node).Source -Destination "$root\node.exe"
     $password = Read-Host -AsSecureString "Password for $account (keep it out of any file)"
     New-LocalUser -Name $account -Password $password -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
     $created = $true
@@ -134,10 +136,11 @@ sign-in leaves its origin.
 
 The `amt-broker` password is typed here, each time. Never use
 `runas /savecred`: it stores the credential where the agent's account can
-replay it. `<bundle>` is the one directory the archive extracted.
+replay it. `<version>` is the candidate's, as in the directory the archive
+extracted (`artifact-migration-tools-1.7.0` for 1.7.0).
 
 ```powershell
-runas /user:amt-broker "\"C:\Program Files\nodejs\node.exe\" C:\ProgramData\amt-session-broker\<bundle>\packages\migration-engine\src\session-broker.mjs C:\ProgramData\amt-session-broker\config.json"
+runas /user:amt-broker "C:\ProgramData\amt-session-broker\node.exe C:\ProgramData\amt-session-broker\artifact-migration-tools-<version>\packages\migration-engine\src\session-broker.mjs C:\ProgramData\amt-session-broker\config.json"
 ```
 
 It refuses to start if the store admits anyone but its account, SYSTEM and
