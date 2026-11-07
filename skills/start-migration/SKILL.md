@@ -1301,7 +1301,7 @@ this engine in the same namespace.
 | --- | --- | --- |
 | `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. |
 | `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | Continue with an authorized session if the operator has supplied one; otherwise record the gap as below. Never type or request a credential. |
-| `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none. | Report the row once. A `log` path is the operator's; do not paste it. |
+| `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
 | `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address. | Report it. Never reuse it, stop it or capture from it. |
 | `IDENTITY_UNPROVEN` | It answers, but no inspectable local process holds it, such as a forwarded port. | Report it; treat it as `WRONG_APP`. |
 | `WRONG_NAMESPACE` | The engine runs in a different namespace from the applications. Nothing was probed. | Run the engine where the configuration says. |
@@ -1313,7 +1313,10 @@ check, and once it is corrected a normal status-first resume continues.
 
 The authority is `.artifact-migration-tools/runtime-apps.json` in the target
 root, written by the operator, kept out of Git (a tracked copy is refused) and
-never taken from a migration record, an application response or a tool argument:
+never taken from a migration record, an application response or a tool argument.
+A `start` is honored only when that file is owned by another account and this
+engine's account cannot write it: a file you could have written grants nothing.
+Never change its ownership or permissions; that is the operator's step:
 
 ```json
 {

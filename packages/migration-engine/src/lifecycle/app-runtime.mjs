@@ -19,7 +19,8 @@
  */
 import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
-import { open, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath, stat } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -155,6 +156,40 @@ const killTree = async (pid) => {
   signal("SIGKILL");
 };
 
+/** The account this engine runs as, in the spelling Windows ACLs use (`DOMAIN\\user`). */
+const windowsAccount = async () => (await execFileAsync("whoami", [], { windowsHide: true })).stdout.trim().toLowerCase();
+
+/**
+ * Start authority is a file this account neither owns nor can write. The agent
+ * runs as this account, so a file it can write is a file it could have written:
+ * it would grant itself execution outside its own sandbox. An owner can always
+ * make its file writable again, so ownership counts too. The verdict is about
+ * the open handle the configuration was read from, so a swap cannot borrow it.
+ * shortcut: root, sudo or an administrator token defeats this, as it defeats any same-host boundary (docs/session-broker.md).
+ */
+const configAuthority = async (file, handle) => {
+  let mine;
+  let writable;
+  if (process.platform === "win32") {
+    // ConstrainedLanguage: a cmdlet and Select-Object only. A path is quoted the PowerShell way.
+    const { Owner } = JSON.parse(await powershell(`Get-Acl -LiteralPath '${file.replaceAll("'", "''")}' | Select-Object Owner | ConvertTo-Json -Compress`));
+    mine = String(Owner).toLowerCase() === await windowsAccount();
+    writable = await open(file, "r+").then(async (other) => { await other.close(); return true; }, (error) => {
+      if (error.code === "EACCES" || error.code === "EPERM") return false;
+      throw error;
+    });
+    // shortcut: Windows reads an ACL by path only; a file swapped away and back between these reads goes unseen. Move the authority out of the agent's tree if that matters.
+    if ((await handle.stat({ bigint: true })).ino !== (await stat(file, { bigint: true })).ino) return `${APP_RUNTIME_CONFIG} changed while it was checked.`;
+  } else {
+    const { uid, mode } = await handle.stat();
+    mine = uid === process.getuid();
+    // Without reading ACLs, any group or other write bit counts as writable here.
+    writable = (mode & 0o022) !== 0;
+  }
+  if (!writable && !mine) return null;
+  return `${APP_RUNTIME_CONFIG} is ${mine ? "owned" : "writable"} by the account this engine runs as, which is the agent's: a file the agent can write cannot authorize starting a process. The operator makes it owned by another account and read-only here, or starts the application.`;
+};
+
 const hostNamespace = () =>
   process.platform === "linux" && /microsoft/i.test(os.release()) ? "wsl" : process.platform;
 
@@ -164,6 +199,7 @@ const hostSystem = {
   listeners: (port) => (process.platform === "win32" ? windowsListeners(port) : posixListeners(port)).catch(() => null),
   processStart,
   killTree,
+  configAuthority,
 };
 
 /**
@@ -292,12 +328,17 @@ const parseApplication = async (role, value, targetRoot) => {
 };
 
 /** The trust boundary. Anything short of a local, well-formed file is a refusal with a reason, never a default. */
-const readConfiguration = async (targetRoot) => {
+const readConfiguration = async (targetRoot, system = hostSystem) => {
   const file = path.join(targetRoot, APP_RUNTIME_CONFIG);
+  let handle;
   try {
     await assertSecurePath(targetRoot, file);
-    const document = await readOptionalJson(file, "Application runtime configuration");
-    if (document === null) throw new Error(`${APP_RUNTIME_CONFIG} does not exist; the operator creates it. Its port numbers come from the project, never from a migration record.`);
+    handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error) => {
+      if (error.code === "ENOENT") throw new Error(`${APP_RUNTIME_CONFIG} does not exist; the operator creates it. Its port numbers come from the project, never from a migration record.`);
+      throw error;
+    });
+    let document;
+    try { document = JSON.parse(await handle.readFile("utf8")); } catch { throw new Error(`${APP_RUNTIME_CONFIG} is not valid JSON.`); }
     const tracked = await execFileAsync("git", ["-C", targetRoot, "ls-files", "--error-unmatch", "--", APP_RUNTIME_CONFIG]).then(() => true, () => false);
     if (tracked) throw new Error(`${APP_RUNTIME_CONFIG} is tracked by Git; authority to start processes must stay local, so a clone cannot grant it.`);
     assertPlainObject(document, "Application runtime configuration");
@@ -316,9 +357,16 @@ const readConfiguration = async (targetRoot) => {
     if (document.sessionBroker !== undefined && !/^http:\/\/127\.0\.0\.1:\d+$/.test(document.sessionBroker)) {
       throw new Error("sessionBroker must be exactly http://127.0.0.1:<port>.");
     }
-    return { namespace: document.namespace, sessionBroker: document.sessionBroker, applications };
+    const refusal = applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
+    return {
+      namespace: document.namespace,
+      sessionBroker: document.sessionBroker,
+      applications: refusal ? applications.map(({ start, ...app }) => ({ ...app, startRefusal: refusal })) : applications,
+    };
   } catch (error) {
     return { problem: error.message };
+  } finally {
+    await handle?.close();
   }
 };
 
@@ -419,7 +467,7 @@ const ensureApplication = async (targetRoot, app, system) => {
     return settled;
   }
   if (row.occupied) return row;
-  return app.start ? startApplication(targetRoot, app, system) : { ...row, reason: `${row.reason} Its configuration authorizes no start.` };
+  return app.start ? startApplication(targetRoot, app, system) : { ...row, reason: `${row.reason} ${app.startRefusal ?? "Its configuration authorizes no start."}` };
 };
 
 const publicRow = ({ occupied, ...row }, app) => ({
@@ -427,7 +475,8 @@ const publicRow = ({ occupied, ...row }, app) => ({
 });
 
 /** `check` and `ensure` over the configured applications, `stop` over the toolkit's own. */
-export const runAppRuntime = async ({ registryPath, moduleName, action = "check", system = hostSystem }) => {
+export const runAppRuntime = async ({ registryPath, moduleName, action = "check", system: injected = {} }) => {
+  const system = { ...hostSystem, ...injected };
   if (!APP_RUNTIME_ACTIONS.includes(action)) throw new Error(`Unknown application runtime action '${action}'; use ${APP_RUNTIME_ACTIONS.join(", ")}.`);
   const { registryData, resolved } = await readContext({ registryPath, moduleName });
   const { targetRoot } = registryData;
@@ -447,7 +496,7 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
 
   const notRequired = await requirement(targetRoot, resolved.canonical);
   if (notRequired) return { ...base, required: false, state: "NOT_REQUIRED", reason: notRequired, applications: [] };
-  const configuration = await readConfiguration(targetRoot);
+  const configuration = await readConfiguration(targetRoot, system);
   if (configuration.problem) {
     return { ...base, required: true, state: "CONFIGURATION_MISSING", reason: configuration.problem, configFile: APP_RUNTIME_CONFIG, applications: [] };
   }
