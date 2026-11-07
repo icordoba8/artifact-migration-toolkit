@@ -77,7 +77,11 @@ export {
   parseLocator,
   assertSessionUsable,
   AUTH_PATH,
+  captureThroughBroker,
+  parseBrokeredPlan,
   refuseCapture,
+  targetAppearanceRow,
+  targetProof,
   taxonomyValues,
 } from "./capture.mjs";
 export {

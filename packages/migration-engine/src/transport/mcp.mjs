@@ -520,7 +520,7 @@ const TOOLS = [
         request: {
           type: "object",
           description:
-            "{origin, route, viewport {width,height}, controls? [{role,name,locator}], setup? [{type,target,value?}], colorScheme?, matte?, browser?, storageState?, timeoutMs?} plus either {uiBehaviorId, state, rootLocator, counts {name: locator}} for a frame or {appearanceClaimId, interaction?} for a claim.",
+            "{origin, route, viewport {width,height}, controls? [{role,name,locator}], setup? [{type,target,value?}], colorScheme?, matte?, browser?, storageState?, session?, timeoutMs?} plus either {uiBehaviorId, state, rootLocator, counts {name: locator}} for a frame or {appearanceClaimId, interaction?, role?: LEGACY|TARGET} for a claim.",
         },
       },
     },

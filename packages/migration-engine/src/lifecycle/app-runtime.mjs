@@ -20,7 +20,7 @@
 import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { constants } from "node:fs";
-import { open, realpath, stat } from "node:fs/promises";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +35,7 @@ import {
   removeDurably,
   statePathFor,
 } from "../store/index.mjs";
-import { AUTH_PATH } from "../visual/index.mjs";
+import { AUTH_PATH, refuseCapture } from "../visual/index.mjs";
 import { readContext } from "./context.mjs";
 import { withModuleLock } from "./lock.mjs";
 
@@ -354,9 +354,15 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
     for (const role of ROLES.filter((name) => document.applications[name])) {
       applications.push(await parseApplication(role, document.applications[role], targetRoot));
     }
+    const broker = document.sessionBroker;
+    if (broker !== undefined && (!isPlainObject(broker) || Object.keys(broker).length !== 2 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(broker.url) ||
+        typeof broker.tokenFile !== "string" || !path.isAbsolute(broker.tokenFile))) {
+      throw new Error("sessionBroker must be exactly {url: http://127.0.0.1:<port>, tokenFile: <absolute path to the client token>}.");
+    }
     const refusal = applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
     return {
       namespace: document.namespace,
+      sessionBroker: document.sessionBroker,
       applications: refusal ? applications.map(({ start, ...app }) => ({ ...app, startRefusal: refusal })) : applications,
     };
   } catch (error) {
@@ -364,6 +370,24 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
   } finally {
     await handle?.close();
   }
+};
+
+/** Where the session broker listens and the token this client asks with, for a capture that asked for its session. */
+export const sessionBrokerOf = async (targetRoot) => {
+  const { problem, sessionBroker } = await readConfiguration(targetRoot);
+  if (problem || !sessionBroker) refuseCapture("CAPTURE_BROKER_UNCONFIGURED", `No session broker is configured in ${APP_RUNTIME_CONFIG}${problem ? `: ${problem}` : "."}`);
+  const token = (await readFile(sessionBroker.tokenFile, "utf8").catch(() => "")).trim();
+  if (!token) refuseCapture("CAPTURE_BROKER_UNCONFIGURED", `The session broker client token '${sessionBroker.tokenFile}' is missing or empty.`);
+  return { url: sessionBroker.url, token };
+};
+
+/** Each role's session word, so an AUTH_REQUIRED row says whether a capture can continue. */
+const sessionStates = async (targetRoot) => {
+  const broker = await sessionBrokerOf(targetRoot).catch(() => null);
+  const response = broker && await fetch(new URL("/status", broker.url), {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${broker.token}` }, body: "{}", signal: AbortSignal.timeout(5_000),
+  }).catch(() => null);
+  return response?.ok ? response.json() : "UNAVAILABLE";
 };
 
 /** A finished migration, and one whose closed discovery found no visible UI, have nothing to observe. The template seeds `hasVisibleUi: false`, so before that it means nothing. */
@@ -504,5 +528,5 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
     : await inspectOrEnsure();
   const states = applications.map((row) => row.state);
   const state = ["CONFIGURATION_MISSING", ...STATE_RANK].find((name) => states.includes(name));
-  return { ...base, required: true, state, applications };
+  return { ...base, required: true, state, applications, ...(configuration.sessionBroker ? { sessions: await sessionStates(targetRoot) } : {}) };
 };

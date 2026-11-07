@@ -68,6 +68,7 @@ const FACADES = {
   "cli/toolkit-identity.mjs": { bin: "artifact-migration-toolkit", from: ["transport/index.mjs"], impl: ["transport/toolkit-identity.mjs"] },
   // The signer service is started by the OS service manager, not a package bin.
   "operator-signer-service.mjs": { from: ["operator-signer-host.mjs"], impl: ["operator-signer-host.mjs"] },
+  "session-broker.mjs": { from: ["session-broker-host.mjs"], impl: ["session-broker-host.mjs"] },
   // Not executable: the policy's historical import path.
   "migration-policy.mjs": { from: ["lifecycle-policy.mjs", "transport/index.mjs"], impl: ["lifecycle-policy.mjs", "transport/index.mjs"] },
 };
@@ -87,6 +88,7 @@ const BASE_EXPORTS = {
   "record-decision.mjs": { APPROVAL_CHANNELS: null, APPROVAL_EVIDENCE_PHRASES: null, DECISION_KINDS: null, SIGNER_UNAVAILABLE: null, approvedByPhrase: 1, assertReviewedCandidateCurrent: 2, auditDecisionLedger: 1, autoApprovalChannel: 1, autoMayDecide: 1, beginAttestedDecision: 1, buildDecision: 1, challengeFor: 1, channelOf: 1, completeAttestedDecision: 1, groupFactsDigest: 1, ledgerFileForChannel: 1, parseDecisionArguments: 1, pendingDecisionCandidates: 1, projectDecisions: 1, rationaleDigestOf: 1, recordNewFormatDecisionGroup: 1, relayOperatorDecision: 1, renderDecisionReview: 1, reviewAttestedCandidate: 1, reviewFor: 1, reviewReference: 1, runRecordDecisionCli: 1 },
   "upgrades/upgrade-migration.mjs": { TRANSACTION_STATES: null, executeRollback: 1, executeUpgrade: 1, parseUpgradeArguments: 1, pendingTransactions: 2, previewRollback: 0, previewUpgrade: 0, recoverTransaction: 1, recoverUpgrade: 0, renderRollbackPreview: 1, renderUpgradePreview: 1, runUpgradeCli: 1 },
   "operator-signer-service.mjs": { SERVICE_CONFIG_FILE: null, runSignerService: 1 },
+  "session-broker.mjs": { readBrokerConfig: 1, runSessionBroker: 1, storeIsPrivate: 2 },
   "migration-policy.mjs": { MIGRATION_MODES: null, MIGRATION_OUTCOMES: null, assertOptionCombination: 1, exitCodeFor: 1, isAutoAuthority: 1, maySelfConfirm: 0, nextOutcome: 0 },
 };
 

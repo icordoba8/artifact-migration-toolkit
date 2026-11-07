@@ -1370,7 +1370,9 @@ to one matching target capture with `visualRowId`.
 **Legacy captures are the engine's.** Capture legacy evidence with
 `migration_capture { module, cwd, request }` (CLI: `artifact-migration-validate
 <module> --capture <request.json>`), never with `browser_*` scripting or a
-harness of your own. TARGET captures stay on the Playwright MCP.
+harness of your own. A format-20 TARGET claim may use the same operation with
+`role: "TARGET"`; it is required whenever the target needs a session, because a
+Playwright MCP browser holding a session would let `browser_evaluate` read it.
 
 - `designSource: legacy-runtime` at `ASSESS_TARGET`, one call per state:
   `{origin, route, viewport, uiBehaviorId, state, rootLocator, counts {name:
@@ -1378,8 +1380,21 @@ harness of your own. TARGET captures stay on the Playwright MCP.
   screenshot and measurements under `inventories/legacy-runtime/` and adds the
   frame to `inventories/legacy-runtime-context.json`.
 - Format 20 at `VERIFY_SLICES`: `{origin, route, viewport, appearanceClaimId,
-  interaction?}`. It writes the claim's LEGACY proof and PNG and its LEGACY
-  `uiEvidence` row. `result` and the interaction's `actual`/`outcome` stay yours.
+  interaction?, role?}`. It writes the claim's proof and PNG under
+  `evidence/<slice>/ui/legacy|target/` and its `uiEvidence` row. A `TARGET` row is
+  bound to the slice's implementation, and its proof asserts exactly what the
+  pinned contract requires of that state: a failing requirement refuses the
+  capture with `CAPTURE_OBSERVATION_FAILED` and writes nothing, which is a real
+  target defect to fix, never a contract to edit. `controls` adds the
+  interaction's trigger when no claim pins it. `result` and the interaction's
+  `actual`/`outcome` stay yours.
+
+When `migration_app_runtime` reports a `sessions` word of `PRESENT` for a role,
+pass `"session": true` instead of `storageState`: the capture then runs in the
+session broker's own OS account (`docs/session-broker.md` in the toolkit), and
+no session reaches this agent. `NONE` or `EXPIRED` means the operator signs in
+through the broker; say so once and record the gap. Never start a broker as this
+agent's own account, and never claim isolation the deployment does not provide.
 
 `origin` is the running legacy app, and the route stays on it. `setup` and
 `interaction` steps are `click`, `fill`, `press`, `hover`, `check`, `uncheck` or
