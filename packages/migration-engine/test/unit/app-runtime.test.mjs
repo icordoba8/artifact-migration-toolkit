@@ -112,7 +112,8 @@ const workspace = async ({ applications, namespace = OWN_NAMESPACE, moduleName =
     await writeFile(path.join(targetRoot, APP_RUNTIME_CONFIG), JSON.stringify(document));
   };
   if (applications) await write({ version: 1, namespace, applications: await applications(root) });
-  const runAppRuntime = (action, options = {}) => runReal({ registryPath, moduleName, action, ...options });
+  // The operator's file is another account's; a test that does not ask otherwise stands that in.
+  const runAppRuntime = (action, options = {}) => runReal({ registryPath, moduleName, action, ...options, system: { configAuthority: async () => null, ...options.system } });
   return { root, targetRoot, registryPath, write, runAppRuntime };
 };
 
@@ -430,7 +431,7 @@ test("an ACTIVE record is untouched by every action, status is unchanged, and it
   assert.equal(await treeDigest(consumer.targetRoot), whole, "check writes nothing at all");
   assert.equal(await starts(legacy), 0);
 
-  const ready = await runReal({ ...options, action: "ensure" });
+  const ready = await runReal({ ...options, action: "ensure", system: { configAuthority: async () => null } });
   assert.equal(ready.state, "READY");
   assert.equal(await treeDigest(consumer.recordRoot), record);
   assert.equal(JSON.stringify(await getMigrationStatus(options)), status, "status reads the same record and starts nothing");
@@ -510,6 +511,44 @@ test("configuration is the only authority, and it must be local and exact", asyn
   await rm(path.join(space.targetRoot, APP_RUNTIME_CONFIG));
   await symlink(elsewhere, path.join(space.targetRoot, APP_RUNTIME_CONFIG));
   assert.match((await space.runAppRuntime("ensure")).reason, /symlink/);
+});
+
+const sudo = (...args) => execFileAsync("sudo", ["-n", ...args]);
+const NO_SUDO = await sudo("true").then(() => false, () => "needs passwordless sudo to hand the file to another account");
+
+test("a file the agent's account can write, or owns, authorizes no start", async () => {
+  const space = await twoApps({}, { start: NPM_START });
+  await launch(space.target, space.sibling);
+  const real = (action) => runReal({ registryPath: space.registryPath, moduleName: "orders", action });
+  const report = await real("ensure");
+  assert.equal(report.state, "RUNTIME_DOWN");
+  assert.equal(row(report, "LEGACY").startAuthorized, false);
+  assert.match(row(report, "LEGACY").reason, /owned by the account this engine runs as/);
+  assert.equal(await starts(space.legacy), 0);
+  // Read-only is not enough while this account owns it: it can make it writable again.
+  await execFileAsync("chmod", ["444", path.join(space.targetRoot, APP_RUNTIME_CONFIG)]);
+  assert.match(row(await real("ensure"), "LEGACY").reason, /owned by the account/);
+  assert.equal(await starts(space.legacy), 0);
+});
+
+test("a file another account owns and this one cannot write authorizes the start", { skip: NO_SUDO }, async () => {
+  const space = await twoApps({}, { start: NPM_START });
+  await launch(space.target, space.sibling);
+  const file = path.join(space.targetRoot, APP_RUNTIME_CONFIG);
+  await sudo("chown", "root", file);
+  await sudo("chmod", "644", file);
+  try {
+    const report = await runReal({ registryPath: space.registryPath, moduleName: "orders", action: "ensure" });
+    assert.equal(row(report, "LEGACY").startAuthorized, true);
+    assert.equal(row(report, "LEGACY").started, true);
+    await space.runAppRuntime("stop");
+    // Writable by this account again: refused, whoever owns it.
+    await sudo("chmod", "666", file);
+    await until(() => refused(space.port), "the owned server to stop");
+    assert.match(row(await runReal({ registryPath: space.registryPath, moduleName: "orders", action: "ensure" }), "LEGACY").reason, /writable by the account/);
+  } finally {
+    await sudo("rm", "-f", file);
+  }
 });
 
 test("the engine names no consumer, and the CLI exposes exactly the three actions", async () => {
