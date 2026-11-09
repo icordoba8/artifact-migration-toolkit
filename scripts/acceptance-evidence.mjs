@@ -288,7 +288,7 @@ export const traceRefusals = (trace, engines, { python = 'python3' } = {}) => {
  * A Codex 0.165.0 rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`): the provider's own per-call record.
  * Returns its session, turn count, operator prompts and every engine refusal (line number + line SHA-256).
  */
-export function codexRollout(text, engineCommands) {
+export function codexRollout(text, engineCommands, { trustedSkills } = {}) {
   const rollout = { meta: null, turns: 0, prompts: [], refusals: [] };
   const promptsBySource = { response: [], event: [], legacy: [] };
   const started = { task: 0, turn: 0 };
@@ -327,13 +327,26 @@ export function codexRollout(text, engineCommands) {
   // It also injects an invoked skill's SKILL.md as an unordered role=user message.
   // Excluded only when an earlier legacy typed skill part names this toolkit skill
   // at its installed path; each part vouches for one injection, so a duplicate counts.
+  // Codex 0.165.0 sometimes omits the typed part (N02b). Then, and only when the rollout has no typed
+  // part at all, one injection counts if it is byte-identical to the skill rendered from the pinned
+  // release (`trustedSkills`, never a consumer file), follows the ordered prompt that names it (a second prompt still counts and fails the caller).
+  const typedParts = skills.length, orderedInputs = responses.filter(({ metadata }) => Number.isInteger(metadata?.user_input_order));
+  let pinnedUsed = false;
   const injectedSkill = (content, index) => {
     const match = content.length === 1 && content[0].type === 'input_text' &&
       /^<skill>\n<name>(start-migration|migrate-artifact)<\/name>\n<path>([^<\n]+)<\/path>\n---\nname: \1\n[\s\S]*\n<\/skill>$/.exec(content[0].text);
     if (!match || typeof rollout.meta.cwd !== 'string' ||
         match[2] !== path.join(rollout.meta.cwd, '.agents/skills', match[1], 'SKILL.md')) return false;
     const vouch = skills.findIndex(part => part.index < index && part.name === match[1] && part.path === match[2]);
-    return vouch !== -1 && skills.splice(vouch, 1).length === 1;
+    if (vouch !== -1) return skills.splice(vouch, 1).length === 1;
+    const trusted = trustedSkills instanceof Map ? trustedSkills.get(match[1]) : undefined;
+    const prompt = orderedInputs[0]?.index < index && orderedInputs[0].metadata.user_input_order === 0
+      ? orderedInputs[0].payload.content?.map(part => part.type === 'input_text' ? part.text : '').join('').trim() : '';
+    if (typedParts !== 0 || pinnedUsed || typeof trusted !== 'string' || promptsBySource.legacy.length !== 1 ||
+        content[0].text !== '<skill>\n<name>' + match[1] + '</name>\n<path>' + match[2] + '</path>\n' + trusted + '\n</skill>' ||
+        !(prompt === '$' + match[1] || prompt.startsWith('$' + match[1] + ' ') || prompt.startsWith('$' + match[1] + '\n'))) return false;
+    rollout.skillProof = 'pinned-render';
+    return pinnedUsed = true;
   };
   for (const { payload, metadata, index } of responses) {
     const content = payload.content ?? [];
@@ -351,6 +364,27 @@ export function codexRollout(text, engineCommands) {
   // extra started event must not be hidden by a single user-message record.
   rollout.turns = Math.max(started.task, started.turn, rollout.prompts.length);
   return rollout;
+}
+
+/**
+ * Expected installed SKILL.md text per toolkit skill, rendered from a hash-checked pinned release the way
+ * providers/install-support.mjs renderFiles does (G0 showed byte identity; a test pins it against the real installer).
+ * shortcut: POSIX shell quoting only (the harness is Linux-only), update with renderFiles if it changes.
+ */
+export async function pinnedSkillTexts(release, manifest, node) {
+  const engine = path.join(release, 'packages/migration-engine');
+  const { bin } = JSON.parse(await readFile(path.join(engine, 'package.json'), 'utf8'));
+  const commands = Object.entries(bin).sort(([a], [b]) => b.length - a.length);
+  const texts = new Map();
+  for (const name of ['start-migration', 'migrate-artifact']) {
+    const relative = `providers/codex/skills/${name}/SKILL.md`, bytes = await readFile(path.join(release, relative));
+    if ('sha256:' + sha256(bytes) !== manifest.files[relative]) throw new Error('ACCEPTANCE_PRECONDITION: pinned skill template does not match the release manifest: ' + relative);
+    let text = bytes.toString('utf8').replaceAll('{{ENGINE_MCP_ENTRY}}', path.join(engine, 'src/mcp-server.mjs'));
+    for (const [command, entry] of commands)
+      text = text.replace(new RegExp(`(?<![\\w-])${command}(?![\\w-])`, 'g'), () => [node, path.join(engine, entry)].map(quote).join(' '));
+    texts.set(name, text);
+  }
+  return texts;
 }
 
 /**

@@ -14,7 +14,7 @@
  * only and its report says it is not security-certified.
  */
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict, traceRefusals } from "./acceptance-evidence.mjs";
+import { checkpoint, pendingTransaction, startLockHolder, verifyCheckpoint, snapshotTree, sameTree, exists, sha256, openspecLeads, lockRemovals, codexRollout, findCodexRollout, pinnedSkillTexts, parseJson, startLedgerObserver, ledgerObserverVerdict, ledgerTraced, ledgerTraceVerdict, traceRefusals } from "./acceptance-evidence.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { probeMcpTools } from "./mcp-preflight-transport.mjs";
@@ -458,6 +458,14 @@ async function bindModuleFixture(root, target, scenario) {
   return { registry: MODULE_FIXTURE_REGISTRY, openspec, seeded: true };
 }
 
+// A scored interruption keeps INTERRUPTED_CHECKPOINT. Diagnostic mode rewrites every non-FAIL verdict to
+// DIAGNOSTIC_ONLY, so a diagnostic interruption is recognised by what only the interrupt branch produces: scenario
+// "interrupt", a recorded checkpoint, no failure, never certified. Checkpoint contents are still verified by the caller.
+export const isResumableInterruption = (saved, scoring) => saved.scoring === scoring && (scoring === "diagnostic"
+  ? saved.verdict === "DIAGNOSTIC_ONLY" && saved.scenario === "interrupt" && saved.failure === null && !!saved.checkpoint &&
+    saved.security?.certified === false && !saved.resume
+  : saved.verdict === "INTERRUPTED_CHECKPOINT");
+
 export function acceptanceVerdict(goal, agent, bootstrapped, finished, verified, progress) {
   if (agent.code !== 0 || agent.timedOut || agent.overflow) return "FAIL";
   if (goal === "bootstrap") return bootstrapped ? "BOOTSTRAP_PASS" : "FAIL";
@@ -480,13 +488,21 @@ async function main() {
     if (error.code === "EEXIST") fail("Output already exists; never overwrite earlier evidence");
     throw error;
   });
+  // The reservation is held by descriptor: a writable ancestor can be renamed and the pathname re-created with forged
+  // files, but writes through /proc/self/fd/N still land in the directory this run created, and the final identity
+  // check refuses to publish when the pathname no longer names it. Linux-only, like the rest of the harness.
+  const held = await open(output, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+  const heldPath = path.join("/proc/self/fd", String(held.fd));
+  const heldStat = await held.stat();
+  if (heldStat.uid !== process.getuid() || (await readdir(heldPath)).length) fail("Output reservation was replaced before use; never trust it");
+  const samePath = async () => { const now = await lstat(output).catch(() => null); return !!now && now.dev === heldStat.dev && now.ino === heldStat.ino; };
   // From here on every outcome -- a refusal, a tamper finding, a missing status
   // -- leaves a report.json: an absent report must never be read as a pass.
   const report = { schemaVersion: 1, provider: options.provider, module: options.module, target: options.target,
     goal: options.goal, kind: options.kind, scenario: options.scenario, ui: options.ui, scoring: options.scoring, root, verdict: "FAIL", failure: null };
   let error = null;
   try {
-    await score(options, root, output, report);
+    await score(options, root, output, report, heldPath);
   } catch (caught) {
     error = caught;
     report.failure = caught.message;
@@ -500,7 +516,12 @@ async function main() {
   // A4: only infrastructure outcomes may be rerun, once, on a fresh consumer. A FAIL (a rescue turn included) never.
   report.rerunEligible = ["NATIVE_NO_PROMPT", "NOT_RUN"].includes(report.verdict) && !report.rerunOf;
   const reportPath = path.join(output, "report.json");
-  await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+  await writeFile(path.join(heldPath, "report.json"), JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+  if (!await samePath()) {
+    await held.close();
+    throw new Error("ACCEPTANCE_OUTPUT_REPLACED: the output pathname no longer names the directory this run reserved; its report.json is not authentic evidence");
+  }
+  await held.close();
   // I6: always the last stdout line, on every verdict. Drivers consume it; they never re-derive paths.
   process.stdout.write(JSON.stringify({ output, report: reportPath, verdict: report.verdict, currentStep: report.engine?.currentStep,
     progressDisplayed: report.presentation?.progressAppearsInAgentOutput }) + "\n");
@@ -508,9 +529,9 @@ async function main() {
   if (!["BOOTSTRAP_PASS", "E2E_COMPLETE_PASS", "INTERRUPTED_CHECKPOINT", "SAFETY_REFUSAL_PASS", "DIAGNOSTIC_ONLY"].includes(report.verdict)) process.exitCode = 1;
 }
 
-async function score(options, root, output, report) {
+async function score(options, root, output, report, heldPath = output) {
   // Every evidence file is created exclusively: nothing in a reserved output is ever overwritten.
-  const put = (name, data) => writeFile(path.join(output, name), data, { flag: "wx" });
+  const put = (name, data) => writeFile(path.join(heldPath, name), data, { flag: "wx" });
   if (options.rerunOf) {
     const priorBytes = await readFile(options.rerunOf);
     const prior = JSON.parse(priorBytes);
@@ -642,7 +663,7 @@ async function score(options, root, output, report) {
   const saved = savedBytes === null ? null : JSON.parse(savedBytes);
   if (options.resumeFrom && (!saved || typeof saved !== "object")) fail("Resume report must be an interruption report object");
   if (saved) {
-    if (saved.verdict !== "INTERRUPTED_CHECKPOINT" || saved.scoring !== options.scoring || saved.root !== root || saved.kind !== options.kind || saved.provider !== options.provider ||
+    if (!isResumableInterruption(saved, options.scoring) || saved.root !== root || saved.kind !== options.kind || saved.provider !== options.provider ||
         saved.invocation !== invocation || saved.candidate?.installedPin !== installed.pin ||
         saved.security?.isolation !== (options.isolation === "os" ? "OS_NAMESPACE" : "NONE") || !saved.checkpoint)
       fail("ACCEPTANCE_PRECONDITION: Resume report does not bind this interrupted consumer");
@@ -841,8 +862,11 @@ async function score(options, root, output, report) {
       if (found) {
         rolloutText = found.text;
         await put("codex-rollout.jsonl", found.text);
-        rollout = codexRollout(found.text, engines);
-        report.rollout = { source: found.file, copy: "codex-rollout.jsonl", sha256: sha256(found.text), threadId: rollout.meta.id,
+        // The render's Node is this runner's own executable (the hash-pinned Node the driver launched), never a path a
+        // receipt chose: any engine entry naming another executable withholds the pinned render, so the injection fails.
+        rollout = codexRollout(found.text, engines, report.candidate.matchesTrustedPin && engines.length && engines.every(([node]) => node === process.execPath)
+          ? { trustedSkills: await pinnedSkillTexts(installed.release, manifest, process.execPath) } : {});
+        report.rollout = { source: found.file, copy: "codex-rollout.jsonl", sha256: sha256(found.text), threadId: rollout.meta.id, skillProof: rollout.skillProof ?? null,
           turns: rollout.turns, prompts: rollout.prompts.length, refusals: rollout.refusals };
         if (!native && (rollout.turns !== 1 || rollout.prompts.length !== 1 ||
             rollout.prompts[0] !== commandFor('codex', invocation, root, false, null, options.scenario).argv.at(-1)))
