@@ -1548,6 +1548,46 @@ test('trace binding: a refusal is an engine pid\'s own fd-1 document and non-zer
   for (const [name, lines] of Object.entries(rejected)) assert.deepEqual(await accepted(...lines), [], name);
 });
 
+test('the trusted sink and gate accept strace unknown-syscall records of an exiting tracee and refuse every other unparsed record (G4 N01)', async () => {
+  const root = await mkdtemp(path.join(scratch, 'agent-e2e-unknown-syscall-'));
+  try {
+    const sink = fileURLToPath(new URL('../scripts/ledger-trace.py', import.meta.url));
+    const gate = async (name, records) => {
+      const trace = path.join(root, name);
+      const fed = spawnSync('python3', [sink, 'filter', trace, '[]'], { input: records.join('\n') + '\n', encoding: 'utf8' });
+      assert.equal(fed.status, 0, fed.stderr);
+      let persisted = '';
+      for (let tries = 0; tries < 100 && !persisted.endsWith('1 +++ exited with 0 +++\n'); tries++) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        persisted = await readFile(trace, 'utf8').catch(() => '');
+      }
+      const verdict = spawnSync('python3', [sink, trace, '1'], { encoding: 'utf8' });
+      return { persisted, violations: JSON.parse(verdict.stdout).violations, status: verdict.status };
+    };
+    const thread = child => `1 clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7abd5b9ff990, parent_tid=0x7abd5b9ff990, exit_signal=0, stack=0x7abd5b1ff000, stack_size=0x7fff80, tls=0x7abd5b9ff6c0} => {parent_tid=[${child}]}, 88) = ${child}`;
+    // Verbatim strace 6.8 shape (runner flags, exit_group racing two threads' syscall entry), as in the G4a N01 trace.
+    const race = [thread(2), thread(3), '2 ???( <unfinished ...>', '3 ???( <unfinished ...>', '2 <... ??? resumed>)               = ?',
+      '3 <... ??? resumed>)               = ?', '2 +++ exited with 0 +++', '3 +++ exited with 0 +++'];
+    const benign = await gate('race', [...race, '1 ???()                       = ?', '1 +++ exited with 0 +++']);
+    assert.deepEqual(benign.violations, [], benign.persisted);
+    assert.equal(benign.status, 0);
+    assert.doesNotMatch(benign.persisted, /REDACTED/);
+    // Fail-closed: an unknown syscall that returned, an unparsable record and a resume without its start all still refuse,
+    // and each marker names only the pid and syscall.
+    const refused = {
+      'an unknown syscall with a result': ['2 ???()                       = 0', /unattributed syscall: pid 2/],
+      'an unparsable record': ['2 write"S3CRET", 6) = 6', /REDACTED unparsable trace record \(pid 2, syscall write\)/],
+      'a resume without its start': ['2 <... read resumed>"S3CRET", 6) = 6', /REDACTED read resumed without its start \(pid 2, syscall read\)/],
+    };
+    for (const [name, [record, reason]] of Object.entries(refused)) {
+      const { persisted, violations, status } = await gate(name.replaceAll(' ', '-'), [thread(2), record, '2 +++ exited with 0 +++', '1 +++ exited with 0 +++']);
+      assert.equal(status, 1, name);
+      assert.match(violations.join('\n'), reason, name);
+      assert.doesNotMatch(persisted, /S3CRET/, name);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('the trusted sink reduces an execve environment to a verdict and persists no value or other name', async () => {
   const root = await mkdtemp(path.join(scratch, 'agent-e2e-sink-'));
   try {
