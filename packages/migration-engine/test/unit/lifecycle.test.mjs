@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
+import nodeModule, { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -420,7 +420,8 @@ test("A8-ARCH-8: module and artifact checkpoint rules stay separate", async () =
   assert.deepEqual(lifecycle.checkpointArtifacts({ currentStep: "COMPLETE" }), ["state.json", "steps/08-finalize.md", "gates.json", "matrices/*.json"]);
 });
 
-test("A8-ARCH-9: installed paths and location-sensitive loaders resolve as before; importing lifecycle runs and loads nothing", async (t) => {
+test("A8-ARCH-9: installed paths and location-sensitive loaders resolve as before; importing lifecycle runs and loads nothing",
+  { skip: typeof nodeModule.registerHooks !== "function" && "requires node:module registerHooks (Node >= 22.15)" }, async (t) => {
   // The artifact parser still resolves from src/artifact/artifact-migration.mjs.
   const toolchain = await readFile(path.join(src, "census/toolchain.mjs"), "utf8");
   assert.match(toolchain, /new URL\("\.\.\/artifact\/artifact-migration\.mjs", import\.meta\.url\)/);
