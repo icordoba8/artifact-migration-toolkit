@@ -27,17 +27,17 @@ a decision rule. The MCP relay tool is not granted by default for Codex or
 GitHub Copilot: on both, the relay is CLI-only.
 
 The Codex adapter's registration (`.codex/config.toml`, project or user)
-launches the server with `--without-relay` and grants exactly the nine
+launches the server with `--without-relay` and grants exactly the
 remaining tools through `enabled_tools`, on install and on update from an
 earlier release, with no flag. `migration_relay_decision` is neither listed
 nor granted, and a call to it is refused by name. A project's shared
 `.agents/mcp.json` `start-migration` entry, which consumer tooling may turn
-into `.codex/config.toml`, gets the same relay-less launch and nine tools from
+into `.codex/config.toml`, gets the same relay-less launch and tools from
 a Codex install.
 
 The Copilot adapter registers the same server twice, one file per client:
 `.vscode/mcp.json` (`servers`, read by VS Code) and `.github/mcp.json`
-(`mcpServers`, read by Copilot CLI with an explicit nine-tool `tools` list).
+(`mcpServers`, read by Copilot CLI with an explicit `tools` list of every tool but the relay).
 Both launch it with `--without-relay`, so `migration_relay_decision` is not
 registered and a call to it is refused by name; on Copilot the operator relays
 an `OPERATOR_DECISION` answer by running

@@ -36,11 +36,17 @@ const layouts = {
 };
 // T1. VS Code reads only `.vscode/mcp.json`; Copilot CLI reads `.mcp.json` or
 // `.github/mcp.json` (trusted folder) and ignores `.vscode`. So Copilot owns a
-// second registration, and both launch `--without-relay`: 9 tools, never the relay.
+// second registration, and both launch `--without-relay`: every tool but the relay.
 // E7. Codex's registration launches `--without-relay` too and grants the same
-// nine through `enabled_tools`. The relay is CLI-only on both hosts.
-export const RELAYLESS_MCP_TOOLS = ['artifact_status', 'artifact_run', 'migration_status', 'migration_scan', 'migration_evidence_binding', 'migration_prefill', 'migration_capture', 'migration_pending_decisions', 'migration_run'];
-export const copilotCliEntry = server => ({ ...server, tools: RELAYLESS_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
+// tools through `enabled_tools`. The relay is CLI-only on both hosts. The list is
+// the server's own `--without-relay` tools/list (pinned by providers-sync.test).
+export const RELAYLESS_MCP_TOOLS = ['artifact_status', 'artifact_run', 'migration_status', 'migration_scan', 'migration_evidence_binding', 'migration_prefill', 'migration_capture', 'migration_app_runtime', 'migration_pending_decisions', 'migration_run'];
+// The 1.6.6 grant, before `migration_app_runtime`; accepted only so its registration converges.
+const RELAYLESS_MCP_TOOLS_1_6_6 = RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime');
+// A registration's grant is read from its own proof (receipt bytes, release
+// template), never assumed current: only a grant this toolkit shipped counts.
+const grantOf = tools => [RELAYLESS_MCP_TOOLS, RELAYLESS_MCP_TOOLS_1_6_6].find(grant => same(grant, tools));
+export const copilotCliEntry = (server, tools = RELAYLESS_MCP_TOOLS) => ({ ...server, tools, env: { pnpm_config_pm_on_fail: 'error' } });
 const copilotCli = [null, null, '.github/mcp.json', 'mcpServers'];
 
 // Validate every component, including existing ancestors of the selected root.
@@ -122,43 +128,48 @@ const serversIn = (config, key) => {
   return { ...legacy, ...servers };
 };
 // `legacy` for Codex and Copilot is the <=1.6.5 relay-carrying registration, accepted only so it can converge.
-const serverFor = (provider, release, legacy = false) => {
+const serverFor = (provider, release, legacy = false, grant = RELAYLESS_MCP_TOOLS) => {
   const launch = { command: process.execPath, args: [path.join(release, 'packages/migration-engine/src/mcp-server.mjs')] };
   if (['copilot', 'codex'].includes(provider) && !legacy) launch.args.push('--without-relay');
   return provider === 'opencode' ? opencodeServer([launch.command, ...launch.args], legacy)
     : provider === 'copilot' ? { type: 'stdio', ...launch }
-      : provider === 'codex' && !legacy ? { ...launch, enabled_tools: RELAYLESS_MCP_TOOLS } : launch;
+      : provider === 'codex' && !legacy ? { ...launch, enabled_tools: grant } : launch;
 };
 // E7. Consumer tooling (`agents:sync`) generates `.codex/config.toml` from the shared
 // `.agents/mcp.json` entry, so a Codex install keeps that entry relay-less too. The
 // Claude-shaped launch every other provider (and Codex <=1.6.5) wrote stays accepted.
-const agentsServerFor = (provider, release, legacy = false) => serverFor(provider === 'codex' && !legacy ? 'codex' : 'claude', release);
+const agentsServerFor = (provider, release, legacy = false, grant) => serverFor(provider === 'codex' && !legacy ? 'codex' : 'claude', release, false, grant);
 // The body of the owned `[mcp_servers.start-migration]` table; JSON arrays and strings are valid TOML.
 export const codexToml = server => `command = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n` +
   (server.enabled_tools ? `enabled_tools = ${JSON.stringify(server.enabled_tools)}\n` : '');
 // Copilot requires `tools` for a local server and builds its environment from `env`.
-const copilotCliServer = release => copilotCliEntry(serverFor('copilot', release));
+const copilotCliServer = (release, grant) => copilotCliEntry(serverFor('copilot', release), grant);
 
+// The historical release's own relay-less grant when its template is one we shipped, else null.
 async function historicalTemplateMatches(release, provider, layout, adapter) {
   const template = await readFile(await safePath(release, `providers/${provider}/${adapter.mcpTemplate}`), 'utf8');
+  const shipped = matched => (matched ? RELAYLESS_MCP_TOOLS : null);
   if (layout[3] === null) {
     const sections = template.split('[mcp_servers.start-migration]\n');
-    return sections.length === 2 && [codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] }),
-      codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'], enabled_tools: RELAYLESS_MCP_TOOLS })].includes(`${sections[1].trim()}\n`);
+    if (sections.length !== 2) return null;
+    const body = `${sections[1].trim()}\n`;
+    if (body === codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] })) return RELAYLESS_MCP_TOOLS;
+    return [RELAYLESS_MCP_TOOLS, RELAYLESS_MCP_TOOLS_1_6_6].find(enabled_tools =>
+      body === codexToml({ command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'], enabled_tools })) ?? null;
   }
   const parsed = JSON.parse(template);
   const launch = { command: 'node', args: ['{{ENGINE_MCP_ENTRY}}'] };
   if (provider === 'opencode') {
-    return same(parsed?.mcp?.servers?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], false)) ||
-      same(parsed?.mcp?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], true));
+    return shipped(same(parsed?.mcp?.servers?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], false)) ||
+      same(parsed?.mcp?.['start-migration'], opencodeServer(['node', '{{ENGINE_MCP_ENTRY}}'], true)));
   }
   if (provider === 'copilot') {
     const relayless = { type: 'stdio', command: 'node', args: ['{{ENGINE_MCP_ENTRY}}', '--without-relay'] };
-    return same(parsed?.servers?.['start-migration'], { type: 'stdio', ...launch }) ||
-      (same(parsed?.servers?.['start-migration'], relayless) &&
-        same(parsed?.mcpServers?.['start-migration'], copilotCliEntry(relayless)));
+    if (same(parsed?.servers?.['start-migration'], { type: 'stdio', ...launch })) return RELAYLESS_MCP_TOOLS;
+    if (!same(parsed?.servers?.['start-migration'], relayless)) return null;
+    return grantOf(parsed?.mcpServers?.['start-migration']?.tools) ?? null;
   }
-  return same(parsed?.[layout[3]]?.['start-migration'], launch);
+  return shipped(same(parsed?.[layout[3]]?.['start-migration'], launch));
 }
 
 async function historicalOwned(receipt, provider, layout) {
@@ -168,15 +179,16 @@ async function historicalOwned(receipt, provider, layout) {
     if (typeof item.release !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(item.pin ?? '')) continue;
     if (path.dirname(item.release) !== receipt.store) continue;
     let manifest;
+    let grant;
     try {
       manifest = await verifyBundle(item.release, item.pin);
       if (item.release !== path.join(receipt.store, `${manifest.toolkit.version}-${item.pin.slice(7)}`)) continue;
       const adapter = JSON.parse(await readFile(await safePath(item.release, `providers/${provider}/adapter.json`)));
       if (adapter.provider !== provider || !same(adapter.toolkit, manifest.toolkit) ||
-          !(await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
+          !(grant = await historicalTemplateMatches(item.release, provider, layout, adapter))) continue;
     } catch { continue; }
     for (const legacy of provider === 'claude' ? [false] : [false, true]) {
-      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy)).owned, agents: agentsServerFor(provider, item.release, legacy), release: item.release, pin: item.pin, manifest });
+      owned.push({ native: mergeConfig(null, layout, null, serverFor(provider, item.release, legacy, grant)).owned, agents: agentsServerFor(provider, item.release, legacy, grant), release: item.release, pin: item.pin, manifest, grant });
     }
   }
   return owned;
@@ -270,7 +282,7 @@ function mergeAgents(raw, previous, server, historical, provider) {
       !targets.every(target => typeof target === 'string' && target.length > 0) || new Set(targets).size !== targets.length)) {
     throw conflict('.agents/mcp.json');
   }
-  const current = [serverFor('claude', previous.release), agentsServerFor(provider, previous.release)];
+  const current = [serverFor('claude', previous.release), agentsServerFor(provider, previous.release, false, grantOf(previous.mcp?.enabled_tools))];
   if (!current.some(item => same(registration, item)) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
   const desired = server ? agentsServerFor(provider, server) : null;
   if (!desired || same(registration, desired)) return null;
@@ -314,11 +326,11 @@ async function validateSelection(receipt, provider, layout) {
   const pkg = JSON.parse(await readFile(path.join(receipt.release, 'packages/migration-engine/package.json')));
   const commands = Object.fromEntries(Object.entries(pkg.bin).map(([name, entry]) => [name, [process.execPath, path.join(receipt.release, 'packages/migration-engine', entry)]]));
   if (!same(receipt.commands, commands)) throw new Error('Installation CLI selection conflict');
-  const server = [serverFor(provider, receipt.release), serverFor(provider, receipt.release, true)].find(candidate => same(receipt.mcp, candidate));
+  const server = [serverFor(provider, receipt.release, false, grantOf(receipt.mcp?.enabled_tools)), serverFor(provider, receipt.release, true)].find(candidate => same(receipt.mcp, candidate));
   if (!server) throw new Error('Installation MCP selection conflict');
   const owned = mergeConfig(null, layout, null, server).owned;
   if (!same(receipt.configOwned, owned) && !(typeof owned === 'string' && receipt.configOwned === `\n${owned}`)) throw new Error('Invalid configuration ownership');
-  if (receipt.cliConfigOwned !== undefined && !same(receipt.cliConfigOwned, copilotCliServer(receipt.release))) throw new Error('Invalid configuration ownership');
+  if (receipt.cliConfigOwned !== undefined && !same(receipt.cliConfigOwned, copilotCliServer(receipt.release, grantOf(receipt.cliConfigOwned?.tools)))) throw new Error('Invalid configuration ownership');
   const source = JSON.parse(await readFile(path.join(receipt.release, `providers/${provider}/adapter.json`)));
   const expectedFiles = (receipt.mode === 'runtime' ? [] : source.files).flatMap(relative => {
     if (relative.startsWith('skills/')) return [`${layout[0]}/${relative.slice(7)}`];
@@ -516,7 +528,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   const agents = mergeAgents(rawAgents, previous ?? adopted, receipt?.release, history, provider);
   if (receipt) receipt.configOwned = merged.owned;
   // A legacy (<=1.6.5) receipt owns no `.github` entry; an adopted registration owns its release's.
-  const cli = cliFile && (receipt || previous?.cliConfigOwned) ? mergeConfig(rawCli, copilotCli, previous ? previous.cliConfigOwned : adopted && copilotCliServer(adopted.release), receipt && copilotCliServer(receipt.release)) : null;
+  const cli = cliFile && (receipt || previous?.cliConfigOwned) ? mergeConfig(rawCli, copilotCli, previous ? previous.cliConfigOwned : adopted && copilotCliServer(adopted.release, adopted.grant), receipt && copilotCliServer(receipt.release)) : null;
   if (receipt && cli) receipt.cliConfigOwned = cli.owned;
   const owned = previous?.files ?? adopted?.files ?? {};
   const backups = new Map();

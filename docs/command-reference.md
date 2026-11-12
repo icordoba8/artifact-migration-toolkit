@@ -142,7 +142,7 @@ call. `migration_relay_decision` relays only the operator's explicit
 answer to the review it names; no other tool accepts an approval-shaped
 argument.
 The shipped Codex and GitHub Copilot registrations launch the server with
-`--without-relay` and grant only the other nine tools, so on those hosts the
+`--without-relay` and grant every other tool, so on those hosts the
 MCP relay tool is not granted by default and the relay is CLI-only
 (`artifact-migration-decision <module> --relay …`).
 

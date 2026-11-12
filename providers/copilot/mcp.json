@@ -25,6 +25,7 @@
         "migration_evidence_binding",
         "migration_prefill",
         "migration_capture",
+        "migration_app_runtime",
         "migration_pending_decisions",
         "migration_run"
       ],

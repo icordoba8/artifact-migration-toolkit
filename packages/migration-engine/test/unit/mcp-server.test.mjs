@@ -150,7 +150,7 @@ test("an unknown protocol version falls back instead of failing", async () => {
 
 // --- §11.2 the tool set ------------------------------------------------------
 
-test("T1: the installed entry with --without-relay lists nine tools and refuses the relay by name", () => {
+test("T1: the installed entry with --without-relay lists every tool but the relay and refuses the relay by name", () => {
   const frames = (extra) => spawnSync(process.execPath, [path.join(repositoryRoot, "packages/migration-engine/src/mcp-server.mjs"), ...extra], {
     cwd: repositoryRoot,
     encoding: "utf8",
@@ -161,11 +161,12 @@ test("T1: the installed entry with --without-relay lists nine tools and refuses 
   }).stdout.trim().split("\n").map((line) => JSON.parse(line));
   const [listed, relay] = frames(["--without-relay"]);
   const names = listed.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 9);
+  assert.equal(names.length, 10);
+  assert.ok(names.includes("migration_app_runtime"));
   assert.ok(!names.includes("migration_relay_decision"));
   assert.equal(relay.error.code, -32601);
   assert.match(relay.error.message, /--without-relay.*artifact-migration-decision auth --relay <reference>/);
-  assert.equal(frames([])[0].result.tools.length, 10);
+  assert.equal(frames([])[0].result.tools.length, 11);
 });
 
 

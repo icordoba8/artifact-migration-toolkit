@@ -38,7 +38,7 @@ External services or privileged infrastructure may only provide optional
 enhancements and must never be required for normal migration creation,
 decision completion, format activation, testing, installation, or release.
 
-New modules default to **format 19** (supported: 19); new standalone and
+New modules default to **format 21** (supported: 21); new standalone and
 delegated artifacts default to **format 14** (supported: 14). Existing Module 18
 and Artifact 13 records retain their historical semantics and explicit upgrades.
 
@@ -269,7 +269,7 @@ verified local runtime that satisfies its skill works offline indefinitely.
 **Do not install the Claude Code and GitHub Copilot adapters in the same
 project root.** Claude registers `start-migration` in the root `.mcp.json`.
 Copilot CLI also reads that file, and its entry shadows Copilot's own
-nine-tool, relay-less `.github/mcp.json` registration with every tool,
+relay-less `.github/mcp.json` registration with every tool,
 `migration_relay_decision` included. The Copilot installer's `install`,
 `update` and `doctor` refuse such a root with `INSTALL_REGISTRATION_CONFLICT`
 (file `.mcp.json`). The Claude installer does not check for Copilot, so

@@ -245,7 +245,7 @@ test('R-W9-a / R-W9-c: installed MCP is launchable; doctor preserves and reports
   assert.deepEqual(JSON.parse(await readFile(config)), { servers: { playwright: browser, figma }, inputs: [{ id: 'preserved' }] });
 });
 
-test('T1: Copilot registers nine tools without the relay by default, on install and on upgrade from a <=1.6.5 receipt', async t => {
+test('T1: Copilot registers every tool but the relay by default, on install and on upgrade from a <=1.6.5 or 1.6.6 receipt', async t => {
   const b = await bundles();
   const consumer = await createUnstampedRecord({ prefix: 'copilot T1 ' });
   t.after(() => consumer.cleanup());
@@ -260,7 +260,7 @@ test('T1: Copilot registers nine tools without the relay by default, on install 
     assert.equal(registered.args.at(-1), '--without-relay');
     assert.deepEqual(JSON.parse(await readFile(vscode, 'utf8')).servers['start-migration'], receipt.mcp);
     assert.deepEqual(await toolsOf(receipt, registered), RELAYLESS_MCP_TOOLS);
-    assert.equal(RELAYLESS_MCP_TOOLS.length, 9);
+    assert.equal(RELAYLESS_MCP_TOOLS.length, 10);
     assert.ok(!RELAYLESS_MCP_TOOLS.includes('migration_relay_decision'));
   };
   await expectNine(await adapter('copilot', options));
@@ -273,8 +273,15 @@ test('T1: Copilot registers nine tools without the relay by default, on install 
   await writeFile(receiptFile, JSON.stringify(legacy, null, 2));
   await writeFile(vscode, JSON.stringify({ servers: { 'start-migration': legacy.mcp } }));
   await rm(cli);
-  assert.equal((await toolsOf(legacy, legacy.mcp)).length, 10);
+  assert.equal((await toolsOf(legacy, legacy.mcp)).length, 11);
   await expectNine(await adapter('copilot', { ...options, action: 'update', bundle: b.second, pin: b.nextPin }));
+
+  // A 1.6.6 receipt: relay-less, but granting the nine tools before migration_app_runtime.
+  const before = JSON.parse(await readFile(receiptFile, 'utf8'));
+  const nine = { ...before.cliConfigOwned, tools: RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime') };
+  await writeFile(receiptFile, JSON.stringify({ ...before, cliConfigOwned: nine }, null, 2));
+  await writeFile(cli, JSON.stringify({ mcpServers: { 'start-migration': nine } }));
+  await expectNine(await adapter('copilot', { ...options, action: 'update', bundle: b.first, pin: b.pin }));
 
   // Doctor repairs a removed `.github` registration; remove takes only ours.
   const current = JSON.parse(await readFile(receiptFile, 'utf8'));
@@ -285,7 +292,7 @@ test('T1: Copilot registers nine tools without the relay by default, on install 
   assert.deepEqual(JSON.parse(await readFile(cli, 'utf8')), { mcpServers: { other: { type: 'http', url: 'https://example.invalid/mcp' } } });
 });
 
-test('E7: Codex grants nine tools without the relay by default, on install and on upgrade from a <=1.6.5 receipt', async t => {
+test('E7: Codex grants every tool but the relay by default, on install and on upgrade from a <=1.6.5 or 1.6.6 receipt', async t => {
   const b = await bundles();
   const consumer = await createUnstampedRecord({ prefix: 'codex E7 ' });
   t.after(() => consumer.cleanup());
@@ -310,8 +317,17 @@ test('E7: Codex grants nine tools without the relay by default, on install and o
   legacy.configOwned = `# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ${JSON.stringify(legacy.mcp.command)}\nargs = ${JSON.stringify(legacy.mcp.args)}\n# END artifact-migration-tools\n`;
   await writeFile(receiptFile, JSON.stringify(legacy, null, 2));
   await writeFile(config, `model = "consumer"\n${legacy.configOwned}`);
-  assert.equal((await toolsOf(legacy.mcp)).length, 10);
+  assert.equal((await toolsOf(legacy.mcp)).length, 11);
   await expectNine(await adapter('codex', { ...options, action: 'update', bundle: b.second, pin: b.nextPin }));
+
+  // A 1.6.6 receipt: relay-less, but granting the nine tools before migration_app_runtime.
+  const before = JSON.parse(await readFile(receiptFile, 'utf8'));
+  const nine = { ...before.mcp, enabled_tools: RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime') };
+  const nineOwned = before.configOwned.replace(JSON.stringify(RELAYLESS_MCP_TOOLS), JSON.stringify(nine.enabled_tools));
+  assert.notEqual(nineOwned, before.configOwned);
+  await writeFile(receiptFile, JSON.stringify({ ...before, mcp: nine, configOwned: nineOwned }, null, 2));
+  await writeFile(config, `model = "consumer"\n${nineOwned}`);
+  await expectNine(await adapter('codex', { ...options, action: 'update', bundle: b.first, pin: b.pin }));
   await adapter('codex', { ...options, action: 'remove' });
   assert.equal(await readFile(config, 'utf8'), 'model = "consumer"\n');
 });
@@ -533,6 +549,56 @@ for (const provider of ['codex', 'claude']) {
     await settled();
   });
 }
+
+test('E7/T1: without a receipt, a 1.6.6 nine-tool registration from the same store is historical and converges', async () => {
+  const b = await bundles();
+  const nine = RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime');
+  // A 1.6.6-shaped release: the synthetic next release with the grant it shipped before migration_app_runtime.
+  const old = path.join(scratch, 'release 1.6.6 grant');
+  await cp(b.second, old, { recursive: true });
+  const manifest = JSON.parse(await readFile(path.join(old, 'release-manifest.json')));
+  const rewrite = async (relative, edit) => {
+    const text = await readFile(path.join(old, relative), 'utf8');
+    const bytes = edit(text);
+    assert.notEqual(bytes, text);
+    await writeFile(path.join(old, relative), bytes);
+    manifest.files[relative] = digest(bytes);
+  };
+  await rewrite('providers/codex/config.toml', text => text.replace(JSON.stringify(RELAYLESS_MCP_TOOLS), JSON.stringify(nine)));
+  await rewrite('providers/copilot/mcp.json', text => {
+    const json = JSON.parse(text);
+    json.mcpServers['start-migration'].tools = nine;
+    return `${JSON.stringify(json, null, 2)}\n`;
+  });
+  await writeFile(path.join(old, 'SHA256SUMS'), `${Object.entries(manifest.files).map(([relative, hash]) => `${hash.slice(7)}  ${relative}`).join('\n')}\n`);
+  await writeFile(path.join(old, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  const oldPin = digest(await readFile(path.join(old, 'release-manifest.json')));
+  // Each registration as 1.6.6 itself wrote it: the nine-tool grant.
+  const cases = {
+    codex: ['.codex/config.toml', text => text.replace(JSON.stringify(RELAYLESS_MCP_TOOLS), JSON.stringify(nine)),
+      text => assert.ok(text.includes(`enabled_tools = ${JSON.stringify(RELAYLESS_MCP_TOOLS)}\n`))],
+    copilot: ['.github/mcp.json', text => {
+      const json = JSON.parse(text);
+      json.mcpServers['start-migration'].tools = nine;
+      return JSON.stringify(json, null, 2);
+    }, text => assert.deepEqual(JSON.parse(text).mcpServers['start-migration'].tools, RELAYLESS_MCP_TOOLS)],
+  };
+  for (const [provider, [relative, asShipped, converged]] of Object.entries(cases)) {
+    const root = path.join(scratch, `${provider} 1.6.6 adopt`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} 1.6.6 adopt store`) };
+    await mkdir(root, { recursive: true });
+    await adapter(provider, { ...options, bundle: old, pin: oldPin });
+    const file = path.join(root, relative);
+    const text = await readFile(file, 'utf8');
+    await writeFile(file, asShipped(text));
+    assert.notEqual(await readFile(file, 'utf8'), text);
+    await dropReceipts(root);
+    const adopted = await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    assert.deepEqual(adopted.releases.map(item => item.pin), [oldPin, b.pin], provider);
+    converged(await readFile(file, 'utf8'));
+    assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', provider);
+  }
+});
 
 test('without a receipt, a foreign .agents/mcp.json start-migration entry is a typed conflict', async () => {
   const b = await bundles();

@@ -362,7 +362,7 @@ test("every MCP template launches the installed engine through a placeholder, ne
 
   const toml = await readText(root, "providers/codex/config.toml");
   assert.match(toml, /^\[mcp_servers\.start-migration\]$/m);
-  // E7: Codex ships relay-less too, granting the same nine through enabled_tools.
+  // E7: Codex ships relay-less too, granting the same tools through enabled_tools.
   assert.ok(toml.includes(`\nargs = ${JSON.stringify([ENGINE_MCP_ENTRY_PLACEHOLDER, "--without-relay"])}\n`));
   assert.ok(toml.includes(`\nenabled_tools = ${JSON.stringify(RELAYLESS_MCP_TOOLS)}\n`));
 

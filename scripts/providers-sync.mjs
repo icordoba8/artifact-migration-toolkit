@@ -301,7 +301,7 @@ const providers = [
     }),
     mcp: {
       output: "providers/codex/config.toml",
-      // E7: relay-less like Copilot, with the nine tools granted by `enabled_tools`.
+      // E7: relay-less like Copilot, with every tool but the relay granted by `enabled_tools`.
       render: (server) =>
         `# ${generatedNotice}\n\n[mcp_servers.${MCP_SERVER_NAME}]\n${codexToml({ ...server, args: [...server.args, "--without-relay"], enabled_tools: RELAYLESS_MCP_TOOLS })}`,
     },
