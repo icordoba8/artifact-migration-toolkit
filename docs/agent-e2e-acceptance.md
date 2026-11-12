@@ -164,16 +164,17 @@ agent spawns, every installed Codex (`.codex/config.toml` `enabled_tools` minus
 `.github/mcp.json`) registration must grant exactly `artifact_status`,
 `artifact_run`, `migration_status`, `migration_scan`,
 `migration_evidence_binding`, `migration_prefill`, `migration_capture`,
-`migration_pending_decisions`, `migration_run`, or the run is refused with
+`migration_app_runtime`, `migration_pending_decisions`, `migration_run`
+(the installer's `RELAYLESS_MCP_TOOLS`), or the run is refused with
 `ACCEPTANCE_INSTALLED_GRANTS`.
 The runner probes the server's actual `tools/list`, then intersects it with the installed
 allowlist and removes installed denylisted tools. Both the advertised surface and that
-effective set must be exactly the nine tools; a nine-tool declaration cannot hide a
-relay-bearing server, and a nine-tool server cannot hide a narrowed provider filter.
+effective set must be exactly those tools; a relay-less declaration cannot hide a
+relay-bearing server, and a relay-less server cannot hide a narrowed provider filter.
 Malformed or ambiguous filters refuse rather than being ignored.
 The overrides are `approval_policy="never"`;
 `mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
-those nine (Codex CLI 0.165.0 keys); plus
+those tools (Codex CLI 0.165.0 keys); plus
 `mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]`, because Codex
 passes an MCP server only an environment allowlist and the official launcher's
 pnpm version-switch refusal must reach the engine's validators. There is no server-wide

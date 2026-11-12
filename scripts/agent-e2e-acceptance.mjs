@@ -23,7 +23,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { open, readdir, readFile, realpath, mkdir, unlink, writeFile, lstat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { verifyBundle } from "../providers/install-support.mjs";
+import { RELAYLESS_MCP_TOOLS, verifyBundle } from "../providers/install-support.mjs";
 // Node 22.13.0 linux-x64, the Codex preflight pin (scripts/m15-official-run.sh).
 const PINNED_NODE_SHA256 = "af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8";
 import { isMainModule } from "../packages/migration-engine/src/engine-paths.mjs";
@@ -274,8 +274,8 @@ export const commandFor = (provider, invocation, root, native = false, mcpServer
       "-m", "gpt-6.1-sol", "-c", 'model_reasoning_effort="high"',
       ...(native ? [] : [ask])] };
 };
-export const CODEX_MCP_TOOLS = ["artifact_status", "artifact_run", "migration_status", "migration_scan",
-  "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"];
+// The installer's relay-less grant is the one list: a second copy here drifted when a tool was added.
+export const CODEX_MCP_TOOLS = RELAYLESS_MCP_TOOLS;
 
 /** Probe the installed stdio transport before applying the provider's installed filters. */
 const advertisedGrants = (root, server) => {
@@ -320,7 +320,7 @@ const advertisedGrantsWithNodePipes = (root, server) => new Promise((resolve, re
         send({ method: "notifications/initialized" });
         send({ id: 2, method: "tools/list", params: {} });
       } else if (message.id === 2 && initialized) {
-        // ponytail: the nine-tool server has one page; refuse pagination rather than certify a partial list.
+        // ponytail: the relay-less server has one page; refuse pagination rather than certify a partial list.
         if (!Array.isArray(message.result?.tools) || message.result.nextCursor !== undefined ||
             !message.result.tools.every(tool => typeof tool?.name === "string"))
           throw new Error("Incomplete MCP tools/list");
@@ -609,7 +609,7 @@ async function score(options, root, output, report, heldPath = output) {
   const cli = installed.commands?.[cliName];
   if (!Array.isArray(cli) || cli.length !== 2 || !path.isAbsolute(cli[0]) || cli[1] !== expectedCli || !packageJson.bin?.[cliName])
     fail("ACCEPTANCE_PRECONDITION: Status command is not the one from the verified release.");
-  // E7: every installed Codex/Copilot registration grants exactly the nine relay-less tools, or nothing spawns.
+  // E7: every installed Codex/Copilot registration grants exactly the relay-less tools, or nothing spawns.
   const shipped = {};
   report.installedGrants = shipped;
   const registrations = new Map();
@@ -633,7 +633,7 @@ async function score(options, root, output, report, heldPath = output) {
           new Set(grants).size !== CODEX_MCP_TOOLS.length || !CODEX_MCP_TOOLS.every((tool) => grants.includes(tool)))
         fail(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ` +
           (Array.isArray(grants) ? `${new Set(grants).size} ${JSON.stringify(grants)}` : "unbounded or unreadable") +
-          ", not exactly the nine without migration_relay_decision (server surface and effective provider grants must both match)");
+          `, not exactly the ${CODEX_MCP_TOOLS.length} without migration_relay_decision (server surface and effective provider grants must both match)`);
     }
   }
   // Both UIs are bound before tools/list is probed; native only restates the verified installed transport.

@@ -601,7 +601,7 @@ test("black-box acceptance refuses an unverified installed engine before startin
   }
 });
 
-test("Codex approves exactly the nine engine tools, per tool, keeps approval_policy never, and injects no tool filter", () => {
+test("Codex approves exactly the relay-less engine tools, per tool, keeps approval_policy never, and injects no tool filter", () => {
   const { argv } = commandFor("codex", "$start-migration discounts", "/consumer/target");
   const native = commandFor("codex", "$start-migration discounts", "/consumer/target", true, { command: "/node", args: ["/r/mcp-server.mjs", "--without-relay"] }).argv;
   // The installed server supplies the tool surface, headless and native.
@@ -613,14 +613,15 @@ test("Codex approves exactly the nine engine tools, per tool, keeps approval_pol
     ...CODEX_MCP_TOOLS.map((tool) => `mcp_servers.start-migration.tools.${tool}.approval_mode="approve"`),
     'mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]', 'model_reasoning_effort="high"']);
   assert.equal(argv[argv.indexOf("-m") + 1], "gpt-6.1-sol");
+  // An explicit pin: growing the auto-approved set must be a deliberate, reviewed change here.
   assert.deepEqual(CODEX_MCP_TOOLS, ["artifact_status", "artifact_run", "migration_status", "migration_scan",
-    "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_pending_decisions", "migration_run"]);
+    "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_app_runtime", "migration_pending_decisions", "migration_run"]);
   // No server-wide default, no relay grant, no sandbox escalation, no other server.
   assert.doesNotMatch(argv.join(" "), /default_tools_approval_mode|migration_relay_decision|danger|bypass|mcp_servers\.(?!start-migration\.)/);
   assert.deepEqual(argv.slice(0, 6), ["exec", "--json", "--sandbox", "workspace-write", "--add-dir", "/consumer/target/.agents"]);
 });
 
-test("installed Codex and Copilot grants: effective nine proceeds, declared nine and legacy ten refuse before spawn",
+test("installed Codex and Copilot grants: the effective relay-less set proceeds, a declared one and the legacy relay-bearing set refuse before spawn",
   { skip: process.version === "v22.13.0" ? false : "requires the pinned Node 22.13.0 MCP executable" }, async () => {
   const root = await mkdtemp(path.join(scratch, "agent-e2e-grants-"));
   try {
@@ -645,7 +646,7 @@ test("installed Codex and Copilot grants: effective nine proceeds, declared nine
     { encoding: "utf8", timeout: 60000, env: { ...process.env, PATH: bin + path.delimiter + process.env.PATH } });
     for (const legacy of [false, true]) for (const [host, codex, copilot] of [["codex", false, true], ["copilot", true, false]]) {
       await install(codex, copilot, legacy);
-      assert.match(runner(host + "-ten-" + legacy).stderr, new RegExp(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are 10 `));
+      assert.match(runner(host + "-relay-" + legacy).stderr, new RegExp(`ACCEPTANCE_INSTALLED_GRANTS: installed ${host} start-migration grants are ${CODEX_MCP_TOOLS.length + 1} `));
       await assert.rejects(stat(spawned), { code: "ENOENT" });
     }
     await install(true, true);
@@ -653,10 +654,10 @@ test("installed Codex and Copilot grants: effective nine proceeds, declared nine
     const shadow = JSON.parse(await readFile(path.join(target, ".github/mcp.json"), "utf8"));
     shadow.mcpServers["start-migration"].args.pop();
     await writeFile(path.join(target, ".mcp.json"), JSON.stringify(shadow));
-    assert.match(runner("shadow").stderr, /ACCEPTANCE_INSTALLED_GRANTS: installed copilot.*grants are 10/);
+    assert.match(runner("shadow").stderr, new RegExp(`ACCEPTANCE_INSTALLED_GRANTS: installed copilot.*grants are ${CODEX_MCP_TOOLS.length + 1}`));
     await assert.rejects(stat(spawned), { code: "ENOENT" });
     await rm(path.join(target, ".mcp.json"));
-    // Nine advertised tools are insufficient when the provider narrows the effective surface.
+    // The advertised relay-less tools are insufficient when the provider narrows the effective surface.
     for (const filter of ["enabled_tools", "disabled_tools", "copilot", "malformed"]) {
       await install(true, true);
       const codexFile = path.join(target, ".codex/config.toml");
@@ -675,7 +676,7 @@ test("installed Codex and Copilot grants: effective nine proceeds, declared nine
       await assert.rejects(stat(spawned), { code: "ENOENT" });
     }
     await install(true, true);
-    assert.doesNotMatch(runner("nine").stderr, /ACCEPTANCE_INSTALLED_GRANTS/);
+    assert.doesNotMatch(runner("relayless").stderr, /ACCEPTANCE_INSTALLED_GRANTS/);
     await stat(spawned);
     // Probe this branch's actual legacy server too, not just the MCP stand-in.
     shadow.mcpServers["start-migration"].args = [fileURLToPath(new URL("../packages/migration-engine/src/mcp-server.mjs", import.meta.url))];

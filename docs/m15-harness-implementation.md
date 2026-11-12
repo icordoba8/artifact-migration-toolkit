@@ -76,7 +76,7 @@ Use a plain non-root terminal with `Seccomp: 0`. Approvals above must precede th
 The launcher requires externally approved `AMT_HARNESS_COMMIT` and `AMT_PATCH_SHA256`, a clean
 worktree (including no untracked files), and an explicit `AMT_BASE` (40 hex) that is an ancestor of the harness commit. It refuses changed binary hashes,
 other Node/Codex versions, or different reviewed content. It passes `gpt-6.1-sol`, high reasoning, workspace-write, approval_policy=never and the
-same exact nine MCP grants. It uses a separate disposable HOME and CODEX_HOME with an empty environment.
+same exact relay-less MCP grants (`RELAYLESS_MCP_TOOLS`). It uses a separate disposable HOME and CODEX_HOME with an empty environment.
 Do not reuse the old official-run.sh, which requires a clean historical worktree.
 
 Four identities are separate:
