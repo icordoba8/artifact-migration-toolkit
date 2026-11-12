@@ -573,29 +573,40 @@ test('E7/T1: without a receipt, a 1.6.6 nine-tool registration from the same sto
   await writeFile(path.join(old, 'SHA256SUMS'), `${Object.entries(manifest.files).map(([relative, hash]) => `${hash.slice(7)}  ${relative}`).join('\n')}\n`);
   await writeFile(path.join(old, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   const oldPin = digest(await readFile(path.join(old, 'release-manifest.json')));
-  // Each registration as 1.6.6 itself wrote it: the nine-tool grant.
-  const cases = {
-    codex: ['.codex/config.toml', text => text.replace(JSON.stringify(RELAYLESS_MCP_TOOLS), JSON.stringify(nine)),
-      text => assert.ok(text.includes(`enabled_tools = ${JSON.stringify(RELAYLESS_MCP_TOOLS)}\n`))],
-    copilot: ['.github/mcp.json', text => {
-      const json = JSON.parse(text);
-      json.mcpServers['start-migration'].tools = nine;
-      return JSON.stringify(json, null, 2);
-    }, text => assert.deepEqual(JSON.parse(text).mcpServers['start-migration'].tools, RELAYLESS_MCP_TOOLS)],
+  // Installing the 1.6.6-shaped release writes its own nine-tool grant, as 1.6.6 itself did.
+  const grantOfFile = {
+    codex: ['.codex/config.toml', text => JSON.parse(text.match(/^enabled_tools = (.*)$/m)[1])],
+    copilot: ['.github/mcp.json', text => JSON.parse(text).mcpServers['start-migration'].tools],
   };
-  for (const [provider, [relative, asShipped, converged]] of Object.entries(cases)) {
+  for (const [provider, [relative, toolsIn]] of Object.entries(grantOfFile)) {
     const root = path.join(scratch, `${provider} 1.6.6 adopt`);
     const options = { scope: 'project', root, store: path.join(scratch, `${provider} 1.6.6 adopt store`) };
-    await mkdir(root, { recursive: true });
-    await adapter(provider, { ...options, bundle: old, pin: oldPin });
     const file = path.join(root, relative);
-    const text = await readFile(file, 'utf8');
-    await writeFile(file, asShipped(text));
-    assert.notEqual(await readFile(file, 'utf8'), text);
+    const agents = path.join(root, '.agents/mcp.json');
+    const agentsTools = async () => JSON.parse(await readFile(agents, 'utf8')).mcpServers['start-migration']?.enabled_tools;
+    await mkdir(path.join(root, '.agents'), { recursive: true });
+    await writeFile(agents, '{"mcpServers":{}}\n');
+    const installed = await adapter(provider, { ...options, bundle: old, pin: oldPin });
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), nine, provider);
+    // Consumer tooling (`agents:sync`) shares the receipt's launch in .agents/mcp.json.
+    if (provider === 'codex') {
+      assert.deepEqual(installed.mcp.enabled_tools, nine);
+      await writeFile(agents, `${JSON.stringify({ mcpServers: { 'start-migration': { ...installed.mcp, targets: ['codex'] } } }, null, 2)}\n`);
+    }
+    // Doctor keeps the receipt's own grant, twice over (no flip to the current grant).
+    for (const round of [1, 2]) assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', `${provider} doctor ${round}`);
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), nine, provider);
+    // Without a receipt, the 1.6.6 registrations (shared .agents entry included) are adopted and converge.
     await dropReceipts(root);
     const adopted = await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
     assert.deepEqual(adopted.releases.map(item => item.pin), [oldPin, b.pin], provider);
-    converged(await readFile(file, 'utf8'));
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), RELAYLESS_MCP_TOOLS, provider);
+    if (provider === 'codex') assert.deepEqual(await agentsTools(), RELAYLESS_MCP_TOOLS);
+    assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', provider);
+    // Rolling back restores 1.6.6's own grant, the one its installer accepts.
+    await adapter(provider, { ...options, action: 'rollback', bundle: old, pin: oldPin });
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), nine, provider);
+    if (provider === 'codex') assert.deepEqual(await agentsTools(), nine);
     assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', provider);
   }
 });

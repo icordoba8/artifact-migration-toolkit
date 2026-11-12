@@ -261,7 +261,8 @@ function mergeConfig(raw, layout, previous, server, historical = []) {
   return { bytes: Buffer.from(json(config)), owned: server, missing, stale };
 }
 
-function mergeAgents(raw, previous, server, historical, provider) {
+// `grant` is the relay-less grant of `server`'s own release (desired); `previous` proves its own.
+function mergeAgents(raw, previous, server, historical, provider, grant) {
   if (raw === null) return null;
   const config = JSON.parse(raw);
   const entries = config?.mcpServers;
@@ -282,9 +283,9 @@ function mergeAgents(raw, previous, server, historical, provider) {
       !targets.every(target => typeof target === 'string' && target.length > 0) || new Set(targets).size !== targets.length)) {
     throw conflict('.agents/mcp.json');
   }
-  const current = [serverFor('claude', previous.release), agentsServerFor(provider, previous.release, false, grantOf(previous.mcp?.enabled_tools))];
+  const current = [serverFor('claude', previous.release), agentsServerFor(provider, previous.release, false, grantOf(previous.mcp?.enabled_tools) ?? previous.grant)];
   if (!current.some(item => same(registration, item)) && !historical.some(item => same(registration, item.agents))) throw conflict('.agents/mcp.json');
-  const desired = server ? agentsServerFor(provider, server) : null;
+  const desired = server ? agentsServerFor(provider, server, false, grant) : null;
   if (!desired || same(registration, desired)) return null;
   entries['start-migration'] = { ...desired, ...(targets && { targets }) };
   return Buffer.from(json(config));
@@ -447,7 +448,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     // Restore missing or verified historical registrations after both surfaces
     // have rejected conflicts; leave unrelated configuration untouched.
     const merged = mergeConfig(rawConfig, layout, previous.configOwned, previous.mcp, historical);
-    const agents = mergeAgents(rawAgents, previous, previous.release, history, provider);
+    const agents = mergeAgents(rawAgents, previous, previous.release, history, provider, grantOf(previous.mcp?.enabled_tools));
     const cli = previous.cliConfigOwned ? mergeConfig(rawCli, copilotCli, previous.cliConfigOwned, previous.cliConfigOwned) : null;
     let mcpRepair = null;
     if (merged.missing || merged.stale || agents || cli?.missing) {
@@ -471,6 +472,7 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
   let writes = new Map();
   let receipt = null;
   let server = null;
+  let grant;
   let adopted = null;
   if (action !== 'remove') {
     const manifest = await verifyBundle(bundle, pin);
@@ -485,7 +487,9 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     if (!same(rendered.source.toolkit, manifest.toolkit)) throw new Error('Adapter identity mismatch');
     ({ writes } = rendered);
     const { commands } = rendered;
-    server = serverFor(provider, release);
+    // The selected release's own shipped grant (a 1.6.6 rollback keeps its nine), never this installer's.
+    grant = await historicalTemplateMatches(bundle, provider, layout, rendered.source) ?? undefined;
+    server = serverFor(provider, release, false, grant);
     if (!previous) {
       adopted = await adoptRegistration(provider, layout, store, { release, pin }, rawConfig, rawAgents);
       // Its files are ours too, where they are exactly what it (or this bundle) writes.
@@ -525,10 +529,10 @@ async function applyAdapter(provider, { action = 'install', scope, root, store, 
     // Check ownership/config before staging any release or changing a consumer.
   }
   const merged = mergeConfig(rawConfig, layout, previous?.configOwned ?? adopted?.native, server, historical);
-  const agents = mergeAgents(rawAgents, previous ?? adopted, receipt?.release, history, provider);
+  const agents = mergeAgents(rawAgents, previous ?? adopted, receipt?.release, history, provider, grant);
   if (receipt) receipt.configOwned = merged.owned;
   // A legacy (<=1.6.5) receipt owns no `.github` entry; an adopted registration owns its release's.
-  const cli = cliFile && (receipt || previous?.cliConfigOwned) ? mergeConfig(rawCli, copilotCli, previous ? previous.cliConfigOwned : adopted && copilotCliServer(adopted.release, adopted.grant), receipt && copilotCliServer(receipt.release)) : null;
+  const cli = cliFile && (receipt || previous?.cliConfigOwned) ? mergeConfig(rawCli, copilotCli, previous ? previous.cliConfigOwned : adopted && copilotCliServer(adopted.release, adopted.grant), receipt && copilotCliServer(receipt.release, grant)) : null;
   if (receipt && cli) receipt.cliConfigOwned = cli.owned;
   const owned = previous?.files ?? adopted?.files ?? {};
   const backups = new Map();
