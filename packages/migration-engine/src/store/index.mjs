@@ -37,6 +37,7 @@ export {
 } from "./artifact.mjs";
 export {
   appendDurably,
+  assertCreatable,
   atomicWrite,
   contentIdentityMatchesSource,
   fileContentIdentity,
@@ -95,6 +96,7 @@ export {
   renderRegistryPreview,
   validateRegistry,
   resolveModule,
+  REGISTRY_UNBOUND,
   resolveRegistryPath,
 } from "./registry.mjs";
 export {

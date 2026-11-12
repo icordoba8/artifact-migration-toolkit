@@ -11,7 +11,9 @@
 
 import assert from "node:assert/strict";
 
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -147,6 +149,25 @@ test("an unknown protocol version falls back instead of failing", async () => {
 });
 
 // --- §11.2 the tool set ------------------------------------------------------
+
+test("T1: the installed entry with --without-relay lists nine tools and refuses the relay by name", () => {
+  const frames = (extra) => spawnSync(process.execPath, [path.join(repositoryRoot, "packages/migration-engine/src/mcp-server.mjs"), ...extra], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    input: [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      call(2, "migration_relay_decision", { module: "auth", reference: "r", decision: "APPROVE" }),
+    ].map((frame) => `${JSON.stringify(frame)}\n`).join(""),
+  }).stdout.trim().split("\n").map((line) => JSON.parse(line));
+  const [listed, relay] = frames(["--without-relay"]);
+  const names = listed.result.tools.map((tool) => tool.name);
+  assert.equal(names.length, 9);
+  assert.ok(!names.includes("migration_relay_decision"));
+  assert.equal(relay.error.code, -32601);
+  assert.match(relay.error.message, /--without-relay.*artifact-migration-decision auth --relay <reference>/);
+  assert.equal(frames([])[0].result.tools.length, 10);
+});
+
 
 test("tools/list exposes module and artifact iteration/read tools, never approval tools", async () => {
   const response = await only(null, {
@@ -1509,3 +1530,69 @@ test("an argument refusal under --json still prints one JSON document; without i
   assert.equal(text.code, exitCodeFor("FAILED"));
   assert.equal(text.stdout, "");
 });
+
+// E1: an unbound registry is one BLOCKED / not started document on every
+// transport; E6: any other coded refusal crosses MCP as an `isError` result.
+test("an unbound registry is the same BLOCKED / not started result on MCP and CLI, and writes nothing", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "unbound-registry-"));
+  const fixture = { root };
+  try {
+    await writeFile(path.join(root, "package.json"), '{"name":"fresh","private":true}\n');
+    await execFileAsync("git", ["init", "-q"], { cwd: root });
+    const before = await snapshot(root);
+    const expected = {
+      outcome: "BLOCKED",
+      status: "NOT_STARTED",
+      module: "auth",
+      nextCommand: "artifact-migration-discover auth --target <target-module> --registry <registry.json> --openspec-proposal-stdin",
+    };
+    const pick = (document) => Object.fromEntries(Object.keys(expected).map((key) => [key, document[key]]));
+    const documents = [];
+    for (const name of ["migration_status", "migration_scan", "migration_run"]) {
+      const document = structured(await only(fixture, call(1, name, { module: "auth" })));
+      assert.deepEqual(pick(document), expected, name);
+      documents.push(document);
+    }
+    const cli = path.join(repositoryRoot, "packages/migration-engine/src/cli");
+    for (const args of [["discover-module.mjs", "auth", "--status"], ["run-migration.mjs", "auth", "--json"]]) {
+      const failed = await execFileAsync(process.execPath, [path.join(cli, args[0]), ...args.slice(1)], { cwd: root, env: { ...process.env, MIGRATION_REGISTRY_PATH: "" } })
+        .then(() => assert.fail(`${args[0]} succeeded`), (error) => error);
+      assert.equal(failed.code, 2, `${args[0]}: ${failed.stderr}`);
+      const document = JSON.parse(failed.stdout);
+      assert.deepEqual(pick(document), expected, args[0]);
+      documents.push(document);
+    }
+    // Same reason and nextAction everywhere, too.
+    assert.equal(new Set(documents.map(({ reason, nextAction }) => JSON.stringify([reason, nextAction]))).size, 1);
+    // The conventional registry, once it exists, is named instead of the placeholder.
+    await mkdir(path.join(root, ".agents/knowledge/migrations"), { recursive: true });
+    await writeFile(path.join(root, ".agents/knowledge/migrations/registry.json"), "{}\n");
+    const named = structured(await only(fixture, call(1, "migration_status", { module: "auth" })));
+    assert.match(named.nextCommand, /--registry \S+\/\.agents\/knowledge\/migrations\/registry\.json /);
+    await rm(path.join(root, ".agents"), { recursive: true });
+    assert.deepEqual(await snapshot(root), before, "an unbound call wrote something");
+
+    // A binding to a missing registry is no first setup: an isError result
+    // whose structuredContent is Node's own errno fields (E6).
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "fresh", private: true, config: { startMigration: { registry: "missing/registry.json" } } }));
+    const missing = await only(fixture, call(1, "migration_status", { module: "auth" }));
+    assert.equal(missing.result?.isError, true, JSON.stringify(missing));
+    assert.equal(missing.result.structuredContent.code, "ENOENT");
+    assert.equal(missing.result.structuredContent.syscall, "open");
+    assert.match(missing.result.structuredContent.path, /missing[\\/]registry\.json$/);
+    assert.match(missing.result.content[0].text, /^ENOENT: /);
+    // The CLI prints the same document on stdout and exits non-zero.
+    const missingCli = await execFileAsync(process.execPath, [path.join(cli, "discover-module.mjs"), "auth", "--status"], { cwd: root, env: { ...process.env, MIGRATION_REGISTRY_PATH: "" } })
+      .then(() => assert.fail("discover succeeded"), (error) => error);
+    assert.equal(missingCli.code, 1, missingCli.stderr);
+    assert.deepEqual(JSON.parse(missingCli.stdout), missing.result.structuredContent);
+    // An uncoded fault stays a JSON-RPC internal error, with no data.
+    await writeFile(path.join(root, "package.json"), "{");
+    const torn = await only(fixture, call(1, "migration_status", { module: "auth" }));
+    assert.equal(torn.error?.code, -32603, JSON.stringify(torn));
+    assert.equal(torn.error.data, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+

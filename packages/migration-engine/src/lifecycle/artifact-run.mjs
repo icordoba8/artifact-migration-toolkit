@@ -18,7 +18,7 @@ import { withModuleLock } from "./lock.mjs";
 import { resolveArtifact } from "../census/index.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { jsonBytes } from "../shared/index.mjs";
-import { fileExists as exists, integrityFor, mkdirDurably } from "../store/index.mjs";
+import { assertCreatable, fileExists as exists, integrityFor, mkdirDurably } from "../store/index.mjs";
 import { approveWithOperator, artifactApprover, recorderFor } from "./approval.mjs";
 import { previewAdvance, requestFor } from "./artifact-checkpoints.mjs";
 import {
@@ -186,6 +186,9 @@ const runArtifactIteration = async (options = {}) => {
   if ((mode === "step" || options.pilotFormat === 14) && !(await stateFileExists(location.root))) {
     const preview = await previewArtifact(options);
     if (options.confirmationId !== preview.confirmationId) {
+      // Never ask to confirm a bootstrap this process could not write: the
+      // kernel's own refusal instead, and still nothing written.
+      await assertCreatable(location.root);
       const synthetic = {
         artifactId: preview.artifactId,
         target: preview.target,

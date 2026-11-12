@@ -4727,10 +4727,10 @@ test("an actual SIGINT mid-checkpoint leaves a resumable record", async () => {
     const checkpointDeadline = Date.now() + 60_000;
     let holder = null;
     while (Date.now() < checkpointDeadline) {
-      // The lock is a directory published with its one owner entry already
-      // written; a probe before it exists finds nothing -- not an owner yet.
+      // The lock is a directory published with its owner entry (and its FIFO
+      // token, never read: a read-open would block) already written; a probe before it exists finds nothing -- not an owner yet.
       holder = await readdir(lockFile)
-        .then(([entry]) => readFile(path.join(lockFile, entry), "utf8"))
+        .then((entries) => readFile(path.join(lockFile, entries.find((name) => name.endsWith(".json"))), "utf8"))
         .then((bytes) => JSON.parse(bytes))
         .catch(() => null);
       if (holder?.pid === child.pid) break;

@@ -41,6 +41,21 @@ ambient `PATH` instead. Refusals are typed — `SKILL_IDENTITY_MISSING`,
 connected run, or an explicit `--version`. Never suggest editing or deleting a
 receipt, an MCP configuration or the install lock.
 
+If preflight fails with typed `ENGINE_FILESYSTEM_BLOCKED`, the verified runtime
+is usable but the engine doctor, run from this shell, cannot write the knowledge
+root (EROFS). This shell's view does not prove what the MCP server can write. Do
+not repair permissions or continue migration. For a mutating invocation only, if
+the installed `start-migration` MCP server is connected, make exactly one
+diagnostic call: `artifact_run` with this invocation's arguments and
+`mode: "step"`. Unconfirmed step mode executes nothing; the engine checks from
+its own process whether it could write and, if not, returns the kernel's
+structured refusal. Then stop and report both results. Never confirm, retry or
+switch to `auto`: `AWAITING_CONFIRMATION` means the server can write this
+consumer, so stop with the preflight failure. Only a structured
+`EROFS`/`EACCES`/`EPERM` from that call is the engine's refusal; a startup error
+or preflight errno never is. If MCP is unavailable, stop with the preflight
+failure; do not substitute shell output or invent a refusal code.
+
 `--version X.Y.Z` and `ARTIFACT_MIGRATION_TOOLS_VERSION=X.Y.Z` are admin/CI
 overrides for **one invocation only**: they bypass the identity proof, persist
 nothing, and the next ordinary invocation converges back. Only an explicit

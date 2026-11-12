@@ -28,7 +28,8 @@
     },
     "mcpConfig": {
       "user": null,
-      "project": ".vscode/mcp.json"
+      "project": ".vscode/mcp.json",
+      "copilotCli": ".github/mcp.json"
     }
   },
   "mcpTemplate": "mcp.json",

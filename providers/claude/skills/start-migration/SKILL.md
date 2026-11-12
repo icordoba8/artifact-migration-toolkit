@@ -61,6 +61,21 @@ commands as the fallback for the rest of this invocation when it is not —
 must stop. Stop on preflight failure; never fall back to a checkout, branch,
 `latest` URL, package-manager install, or ambient `PATH`.
 
+If preflight fails with typed `ENGINE_FILESYSTEM_BLOCKED`, the verified runtime
+is usable but the engine doctor, run from this shell, cannot write the knowledge
+root (EROFS). This shell's view does not prove what the MCP server can write. Do
+not repair permissions or continue migration. For a mutating invocation only, if
+the installed `start-migration` MCP server is connected, make exactly one
+diagnostic call: `migration_run` with this invocation's arguments and
+`mode: "step"`. Unconfirmed step mode executes nothing; the engine checks from
+its own process whether it could write and, if not, returns the kernel's
+structured refusal. Then stop and report both results. Never confirm, retry or
+switch to `auto`: `AWAITING_CONFIRMATION` means the server can write this
+consumer, so stop with the preflight failure. Only a structured
+`EROFS`/`EACCES`/`EPERM` from that call is the engine's refusal; a startup error
+or preflight errno never is. If MCP is unavailable, stop with the preflight
+failure; do not substitute shell output or invent a refusal code.
+
 When the preflight returns `bootstrapped: true` because the required identity
 changed, run `artifact-migration-toolkit status` before resuming an existing
 migration, so a record still stamped with the previous toolkit identity surfaces
@@ -325,9 +340,20 @@ installed CLI. Neither front end can attest a module-19 decision.
    and may present an engine-owned review (see Operator decisions). The runtime
    preflight registers the server in this provider's MCP configuration (see
    `provider-compatibility.md`). Read `outcome` from the tool result, not the
-   `log`. Neither MCP nor `run` bootstraps: a fresh module's `BLOCKED` names
-   the `artifact-migration-discover` call to make (see Pre-execution
-   confirmation).
+   `log`. Neither MCP nor `run` bootstraps: a fresh module's BLOCKED / not
+   started result (`outcome: "BLOCKED"`, `status: "NOT_STARTED"`, identical on
+   MCP and CLI) names in `nextCommand` the `artifact-migration-discover` call to
+   make (see Pre-execution confirmation and the migration contract's registry
+   section).
+   A refusal is a tool result with `isError: true` whose `structuredContent`
+   carries `code`, `errno`, `syscall` and `path` (the CLI prints the same JSON
+   and exits non-zero; `run` in its `--json` document); classify it by
+   `structuredContent.code`, never the message:
+   `EROFS`, `EACCES` or `EPERM` is a sandbox write refusal, a safety stop;
+   `ENOENT` is a missing path, never a read-only refusal; `FS_ERRNO_UNKNOWN`
+   means no syscall recovered the cause, so it is neither; `LOCK_HELD` is a
+   live lock to wait for, while `LOCK_OWNER_UNKNOWN`, `LOCK_NO_LIVENESS_TOKEN`
+   and `LOCK_PROTOCOL_1` need an operator.
 2. **Bash — the fallback when that server is not connected.**
 
    ```bash
@@ -356,9 +382,11 @@ module 19, when `operatorApproval.blocked` is null:
 2. Only when the user's next message is an explicit `APPROVE` or `REJECT`, call
    the MCP tool `migration_relay_decision` with `module`, `cwd`,
    `reference` = `operatorApproval.reference` unchanged, and `decision` = that
-   answer. Without MCP, run the same relay through the CLI from the same
+   answer. Without that tool, run the same relay through the CLI from the same
    working directory:
    `artifact-migration-decision <module> --relay <operatorApproval.reference> --decision <APPROVE|REJECT>`.
+   The MCP relay tool is not granted by default on Codex or GitHub Copilot;
+   there the relay is CLI-only.
    Anything else relays nothing; show the review again if asked.
 3. Then call `migration_run` (or `artifact-migration-run <module> --json`)
    again; it resumes normally.
@@ -456,7 +484,9 @@ migration state, first-setup `--registry`, persisted
 `package.json#config.startMigration.registry`, then `MIGRATION_REGISTRY_PATH`
 as an optional CI fallback. Conflicting values fail; they never silently
 override state. On first setup only, add `--registry
-<target-root>/.agents/knowledge/migrations/registry.json`.
+<target-root>/.agents/knowledge/migrations/registry.json`. With no binding at all,
+helpers return the BLOCKED / not started result, whose `nextCommand` is that
+first-setup call.
 
 ### Invocation options
 

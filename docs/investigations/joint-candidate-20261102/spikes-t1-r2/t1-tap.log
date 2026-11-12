@@ -1,0 +1,34 @@
+2026-11-02T22:19:12.565Z spawned argv=[] pm_on_fail=error
+2026-11-02T22:19:12.570Z client server/discover
+2026-11-02T22:19:12.673Z client initialize
+2026-11-02T22:19:12.673Z client notifications/initialized
+2026-11-02T22:19:12.674Z client tools/list
+2026-11-02T22:19:12.674Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:19:13.995Z client tools/list
+2026-11-02T22:19:13.996Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:20:11.188Z spawned argv=[] pm_on_fail=error
+2026-11-02T22:20:11.192Z client server/discover
+2026-11-02T22:20:11.284Z client initialize
+2026-11-02T22:20:11.285Z client notifications/initialized
+2026-11-02T22:20:11.285Z client tools/list
+2026-11-02T22:20:11.286Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:20:12.499Z client tools/list
+2026-11-02T22:20:12.500Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:21:05.716Z spawned argv=[] pm_on_fail=error
+2026-11-02T22:21:05.723Z client server/discover
+2026-11-02T22:21:05.825Z client initialize
+2026-11-02T22:21:05.826Z client notifications/initialized
+2026-11-02T22:21:05.826Z client tools/list
+2026-11-02T22:21:05.827Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:21:07.023Z client tools/list
+2026-11-02T22:21:07.024Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:21:21.681Z client tools/list
+2026-11-02T22:21:21.682Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:21:52.749Z spawned argv=[] pm_on_fail=error
+2026-11-02T22:21:52.754Z client server/discover
+2026-11-02T22:21:52.878Z client initialize
+2026-11-02T22:21:52.879Z client notifications/initialized
+2026-11-02T22:21:52.879Z client tools/list
+2026-11-02T22:21:52.880Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision
+2026-11-02T22:21:53.402Z client tools/list
+2026-11-02T22:21:53.402Z server tools/list -> 10 tools: artifact_status,artifact_run,migration_status,migration_scan,migration_evidence_binding,migration_prefill,migration_capture,migration_pending_decisions,migration_run,migration_relay_decision

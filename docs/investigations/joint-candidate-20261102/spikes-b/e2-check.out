@@ -1,0 +1,6 @@
+token fd flags 02504000 (O_CLOEXEC=02000000)
+entries [ '<uuid>.fifo', '<uuid>.json' ]
+live: LOCK_HELD
+unshare pid 897456 engine node pid 897457 (other pidns)
+unshare: sigprocmask unblock failed: Invalid argument
+reclaimed after SIGKILL of the engine process

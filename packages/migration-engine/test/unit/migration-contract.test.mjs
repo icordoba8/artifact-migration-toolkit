@@ -23,6 +23,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   readlink,
@@ -33,7 +34,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { readlinkSync } from "node:fs";
+import { constants as fsConstants, readlinkSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -2864,6 +2865,7 @@ const treeOf = async (dir, tree = {}) => {
     const file = path.join(dir, name);
     const info = await lstat(file);
     if (info.isSymbolicLink()) tree[file] = `-> ${await readlink(file)}`;
+    else if (info.isFIFO()) tree[file] = `fifo ${info.ino}`; // reading one would block
     else if (info.isDirectory()) await treeOf(file, Object.assign(tree, { [file]: "dir" }));
     else tree[file] = await readFile(file, "utf8");
   }
@@ -3152,7 +3154,7 @@ test("a spent budget still tries the lock once and names its holder", async () =
         assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
       } else {
         const release = await acquireModuleLock(root, "auth", options);
-        assert.equal((await readdir(lock)).length, 1, `${label}: the lock holds exactly its new owner`);
+        assert.equal((await readdir(lock)).filter((name) => name.endsWith(".json")).length, 1, `${label}: the lock holds exactly its new owner`);
         await assert.rejects(acquireModuleLock(root, "auth", { timeoutMs: 0 }), live, `${label}: two writers held the lock`);
         await release();
         assert.deepEqual(await readdir(path.dirname(lock)), [], `${label}: the lock or a staging directory was left behind`);
@@ -3177,7 +3179,7 @@ test("a provably dead or vanished owner is reclaimed automatically", async () =>
     try {
       await seed(lock);
       const release = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
-      assert.equal((await readdir(lock)).length, 1, `${label}: the lock holds exactly its new owner`);
+      assert.equal((await readdir(lock)).filter((name) => name.endsWith(".json")).length, 1, `${label}: the lock holds exactly its new owner`);
       await release();
       assert.equal(await exists(lock), false, label);
     } finally {
@@ -3192,6 +3194,251 @@ test("a provably dead or vanished owner is reclaimed automatically", async () =>
     const before = await treeOf(root);
     await (await acquireModuleLock(root, "auth", { timeoutMs: 1000 }))();
     assert.deepEqual(await treeOf(root), before);
+  } finally {
+    await cleanup();
+  }
+});
+
+// E2: the liveness token. A FIFO whose only read end the owner holds; the
+// kernel closes it when the owner dies, in whatever PID namespace.
+const TOKENS = process.platform === "win32" ? "Windows has no FIFOs: the PID rule above covers it" : false;
+const FOREIGN_REALM = "linux:pid:[1]";
+/** An owner entry bound to a fresh FIFO nobody holds open: a dead owner's. */
+const seedTokenOwner = async (lock, owner = {}) => {
+  await mkdir(lock, { recursive: true });
+  const uuid = randomUUID();
+  const fifo = path.join(lock, `${uuid}.fifo`);
+  await execFileAsync("mkfifo", [fifo]);
+  const { dev, ino } = await lstat(fifo, { bigint: true });
+  await writeFile(
+    path.join(lock, `${uuid}.json`),
+    `${JSON.stringify({ pid: DEAD_PID, hostname: os.hostname(), realm: FOREIGN_REALM, uuid, fifo: { dev: String(dev), ino: String(ino) }, acquiredAt: new Date().toISOString(), ...owner })}\n`,
+  );
+  return { uuid, fifo };
+};
+const holderScript = (root, after) =>
+  `const { acquireModuleLock } = await import(${JSON.stringify(lockModuleUrl)});\n` +
+  `await acquireModuleLock(${JSON.stringify(root)}, "auth");\n${after}\n` +
+  `process.stdout.write("HELD\\n");\nsetInterval(() => {}, 1000);\n`;
+const startHolder = async (command, args) => {
+  const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  const line = await new Promise((resolve) => {
+    let out = "";
+    child.stdout.on("data", (chunk) => (out += chunk) && out.includes("\n") && resolve(out));
+    exited.then(() => resolve(out));
+  });
+  assert.match(line, /HELD/, stderr);
+  return { child, line, exited };
+};
+const userns = TOKENS || (await execFileAsync("unshare", ["-Urpf", "true"]).then(() => false, () => "unprivileged user and PID namespaces are unavailable here"));
+
+test("E2: an engine SIGKILLed in another PID namespace leaves a lock the next writer reclaims", { skip: userns }, async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  const { child, exited } = await startHolder("unshare", ["-Urpf", process.execPath, "--input-type=module", "-e", holderScript(root, "")]);
+  try {
+    const [entry] = (await readdir(lock)).filter((name) => name.endsWith(".json"));
+    const owner = JSON.parse(await readFile(path.join(lock, entry), "utf8"));
+    assert.notEqual(owner.realm, REALM, "the holder did not run in another PID namespace");
+    assert.deepEqual((await readdir(lock)).sort(), [`${owner.uuid}.fifo`, entry]);
+    await assert.rejects(contend(root), { code: "LOCK_HELD" }, "a live owner in another namespace was reclaimed");
+    // The real engine process -- unshare's child -- not the unshare wrapper.
+    const engine = Number(await readFile(`/proc/${child.pid}/task/${child.pid}/children`, "utf8"));
+    assert.ok(engine > 0, "no engine process under unshare"); // never kill(0): the whole group
+    assert.match(await readFile(`/proc/${engine}/cmdline`, "utf8"), /node/);
+    process.kill(engine, "SIGKILL");
+    await exited;
+    const release = await contend(root, { timeoutMs: 2000 });
+    await release();
+    assert.equal(await exists(lock), false);
+  } finally {
+    child.kill("SIGKILL");
+    await cleanup();
+  }
+});
+
+// E6: a coded refusal crosses both transports with its code intact -- MCP as an
+// isError result whose structuredContent is {code, errno, syscall, path}, the
+// run CLI as its FAILED --json document with a non-zero exit. BLOCKED /
+// NOT_STARTED (an unbound registry) is a result, not a refusal: mcp-server's E1 test.
+test("E6: lock and filesystem refusals reach MCP and the CLI with their code", { skip: TOKENS }, async (t) => {
+  const both = async (fixture, code) => {
+    const mcp = await rpc(fixture, runCall(1), createSession());
+    assert.equal(mcp.result?.isError, true, `${code}: ${JSON.stringify(mcp)}`);
+    assert.equal(mcp.result.structuredContent.code, code);
+    assert.match(mcp.result.content.at(-1).text, new RegExp(`"code": "${code}"`));
+    const cli = await runCli(fixture, () => runMigration(["auth", "--json"]));
+    assert.notEqual(cli.exitCode ?? 0, 0, code);
+    assert.equal(JSON.parse(cli.stdout).code, code);
+    return mcp.result.structuredContent;
+  };
+  const locks = [
+    ["LOCK_HELD", (lock) => seedOwner(lock, { pid: process.pid })],
+    ["LOCK_NO_LIVENESS_TOKEN", (lock) => seedOwner(lock, { realm: FOREIGN_REALM })],
+    ["LOCK_OWNER_UNKNOWN", (lock) => seedTokenOwner(lock, { hostname: `${os.hostname()}-elsewhere` })],
+  ];
+  const now = Date.now;
+  for (const [code, seed] of locks) {
+    const fixture = await createFixture();
+    try {
+      await initialize(fixture);
+      await seed(lockPathFor(fixture.targetRoot, "auth"));
+      // Every lock refusal first waits out the 30 s deadline; a clock that
+      // jumps past it on every read keeps the real code path and none of the wait.
+      let clock = now();
+      Date.now = () => (clock += 31_000);
+      try { await both(fixture, code); } finally { Date.now = now; }
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+  const lockDirectory = (file) => file.endsWith(`${path.sep}locks`) || file.includes(`${path.sep}locks${path.sep}`);
+  let injected = null;
+  await traceFs(t, async (op, file) => {
+    if (injected && op === "mkdir" && lockDirectory(file)) throw Object.assign(ioError(injected), { syscall: "mkdir", path: file });
+  });
+  for (const [errno, code] of [["EROFS", "EROFS"], ["EACCES", "EACCES"], ["EPERM", "EPERM"], ["ENOENT", "FS_ERRNO_UNKNOWN"]]) {
+    const fixture = await createFixture();
+    try {
+      await initialize(fixture);
+      injected = errno;
+      const refusal = await both(fixture, code);
+      if (code !== "FS_ERRNO_UNKNOWN") assert.equal(refusal.syscall, "mkdir", code);
+    } finally {
+      injected = null;
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("E2: a child that outlives the lock owner does not keep the lock alive; the token is close-on-exec", { skip: TOKENS }, async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  const after = `const { spawn } = await import("node:child_process");\n` +
+    `const grandchild = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });\n` +
+    `grandchild.unref();\nprocess.stdout.write(grandchild.pid + " ");`;
+  const { child, line, exited } = await startHolder(process.execPath, ["--input-type=module", "-e", holderScript(root, after)]);
+  const grandchild = Number(line.split(" ")[0]);
+  try {
+    process.kill(child.pid, "SIGKILL");
+    await exited;
+    process.kill(grandchild, 0); // still running, still holding whatever it inherited
+    const release = await contend(root, { timeoutMs: 2000 });
+    // This process's own token: O_CLOEXEC (02000000) on its read end.
+    if (process.platform === "linux") {
+      const fifo = (await readdir(lock)).find((name) => name.endsWith(".fifo"));
+      const fds = await readdir("/proc/self/fd");
+      const fd = fds.find((n) => { try { return readlinkSync(`/proc/self/fd/${n}`) === path.join(lock, fifo); } catch { return false; } });
+      const flags = parseInt((await readFile(`/proc/self/fdinfo/${fd}`, "utf8")).match(/flags:\s+([0-7]+)/)[1], 8);
+      assert.ok(flags & 0o2000000, `token fd flags ${flags.toString(8)} lack O_CLOEXEC`);
+    }
+    await release();
+  } finally {
+    try { process.kill(grandchild, "SIGKILL"); } catch {}
+    await cleanup();
+  }
+});
+
+test("E2: a token proves its owner gone or alive; anything that is not the recorded FIFO is UNKNOWN", { skip: TOKENS }, async () => {
+  const unknown = { code: "LOCK_OWNER_UNKNOWN", message: /cannot be proven gone/ };
+  const refused = [
+    ["a missing token", async (lock) => rm((await seedTokenOwner(lock)).fifo), unknown],
+    ["a token replaced by a regular file", async (lock) => {
+      const { fifo } = await seedTokenOwner(lock);
+      await rm(fifo);
+      await writeFile(fifo, "");
+    }, unknown],
+    ["a token replaced by a symlink to a dead FIFO", async (lock, root) => {
+      const { fifo } = await seedTokenOwner(lock);
+      const elsewhere = path.join(root, "elsewhere.fifo");
+      await execFileAsync("mkfifo", [elsewhere]);
+      await rm(fifo);
+      await symlink(elsewhere, fifo);
+    }, unknown],
+    ["a token replaced by another FIFO", async (lock, root) => {
+      const { fifo } = await seedTokenOwner(lock);
+      const other = path.join(root, "other.fifo"); // coexisting, so another inode
+      await execFileAsync("mkfifo", [other]);
+      await rename(other, fifo);
+    }, unknown],
+    ["a token on another host", (lock) => seedTokenOwner(lock, { hostname: `${os.hostname()}-elsewhere` }), unknown],
+    ["a malformed token binding", (lock) => seedTokenOwner(lock, { fifo: { dev: "x", ino: "1" } }), unknown],
+    ["a token with an extra entry", async (lock) => {
+      await seedTokenOwner(lock);
+      await writeFile(path.join(lock, "extra"), "");
+    }, unknown],
+    ["a token-less owner in another PID realm", (lock) => seedOwner(lock, { realm: FOREIGN_REALM }),
+      { code: "LOCK_NO_LIVENESS_TOKEN", message: /recorded no liveness token .*cannot be proven gone/ }],
+    ["a live token-less owner", (lock) => seedOwner(lock, { pid: process.pid }), { code: "LOCK_HELD" }],
+    ["a protocol-1 lock file", (lock) => writeFile(lock, "{}"), { code: "LOCK_PROTOCOL_1" }],
+  ];
+  for (const [label, seed, expected] of refused) {
+    const { root, lock, cleanup } = await lockRoot();
+    try {
+      await seed(lock, root);
+      const before = await treeOf(root);
+      await assert.rejects(contend(root), expected, label);
+      assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
+    } finally {
+      await cleanup();
+    }
+  }
+  // A live token: its read end is open, whatever the recorded pid and realm say.
+  {
+    const { root, lock, cleanup } = await lockRoot();
+    const { fifo } = await seedTokenOwner(lock);
+    const reader = await open(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+    try {
+      await assert.rejects(contend(root), { code: "LOCK_HELD" }, "a live token");
+      await reader.close();
+      await (await contend(root))();
+      assert.equal(await exists(lock), false, "a dead token's lock was not reclaimed");
+    } finally {
+      await reader.close().catch(() => undefined);
+      await cleanup();
+    }
+  }
+  const freed = [
+    ["a dead token in another PID realm", (lock) => seedTokenOwner(lock)],
+    ["a lone token: a release cut short", async (lock) => rm(path.join(lock, `${(await seedTokenOwner(lock)).uuid}.json`))],
+  ];
+  for (const [label, seed] of freed) {
+    const { root, lock, cleanup } = await lockRoot();
+    try {
+      await seed(lock);
+      await (await contend(root))();
+      assert.equal(await exists(lock), false, label);
+    } finally {
+      await cleanup();
+    }
+  }
+});
+
+test("E2: without mkfifo the owner falls back to the PID rule, and a dead one is still reclaimed", { skip: TOKENS }, async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  try {
+    await execFileAsync(process.execPath, ["--input-type=module", "-e", holderScript(root, `process.kill(process.pid, "SIGKILL");`)], { env: { PATH: "" } })
+      .then(() => assert.fail("the holder was not killed"), (error) => assert.equal(error.signal, "SIGKILL", error.stderr));
+    const entries = await readdir(lock);
+    assert.equal(entries.length, 1, "a token was made without mkfifo");
+    assert.equal(JSON.parse(await readFile(path.join(lock, entries[0]), "utf8")).fifo, null);
+    await (await contend(root, { timeoutMs: 1000 }))();
+    assert.equal(await exists(lock), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("E2: two writers racing for a dead token owner's lock: exactly one holds it", { skip: TOKENS }, async () => {
+  const { root, lock, cleanup } = await lockRoot();
+  try {
+    await seedTokenOwner(lock);
+    const results = await Promise.allSettled([contend(root, { timeoutMs: 300 }), contend(root, { timeoutMs: 300 })]);
+    const held = results.filter((r) => r.status === "fulfilled");
+    assert.equal(held.length, 1);
+    assert.equal(results.find((r) => r.status === "rejected").reason.code, "LOCK_HELD");
+    await held[0].value();
   } finally {
     await cleanup();
   }
@@ -3269,7 +3516,7 @@ test("a legacy lock file blocks until an operator removes it, then the lock work
     assert.equal(await readFile(lock, "utf8"), legacy, "the legacy lock was touched");
     await rm(lock); // the documented manual recovery, once every writer is stopped
     const release = await acquireModuleLock(root, "auth", { timeoutMs: 1000 });
-    const [entry] = await readdir(lock);
+    const [entry] = (await readdir(lock)).filter((name) => name.endsWith(".json"));
     const owner = JSON.parse(await readFile(path.join(lock, entry), "utf8"));
     assert.equal(owner.realm, REALM);
     assert.equal(`${owner.uuid}.json`, entry);

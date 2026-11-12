@@ -1,0 +1,61 @@
+
+
+
+/→ switch view · ↑/↓ select row · / search · enter add · r refresh · esc close2/2 enabled2)
+
+ MCP · start-migration
+
+id: start-migration
+ kind: mcp
+ name: start-migration
+ scope: Repository
+ enabled: ✓ yes
+ trust: {
+   "origin": {
+"kind": "workspace"
+   },
+   "capabilities": {},
+   "permissions": {}
+ }
+
+ tools
+Loading tools…
+
+ data
+{
+   "name": "start-migration",
+   "status": "connected",
+   "source": "workspace",
+   "serverMetadata": {
+"instructions": null
+   }
+ }esc back · ⌫ back · qcloseMMMMMMMMMMMMMM (10)
+artifact_run: Run one artifact iteration. Pending decisions use the engine review and explicit operator APPROVE/REJECT through elicitation; tool arguments never authorize decisions.
+ artifact_status: Read an artifact record and its current direct-ledger decision projection. Writes nothing.
+ migration_capture: Capture one legacy-runtime state in a real browser and persist the evidence: an ASSESS_TARGET authority frame (legacy-runtime records) or, with appearanceClaimId, the format-20
+ LEGACY capture of one appearance claim at VERIFY_SLICES. Returns a compact summary; never overwrites, pins, approves, advances or marks PASS.
+ migration_evidence_binding: Read the boundTo values a FINALIZE gate evidence entry must carry now, and the current digest of each named evidence file inside the legacy or target repository. Writes
+ nothing and takes no lock.
+ migration_pending_decisions: List pending decisions and engine-owned reviews. STANDARD_LOCAL relays explicit APPROVE/REJECT as AGENT_RELAYED; only protected high-assurance policy requires
+ HUMAN_ATTESTED. Legacy records retain their terminal/host interaction.
+ migration_prefill: Write the engine-derivable part of the current checkpoint's authored artifact in place (classification rows from the scan, legacy-runtime visual rows from the pinned capture,
+ evidence digests and gate bindings) and return a summary of what is still to author. Fills absent fields only; never overwrites, pins, approves or advances.
+ migration_relay_decision: Relay the operator's explicit APPROVE or REJECT, given in conversation after seeing the review of an OPERATOR_DECISION, as AGENT_RELAYED. Pass operatorApproval.reference
+ unchanged. Never relay without the operator's explicit answer; a stale reference or a policy requiring HUMAN_ATTESTED records nothing.
+ migration_run: Perform one migration iteration: preflight, validate, and at most one advance. Every write happens in the core, under its existing lock and journal.
+ migration_scan: Recompute the discovery census the module classification is written against. Writes nothing.
+ migration_status: Read a migration record's persisted status. Writes nothing and takes no lock./ Filter by name, description, or source…
+
+   +  Add MCP server…                                                                                                                                                                                  
+     Configure a new MCP server (local command or remote URL)                                                                                                                                         
+                                                                                                                                                                                                      
+  ◎  GitHub MCP ServerBuilt-in
+ mcp:github-mcp-server1.1k tokens
+
+   ◎  start-migrationRepository
+      mcp:start-migration2.3k tokens
+
+
+
+
+

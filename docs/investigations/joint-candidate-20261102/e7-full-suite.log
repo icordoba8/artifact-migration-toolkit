@@ -1,0 +1,1832 @@
+$ pnpm engine:test && pnpm engine:test:ts && pnpm providers:test
+$ node scripts/engine-test.mjs packages/migration-engine/test/integration/direct-ledger-defaults.integration.spec.mjs packages/migration-engine/test/external/bin-mappings.test.mjs packages/migration-engine/test/external/format-17-acceptance.test.mjs packages/migration-engine/test/external/visual-authority-proof.test.mjs packages/migration-engine/test/external/engine-paths.test.mjs packages/migration-engine/test/integration/artifact-delegation.test.mjs packages/migration-engine/test/integration/inline-approval.integration.spec.mjs packages/migration-engine/test/integration/operator-approval-authority.integration.spec.mjs packages/migration-engine/test/unit/artifact-migration.test.mjs packages/migration-engine/test/unit/auto-authority.test.mjs packages/migration-engine/test/unit/v5-contract-parity.test.mjs packages/migration-engine/test/unit/discovery-scan.test.mjs packages/migration-engine/test/unit/api-contract.test.mjs packages/migration-engine/test/integration/api-response-contract.integration.spec.mjs packages/migration-engine/test/unit/export-contract.test.mjs packages/migration-engine/test/integration/export-contract.integration.spec.mjs packages/migration-engine/test/unit/evidence-provenance.test.mjs packages/migration-engine/test/unit/format-upgrades.test.mjs packages/migration-engine/test/unit/mcp-server.test.mjs packages/migration-engine/test/unit/content-identity.test.mjs packages/migration-engine/test/unit/store-shared.test.mjs packages/migration-engine/test/unit/durable-storage.test.mjs packages/migration-engine/test/unit/formats.test.mjs packages/migration-engine/test/unit/decisions.test.mjs packages/migration-engine/test/unit/slices.test.mjs packages/migration-engine/test/unit/census.test.mjs packages/migration-engine/test/unit/visual.test.mjs packages/migration-engine/test/unit/transport.test.mjs packages/migration-engine/test/unit/lifecycle.test.mjs packages/migration-engine/test/unit/legacy-runtime-authority.test.mjs packages/migration-engine/test/unit/live-history-replay.test.mjs packages/migration-engine/test/unit/migration-contract.test.mjs packages/migration-engine/test/unit/migration-policy.test.mjs packages/migration-engine/test/unit/record-decision.test.mjs packages/migration-engine/test/unit/registry-resolution.test.mjs packages/migration-engine/test/unit/toolkit-identity.test.mjs packages/migration-engine/test/unit/visual-evidence.test.mjs packages/migration-engine/test/unit/run-migration.test.mjs packages/migration-engine/test/unit/operator-webauthn.test.mjs packages/migration-engine/test/integration/operator-signer.integration.spec.mjs
+✔ an installed toolkit resumes an existing unstamped Format 17 record only after explicit adoption (5317.063628ms)
+✔ operator decision candidates and the approval gate survive the installed toolkit (1465.460583ms)
+✔ the MCP server runs from the installation and keeps host elicitation the only approval path (3163.118312ms)
+✔ an interrupted adoption is recovered, not half-applied (825.623473ms)
+✔ decision material, evidence provenance and pins are byte-identical across adoption (776.782203ms)
+✔ the scratch consumer contains no engine source after the whole run (975.159885ms)
+✔ only the pinned build may mutate, and an update moves the pin explicitly (1812.336747ms)
+✔ an installed toolkit previews and executes a contract-4 upgrade, writing nothing until confirmed (1893.182284ms)
+✔ an upgrade killed mid-transaction is recovered by the installed toolkit, then completes (2603.272113ms)
+✔ an executed upgrade rolls back to the contract-4 tree only under explicit confirmation (3003.019898ms)
+✔ an artifact transaction killed mid-write is recovered by the next installed command (1700.139328ms)
+✔ E2E-A: an installed toolkit upgrades a visible-UI format-17 record using only the normal command (1721.887955ms)
+✔ E2E-B: a format-17 record whose legacy authority declares no visible UI commits an atomic NO_OP (1984.179978ms)
+✔ E2E-C: reading the status of a pending format upgrade through the installation mutates nothing (1330.586828ms)
+✔ E2E-D: the built bundle states both engines' upgrade floors and registries, and no internals (2.386332ms)
+✔ E2E-E: an early format-17 record discovers its authority before the normal command upgrades it (1913.446352ms)
+✔ an identity is exactly four fields, each with an exact shape (3.331671ms)
+✔ equality is exact on all four fields, not on the version alone (0.421449ms)
+✔ the canonical key and digest ignore JSON key order (0.736835ms)
+✔ the blocker and status matrix: status reports, mutation refuses (0.808209ms)
+✔ toolkit SemVer is an axis of its own, coupled to no migration version (10.099302ms)
+✔ this file runs as an unidentified runtime, which is the premise of every case below (0.427229ms)
+✔ release identity is derived from the payload and is checksum-verifiable (2608.999042ms)
+✔ a release bundle carries no mutable reference an installer could follow (3.096574ms)
+✔ A-02 artifact mismatch remains BLOCKED with progress and exact identity recovery command (1764.763339ms)
+✔ an unidentified checkout reads an unstamped active record and may not write to it (1570.054023ms)
+✔ the approval recorder's own gate refuses an unstamped record under this runtime (544.129424ms)
+✔ status and validation read an unstamped record, report UNSTAMPED, and write nothing (716.471992ms)
+✔ an installed toolkit refuses to mutate an unstamped record and names one command (778.103119ms)
+✔ adoption is one locked, atomic, replayable event that then stops (675.266889ms)
+✔ after adoption the same toolkit resumes the record normally (1092.965768ms)
+✔ a different build is refused by every mutating entry point, before any write (1319.31248ms)
+✔ update and rollback move between two immutable releases without touching consumer state (1666.666885ms)
+✔ concurrent adoptions serialize through the existing record lock (618.370559ms)
+✔ a forged identity in state.json is refused by the integrity anchor and the history (477.813569ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 44982.435033
+✔ every bin names a module inside the package (5.632113ms)
+✔ each bin does real work when invoked through its symlink (3211.906012ms)
+✔ the README executables table is exactly the package bin map (8.861798ms)
+✔ R-1: the engine root is this module's own installed location (2.937796ms)
+✔ R-1: an installation path with a space renders a command a shell can run (23.3621ms)
+✔ R-1: engineArgv is the command's argv, so nothing has to parse it back (3.457612ms)
+✔ R-1: a rendered command is absolute and identical from any directory (8.801209ms)
+✔ R-1: every rendered command names a file that exists (7.306287ms)
+✔ R-1 guard: no engine source hardcodes the consumer-relative scripts path (23.781086ms)
+✔ R-1 guard: only the root helper may walk up out of the engine installation (30.218141ms)
+✔ R-1 guard: consumer-owned migration state is still addressed by convention (1.161884ms)
+✔ R-1 proof: the consumer repository holds state and no engine copy (351.83555ms)
+✔ R-1 proof (legacy): the engine resolves the consumer registry, not its own ancestor (800.205819ms)
+✔ R-1 proof (legacy): existing consumer migration state stays authoritative (1048.238168ms)
+✔ R-1 proof (legacy): approval, upgrade, recovery, rework, and artifact approval all run (1378.705707ms)
+✔ R-1 proof (ancestor): the engine resolves the consumer registry, not its own ancestor (963.281958ms)
+✔ R-1 proof (ancestor): existing consumer migration state stays authoritative (1790.376523ms)
+✔ R-1 proof (ancestor): approval, upgrade, recovery, rework, and artifact approval all run (2128.268786ms)
+✔ R-1 proof (unrelated): the engine resolves the consumer registry, not its own ancestor (1027.104234ms)
+✔ R-1 proof (unrelated): existing consumer migration state stays authoritative (1424.532291ms)
+✔ R-1 proof (unrelated): approval, upgrade, recovery, rework, and artifact approval all run (2146.89904ms)
+✔ R-1 proof (spaced): the engine resolves the consumer registry, not its own ancestor (1372.111613ms)
+✔ R-1 proof (spaced): existing consumer migration state stays authoritative (1751.568111ms)
+✔ R-1 proof (spaced): approval, upgrade, recovery, rework, and artifact approval all run (1708.698187ms)
+✔ R-1 proof (legacy): a nested workspace package still resolves the repository's binding (1108.537012ms)
+✔ R-1 proof (user-level .agents): an install's own ancestor is never the consumer (959.234229ms)
+✔ R-1 proof (user-level .claude): an install's own ancestor is never the consumer (1041.974337ms)
+✔ R-1 proof (user-level .codex): an install's own ancestor is never the consumer (1200.656974ms)
+✔ R-1 proof (user-level .github): an install's own ancestor is never the consumer (1089.710812ms)
+✔ R-1 proof (user-level .opencode): an install's own ancestor is never the consumer (1415.411338ms)
+✔ R-1 proof (user-level, ancestor is its own repository): a different repository is still not the consumer (990.076878ms)
+✔ R-1 proof: a spaced installation renders a command the operator's shell can run (1800.179419ms)
+✔ R-1 proof: --doctor from an external engine reports the consumer, not its own ancestor (1504.431076ms)
+✔ R-1 proof: the MCP server starts from an external engine installation (1128.467531ms)
+✔ portability: a rendered command matches by meaning on either shell family (1.615251ms)
+✔ portability: a comparison path is the repository-relative `/` form, for text only (0.259672ms)
+✔ portability: a file URL becomes a path with exactly one drive prefix (178.963711ms)
+✔ portability: a stopped child has exited and released its cwd (7.744009ms)
+✔ legacy-runtime: a full lifecycle completes, and every divergence is refused on its own (43038.523313ms)
+✔ figma-mcp: a full lifecycle completes, and every divergence is refused on its own (32463.67506ms)
+
+PROVISIONAL visual calibration evidence (synthetic fixtures, Slice D).
+Not a certified threshold: see the reduced plan section 6.
+
+| scenario | authority | diffPixels | diffRatio | threshold | verdict |
+| --- | --- | --- | --- | --- | --- |
+| matching pair (2x design render downsampled) | figma-mcp | 0 | 0 | 0.05 | PASS |
+| perceptual-only layout shift (injected) | figma-mcp | 88 | 0.11 | 0.05 | REFUSED |
+| wrong visible asset (render byte-identical) | figma-mcp | 0 | 0 | 0.05 | REFUSED by assets fact, NOT by the pixel gate |
+| matching pair, authorized native extra | legacy-runtime | 0 | 0 | 0.0005 | PASS |
+| perceptual-only layout shift (injected) | legacy-runtime | 88 | 0.11 | 0.0005 | REFUSED |
+| wrong visible asset (render byte-identical) | legacy-runtime | 0 | 0 | 0.0005 | REFUSED by assets fact, NOT by the pixel gate |
+
+✔ format 21 refuses an OpenSpec that names the service errors but omits the route layer's statuses, and writes nothing (3621.676396ms)
+✔ format 21 rechecks the declared roots, binds slice evidence to every traced response, and completes only when all are proven (36462.206325ms)
+✔ a persisted format-20 record keeps format-20 semantics over the same API module (4210.656764ms)
+✔ format 13 requires artifactMigration on SHARED_PREREQUISITE (81.061607ms)
+✔ format 12 does not require artifactMigration (85.018625ms)
+✔ delegated completion replaces changedFiles only for format 13 (1.79164ms)
+✔ a target outside targetOwner is refused (72.758197ms)
+✔ two modules naming the same source and type derive one id (131.86061ms)
+✔ a missing prerequisite becomes RUN_ARTIFACT work (57.761823ms)
+✔ AUTO runs one child iteration without mutating parent state (762.524558ms)
+✔ STEP exposes the child command without creating child state (102.962829ms)
+✔ no SHARED_PREREQUISITE means no artifact gate (72.058783ms)
+✔ a binding mismatch blocks the parent (253.877195ms)
+✔ a stale child blocks the parent (427.09437ms)
+✔ a genuinely blocked child blocks the parent (294.261632ms)
+✔ two parents reuse one artifact without mutating it (414.731362ms)
+✔ module-level prerequisite order selects B before A and never nests artifacts (68.493254ms)
+✔ independent prerequisites follow module declaration order without inventing a dependency (62.152297ms)
+✔ MCP artifact iteration uses the shared recorder and exposes no approval tool (4.386283ms)
+Operator decisions are recorded only from an interactive terminal. This invocation has no TTY, so nothing was read or written. An agent may run --pending, but it can never approve a candidate.
+✔ OPERATOR-CHILD uses the trusted recorder and rejects wrong or replayed challenges (619.686796ms)
+✔ OPERATOR-MCP routes parent and child decisions through one host recorder (3.359628ms)
+✔ claude: no infrastructure, default 19, explicit relay, stale, rejection and consumed identity (19495.498859ms)
+✔ codex: no infrastructure, default 19, explicit relay, stale, rejection and consumed identity (13701.400246ms)
+✔ copilot: no infrastructure, default 19, explicit relay, stale, rejection and consumed identity (15069.864229ms)
+✔ opencode: no infrastructure, default 19, explicit relay, stale, rejection and consumed identity (14199.759264ms)
+✔ conversational APPROVE relay over mcp: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse (7031.823608ms)
+✔ conversational APPROVE relay over cli: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse (5360.037741ms)
+✔ conversational REJECT relay over mcp: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse (4055.9337ms)
+✔ conversational REJECT relay over cli: timeout/unavailable write nothing, stale and HUMAN_ATTESTED refuse (3014.263128ms)
+✔ run --json at a terminal asks the operator on stderr; stdout is one JSON document (1215.834032ms)
+✔ standard terminal APPROVE: one complete group, one ledger line, no IDs or challenge (1487.952309ms)
+✔ standard terminal REJECT: one complete group, one ledger line, no IDs or challenge (1136.3681ms)
+✔ canonical policy: deterministic standard, protected opt-up, historical pins and policy staleness (1199.347878ms)
+✔ standard relay revalidates evidence and protected policy under the append lock (1179.008874ms)
+✔ FINALIZE refuses a changed export call contract, then source changed after verification, and completes on fresh evidence (32796.385447ms)
+Candidate 'APP-b99db23fd5c7d1aca51f' changed or ceased to be pending while the challenge was open. Nothing was written; run --pending again.
+✔ inline worktree approval preserves context, rejects invalid answers, and returns usable references (18942.128575ms)
+✔ terminal fallback rejects Approve and requires the exact candidate challenge (1741.367863ms)
+✔ protected high assurance: status, pending and run refuse relayed authority identically (4423.085632ms)
+✔ a format-18 record keeps its historical citation behavior under the shared projection (2131.367444ms)
+✔ a host that cannot deliver a human answer still leaves a trusted worktree-scoped path, and a resume consumes it (2286.61998ms)
+✔ a host with no human channel is answered by AUTO and writes no human ledger line (1944.859814ms)
+✔ fourteen pending decisions and no human interaction write nothing at all (12386.48574ms)
+Candidate 'APP-d162ee0c6c8bec9dae41' changed or ceased to be pending while the challenge was open. Nothing was written; run --pending again.
+✔ one explicit group approval appends every member atomically (2853.618716ms)
+✔ a format-19 group shows one complete review and refuses host/terminal attestation (1982.762643ms)
+✔ the pinned census never re-offers discovery approvals after legacy edits (4303.894189ms)
+✔ a format-19 single candidate cannot write v1, attest via host/TTY/argv, or downgrade to AUTO (3496.573398ms)
+✔ no fabricated, unbound, stale or mismatched ledger line authorizes a checkpoint (10231.461471ms)
+✔ a genuine approval does not replay into another record of the same module (4103.392223ms)
+✔ a superseded approval stops authorizing and the ledger only ever grows (2713.748081ms)
+✔ the recorder refuses to approve an id that is no longer the current candidate (1661.156975ms)
+✔ artifact decisions bind to a derived candidate and expose their recorded receipt (10.612845ms)
+✔ a refused approval touches nothing outside the record it was refused in (1553.918789ms)
+✔ R-W2-e: no argv option, environment variable, or tool argument can produce an approval (186.592869ms)
+✔ R-W2-f: the artifact ledger refuses every non-transcribed answer the module ledger refuses (0.883115ms)
+✔ R-W2-g: --verify flags a forged chain, a truncated ledger, and an unbound evidence claim (2097.351106ms)
+✔ module 19: signed APPROVED appends one replay-verified line and the shared projection updates (3856.644952ms)
+✔ module 19: signed REJECTED blocks only that candidate digest and a stale review writes nothing (2855.3766ms)
+✔ module 19: forged, edited, unclaimed and duplicated attested lines are refused on read (3911.894732ms)
+✔ module 19: a swapped proof is refused even when the genuine signature already ends in AA (9643.442386ms)
+✔ module 19: one signed group act is one line; members cannot be attested alone (2520.78965ms)
+✔ module 19: changed group membership invalidates an issued group challenge (2368.758183ms)
+✔ crash at before-verify: one committed line or an explicit blocked state, never two (2408.508914ms)
+✔ crash at after-verify: one committed line or an explicit blocked state, never two (2064.254804ms)
+✔ crash at before-claim: one committed line or an explicit blocked state, never two (3250.088406ms)
+✔ crash at after-claim: one committed line or an explicit blocked state, never two (2683.289314ms)
+✔ crash at during-append: one committed line or an explicit blocked state, never two (2632.699682ms)
+✔ crash at after-append: one committed line or an explicit blocked state, never two (2560.927717ms)
+✔ crash at after-fsync: one committed line or an explicit blocked state, never two (2475.176623ms)
+✔ crash at before-commit: one committed line or an explicit blocked state, never two (1996.235363ms)
+✔ crash at after-commit: one committed line or an explicit blocked state, never two (2141.306387ms)
+✔ crash at before-response: one committed line or an explicit blocked state, never two (2887.22047ms)
+✔ companion: HTTPS-only, session-bound, CSRF-checked, inert, stale-aware; approve/reject/cancel/timeout (4689.963988ms)
+✔ provider, TTY and MCP surfaces cannot attest, even beside an active protected verifier (2362.574252ms)
+✔ companion: enrollment is a separate admin-launched mode; review mode exposes no enrollment (373.676691ms)
+✔ algorithm 5 traces route-layer mapping tables, fallbacks and runtime faults across files (822.503028ms)
+✔ a conflict status is read from the mapping table, never assumed (453.526422ms)
+✔ a dynamic mapping, identifier or convention is UNRESOLVED, never defaulted (241.547718ms)
+✔ a module without endpoints owes no response obligations, and older algorithms carry no contract (1050.382254ms)
+✔ the OpenSpec must cite every derived response verbatim and nothing else (210.25035ms)
+✔ a Next.js frontend module owes nothing for a route handler outside its boundary, and stays UNRESOLVED for one inside (226.53176ms)
+✔ two exact in-place sources keep frozen provenance through ordered slices and FINALIZE (11905.285955ms)
+✔ FINALIZE reports a same-root bound legacy import outside migrated overlap paths (5911.026476ms)
+✔ A-02 artifact invocation mismatch emits canonical BLOCKED progress and recovery (410.452924ms)
+✔ migrate-artifact parses only explicit Ponytail targets (3.684271ms)
+✔ migrate-artifact skill and all four provider examples use executable Ponytail values (4.361698ms)
+✔ every flag in the command reference argument tables is one its parser declares (29.955243ms)
+✔ artifact Ponytail full requires Review evidence before COMPLETE (7248.318657ms)
+✔ artifact Ponytail full-audit requires Review then Audit before PRECOMMIT_GATE (8778.451703ms)
+✔ M10 D1: Ponytail evidence is AGENT_ASSERTED, never reported or accepted as attested (8092.532599ms)
+✔ M9-R1 D2: FINALIZE declares and pins the matrices whose terminal status it requires (10373.360177ms)
+✔ E/F: completed standalone artifacts are reused by multiple parents without mutation (16275.806437ms)
+✔ the CLI bootstraps directly with no registry, parent, or module state (725.13021ms)
+✔ TARGET_REUSE requires verified evidence; EXTEND and NEW persist independently (3048.348346ms)
+✔ resume is exact and an unauthored checkpoint appends no history (304.558757ms)
+✔ every artifact checkpoint schemaRef lands on its contract row (303.734415ms)
+✔ relevant source/target drift is typed STALE/BLOCKED while provider drift is ignored (541.927831ms)
+✔ global themes cover every consumer and feature-local visuals stay excluded (997.065863ms)
+✔ visible UI requires Playwright evidence at VERIFY and fresh references at FINALIZE (4044.443937ms)
+✔ completed artifact does not bypass freshness validation and returns STALE (2852.489113ms)
+✔ TARGET_EXTEND immutable target-native rows survive implementation (1708.371528ms)
+✔ HISTORICAL_ARTIFACT_FORMATS no longer exists and format 11 is refused (67.234519ms)
+✔ pending operator decisions block advance and no approval API exists on the engine (206.133913ms)
+✔ an agent cannot mint its own artifact approval; a real ledger approval advances (360.325904ms)
+✔ an artifact approval without a TTY or ask is refused before anything is read (174.751515ms)
+✔ step mode binds confirmation and strict documents refuse unknown keys (255.366964ms)
+✔ case-equivalent paths produce one artifact identity on win32 (192.621607ms)
+✔ a completed artifact with a different target binding is refused (2649.075087ms)
+✔ concurrent bootstrap yields one record and no crash (306.477136ms)
+✔ a pending recoverable transaction reports ACTIVE from --status and is recovered by the next run (305.975576ms)
+✔ the artifact engine creates 14 by default and refuses unsupported old and future formats (301.081458ms)
+✔ pilot creation requires an explicit 14 selection, preview and confirmation (376.18223ms)
+widget-51815881d51a -> src/widget.ts | 1/9 RESOLVE | AWAITING_CONFIRMATION
+progress: widget-51815881d51a -> src/widget.ts  status=ACTIVE  revision=0  mode=auto
+[>] 1/9 RESOLVE
+[ ] 2/9 DISCOVER_LEGACY
+[ ] 3/9 DISCOVERY_COMPLETENESS
+[ ] 4/9 ASSESS_TARGET
+[ ] 5/9 BUILD_BASELINE
+[ ] 6/9 PLAN
+[ ] 7/9 IMPLEMENT_SLICES
+[ ] 8/9 VERIFY_SLICES
+[ ] 9/9 FINALIZE
+next: RESOLVE
+widget-51815881d51a -> src/widget.ts | 2/9 DISCOVER_LEGACY | CONTINUE
+progress: widget-51815881d51a -> src/widget.ts  status=ACTIVE  revision=0  mode=auto
+[x] 1/9 RESOLVE
+[>] 2/9 DISCOVER_LEGACY
+[ ] 3/9 DISCOVERY_COMPLETENESS
+[ ] 4/9 ASSESS_TARGET
+[ ] 5/9 BUILD_BASELINE
+[ ] 6/9 PLAN
+[ ] 7/9 IMPLEMENT_SLICES
+[ ] 8/9 VERIFY_SLICES
+[ ] 9/9 FINALIZE
+next: DISCOVER_LEGACY
+widget-51815881d51a -> src/widget.ts | 2/9 DISCOVER_LEGACY | AWAITING_CONFIRMATION
+progress: widget-51815881d51a -> src/widget.ts  status=ACTIVE  revision=0  mode=auto
+[x] 1/9 RESOLVE
+[>] 2/9 DISCOVER_LEGACY
+[ ] 3/9 DISCOVERY_COMPLETENESS
+[ ] 4/9 ASSESS_TARGET
+[ ] 5/9 BUILD_BASELINE
+[ ] 6/9 PLAN
+[ ] 7/9 IMPLEMENT_SLICES
+[ ] 8/9 VERIFY_SLICES
+[ ] 9/9 FINALIZE
+next: DISCOVER_LEGACY
+widget-51815881d51a -> src/widget.ts | 2/9 DISCOVER_LEGACY | FORMAT_UPGRADED
+progress: widget-51815881d51a -> src/widget.ts  status=ACTIVE  revision=1  mode=auto
+[x] 1/9 RESOLVE
+[>] 2/9 DISCOVER_LEGACY
+[ ] 3/9 DISCOVERY_COMPLETENESS
+[ ] 4/9 ASSESS_TARGET
+[ ] 5/9 BUILD_BASELINE
+[ ] 6/9 PLAN
+[ ] 7/9 IMPLEMENT_SLICES
+[ ] 8/9 VERIFY_SLICES
+[ ] 9/9 FINALIZE
+next: DISCOVER_LEGACY
+✔ the CLI confirms a pilot and an explicit upgrade without changing ordinary creation (799.123789ms)
+✔ pilot 14 reports source decisions without accepting legacy citations (793.734666ms)
+✔ pilot 14 status, pending and locked run re-read weak and stale source authority (779.904434ms)
+✔ no infrastructure: default 14 explicitly approves/rejects source and visual decisions, consumes and recovers (6277.135575ms)
+✔ pilot 14 derives a policy-bound source candidate from current evidence (467.685586ms)
+✔ pilot 14 recorder reviews current evidence and cannot mint attestation (425.938772ms)
+✔ pilot 14 rejects a reviewed source candidate when current evidence or policy changes (337.973614ms)
+✔ pilot 14 rejects forged visual receipts without bypassing visual checks (1062.773633ms)
+✔ pilot 14 visual projections re-read the ledger and stale evidence without advancing (1157.573863ms)
+✔ pilot 14 derives a policy-bound visual candidate from current evidence (943.498688ms)
+✔ delegated child arguments create default format 14 without a pilot flag (294.241596ms)
+✔ claude: standalone artifact MCP defaults to 14 and relays explicit decisions without infrastructure (1236.531084ms)
+✔ codex: standalone artifact MCP defaults to 14 and relays explicit decisions without infrastructure (1103.808229ms)
+✔ copilot: standalone artifact MCP defaults to 14 and relays explicit decisions without infrastructure (1079.814094ms)
+✔ opencode: standalone artifact MCP defaults to 14 and relays explicit decisions without infrastructure (999.830348ms)
+✔ only a pristine 13 bootstrap upgrades, with an explicit byte-bound confirmation (549.280489ms)
+✔ authored, decided, pinned, journalled and drifted 13 records refuse without mutation (2129.756588ms)
+✔ artifact progress always shows 9 checkpoints regardless of formatVersion (229.664726ms)
+✔ every emitted nextCommand parses to the same artifact binding (222.285863ms)
+✔ checkpointArtifacts and progress artifacts agree at every checkpoint (188.578856ms)
+✔ valid TARGET_REUSE completes with evidence on the bound file (1446.52466ms)
+✔ forged TARGET_REUSE against an unrelated file is refused at ASSESS_TARGET (463.742772ms)
+✔ TARGET_REUSE evidence on a sibling file cannot stand in for the bound target (593.844027ms)
+✔ a TARGET_NATIVE_EQUIVALENT unit naming no real targetNative row is refused (1075.745425ms)
+✔ the Playwright gate cannot be downgraded: visible UI with no runtime evidence is refused (2398.015203ms)
+✔ an invented runtime state is refused (3772.576043ms)
+✔ a state the behavior does not declare is refused (4141.665205ms)
+✔ a missing required TARGET state is refused (3481.979769ms)
+✔ a missing origin is refused (3141.585422ms)
+✔ identical captures across origins and across distinct declared states are legal (2198.253672ms)
+✔ a logical evidence slot cannot be captured twice (2006.564ms)
+✔ a capture file reused across logical slots is refused (1830.286537ms)
+✔ a global contract cannot be reduced to its first consumer's behavior (359.165442ms)
+✔ runArtifact always enters the engine and never returns a provider short-circuit (205.321569ms)
+✔ structuralUnits discovers components from createTheme(arrowFn({...})) (0.63462ms)
+✔ structuralUnits discovers components from both ternary branches (0.200441ms)
+✔ completeness with an undeclared structural unit is refused (319.789396ms)
+✔ target comments alone cannot prove resolution at ASSESS_TARGET (420.392815ms)
+✔ code-changing IMPLEMENT_SLICES without a validation check is refused (1332.701804ms)
+✔ non-code IMPLEMENT_SLICES without a validation check is allowed (1050.687399ms)
+✔ echo tsc passed is refused as a fake validation command (1044.854915ms)
+✔ a check with status FAIL is refused even if the command is valid (903.99285ms)
+✔ a validation command that actually fails is refused despite claimed PASS (985.170227ms)
+✔ node --check targeting an unrelated file is refused (934.236386ms)
+✔ prettier --check is refused as a formatting-only command (944.272104ms)
+✔ node --check on a changed JS file is accepted (1025.732302ms)
+✔ design-system missing-dependency false-COMPLETE is refused (1636.7294ms)
+✔ project-wide validator with errors in unrelated files is accepted (1698.274882ms)
+✔ a no-op TypeScript command cannot claim validator coverage (1222.982092ms)
+✔ a TypeScript project does not cover an excluded changed file (2280.298245ms)
+✔ a no-op package script cannot claim validator coverage (1003.776086ms)
+✔ finalization reports shared imports that resolve transitively into the legacy tree (2272.231187ms)
+✔ out-of-boundary code and non-code requirements cannot be silently dropped (694.040412ms)
+✔ the structural census is unconditional and covers the artifact's own files (435.128261ms)
+✔ final gate evidence citing an unrelated file is refused (2297.701397ms)
+✔ ARCHITECTURE_IMPLEMENTATION_GATE and PRECOMMIT_GATE assert the mandatory rules (22.311251ms)
+✔ a violated architecture rule fails its own gate at FINALIZE (1991.425211ms)
+✔ an engine fault is BLOCKED and stops the loop, not CONTINUE (2666.021806ms)
+✔ the legacy-dependency gate reaches every target root, import form, and root layout (55.334415ms)
+✔ an undecidable dynamic reference in a changed file is surfaced (11.049128ms)
+✔ an orphan transaction reports BLOCKED from --status and from run alike (197.982613ms)
+✔ shipping a component other than the required primitive needs a recorded exception (501.664809ms)
+✔ a required external package holds DISCOVERY_COMPLETENESS instead of vanishing (1145.499309ms)
+✔ EXTERNAL_DEPENDENCY is refused unless the target really declares the package (449.78968ms)
+✔ the artifact requirement projection loses nothing the reference scan found (279.43006ms)
+✔ ancillary test files inside the artifact are censused, not skipped (278.20819ms)
+✔ style, asset, data and runtime requirements need real preservation evidence at FINALIZE (2477.30266ms)
+✔ referenced runtime capture files are revalidated at FINALIZE (2039.345861ms)
+✔ an external dependency that disappears blocks FINALIZE and invalidates COMPLETE (2056.329924ms)
+✔ an applicable generic build/test check is executed, not trusted (1431.984056ms)
+✔ a check that exhausts the output buffer is BLOCKED, not silently downgraded (983.653002ms)
+✔ a resolved but unreadable requirement is BLOCKED, not disposed on faith (592.812201ms)
+✔ an unwritable record fails loudly and replays once the obstruction is gone (733.752837ms)
+✔ DR13: an unreadable, symlinked or unknown-kind artifact transaction is refused and never reported healthy (636.318723ms)
+✔ an actual SIGINT mid-checkpoint leaves a resumable record (3548.154557ms)
+✔ the engine writes only inside its own record and refuses provider paths (2612.30197ms)
+✔ every run and status reports scan, parse and time metrics (429.648417ms)
+✔ migrate-artifact discovery succeeds when the application uses typescript 7.0.2 (345.731336ms)
+✔ P1 #6: --status executes no target-controlled code and mutates no record (1174.691989ms)
+✔ P1 #6: stale and valid --status verdicts stay correct without executing anything (715.268155ms)
+✔ P1 #6: a failing target check --status cannot see still blocks the explicit run (812.174092ms)
+✔ P1 #6: the execution choke point fails closed for a read-only capability (47.009755ms)
+✔ R-W1-b: a target that declares its own TypeScript is checked with it, and the evidence says so (99.881709ms)
+✔ R-W1-c: a target with no TypeScript falls back and stamps PINNED_FALLBACK (560.757072ms)
+✔ R-W1-c: a target that declares TypeScript but has not installed it does not claim TARGET (40.549838ms)
+✔ R-W1-a: the structural parser resolves from the skill's own dependency, not the host manifest (2.461882ms)
+✔ R-W1-d: an unresolvable parser names the dependency, the manifest, the searched root and the install command (0.564407ms)
+✔ R-W7-a: a CONTINUE with no next command is FAILED, never `loop: STOP reason=CONTINUE` (0.228408ms)
+✔ R-W7-b: every directive the artifact CLI can emit parses against MIGRATION_OUTCOMES (0.557517ms)
+✔ R-W7-c: --mode step emits no directive from the artifact front end either (0.175373ms)
+✔ R-W7-d: the artifact front ends carry no second copy of a shared rule (6.607675ms)
+✔ Figma parity: CLI validation, persisted canonical sources, shared evidence contract, and deterministic visual verdict (1057.530214ms)
+✔ DR18: an artifact record applies the module's design-source immutability rule (1396.666645ms)
+✔ structured Figma authority: artifact lifecycle compares child facts, pins evidence and refuses injections (1714.269411ms)
+✔ legacy-runtime parity: migrate-artifact pins the same authority and takes the same visual path (1610.358514ms)
+✔ Figma parity: DEGRADED frames cannot back acceptance and pinned evidence rejects tampering (656.565665ms)
+✔ pilot 14 signer: signed ARTIFACT_DECISION APPROVED and REJECTED, stale after change, verified on reread (1407.80844ms)
+✔ pilot 14 signer: signed VISUAL_UNBACKED uses the same protocol; artifact 13 and groups are refused (1303.949959ms)
+✔ M13 census: CommonJS exports are structural units (8.0947ms)
+✔ M13 census: undecidable CommonJS exports stay visible as unresolved units (2.412134ms)
+✔ M13.1 census: a CommonJS root whose shape is decided at run time is unresolved (3.752254ms)
+✔ M13.1 census: bracketed module['exports'] is the export object (3.452908ms)
+✔ M13 census: ESM and TypeScript units are unchanged (1.857923ms)
+✔ M13 completeness: omitted, altered and undisposed CommonJS units cannot pass (674.141318ms)
+✔ M13.1 completeness: a dynamically built CommonJS export cannot be omitted or left unjustified (577.828188ms)
+✔ M13 FINALIZE: a completeness document blind to CommonJS exports cannot complete (2414.611134ms)
+✔ M13 evidence: executed validators persist an integrity-bound receipt through COMPLETE (2040.227439ms)
+✔ M13 evidence: a failing validator advances nothing and persists no receipt (1503.392612ms)
+✔ M13 evidence: declared, unsupported and not-required checks are recorded as exactly that (979.586931ms)
+✔ M13 evidence: status and preview never execute validators or write evidence (1621.930605ms)
+✔ M13 evidence: FINALIZE refuses tampered, rebound or stripped evidence and a target changed after validation (4146.24079ms)
+✔ M13.1 evidence: FINALIZE refuses command receipts promoted, rebound or reordered after the fact (2991.92261ms)
+✔ M13 evidence: crash recovery re-executes and reproves the persisted receipt (2893.056193ms)
+✔ M13 compatibility: pre-M13 records without validator evidence still complete (3941.985467ms)
+✔ AUTO is the default principal and `--mode step` is the only way out of it (2.234903ms)
+✔ the AUTO ledger is a separate file from the human ledger (0.53459ms)
+✔ deterministic transitions self-confirm under auto and never under step (0.867392ms)
+✔ a bootstrap is AUTO's own decision and stays two-phase under step (0.444937ms)
+✔ the contract states what AUTO owns: bootstrap and registration self-confirm, step stays two-phase (29.653926ms)
+✔ the operator-only transitions are reachable under auto instead of throwing (5.812116ms)
+✔ toolkit identity: safe transitions auto-adopt, unsafe ones fail closed (2.043912ms)
+✔ no pseudo-interactive prompt is reachable under the AUTO principal (122.095091ms)
+✔ the step-mode stop prose names the mode that caused it (1.651171ms)
+✔ A5-ARCH-1: census/ has exactly one public entry, and it only re-exports its own files (46.639267ms)
+✔ A5-ARCH-2: engine code takes census-owned names from census/index.mjs, never through a compatibility path (1842.785203ms)
+✔ A5-ARCH-3: census/ adds no import cycle: its files import each other acyclically (179.950123ms)
+✔ A5-ARCH-4: every census declaration has exactly one live definition, and no moved declaration survives at its old site (1021.202791ms)
+✔ A5-ARCH-5: historical compatibility exports remain, as the census binding itself (13.883801ms)
+✔ A5-ARCH-6: the scanner's versions are pinned, and its parser loads lazily from the scanner's installed path (721.462992ms)
+✔ A5-ARCH-7: census never grants approval or writes: it reaches decisions only to build, read and require (91.65328ms)
+✔ A5: the legacy inventory rules apply the injected observation rule once per UI behavior, in order, only from format 18 (39.615121ms)
+✔ A5: an external requirement's census rules decide the package the target must provide, before any target read (4.010571ms)
+✔ I3/DR28: implicitModuleRoots prefers the one feature root, fails closed on competing ones, and respects attribution (3.715371ms)
+✔ text-lf-v1 folds CRLF to LF and nothing else (10.857622ms)
+✔ bytes-v1 is the exact bytes, and an explicit byte purpose wins (0.718903ms)
+✔ eligibility is the frozen extension list plus the content itself (0.753916ms)
+✔ the three supported spellings parse, and nothing else does (1.756283ms)
+✔ a legacy pin matches the current bytes and the two EOL candidates (0.761378ms)
+✔ a tagged pin means its tag and is never retried under the other one (0.589348ms)
+✔ A3-ARCH-1: every decisions declaration has exactly one live definition, inside decisions/ (1069.636056ms)
+✔ A3-ARCH-2: engine code imports decisions-owned names from decisions/index.mjs, never through a compatibility re-export (1222.409422ms)
+✔ A3-ARCH-3: decisions/ adds no import cycle: its files import each other acyclically (43.850951ms)
+✔ A3-ARCH-4: historical compatibility exports remain, as the decisions binding itself (19.791306ms)
+✔ A3: AUTO and a host channel never answer a format-19 review, and a signer requirement is never met locally (6.004474ms)
+✔ A3: only an exact APPROVE or REJECT is a format-19 answer; anything else records nothing (4.829791ms)
+✔ A3: a legacy challenge accepts only its exact phrase, and AUTO is never asked about an underivable candidate (2.899283ms)
+✔ A3: under the lock only the deep-equal reviewed candidate is writable, at the same principal (3.314444ms)
+✔ A3: a rejection blocks until the facts change, and then the candidate is stale, never approved (11.268651ms)
+✔ A3: a relay answers only the review its reference names, and only with the explicit decision (21.064574ms)
+✔ A3: AUTO provenance names exactly the identity its seam supplied; a human line carries none (0.973853ms)
+✔ A3: post-census facts offer only what the writer accepts, at each format (32.745127ms)
+✔ external JSX imports require exact behavior and source-backed capability dispositions (9.059574ms)
+✔ format 20 refuses a historical scanner pin before running discovery (55.542538ms)
+✔ algorithm 4 includes governing Next.js ancestors and their styles without claiming ownership (259.10612ms)
+✔ algorithm 4 retains externally rendered controls as bound UI imports (150.306673ms)
+✔ algorithm 4 binds required and lazily loaded packages too; an unspelled member stays '*', an import passed as data is not rendered (131.899331ms)
+✔ a file with no imports and no importers is still in the census (83.217454ms)
+✔ a for-statement with an omitted initializer does not crash write-tracking (90.431046ms)
+✔ the census includes untracked-but-unignored files and excludes ignored ones (99.896058ms)
+✔ a symlink under an owned root is rejected, not followed (107.303984ms)
+✔ alias -> barrel -> component resolves, so a decorative leaf is reachable (129.97501ms)
+✔ literal dynamic import and require traverse; a non-literal one blocks (102.152358ms)
+✔ import.meta.url creates a module-resource edge and requires targets for a non-literal (85.079246ms)
+✔ a root-relative URL is a route, not an unresolved module reference (120.313251ms)
+✔ a finding outside the module and its closure is not the module's problem (140.409488ms)
+✔ CSS @import and url() are traversed; assets are entered, not parsed (107.887333ms)
+✔ an i18n namespace is a finding and a bare package is EXTERNAL (98.410913ms)
+✔ an undeclared file that imports into the roots becomes an entry point (113.494744ms)
+✔ relevant or declared Next.js conventions govern the module boundary (127.60997ms)
+✔ an owned Next.js error boundary is a framework entry without a declaration (I2) (386.907203ms)
+✔ a declared framework module edge needs concrete targets before it is production-reachable (387.49225ms)
+✔ the module's out-closure is SUPPORTING with a requiredBy map (152.070138ms)
+✔ a tsconfig paths edit changes the digest; reordering files does not (483.033722ms)
+✔ adding a census file changes the digest (190.440447ms)
+✔ a legacy project with no compiler installed at all still discovers, using this skill's own compiler (224.14655ms)
+✔ a module with nothing parseable never needs a compiler at all (141.645981ms)
+✔ scanning refuses without a declared module root, and rejects escaping roots (133.880816ms)
+✔ the visual safeguard's inputs classify the files a user can see (0.400223ms)
+✔ loadTypeScript resolves this skill's own pinned discovery compiler (0.344387ms)
+✔ a legacy project pinned to TypeScript 7 still discovers correctly, without loading that project's own compiler (219.172666ms)
+✔ i18n configuration governs the boundary while only the used namespace resource supports it (196.407178ms)
+✔ HTTP new URL calls are runtime evidence, while import.meta.url remains a module-resource edge (205.397823ms)
+✔ a baseless URL and a parameter-based computed URL are runtime, but a parameter-based literal still fails closed (131.93724ms)
+✔ a computed URL over a destructured parameter base is runtime, not a module edge (101.072407ms)
+✔ a computed URL over an import.meta.url base stays a blocking module edge (114.062709ms)
+✔ immutable import.meta.url aliases and nested URL bases remain module resources (262.637372ms)
+✔ shadowed, reassigned, and cyclic URL bases fail closed while proven runtime URLs do not (204.986497ms)
+✔ named class expressions and import-equals aliases shadow the platform URL constructor (176.331962ms)
+✔ inbound consumers and governing framework files retain distinct evidence relations (167.821816ms)
+✔ an unrelated barrel export neither expands SUPPORTING nor changes the digest (204.113335ms)
+✔ namespace demand subsumes named demand in either import order (297.783761ms)
+✔ a declared entry point remains represented when it is also supporting (148.869177ms)
+✔ an unrelated repository edge does not alter the module discovery digest (131.776848ms)
+✔ multiple legitimate roots share one owned census (118.15806ms)
+✔ scanner algorithm dispatch changes behavior, not only metadata (157.350819ms)
+✔ structuralUnits enumerates nested statically-keyed contract units of an exported factory call (4.611554ms)
+✔ a binding exported by a separate export clause censuses like an inline export (4.384978ms)
+✔ a re-export names a unit this file cannot census, so it is unresolved (0.643827ms)
+✔ a non-statically-decidable key is emitted unresolved, never dropped (3.883887ms)
+✔ a non-script source file is one structural unit (0.620319ms)
+✔ structural traversal follows a locally declared binding named by shorthand (2.015689ms)
+✔ an identifier this file cannot resolve is emitted unresolved, never dropped (1.166199ms)
+✔ a cyclic alias chain terminates instead of recursing forever (0.712331ms)
+✔ default-exported local identifier traverses nested structure (theme.components.MuiDrawer) (0.750282ms)
+✔ direct default expression uses bounded structural traversal (1.407845ms)
+✔ imported re-export emits unresolved binding, never resolved (0.639881ms)
+✔ DR7: atomicWrite flushes the temp file before the rename and the directory after it (109.042146ms)
+✔ DR7: an interrupted replace-write leaves the previous bytes and no temp file (38.394817ms)
+✔ DR7: atomicWrite refuses symlinks, traversal and a directory destination without mutation (24.492929ms)
+✔ DR7: a permission error leaves nothing behind (20.059897ms)
+✔ DR7: writeJournalAtomic is the store replace-write, byte for byte (60.265999ms)
+✔ DR7: writeJournalAtomic checks the whole path from the target root and refuses any symlink in it (13.654476ms)
+✔ DR7: a write into new directories makes each new directory entry durable before it returns (119.27611ms)
+✔ DR7: mkdirDurably returns once a new chain exists on every platform, and refuses rather than spins on a first directory outside it (254.68023ms)
+▶ E4: mkdirDurably reports a read-only mount as EROFS, an unrecoverable ENOENT as FS_ERRNO_UNKNOWN, creating nothing
+  ✔ read-only bind mount (123.919055ms)
+  ✔ ENOENT that no syscall explains (120.890767ms)
+✔ E4: mkdirDurably reports a read-only mount as EROFS, an unrecoverable ENOENT as FS_ERRNO_UNKNOWN, creating nothing (255.829226ms)
+✔ DR7: renameDurably fsyncs both directories, and copyTree flushes the copy and the entry naming it (73.833834ms)
+✔ DR7: writeTree stages a flushed tree with the same bytes and modes, and stays inside its root (136.170615ms)
+✔ DR8: appendHistory is the store durable append and leaves the anchored prefix byte-identical (57.918097ms)
+✔ DR8: a torn history append is cut by sealHistoryTail, replays once, and never touches the anchored prefix (79.566141ms)
+✔ DR7/DR8: a directory fsync failure is never reported as a durable write (65.025604ms)
+✔ DR8: appendDurably refuses symlinks, traversal and a directory ledger without mutation (7.991593ms)
+✔ DR8: concurrent appends under the module lock keep every record whole, once, in lock order, even across short writes (2233.927223ms)
+✔ DR8: the decision ledger append is the store durable append; an interrupted one writes no decision (88.95241ms)
+✔ DR13: a torn history append is recognized byte for byte, even split inside a character (46.019606ms)
+✔ a claim attributes to the one source whose root contains it (2.929141ms)
+✔ a claim under no declared root attributes to nothing (0.791835ms)
+✔ a single-source record needs no source field, and a bare string root still reads (0.37817ms)
+✔ the legacy contract is derived from source: every exported callable and the keys it reads per argument (147.983492ms)
+✔ M14 D1: a target that turns the options bag into a bare Date is refused, naming the key it no longer reads (50.941276ms)
+✔ equivalent call contracts pass: delegation to another file, parameter destructuring, TypeScript and aliases (138.316732ms)
+✔ a missing export, a non-callable export and a dropped argument are each refused (24.128269ms)
+✔ fail-open: a use the analyzer cannot establish never refuses an otherwise equivalent target (19.662208ms)
+✔ CommonJS default exports and ESM re-exports resolve to the function they name (88.830532ms)
+✔ a parameter declared again inside the function is open on either side, never a guessed obligation (43.563469ms)
+✔ a destructured CommonJS require names the exports its consumer takes; a whole-module require takes all (10.92291ms)
+✔ FINALIZE refuses source changed after VERIFY_SLICES unless FINAL_VERIFY evidence was written after the change (65.076246ms)
+✔ each file is judged by the newest verification that covered it; a record verified before snapshots existed is not judged (75.492182ms)
+✔ the shipped module registry covers every increment from the floor (8.6872ms)
+✔ coverage refuses a missing, gapped, jumping or duplicated registry (5.594533ms)
+✔ coverage requires an explicitly declared, well-formed activation (2.111653ms)
+✔ upgradeIsActive is fail-closed, and pure over persisted state (0.758197ms)
+✔ the shipped 17 -> 18 activation reads the pin, never the file (0.539573ms)
+✔ no declaration elsewhere buys a missing upgrader a pass (0.695104ms)
+✔ the cursor resolves exactly the next adjacent increment, or none (0.878023ms)
+✔ record 17 / runtime 20 takes one increment per invocation, driven by the loop (4.873613ms)
+✔ classifyUpgrade is total over the three pending results (5.351564ms)
+✔ the 17 -> 18 row declares its input and classifies from record authority (48.65582ms)
+✔ upgradeProjection carries the contract and none of the internals (0.760872ms)
+✔ the artifact engine supports and creates 14 and retains the explicit adjacent upgrade (0.531588ms)
+✔ a future artifact bump cannot ship without its adjacent upgrader (4.928556ms)
+✔ the release gate runs for both engines and the manifest states both registries (63.061623ms)
+✔ A2-ARCH-1: every formats declaration has exactly one live definition, inside formats/ (1440.168524ms)
+✔ A2-ARCH-2: engine code imports formats-owned names from formats/index.mjs, never through a compatibility re-export (1570.307091ms)
+✔ A2-ARCH-3: format-version branching outside formats/ is only the identified remainder (852.457913ms)
+✔ A2-ARCH-4: historical compatibility exports remain, as the formats binding itself (25.791659ms)
+✔ formats owns the record-layout names store persists, with their exact values (0.456704ms)
+✔ each format predicate turns on exactly at its format, and an unstamped record is format 1 (1.901678ms)
+✔ historical formats keep their lifecycle and are never promoted by an advance (1.169935ms)
+✔ the compatibility classification is formats', and the engine binds the same refusal bytes (3.556907ms)
+✔ each engine's upgrader rows are its formats increments plus runtime handlers, in the same order (1.844846ms)
+✔ the freeze gate and artifact admission read only the formats increments (2.546823ms)
+✔ legacy-17: legacy-runtime is a design source and refuses --figma (10.053651ms)
+✔ legacy-17: the authority adapter is the one pluggable seam (0.867718ms)
+✔ legacy-17: a valid authority frame validates and carries its capture role (87.753881ms)
+✔ legacy-17: the contract reaches compareVisualFact through the shared path (42.695128ms)
+✔ legacy-17: byte-identical authority and target screenshots at disjoint paths PASS (15.561753ms)
+✔ legacy-17: every authority defect is refused fail-closed (77.010499ms)
+✔ v2: the facts the contract asserts are derived from the pinned measurements (12.721275ms)
+✔ v2: a full taxonomy verifies; anything less does not (108.8233ms)
+✔ v2: the fixed ±1px admits subpixel drift and refuses two pixels (29.741414ms)
+✔ v2: a newly authored version 1 refuses; an already-pinned one still reads (41.576565ms)
+✔ v2: a state cannot be waived while its sibling was captured (42.840924ms)
+✔ A8-ARCH-1: lifecycle has one public entry, which only re-exports the BASE lifecycle API (111.440014ms)
+✔ A8-ARCH-2: outside lifecycle/, only lifecycle/index.mjs is named; old lifecycle paths are named only by facades and the aggregator (1115.945597ms)
+✔ A8-ARCH-3: nothing below lifecycle names it; lifecycle names only lower entries; no static or lazy cycle remains (1258.741937ms)
+✔ A8-ARCH-4: one live implementation per lifecycle export, inside lifecycle/; the facades declare nothing (1899.316294ms)
+✔ A8-ARCH-5: every historical path exports its BASE names and arities, as the lifecycle bindings (77.147647ms)
+✔ A8-ARCH-6: the module lock and every journal stay lifecycle-controlled, with their BASE names (1315.094561ms)
+✔ A8-ARCH-7: lifecycle reaches the decision ledgers only through the recorder, under the module lock (174.544979ms)
+✔ A8-ARCH-8: module and artifact checkpoint rules stay separate (260.73277ms)
+✔ A8-ARCH-9: installed paths and location-sensitive loaders resolve as before; importing lifecycle runs and loads nothing (394.911359ms)
+✔ the synthetic compatibility record replays to its persisted revision, untouched (139.88878ms)
+✔ the frozen history exercises both ported transitions (6.714157ms)
+✔ initialize declares tools and neither elicitation nor resources (33.448362ms)
+✔ an unknown protocol version falls back instead of failing (7.443667ms)
+✔ T1: the installed entry with --without-relay lists nine tools and refuses the relay by name (1056.302897ms)
+✔ tools/list exposes module and artifact iteration/read tools, never approval tools (40.925638ms)
+✔ a call missing the required module is refused before any core call (1349.427483ms)
+✔ the three read-only tools leave the record byte-identical and take no lock (1736.137565ms)
+✔ migration_pending_decisions deep-equals the core reader, blockers included (1889.66358ms)
+✔ migration_status exposes the same UI-evidence state as CLI/core (1615.480821ms)
+✔ every refused tool returns a method error naming the operator command (1161.357117ms)
+✔ an unknown tool is a method error, not a silent success (6.39771ms)
+✔ a malformed frame is a parse error and the connection survives (2.100568ms)
+✔ no sequence of tool calls appends to the operator decisions ledger (4552.258136ms)
+✔ a run against a pending decision resolves as AUTO and never writes the human ledger (2169.248353ms)
+✔ a migration_run writes exactly one JSON-RPC response and nothing else (2428.724813ms)
+✔ CLI and MCP default omitted mode to auto (3194.399257ms)
+Ponytail target 'full-audit' conflicts with recorded target 'full'.
+✔ migration_run forwards full-audit unchanged to runMigration (1627.601699ms)
+Invalid Ponytail target 'turbo'. Use full or full-audit.
+Invalid Ponytail target 'turbo'. Use full or full-audit.
+✔ CLI and MCP reject invalid mode and Ponytail values consistently (2194.625995ms)
+✔ session Ponytail never implicitly enables migration Ponytail (1667.995985ms)
+✔ migration_run and the CLI agree on CONTINUE (4387.71882ms)
+✔ migration_run and the CLI agree on a pending decision (3942.092964ms)
+✔ migration_run and the CLI agree on legacy revision drift (2263.735806ms)
+✔ one migration_run moves the revision by one and appends one history event (1468.187902ms)
+✔ after a committed advance, a fresh session resumes the same next iteration from status alone (1543.65295ms)
+✔ migration_run exposes canonical progressChecklist on CONTINUE (925.518234ms)
+✔ migration_run exposes canonical progressChecklist on a resolved decision (1224.17041ms)
+✔ an unauthored checkpoint returns CONTINUE with an authoring request and no advance (931.057202ms)
+✔ the format-9 auth record is refused by scan and pending_decisions, unchanged (784.087944ms)
+✔ the canonical skill prefers the MCP front end (3.266227ms)
+✔ with client elicitation the server originates the approval request (1234.850655ms)
+✔ a model-supplied challenge approves nothing when the human declines (926.915275ms)
+✔ cancel and transport failure are not signed REJECTED or any decision (1924.343329ms)
+✔ an unresponsive MCP provider times out, cleans pending, and ignores a late acceptance (6073.226372ms)
+✔ without client elicitation the server asks nothing and stops safely (1066.529732ms)
+✔ an MCP run never falls back to the transport's own TTY (1190.582533ms)
+Legacy sources ["auth-core","auth-ui"] conflict with the recorded sources ["auth"]. The source set is fixed for the migration's lifetime; start a new migration to change it.
+✔ migration_run forwards repeated legacy sources and adoptTarget to the CLI (776.226768ms)
+✔ progress tools put the status block first, the unchanged JSON last, and send no structuredContent (1118.389593ms)
+✔ an OPERATOR_DECISION stop and the resume after the relay both show the block (1826.763255ms)
+✔ the status block names checkpoint, slice and outcome for every outcome (488.234763ms)
+✔ the CLI prints one post-iteration block: stderr under --json, stdout otherwise (1237.876034ms)
+✔ an argument refusal under --json still prints one JSON document; without it stdout stays empty (526.306839ms)
+Migration registry is not configured. On first setup pass --registry <path>; otherwise restore config.startMigration.registry in the project package.json. MIGRATION_REGISTRY_PATH is available only as a CI fallback.
+✔ an unbound registry is the same BLOCKED / not started result on MCP and CLI, and writes nothing (469.5744ms)
+✔ structured Figma context re-derives authority on repeated validation and rejects pinned mutation (303.043935ms)
+✔ P0-1: a LIVE_MOVED transaction blocks preview and bootstrap with zero writes (2000.71026ms)
+✔ P0-1: a LIVE_MOVED transaction blocks reopen, rework and repair with zero writes (2070.94797ms)
+✔ P0-1: the same hole through an absent state.json with no migration tree (493.420823ms)
+✔ P0-1: a real v4 upgrade killed at LIVE_MOVED never bootstraps a fresh migration (6156.88539ms)
+✔ P0-2: barrier-synchronized concurrent bootstraps produce exactly one winner (14162.835915ms)
+✔ P1-2: concurrent advances of one checkpoint yield one success and one event (2683.970478ms)
+✔ P1-2: concurrent verification of two different slices cannot lose a completion (4099.740006ms)
+✔ P1-3: an unwritable history blocks the advance before state moves (1791.447465ms)
+✔ P1-3: an interrupted transition is completed deterministically on the next command (1880.552441ms)
+✔ P1-1: a hand-edited currentStep contradicts the append-only history (1610.724897ms)
+✔ P1-1: pruning artifactHashes to re-pin a rewritten inventory is refused (1226.727797ms)
+✔ P2-3: a truncated or rewritten history is detected (1971.455709ms)
+✔ the legal state graph passes at every checkpoint and reaches COMPLETE (3542.828319ms)
+✔ resume reports the persisted checkpoint from every durable position (11610.492735ms)
+✔ P1-4: swapping the resolved legacy root invalidates the confirmation (255.93801ms)
+✔ P1-5: an unrelated project root is refused with the registry guidance and never written (64.990093ms)
+✔ P1-5: a project root inside the target that cannot hold a relative binding is refused (72.358092ms)
+✔ P1-6: dirty legacy bytes, dirty target bytes, and brief bytes are bound (1819.332647ms)
+✔ P1-6: changing the brief bytes after preview invalidates the confirmation (260.449066ms)
+✔ P1-6: execution without the preview's bound inputs is refused (233.267305ms)
+✔ P1-8: concurrent registrations of different modules both persist (159.896193ms)
+✔ P1-8: concurrent conflicting registrations of the same module barrier-synchronize to exactly one persisted result (104.4028ms)
+✔ P1-9: advance without an exact confirmation writes nothing (1193.298877ms)
+✔ P1-9: a wrong-step advance is blocked and issues no confirmation (867.028685ms)
+✔ a failed gate blocks, and the correction resumes without revision damage (3125.535427ms)
+✔ P1-11: a lock left by a killed process is reclaimed without manual deletion (1584.020553ms)
+✔ P1-12: a contended lock keeps the process alive until every waiter acquires (222.296225ms)
+Warning: Detected unsettled top-level await at file:///tmp/sm-contract-WM7qHV/kill-upgrade.mjs:8
+await executeUpgrade({
+^
+
+
+
+Warning: Detected unsettled top-level await at file:///tmp/sm-contract-5HHWZe/kill-upgrade.mjs:8
+await executeUpgrade({
+^
+
+
+
+Warning: Detected unsettled top-level await at file:///tmp/sm-contract-sDISHu/kill-upgrade.mjs:8
+await executeUpgrade({
+^
+
+
+
+✔ P1-11: a kill at every journal/rename boundary leaves a lock a fresh process reclaims (16333.186003ms)
+✔ DR7: upgrade and rollback flush the snapshot, manifests and staged tree before the live tree moves (4836.88558ms)
+✔ DR7: initialization commits durable entries before it removes its journal (1296.839722ms)
+✔ DR7: an initialization stopped between creating and owning its directory rolls back cleanly (5956.048383ms)
+✔ acquisition stays bounded while a racer keeps re-creating the lock (95.578616ms)
+✔ a live lock holder is never stolen (449.869542ms)
+✔ two reclaimers of one dead owner never both hold the lock (1393.060735ms)
+✔ a reclaimer paused before its removal leaves the replacement owner's lock alone (1359.306549ms)
+✔ a live owner keeps its lock however long it holds it (391.822212ms)
+✔ a release removes its own lock and never a replacement owner's (410.261748ms)
+✔ a half-built lock is only staging: it neither blocks nor shares the published lock (369.82975ms)
+✔ an owner that cannot be proven gone is never reclaimed, whatever its age (3810.859721ms)
+✔ a spent budget still tries the lock once and names its holder (367.543687ms)
+✔ a provably dead or vanished owner is reclaimed automatically (79.861381ms)
+✔ E2: an engine SIGKILLed in another PID namespace leaves a lock the next writer reclaims (351.360599ms)
+Another migration command holds the lock for 'auth' at /tmp/sm-contract-XjIE2P/target/.agents/knowledge/migrations/locks/auth.lock (pid 637329). Wait for it to finish; the lock is reclaimed automatically once that process is gone.
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-XjIE2P/legacy
+Target root: /tmp/sm-contract-XjIE2P/target
+Persisted binding: /tmp/sm-contract-XjIE2P/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+Another migration command holds the lock for 'auth' at /tmp/sm-contract-XjIE2P/target/.agents/knowledge/migrations/locks/auth.lock (pid 637329). Wait for it to finish; the lock is reclaimed automatically once that process is gone.
+loop: STOP reason=FAILED
+Another migration command holds the lock for 'auth' at /tmp/sm-contract-ZVlsgv/target/.agents/knowledge/migrations/locks/auth.lock, but its owner (pid 2147483646 on 22LAP5CD551B022 in linux:pid:[1]) recorded no liveness token and runs in another PID realm, so it cannot be proven gone from here, so it is never reclaimed automatically. Remove it by hand only once no migration command is running (docs/lock-protocol-cutover.md).
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-ZVlsgv/legacy
+Target root: /tmp/sm-contract-ZVlsgv/target
+Persisted binding: /tmp/sm-contract-ZVlsgv/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+Another migration command holds the lock for 'auth' at /tmp/sm-contract-ZVlsgv/target/.agents/knowledge/migrations/locks/auth.lock, but its owner (pid 2147483646 on 22LAP5CD551B022 in linux:pid:[1]) recorded no liveness token and runs in another PID realm, so it cannot be proven gone from here, so it is never reclaimed automatically. Remove it by hand only once no migration command is running (docs/lock-protocol-cutover.md).
+loop: STOP reason=FAILED
+Another migration command holds the lock for 'auth' at /tmp/sm-contract-8oNiqs/target/.agents/knowledge/migrations/locks/auth.lock, but its owner (pid 2147483646 on 22LAP5CD551B022-elsewhere in linux:pid:[1]) cannot be proven gone from here: its entry or liveness token is unreadable, missing, replaced or on another host, so it is never reclaimed automatically. Remove it by hand only once no migration command is running (docs/lock-protocol-cutover.md).
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-8oNiqs/legacy
+Target root: /tmp/sm-contract-8oNiqs/target
+Persisted binding: /tmp/sm-contract-8oNiqs/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+Another migration command holds the lock for 'auth' at /tmp/sm-contract-8oNiqs/target/.agents/knowledge/migrations/locks/auth.lock, but its owner (pid 2147483646 on 22LAP5CD551B022-elsewhere in linux:pid:[1]) cannot be proven gone from here: its entry or liveness token is unreadable, missing, replaced or on another host, so it is never reclaimed automatically. Remove it by hand only once no migration command is running (docs/lock-protocol-cutover.md).
+loop: STOP reason=FAILED
+EROFS: injected
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-GbdbSY/legacy
+Target root: /tmp/sm-contract-GbdbSY/target
+Persisted binding: /tmp/sm-contract-GbdbSY/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+EROFS: injected
+loop: STOP reason=FAILED
+EACCES: injected
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-2EbTlE/legacy
+Target root: /tmp/sm-contract-2EbTlE/target
+Persisted binding: /tmp/sm-contract-2EbTlE/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+EACCES: injected
+loop: STOP reason=FAILED
+EPERM: injected
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-YiQ3L8/legacy
+Target root: /tmp/sm-contract-YiQ3L8/target
+Persisted binding: /tmp/sm-contract-YiQ3L8/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+EPERM: injected
+loop: STOP reason=FAILED
+Cannot create '/tmp/sm-contract-eUK0Qi/target/.agents/knowledge/migrations/locks': mkdir reported ENOENT and no syscall recovered the real cause.
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-eUK0Qi/legacy
+Target root: /tmp/sm-contract-eUK0Qi/target
+Persisted binding: /tmp/sm-contract-eUK0Qi/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: DISCOVER_LEGACY
+Active slice: none
+Action this invocation: Execute checkpoint DISCOVER_LEGACY
+Reason: Complete steps/02-discover-legacy.md and inventories/legacy.json.
+Artifacts involved: steps/02-discover-legacy.md, inventories/legacy.json
+Expected next checkpoint: DISCOVERY_COMPLETENESS
+Expected next artifact: steps/02a-discovery-completeness.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+Cannot create '/tmp/sm-contract-eUK0Qi/target/.agents/knowledge/migrations/locks': mkdir reported ENOENT and no syscall recovered the real cause.
+loop: STOP reason=FAILED
+✔ E6: lock and filesystem refusals reach MCP and the CLI with their code (6266.108985ms)
+✔ E2: a child that outlives the lock owner does not keep the lock alive; the token is close-on-exec (168.918345ms)
+✔ E2: a token proves its owner gone or alive; anything that is not the recorded FIFO is UNKNOWN (2271.454404ms)
+✔ E2: without mkfifo the owner falls back to the PID rule, and a dead one is still reclaimed (196.504497ms)
+✔ E2: two writers racing for a dead token owner's lock: exactly one holds it (348.572121ms)
+✔ only ESRCH proves a lock owner gone: every other probe answer keeps the lock (974.532557ms)
+✔ an owner entry swapped for a symlink after it was vetted is never followed (187.691693ms)
+✔ a legacy lock file blocks until an operator removes it, then the lock works (208.473549ms)
+✔ a kill after any lock filesystem step leaves a lock the next process takes (3260.061076ms)
+✔ a protected state write waits for the live owner and runs once it releases (1244.026729ms)
+✔ P2-1: a blocked invocation exits with the documented blocked code (239.186038ms)
+✔ P2-2: closed-baseline rows are pinned, but verificationStatus still moves (1784.687393ms)
+✔ P2-5: every consolidated P0/P1 scenario is owned by this suite, and engine:test runs it in CI (7.81091ms)
+✔ P2-6: CI installs frozen dependencies before it runs providers:check (1.556422ms)
+✔ P2-7: every provider skill root is generated, documented, and free of engine source (3.750298ms)
+✔ P3-2: every suite engine:test and providers:test run is present and not ignored (10.861362ms)
+✔ P3-3: every manifest-owned generated path is present and not ignored (10.842639ms)
+✔ P3-4: every generated output has a consumer, and every canonical skill file reaches one (33.545245ms)
+✔ P3-1: --status refuses every other flag, including --registry (210.343813ms)
+✔ P1-7: a fictitious legacy evidence path is refused at DISCOVER_LEGACY (847.871412ms)
+✔ P1-7: a fictitious target evidence path is refused at ASSESS_TARGET (952.14882ms)
+✔ P1-7: a checklist evidence item missing a required category is refused (558.363785ms)
+✔ P1-7: an evidence item that is not a checklist object (bare string) is refused (576.162166ms)
+✔ P1-7: a checklist item with an OpenSpec requirement ID the authority does not define is refused (561.950661ms)
+✔ P1-7: a checklist item with an OpenSpec scenario ID the authority does not define is refused (847.296633ms)
+✔ P1-7: a NOT_APPLICABLE/BLOCKED checklist item without a reason is refused (574.037529ms)
+✔ P1-7: a fully-conformant discovery checklist advances DISCOVER_LEGACY (553.616055ms)
+✔ P1-7: changed files must exist and stay inside the target repository (2947.696633ms)
+✔ P1-7: a changed file that exists but was not actually touched is refused (1254.264291ms)
+✔ P1-7: a command result with a nonzero exit code is refused at VERIFY_SLICES (1326.347876ms)
+✔ P1-7: a command result with a falsified output digest is refused at VERIFY_SLICES (1759.298767ms)
+✔ P1-7: a command result referencing a nonexistent output file is refused at VERIFY_SLICES (1474.08346ms)
+✔ P1-10: a gate hash must match the referenced file's current bytes (2632.006459ms)
+✔ QW3: one FINALIZE run reports every independent gates.json problem, typed, ordered and deduplicated (2805.053666ms)
+✔ QW3: dependent checks are skipped, never reported as independent problems (3196.668769ms)
+✔ QW3: prerequisites still refuse first and alone (3628.066843ms)
+✔ QW3: the binding preview returns exactly what FINALIZE accepts, reads nothing outside the repositories, and writes nothing (2876.098063ms)
+✔ QW3: command results report every independent problem at VERIFY_SLICES (1216.648653ms)
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-0sISuH/legacy
+Target root: /tmp/sm-contract-0sISuH/target
+Persisted binding: /tmp/sm-contract-0sISuH/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: FINALIZE
+Active slice: none
+Action this invocation: Finalize the migration and run the seven gates
+Reason: Complete steps/08-finalize.md.
+Artifacts involved: steps/08-finalize.md, gates.json
+Expected next checkpoint: COMPLETE
+Expected next artifact: none
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+Resumed /tmp/sm-contract-0sISuH/target/.agents/knowledge/migrations/modules/auth/state.json
+Current step: FINALIZE
+Resume mode: CHECKPOINT
+Resume guidance: Continue the persisted FINALIZE checkpoint. A session or model interruption does not require --refresh.
+Next artifact: steps/08-finalize.md
+auth -> auth | 9/9 FINALIZE | CONTINUE
+progress: auth -> auth  status=ACTIVE  revision=10  mode=auto
+[x] 1/9 RESOLVE
+[x] 2/9 DISCOVER_LEGACY
+[x] 3/9 DISCOVERY_COMPLETENESS
+[x] 4/9 ASSESS_TARGET
+[x] 5/9 BUILD_BASELINE
+[x] 6/9 PLAN
+[x] 7/9 IMPLEMENT_SLICES
+[x] 8/9 VERIFY_SLICES
+[>] 9/9 FINALIZE
+slices: 2/2 done
+  [x] slice-a
+  [x] slice-b
+next: FINALIZE
+loop: CONTINUE next=/start-migration auth
+✔ QW3: CLI and MCP carry the same issues and the same binding (2680.34169ms)
+✔ P1-10: a dirty target file the evidence never mentions is refused at FINALIZE (2739.576779ms)
+✔ P1-10: a dirty legacy file the evidence never mentions is refused at FINALIZE (2334.681305ms)
+✔ P2-4: an incomplete journal recovers from the retained snapshot (780.868368ms)
+✔ only one tree can report a lifecycle status, because only one tree has an engine (2.059558ms)
+✔ the dirty manifest distinguishes every kind of uncommitted change (107.191614ms)
+✔ repository, migration state, MCP arguments, provider claims and mode cannot set new-format authority (52.674623ms)
+✔ DISCOVER_LEGACY and DISCOVERY_COMPLETENESS consume the same canonical boundary (616.590637ms)
+✔ a classification must record an explicit valid scanner version before scanning (882.751453ms)
+✔ an initialized unregistered migration lists deterministic pending commands (1252.972175ms)
+✔ an isolated clean roles fixture completes DISCOVERY_COMPLETENESS without artificial ownership or approvals (958.651688ms)
+✔ a runtime redirect over a destructured parameter base creates no EDGE_RESOLUTION decision, while a genuine dynamic module edge stays non-approvable (904.040048ms)
+✔ a census file with no classification row blocks, naming it, and writes nothing (984.994159ms)
+✔ the census finds an owned file with every entry point omitted (603.842854ms)
+✔ prose is not a disposition, a scope, or a reachability (1032.632076ms)
+✔ a classification row for a file outside the census is refused (861.210934ms)
+✔ BEHAVIOR_BACKED requires a behavior the legacy inventory actually defines (867.55278ms)
+✔ EXCLUDED_APPROVED without a real operator decision is refused (766.537287ms)
+✔ an agent-authored or fake approval line cannot satisfy a stable candidate (611.003293ms)
+✔ an operator decision approves exactly the file, rationale, and census it was shown (1069.498615ms)
+✔ a stale cited decision stays pending and can be reapproved without editing the classification first (1520.486219ms)
+✔ each way of reusing an approval is refused on its own (3624.737861ms)
+✔ an approval recorded against an older census no longer applies (788.548376ms)
+✔ an approval does not survive an edit to the bytes it approved (955.760369ms)
+✔ a legacy working-tree change after the summary expires the advance confirmation (710.215622ms)
+✔ a legacy change landing between the prompt and the lock is refused, writing nothing (815.027453ms)
+✔ the interactive challenge must match the exact pending subject (655.662335ms)
+✔ an unreadable advance journal is preserved and fails recovery from either position (1346.155217ms)
+✔ a production-reachable visual asset is never dismissed by rationale alone (915.44033ms)
+✔ DISCOVER_LEGACY refuses evidence outside the canonical module boundary (518.267431ms)
+✔ DISCOVERY_COMPLETENESS revalidates legacy evidence against the final editable boundary (852.99581ms)
+✔ a fully classified module advances, pins the digest, and records the scan (886.548411ms)
+✔ a hand-edited discovery scan breaks its own pin (698.760453ms)
+✔ changing raw decision-ledger bytes invalidates a new discovery pin (600.893721ms)
+✔ an existing format-10 discovery pin without a ledger field remains valid (627.377742ms)
+✔ --reopen-discovery returns to DISCOVER_LEGACY without losing anything else (794.41619ms)
+✔ --reopen-discovery before DISCOVERY_COMPLETENESS is blocked and writes nothing (522.855722ms)
+✔ --reopen-discovery after a verified slice is blocked and writes nothing (1693.225801ms)
+✔ UI-1: completed UI remediation reopens only named slice verification (2626.133773ms)
+✔ PLAN preserves completed slice artifacts after refresh (958.853059ms)
+✔ active PASS evidence remains pending until verification advances (1286.271101ms)
+✔ reconcileSliceState never fast-forwards a newly activated slice into VERIFY_SLICES from raw implementationStatus (1252.059407ms)
+✔ UI-2: visible discovery cannot declare hasVisibleUi false (612.094968ms)
+✔ UI-3: UI configuration is pinned with completed discovery (594.648176ms)
+✔ UI-4: missing Playwright evidence blocks slice verification (1293.100442ms)
+✔ UI-5: LEGACY_DEFECT requires disposition evidence, not reproduction (2304.10135ms)
+✔ UI-5: completed remediation validates after implementation files are committed (3961.838166ms)
+✔ UI-6: design adaptation passes only with approval and runtime evidence (3768.238714ms)
+✔ UI-7: every required UI behavior traces through parity to its slice (1079.019387ms)
+✔ UI-8: provider changes and unrelated files do not stale Playwright evidence (1434.819564ms)
+✔ UI-9: changing an owning slice file narrowly stales its UI evidence (1255.13237ms)
+✔ UI-10: non-UI migrations complete without UI runtime evidence (1973.057633ms)
+✔ UI-10b: --reopen-ui is refused on a record with no visible UI, and writes nothing (2293.762857ms)
+✔ UI-11: an interactive UI kind must name the interactions to exercise (415.960479ms)
+✔ UI-12: 'the control exists' is not a UI inventory (604.832991ms)
+✔ UI-13: a required interaction that was never exercised blocks verification (2070.195758ms)
+✔ UI-14: a conditional control is not automatically required (1212.359495ms)
+✔ UI-15: an unavailable runtime is explicit and never becomes a PASS (1323.286032ms)
+✔ UI-16: legacy runtime capture persists and never binds the target implementation (1289.653462ms)
+✔ UI-17: the screenshot budget refuses a second capture of the same state (1569.663481ms)
+✔ UI-18: the same picture is never persisted twice across states (1791.763129ms)
+✔ UI-19: a second viewport needs responsive behavior to justify it (1272.327385ms)
+✔ UI-20: credential material is refused before it can be persisted (1172.539981ms)
+✔ UI-21: differing legacy and target screenshots still verify without a Figma visual contract (1141.8307ms)
+✔ UI-25: a visible-UI slice cannot verify on a reference that is not a file (2173.120556ms)
+✔ UI-26: FINALIZE refuses a verified slice whose UI artifact is gone (2143.207973ms)
+✔ UIP-P1: structured playwright-ui-proof/v1 with interaction post-state passes VERIFY_SLICES and FINALIZE (1978.825143ms)
+✔ UIP-state-binding at VERIFY_SLICES: an interaction in another state cannot satisfy required postAction (1148.112006ms)
+✔ UIP-state-binding at FINALIZE: an interaction in another state cannot satisfy required postAction (1493.160391ms)
+✔ UIP-N1 at VERIFY_SLICES: a correctly hashed command log used as UI proof is rejected (1139.854276ms)
+✔ UIP-N1 at FINALIZE: a correctly hashed command log used as UI proof is rejected and names --reopen-ui (N4) (1559.201444ms)
+✔ UIP-N1b at VERIFY_SLICES: a hash-valid JSON artifact that is not playwright-ui-proof/v1 is rejected (1003.088963ms)
+✔ UIP-N1b at FINALIZE: a hash-valid JSON artifact that is not playwright-ui-proof/v1 is rejected and names --reopen-ui (N4) (1515.595898ms)
+✔ UIP-N2 at VERIFY_SLICES: structured proof missing the required state is rejected (962.849329ms)
+✔ UIP-N2 at FINALIZE: structured proof missing the required state is rejected and names --reopen-ui (N4) (1476.442093ms)
+✔ UIP-N2b at VERIFY_SLICES: structured proof whose required control is not visible, despite an authored PASS is rejected (1095.478187ms)
+✔ UIP-N2b at FINALIZE: structured proof whose required control is not visible, despite an authored PASS is rejected and names --reopen-ui (N4) (1627.072193ms)
+✔ UIP-N4 at VERIFY_SLICES: A+B+C required but proof measures only A is rejected (1118.242749ms)
+✔ UIP-N4 at FINALIZE: A+B+C required but proof measures only A is rejected and names --reopen-ui (N4) (1422.971252ms)
+✔ UIP-N3 at VERIFY_SLICES: an interaction without its post-action observation is rejected (1573.163697ms)
+✔ UIP-N3 at FINALIZE: an interaction without its post-action observation is rejected and names --reopen-ui (N4) (1882.755386ms)
+✔ UI-27: byte-identical legacy and target screenshots verify (1263.065152ms)
+✔ UI-24: a real Playwright observation carries a visible-UI migration to COMPLETE (2299.529398ms)
+✔ UI-23: an observable difference with no disposition never reaches FINALIZE (596.140199ms)
+✔ UI-22: a fresh process resumes on persisted evidence and recaptures nothing (2503.163709ms)
+✔ a reopen killed between the state write and the history append is completed (790.318851ms)
+✔ a reopen killed part-way through the history append is repaired, not spliced (823.24065ms)
+✔ recovering a partial, an absent, and an already-complete event all end identically (1235.038325ms)
+✔ persisted discovery scans retain declared entry reasons through FINALIZE (4656.096341ms)
+✔ a legacy file added after the checkpoint blocks FINALIZE, naming it (1444.693123ms)
+✔ a recorded algorithm version this build cannot run blocks with a recompute message (1216.402713ms)
+✔ a missing recorded scanner version fails as a typed version error before rescanning (1232.273065ms)
+✔ a format-9 record keeps the eight-checkpoint lifecycle and never runs the new code (760.106752ms)
+✔ a format-9 record finalizes on the eight-checkpoint lifecycle (1614.60315ms)
+✔ a record newer than the supported format is refused cleanly, touching nothing (562.754282ms)
+✔ every auxiliary discovery entry point refuses a format-9 record, touching nothing (729.781723ms)
+✔ every auxiliary discovery entry point still serves a format-10 record (727.795984ms)
+✔ a step-mode discover invocation stops for confirmation and writes nothing (412.90402ms)
+✔ a step-mode advance invocation stops for confirmation and writes nothing (403.921233ms)
+✔ a confirmed CLI invocation executes exactly the action it previewed (536.057897ms)
+✔ a blocked CLI invocation exits 2, offers no confirmation ID, and writes nothing (672.424302ms)
+✔ --status and --scan refuse exactly the options they are documented to refuse (3.394052ms)
+✔ --refresh without --confirm-mismatch is refused and writes nothing (740.926414ms)
+✔ auto registers a missing mapping and closes BUILD_BASELINE (954.000986ms)
+Pre-execution summary
+Migration: auth
+Target: auth
+Registry identity: .agents/knowledge/migrations/registry.json
+Legacy root: /tmp/sm-contract-vJI21e/legacy
+Target root: /tmp/sm-contract-vJI21e/target
+Persisted binding: /tmp/sm-contract-vJI21e/package.json -> target/.agents/knowledge/migrations/registry.json
+OpenSpec: EXISTING (sha256:text-lf-v1:2430d28f11da36cc02dda3bdd04bf2b7e89075cbc38c8465c4f3efcb398546e2)
+Current state: ACTIVE
+Current checkpoint: BUILD_BASELINE
+Active slice: none
+Action this invocation: Execute checkpoint BUILD_BASELINE
+Reason: Complete steps/04-build-baseline.md.
+Artifacts involved: steps/04-build-baseline.md, matrices/behavior-parity.json, matrices/route-adaptation.json, matrices/target-native.json, matrices/design-system-usage.json, matrices/capability-ownership.json
+Expected next checkpoint: PLAN
+Expected next artifact: steps/05-plan.md
+Format: 18/5.0 -> 21/5.0
+Blockers: none
+Mode: auto — self-confirmed.
+Confirmation accepted. Executing only the action shown in the summary.
+Resumed /tmp/sm-contract-vJI21e/target/.agents/knowledge/migrations/modules/auth/state.json
+Current step: BUILD_BASELINE
+Resume mode: CHECKPOINT
+Resume guidance: Continue the persisted BUILD_BASELINE checkpoint. A session or model interruption does not require --refresh.
+Next artifact: steps/04-build-baseline.md
+Advance pre-execution summary
+Migration: auth
+Checkpoint to close: BUILD_BASELINE
+Slice: none
+State revision: 4
+Expected next checkpoint: PLAN
+Blockers: none
+Registered auth -> auth
+Completed: BUILD_BASELINE
+Current step: PLAN
+Next artifact: steps/05-plan.md
+auth -> auth | 6/9 PLAN | CONTINUE
+progress: auth -> auth  status=ACTIVE  revision=5  mode=auto
+[x] 1/9 RESOLVE
+[x] 2/9 DISCOVER_LEGACY
+[x] 3/9 DISCOVERY_COMPLETENESS
+[x] 4/9 ASSESS_TARGET
+[x] 5/9 BUILD_BASELINE
+[>] 6/9 PLAN
+[ ] 7/9 IMPLEMENT_SLICES
+[ ] 8/9 VERIFY_SLICES
+[ ] 9/9 FINALIZE
+next: PLAN
+loop: CONTINUE next=/start-migration auth
+✔ public auto run reports registry continuation as JSON (1014.019294ms)
+✔ step mode previews registration and requires its own confirmation (954.584752ms)
+✔ a correct registry mapping is left untouched at BUILD_BASELINE (682.705711ms)
+✔ a conflicting registry mapping cannot be overwritten by auto (655.990134ms)
+✔ failed registry recovery leaves BUILD_BASELINE and unrelated entries unchanged (779.24239ms)
+✔ direct advance cannot invent a registry authority mode (939.811288ms)
+✔ an auto advance reaches the same record as the confirmed advance on a linear step (763.796478ms)
+✔ an auto advance reaches the same record as the confirmed advance on a slice step (1522.759651ms)
+✔ the default mode is auto on both mutating entry points (470.017574ms)
+✔ an unknown --mode value is refused by name on both entry points (794.672096ms)
+✔ --mode auto still refuses a blocked preview on both entry points (677.425999ms)
+✔ --mode step never self-confirms a bootstrap (377.290797ms)
+✔ AUTO legacy drift blocks without refresh and preserves the entire record (961.393542ms)
+✔ explicit --refresh --confirm-mismatch records OPERATOR in auto and step (876.20947ms)
+✔ --mode auto completes registration through the public advance command (1021.543427ms)
+✔ the operator approval gate stays a hard TTY gate that --mode cannot reach (523.251848ms)
+✔ an unfinished upgrade transaction blocks --mode auto exactly as it blocks a manual run (722.323755ms)
+✔ the progress checklist is deterministic and ASCII-only (1059.146224ms)
+✔ the checklist renders the lifecycle the record was actually born under (566.20986ms)
+✔ a COMPLETE record renders every checkpoint done and nothing in progress (1795.093871ms)
+✔ the slice block appears only once slices exist, in progression order (1078.671828ms)
+✔ --status stays valid JSON and carries the checklist (1261.758038ms)
+✔ progress is projected from the engine lifecycle, never from a frozen copy (482.051386ms)
+✔ no presentation path keeps its own copy of the engine lifecycle (1.749537ms)
+✔ visible-UI progress is reported from persisted evidence, beneath the checkpoints (1202.171917ms)
+✔ the projection exposes the engine's checkpoints, in engine order (1408.9552ms)
+✔ a fresh process projects the canonical progress and renders its text from it (1615.120589ms)
+✔ a stopped iteration blocks the active checkpoint and approves nothing (1289.186196ms)
+✔ no provider tree carries its own copy of the migration state machine (6.325314ms)
+✔ the progress checklist is outside the hashed preview, so no confirmation ID moves (751.383921ms)
+✔ a blocked run still prints the checklist on both entry points (1735.680555ms)
+✔ an auto loop closes consecutive checkpoints in one process with no operator input (951.987742ms)
+✔ an interrupted auto loop resumes from persisted state in a new process (1045.856631ms)
+✔ one auto run drives the whole lifecycle to COMPLETE with no operator input (3042.344027ms)
+✔ a genuine stop names a typed reason instead of continuing (1442.29829ms)
+✔ --mode step prints no directive: there is no loop for it to drive (513.716343ms)
+✔ no authoritative instruction orders the loop to stop after an advance (20.905179ms)
+✔ BUILD_BASELINE refuses a capability matrix with no rows (842.068781ms)
+✔ a SHARED_PREREQUISITE proven by fewer than two other consumers is refused (4637.156663ms)
+✔ users, ./users, and users/ count as one consumer (829.154459ms)
+✔ a consumer absent from the discovery scan is refused (973.703781ms)
+✔ a committed shared component used by two external features is accepted (1077.579288ms)
+✔ a consumer nested inside the migrating module is not external (1021.539514ms)
+✔ shared consumer aliases and nested claims cannot inflate the count (2146.301445ms)
+✔ a claimed feature with no import of the shared component is refused (919.738994ms)
+✔ external consumer proof refuses changes after the pinned legacy revision (1695.807976ms)
+✔ a SHARED_PREREQUISITE may not be owned inside the migrating feature (695.511884ms)
+✔ a FEATURE_LOCAL capability owned outside the feature is refused (841.406311ms)
+✔ a classification and requiredDisposition that disagree are refused (847.822331ms)
+✔ DO_NOT_MIGRATE must cite a replacing baseline row, not argue in prose (3251.653304ms)
+✔ TARGET_REUSE must prove the capability already exists in the target (673.353698ms)
+✔ a missing architecture authority is recorded as a gap, never cited as present (817.368138ms)
+✔ PLAN refuses to reach IMPLEMENT_SLICES with an unassigned SHARED_PREREQUISITE (790.970481ms)
+✔ a slice that skips a prerequisite slice in dependencies is refused (706.392498ms)
+✔ a dependency that is unknown, self-referential, or declared later is refused (2951.933615ms)
+✔ one capability may not be claimed by two slices (1113.798605ms)
+✔ a shared prerequisite is scheduled ahead of the feature slices that need it (1054.881598ms)
+✔ a shared prerequisite built inside the feature instead of its owner is refused (1021.763697ms)
+✔ a shared prerequisite is accepted in either accepted path spelling (3432.179108ms)
+✔ a FEATURE_LOCAL owner is recognised in either accepted path spelling (2042.465045ms)
+✔ normalizing the owner does not weaken where a capability may live (1270.090108ms)
+✔ an owner that escapes the target repository is refused (3453.765654ms)
+✔ a changed file outside the owner is still refused in either spelling (2308.105304ms)
+✔ DR4: a shared owner spelled through a traversal is refused, even one that lands back inside the target (900.076766ms)
+✔ the capability matrix is pinned once BUILD_BASELINE closes (772.458785ms)
+✔ a pre-11 record closes BUILD_BASELINE with no capability matrix and is never promoted (1229.77938ms)
+Metrics: 114ms, 0 scan(s), 0 file(s) parsed, 0 validator run(s)
+✔ AUTO drives the delegated artifact through `run`, leaving the parent record untouched (1407.820494ms)
+✔ a delegated artifact decision is recorded through one migration_run elicitation (3371.301128ms)
+✔ without elicitation the same migration_run awaits an explicit standard artifact decision (1381.435359ms)
+✔ a host answering the delegated decision without a human writes no artifact line (9763.125854ms)
+✔ figma-mcp: confirmed refresh preserves authorities and invalidates old-revision evidence (1073.914169ms)
+✔ figma-mcp: every recorded Figma link is persisted into figmaSources (454.520298ms)
+✔ figma-mcp: ASSESS_TARGET states the Figma MCP obligation and its links (375.148226ms)
+✔ target-system: ASSESS_TARGET carries no Figma obligation (360.450859ms)
+✔ figma-mcp: ASSESS_TARGET refuses a missing or unusable figma-context (5865.107846ms)
+✔ figma-mcp: a context bound to a recorded fileKey closes ASSESS_TARGET (713.963291ms)
+✔ figma-mcp: designSource and figmaSources are persisted and rendered at RESOLVE (330.422186ms)
+✔ target-system is the default design source and is rendered at RESOLVE (360.859436ms)
+✔ figma-mcp bootstrap refuses a non-design link and an empty link set (38.228568ms)
+✔ figma-mcp: the design source and its links are fixed for the migration's lifetime (441.754132ms)
+✔ DR18: a module record applies the shared design-source immutability matrix (4298.483327ms)
+✔ figma-mcp: ASSESS_TARGET pins inventories/figma-context.json and editing it is caught (715.740447ms)
+✔ figma-mcp: visual target evidence must bind the pinned figma-context digest (1690.981797ms)
+✔ figma-mcp: a figma-mcp migration reaches COMPLETE with design-independent final gates (2248.876381ms)
+✔ figma-mcp: --reopen-ui keeps the stamped format version and the figma pin (2502.154144ms)
+✔ Slice C: capture equality refuses each mismatch before decoding (6.272557ms)
+✔ Slice C: structural extras require a terminal target-native row (9.476786ms)
+✔ Slice C: unchanged facts cannot waive a shifted layout (1490.960472ms)
+✔ Slice C: terminal native control authorization is recorded in VERIFY_SLICES (1754.077475ms)
+✔ Slice C: an already pinned v1 contract retains its pre-image comparison path (1040.678352ms)
+✔ legacy-17: bootstrap pins the source, renders the authority, and refuses --figma (476.200904ms)
+✔ I4: hardened step 04 guidance matches the fixed-tolerance contract for both authorities (2426.212486ms)
+✔ I4: an already pinned v1 contract still requires its explicit tolerance (927.358288ms)
+✔ legacy-17: --design-source legacy-runtime refuses --figma links (50.503153ms)
+✔ legacy-17: ASSESS_TARGET refuses an absent, mis-bound or substituted authority (1573.109107ms)
+✔ legacy-17: the record reaches COMPLETE through the shared visual pipeline (2745.749297ms)
+✔ legacy-17: the engine, not the authored result, decides a legacy-backed state (2288.788821ms)
+✔ legacy-17: the three design sources keep disjoint pins and one state shape (2931.997164ms)
+✔ visual-17: a frame whose node is not a recorded Figma link is refused (812.274157ms)
+✔ figma-17: the recorded node itself still backs a frame, with no ancestry (780.553972ms)
+✔ figma-17: a direct child and a deeply nested descendant proven from the source's metadata back visual acceptance (1818.358022ms)
+✔ figma-17: an unproven, invented, foreign, or tampered descendant is refused (6702.658547ms)
+✔ figma-17: a whole-file link still authorizes any node, and a node link is not widened into one (647.643678ms)
+✔ figma-17: a frame named 'mobile' binds nothing; only an explicit row binds MOBILE to the concrete descendant (1291.254148ms)
+✔ unbacked-17: explicit rows bind DEFAULT and MOBILE to Figma variants; a 'narrow layout' frame binds nothing by itself (1129.003843ms)
+Operator decisions are recorded only from an interactive terminal. This invocation has no TTY, so nothing was read or written. An agent may run --pending, but it can never approve a candidate.
+✔ unbacked-17: without authoritative design only a live operator decision covers the state (1440.359712ms)
+✔ unbacked-17: DEGRADED evidence is never absence of design; it needs an operator decision naming the limitation (879.489262ms)
+✔ I5: figma-mcp VISUAL_UNBACKED rationale is unchanged, COMPLETE and DEGRADED (1624.907977ms)
+✔ I5: legacy-runtime VISUAL_UNBACKED rationale names the pinned legacy frame, never Figma (3051.838551ms)
+✔ v2 figma: all three provenance kinds resolve, and each way of faking one is refused (9298.308825ms)
+✔ v2 figma: a designContext entry must name the node it was read for, unambiguously (1137.963151ms)
+✔ v2 figma: a conflicting designContext declaration is ambiguous, never resolved by order (1047.754044ms)
+✔ visual-17: a provenance-only stub or incomplete Figma evidence is refused (5931.220978ms)
+✔ visual-17: the contract covers every required state and binds a complete frame at its viewport (2113.157678ms)
+✔ visual-17: a DEGRADED Figma extraction cannot back a visual acceptance row (1057.490951ms)
+✔ visual-17: runtime evidence for the wrong node or viewport is refused (1916.256226ms)
+✔ visual-17: the engine owns the visual verdict -- an authored PASS over wrong measurements fails (1374.291964ms)
+✔ visual-17: harmless rendering variance within tolerance verifies (1301.937653ms)
+✔ visual-17: synthetic narrow-viewport regression -- a 360px mobile frame rendered ~244px wide beside persistent navigation fails (1454.573392ms)
+✔ visual-17: a traced DESIGN_SYSTEM_GAP prevents verification until COMPLIANT or approved (2009.117228ms)
+✔ visual-17: persisted Figma evidence that changed after it was hashed is stale (1347.743954ms)
+✔ visual-17: a format-16 figma-mcp record keeps provenance-only semantics (2123.297529ms)
+✔ visual-17: compareVisualFact tolerates noise and rejects material divergence (0.896204ms)
+✔ adopt-17: without adoption a format-16 figma record is unchanged, and a non-Figma record cannot adopt (5399.511416ms)
+✔ adopt-17: adoption fails closed on absent, incomplete, or degraded evidence and requires the operator's exact confirmation (3379.841217ms)
+✔ adopt-17: adoption preserves identity, history, slices, and functional evidence, and names the visual slices (3225.880561ms)
+✔ adopt-17: adoption consumes a proven descendant of the recorded section without touching identity, sources, history, or functional evidence (2472.775302ms)
+✔ adopt-17: an operator-approved unbacked state goes stale when the adopted Figma context changes (2428.158706ms)
+✔ adopt-17: the mandatory increment requeues the adopted slice, which reverifies to COMPLETE again (3425.707712ms)
+✔ format 15 keys the record on the target and derives the source order (323.904656ms)
+✔ the source set is fixed for the migration's lifetime (358.793767ms)
+✔ a format-14 record keeps legacy-keyed identity and rejects the new keys (337.017444ms)
+✔ DISCOVERY_COMPLETENESS canonicalizes roots per source (2029.971012ms)
+✔ a multi-source ROOT_DECLARATION approved through the recorder satisfies DISCOVERY_COMPLETENESS (654.88297ms)
+✔ the recorder demands no ROOT_DECLARATION for any source's own implicit root (640.340104ms)
+✔ I3: the feature root is implicit and a same-named app route needs a valid ROOT_DECLARATION (928.679505ms)
+✔ I3: a REJECTED ROOT_DECLARATION never authorizes the app route (format 19) (781.568327ms)
+✔ I3: each source resolves its own feature root, and attribution beats a matching basename (1079.749532ms)
+✔ I3: competing feature roots for one source are not implicitly authorized (954.169001ms)
+✔ --adopt-target pins an immutable target baseline and requires the feature (717.179674ms)
+✔ ADOPTED_VERIFIED is earned by evidence bound to its scenarios and tests (7513.385754ms)
+✔ an adopted row goes stale when a path it named changes (1790.92217ms)
+✔ brownfield target inventories cannot come back absent or evidence-free (2200.37112ms)
+✔ pre-existing target work may not be claimed as slice work (1716.127947ms)
+✔ a greenfield slice may never skip production changes via verification-only semantics (1157.654647ms)
+✔ a brownfield slice may be verification-only when it re-proves instead of rewriting (1315.634978ms)
+✔ format-15 brownfield: PLAN never skips IMPLEMENT_SLICES for a slice whose record already reads COMPLETE (1091.256764ms)
+✔ format-14 retains its prior IMPLEMENT_SLICES lifecycle unchanged (1004.201273ms)
+✔ IMPLEMENT_SLICES resolves format-15 artifacts from the target-keyed record (1360.880866ms)
+✔ IMPLEMENT_SLICES keeps format-14 artifacts legacy-keyed (1616.593187ms)
+✔ a format-15 advance emits a nextCommand keyed on the target, not a legacy source (663.976606ms)
+✔ converging legacy sources are not external consumers of a shared capability (764.095026ms)
+✔ R-W9-b: --doctor on a host without the parser reports it, names the install command, and writes nothing (336.151472ms)
+✔ R-W9-c: --doctor takes no lock and creates no directory (442.97367ms)
+✔ R-W9-d: a target repository that declares none of this repository's dependencies still scans (42.821026ms)
+✔ R-W3-a: a FAIL with defects returns the same slice to implementation, and only after the attempt is preserved (1245.458936ms)
+✔ R-W3-b: a FAIL without defects is refused and nothing is written (1089.404822ms)
+✔ R-W3-c: --rework-slice under --mode auto is the AUTO principal's own decision (0.800814ms)
+✔ R-W3-d: run-migration.mjs refuses --rework-slice by name (0.237438ms)
+✔ R-W3-e: a fourth rework is refused, naming the slice (2604.74182ms)
+✔ R-W3-g: rework records are never overwritten and history grows by exactly one event (2836.095584ms)
+✔ R-W3-h: FAIL -> rework -> PASS preserves the failed bytes, and mutating or deleting them is refused (4025.802399ms)
+✔ R-W4-a: an unclaimed modified target file blocks FINALIZE by name (4528.255105ms)
+✔ R-W4-f: engine workspace files never register as drift (3679.803962ms)
+✔ R-W4-b: a file touched under an active rework is AUTHORIZED_REWORK, not drift (2328.64018ms)
+✔ R-W4-d: drift acceptance requires the challenge phrase and cannot be supplied by argv (2220.534352ms)
+✔ R-W4-e: editing an accepted path after acceptance re-blocks (1903.213564ms)
+✔ R-W5-a: a lingering FAIL blocks FINALIZE, a preserved one superseded by a PASS does not (1537.474954ms)
+✔ R-W5-a: a preserved FAIL under rework/ with a newer terminal PASS finalizes (1816.412139ms)
+✔ R-W5-b / R-W3-f: a terminal PASS older than the newest rework blocks FINALIZE (1930.782233ms)
+✔ F6-a: --mode auto accepts owned FINALIZE drift as AUTO, a deleted file included, and completes (4123.650194ms)
+✔ F6-b: format-19 FINALIZE drift is a relayable review; relayed acceptances apply, re-offered after an edit (6174.663225ms)
+✔ F6-c: AUTO is offered exactly what its gate accepts; the rest stays a human decision (2.415144ms)
+✔ R-W10-a: the SKILL.md compatibility table cannot drift from the exported constants (2.909963ms)
+✔ R-W10-c: authored formats through 21 stay non-promoting, and every supported format is executable (1.074576ms)
+✔ R-W10-e: a format newer than supported is refused with the update message (0.741859ms)
+✔ ODA-1: format 21 is active while format 19 retains direct-ledger semantics (5.120313ms)
+✔ new module records start at format 21 without mutating historical records (747.674916ms)
+✔ ODA-3: the direct resolver binds candidate, policy and principal, and fails closed otherwise (6.212939ms)
+✔ ODA-4: group authority is atomic -- one entry for the whole set, or none (5.200715ms)
+✔ ODA-2: the 18 -> 19 transition is explicit, pre-pin, and otherwise a typed compatibility action (1.339866ms)
+✔ R-W10-b / R-W10-d: a format-15 record runs the full lifecycle unchanged and gains no rework vocabulary (6429.450365ms)
+✔ R-W4-c: a file under a delegated targetOwner is AUTHORIZED_DELEGATION, not drift (2483.642716ms)
+✔ W4-4: only a drift acceptance may be appended after DISCOVERY_COMPLETENESS closes (2643.976288ms)
+✔ F-06: module history links, rejects edits, and bridges a legacy prefix (6278.321423ms)
+✔ R-W6-d: a crash between the state write and the integrity write recovers, replays, and drops the journal (816.892129ms)
+✔ R-W6-e: a crash between the state write and the history append recovers idempotently (772.681923ms)
+✔ R-W6-d: a crash after the journal write but before anything else rolls back (662.494851ms)
+✔ R-W6-f: a corrupt journal is preserved byte-for-byte and refuses (455.069475ms)
+✔ DR13: every advance crash boundary recovers once and idempotently, to exactly one event (3858.697ms)
+✔ DR13: a process killed at every advance boundary is recovered by the next process (4515.317006ms)
+✔ DR13: an advance journal its writers never produce is refused before any write (1296.60315ms)
+✔ DR13: a state or anchor outside the journal's phases is refused with history and anchor untouched (1589.845515ms)
+✔ DR13: a journal restores only bytes the persisted state holds, and an undo under a never-created directory recovers (969.506853ms)
+✔ DR13: a discarded transition's undo is durable before its journal is removed, and the removal is fsynced (858.864815ms)
+✔ DR13: a symlinked or non-file advance journal is refused; the link and its target are untouched (1193.913296ms)
+✔ DR13: an undo that would reach through a symlink is refused before its first write (773.686548ms)
+✔ DR13: a failure after the initialization committed never rolls the record back (833.603794ms)
+✔ DR13: an initialization journal left right after it was written rolls back, even before modules/ exists (370.743584ms)
+✔ DR13: a process killed at every initialization commit is recovered by the next initialization (2278.712246ms)
+✔ DR13: an initialization journal that names paths its writer never derives, or a root it does not own, is refused before anything is removed (825.52088ms)
+✔ DR13: registry recovery finishes only its own before/after phases and refuses anything else with nothing written (681.856211ms)
+✔ DR13: a registration that fails after its journal keeps it, and the next registration finishes the pair (164.388848ms)
+✔ DR13: an upgrade journal outside its writer's states, module or directory is refused with nothing restored (3093.5217ms)
+✔ R-W6-a / R-W6-b: an unanchored history tail is bounded to one event at this revision (922.706019ms)
+✔ R-W8-e: no provider tree has an engine entry point to run (5.715443ms)
+✔ amend: one amendment preserves the prior record, re-pins both, and writes one event (3473.330634ms)
+✔ amend: refuses a slice that is not reopened, and a file it does not add (2810.646666ms)
+✔ amend: an unbranded authorization is refused before anything is written (1833.62034ms)
+✔ sequence: one approval executes an ordered set, each event citing its own index (3079.847846ms)
+✔ sequence: naming one slice twice is refused before a human sees anything (3124.364349ms)
+✔ sequence: a record that moved expires the whole remaining authorization (5648.661685ms)
+✔ sequence: a file edited after approval expires the sequence, unwritten (2973.793375ms)
+✔ amend: a transition killed mid-write is recovered to the prior record (2876.625862ms)
+✔ R1-1: COMPLETE is immutable by default (3101.660852ms)
+✔ R1-2: an explicit reopen invalidates only the named slice and preserves the superseded proof (1765.801908ms)
+✔ R1-3: a reopened migration is corrected and reaches COMPLETE again (2892.272996ms)
+✔ R1-4: invalid reopen requests fail closed (4369.011753ms)
+✔ R1-5: a COMPLETE reopen acknowledges legacy drift, keeps every unaffected pin, and completes again (4037.258054ms)
+✔ R1-6: a drift acknowledgement with no drift fails closed; a plain reopen is unchanged (4336.902536ms)
+✔ R2-1: a reopened slice proves ownership from its anchor once its work is committed (4855.345238ms)
+✔ R2-2: an ordinary active slice still proves ownership from the live diff only (2136.115938ms)
+✔ R2-3: reopened committed ownership fails closed (8372.331865ms)
+✔ R2-4: a claimed file committed after the anchor needs evidence bound to current HEAD (2941.962246ms)
+✔ R2-5: a legacy reopen with no recorded anchor resolves one from its pinned evidence (3105.082077ms)
+✔ R3-1: the installed toolkit reopens a COMPLETE record under --mode auto with no external approval (30299.933491ms)
+✔ UIP-P2: state C (ACTIVE, completed slice on pre-v1 evidence) recovers through ACTIVE --reopen-ui to COMPLETE (9862.376732ms)
+✔ UIP-P3: state D (ACTIVE at FINALIZE) recovers through ACTIVE --reopen-ui to COMPLETE (8179.759528ms)
+✔ UIP-P4: state E (COMPLETE) recovers through the existing --reopen-ui with v1 proof (8923.825236ms)
+✔ UIP-P5: role-shaped state A (VERIFY_SLICES, rework 1/3, PENDING) takes v1 proof and advances without a reopen (5903.605282ms)
+✔ UIP-N5: ACTIVE --reopen-ui refusals write nothing (29237.79692ms)
+✔ UIP-N6: after an ACTIVE --reopen-ui the old pre-v1 evidence bytes are rejected (7634.804318ms)
+✔ UIP-N7: history replay after an ACTIVE --reopen-ui derives the live pins, remediation pin retained (8948.784767ms)
+✔ F-01 CLI previews, confirms, journals, and resumes UI observations adoption (4524.950151ms)
+✔ format 18: requiredObservations schema rejects every malformed shape (2.191808ms)
+✔ format 18 is non-promoting; an old UI record adopts before a new PASS (3928.612327ms)
+✔ UI_OBSERVATIONS_ADOPTED blocks without writing when legacy authority is missing, tampered, or unconfirmed (3121.574557ms)
+✔ UI_OBSERVATIONS_ADOPTED case A: ACTIVE with a pending UI slice keeps plan and step (3385.676997ms)
+✔ UI_OBSERVATIONS_ADOPTED role-shaped case B: ACTIVE / VERIFY_SLICES / pending UI slice adopts without restart (3380.929ms)
+✔ UI_OBSERVATIONS_ADOPTED case C: completed UI slices are preserved, requeued, and complete again (6727.231303ms)
+✔ UI_OBSERVATIONS_ADOPTED case D: ACTIVE / FINALIZE is refused, adopts, reverifies, and finalizes (5717.48505ms)
+✔ UI_OBSERVATIONS_ADOPTED case E: COMPLETE keeps prior completion evidence and requires new PASS and FINALIZE (5975.812379ms)
+✔ combined adoption: pre-17 ACTIVE figma-mcp validates both inputs and commits one format-18 event (4492.461091ms)
+✔ FU-1: a format-17 record resolves exactly 17 -> 18, and 18 resolves none (3311.632751ms)
+✔ FU-2: a no-visible-UI format-17 record commits an atomic NO_OP 17 -> 18 (4365.188897ms)
+✔ FU-3: a crash before the state write leaves format 17 and a byte-identical record (6855.395678ms)
+✔ FU-4: a crash after the state write recovers forward to exactly one event (2682.89969ms)
+✔ FU-5: pre-floor records owe no format upgrade and keep their semantics (3137.652675ms)
+✔ FU-6: only a validated legacy inventory that declares no visible UI is a NO_OP (2932.129143ms)
+✔ FU-7: read-only status projects the pending increment and writes nothing (3105.3211ms)
+✔ FU-8: the normal CLI owns 17 -> 18; no format-specific flag is ever typed (3450.913053ms)
+✔ FU-9: the normal CLI commits a NO_OP 17 -> 18 with no input at all (2952.321955ms)
+✔ FU-10: every lifecycle mutation refuses while the increment is owed (6732.242074ms)
+✔ FU-12: an early format-17 record reports the increment INACTIVE and keeps running (1468.092988ms)
+✔ FU-13: the DISCOVER_LEGACY pin closes the window on itself (2107.816857ms)
+✔ FU-14: past the boundary, absent or corrupt authority is BLOCKED and still frozen (4546.777409ms)
+✔ FU-11: the historical adoption spelling stays valid forever (0.843051ms)
+✔ ODA-5: the projection names every decision state the gate enforces (8.798525ms)
+✔ ODA-6: a grouped member view points at one group entry and is never its own authority (7.400382ms)
+✔ IMPLEMENT gate: a file a verified slice claims under another spelling is not requested again (3454.297238ms)
+✔ IMPLEMENT gate: a missed in-scope file blocks the advance with a typed request and zero mutation; listing it passes (4897.384757ms)
+✔ IMPLEMENT gate: a crash after the IMPLEMENT advance's history write recovers the authored record, no engine amendment (4157.445086ms)
+✔ v1.3.17 `<path> <identity>` entry reads as its path; reworking that file is not drift (3210.200503ms)
+✔ IMPLEMENT gate: a path no changedFiles entry can spell (a space) is not requested; it stays BASE drift (3685.363478ms)
+✔ DR4: a reopened claim reached through a link carries no anchored provenance (6736.649472ms)
+✔ DR4: a reopened slice owns its anchored claim in every accepted spelling, and post-anchor commits still need current evidence (21106.767509ms)
+✔ DR4: a prefixed claim switched to a shadow file before the reopen carries no anchored provenance (6928.933842ms)
+✔ DR4: a planned scope in any accepted spelling keeps a stray file in it as FINALIZE drift (4036.828947ms)
+✔ DR4: rework and delegation own their declared subtree in any spelling, never a sibling sharing its prefix (3444.276983ms)
+✔ DR4: a claimed link out of the target is refused, in any spelling (10292.900463ms)
+✔ DR4: an operator acceptance authorizes only the path it names, never a respelling of it (3589.030751ms)
+✔ DR4: an amendment reads --add-file in every accepted spelling as the one target path (5747.364895ms)
+✔ A4: the decisions seam and the three-argument reader offer the same drift facts; a failed census read refuses only where drift is classified (4401.998514ms)
+✔ I7: a finished slice advances before the multi-slice phase document is COMPLETE; the last slice still needs it (4490.080851ms)
+✔ I7: the generated phase documents, once their placeholders are filled, let a non-final slice advance (3586.642947ms)
+✔ I7: a reworked slice retries implementation while the phase document is still in progress (3318.386016ms)
+✔ I7: single-checkpoint step documents still require Status COMPLETE (2039.430009ms)
+✔ MC1: classification rows come from the algorithm-1 scan; dispositions stay unresolved until authored (2152.965299ms)
+✔ MC1: classification rows come from the algorithm-2 scan; dispositions stay unresolved until authored (2162.324244ms)
+✔ MC1: authored rows are reported, never corrected, and a symlinked artifact is refused without a byte changed (1682.495845ms)
+✔ MC1: legacy-runtime rows are derived from the pinned capture; kinds outside the taxonomy and locators stay the agent's (3502.094595ms)
+✔ MC1: a missing or degraded capture stays unresolved, and a stale authority refuses (8958.069547ms)
+✔ MC1: an adopted UI remediation decides which legacy-runtime rows are derived, as it does for the validator (2690.740789ms)
+✔ MC1: result digests are QW3's content identities; command facts and outcomes are never written (2113.275731ms)
+✔ MC1: gate entries get the current binding and digests only; a recorded binding and every gate result stay authored (3687.306157ms)
+✔ MC1: CLI and MCP write the same draft and the same summary; other checkpoints refuse (2155.345678ms)
+✔ MC1: a format-21 record is drafted from scanner algorithm 5 and refuses an older pin (922.335637ms)
+✔ MC2: a real browser captures the legacy authority frame; the validator pins it and MC1 prefills from it (2336.322396ms)
+✔ MC2: unreachable apps, missing or ambiguous elements, unreached states, foreign origins, secrets and unsupported values refuse with no byte written (18747.392026ms)
+✔ MC2: CLI and MCP run the same capture; an authorized session is used and never persisted (5977.041348ms)
+✔ late --reopen-discovery corrects an unresolvable pinned claim locator found at VERIFY_SLICES (21295.441366ms)
+✔ late --reopen-discovery preserves and clears a valid claim captured before the failure, so it recaptures (22154.208761ms)
+✔ MC2: a format-21 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored (6529.336522ms)
+✔ --mode accepts only auto or step (3.151281ms)
+✔ discover takes exactly one positional (0.628942ms)
+✔ --status refuses every other option (0.938771ms)
+✔ --scan refuses every mutating option (0.463551ms)
+✔ --reopen-discovery and --refresh are exclusive transitions (0.30786ms)
+✔ --refresh is a transition either principal may take (0.275844ms)
+✔ --reopen-ui is exclusive, in every mode (0.22667ms)
+✔ every former auto-refusal is gone, and only the auto-refusals (3.496245ms)
+✔ --adopt-visual-contract is operator-only, typed, exclusive, and never run or self-confirmed (1.828392ms)
+✔ advance and validate refuse an unknown step name identically (2.713923ms)
+✔ an unknown command is refused rather than silently allowed (2.050743ms)
+✔ maySelfConfirm is isAutoAuthority, for every command and every input (2.826438ms)
+✔ isAutoAuthority defaults on and is false only for step (0.609994ms)
+✔ registration self-confirms under auto and stops under step (0.684844ms)
+✔ an unknown command may not self-confirm by default (0.563115ms)
+✔ exitCodeFor is total over the outcome set (2.634613ms)
+✔ an unrecognized outcome throws instead of defaulting (1.044552ms)
+✔ authoringRequest composes the existing readers at every checkpoint (2.102142ms)
+✔ a pre-10 record is described with its own eight-step lifecycle (0.668052ms)
+✔ every schemaRef lands on its checkpoint's authoring entry in the shipped contract (61.738275ms)
+✔ nextOutcome types the four continuations the wrappers produce (0.955139ms)
+✔ only an active format increment is this invocation's outcome (0.396543ms)
+✔ renderLoopDirective is byte-identical to the pre-change implementation (0.496995ms)
+✔ the skill's safe context boundaries are exactly the outcomes the loop continues through (15.441539ms)
+✔ a committed increment continues the loop; an owed one stops it (0.954153ms)
+✔ --design-source rejects an unknown value on discover and run (0.324169ms)
+✔ --status refuses --design-source and --figma (0.321292ms)
+✔ --scan refuses --design-source and --figma (0.496658ms)
+✔ run and discover accept a valid design source as a bootstrap input (0.555051ms)
+✔ protocol: exact payload bytes and challenge vector are pinned (7.230877ms)
+✔ protocol: every binding changes the challenge, and module/artifact are domain-separated (1.972073ms)
+✔ protocol: malformed, ambiguous or overlong payloads are refused (2.479703ms)
+✔ webauthn: a valid assertion verifies and every tampered form is refused (317.159369ms)
+✔ webauthn: only ES256 with UV enrolls, and zero counters need admin acceptance (217.617177ms)
+✔ nonce: single use, concurrent claims, wrong record, expiry, restart durability and no rollback (182.327702ms)
+✔ store: protected directory, exact origin/RP and no relaxation on reopen (89.47834ms)
+✔ activation: manifest is read/check only and production writes stay OFF (7.470389ms)
+✔ review text is inert HTML including bidi and control characters (3.191787ms)
+✔ a non-interactive approval refuses before registry or state work (77.806864ms)
+✔ running the recorder as a child process (no TTY) refuses with exit code 2 (514.826408ms)
+✔ the challenge phrase is derived from the subject, so it approves one thing (4.376627ms)
+✔ a decision applies only to the exact current candidate (3.334325ms)
+✔ a valid chain reads back; a truncated, reordered, or edited line does not (109.028314ms)
+✔ the synthetic 16-member decision group audits exactly (10.312267ms)
+✔ group audit rejects tampering, reordering, and an incomplete append (17.922415ms)
+✔ an absent decision file is legal and reads as empty (17.639702ms)
+✔ O_APPEND keeps concurrent writers from losing a line (35.922129ms)
+✔ the rationale digest ignores line endings and surrounding whitespace only (1.829984ms)
+✔ argument parsing requires exactly one deterministic mode (1.957523ms)
+✔ an artifact approval parses with no argv-reachable approval channel (0.351784ms)
+✔ an artifact and a module positional cannot be combined (0.673436ms)
+✔ legacy lines, candidate ids and digests are byte-identical to the pre-v2 engine (4.900451ms)
+✔ v2 APPROVED and REJECTED lines continue the legacy DEC chain without moving its anchor (19.52216ms)
+✔ only an explicit v2 APPROVED over the full candidate digest applies (0.818868ms)
+✔ the v2 writer produces AGENT_RELAYED only, never HUMAN_ATTESTED or a v2 AUTO line (7.293172ms)
+✔ a malformed or unknown v2 principal or result fails closed on read and audit (78.341017ms)
+✔ AUTO stays isolated: a v2 line in the AUTO ledger and AUTO in the human ledger are both refused (17.243635ms)
+✔ new-format judgment uses only the engine policy; weak principals never satisfy it (4.63202ms)
+✔ protected admin policy requires a pinned identity, provenance and matching change history (5.045429ms)
+✔ validated admin policy permits artifact kinds through the existing relayed v2 writer (16.092392ms)
+✔ artifact candidates share policy-aware approval, rejection, stale and duplicate projection (32.356502ms)
+✔ a new-format group is one candidate binding its complete ordered member set (11.65325ms)
+✔ the engine review uses the authoritative group digest and renders proposed text inert (4.865054ms)
+✔ an authored decision id cannot forge engine-owned review lines (2.746664ms)
+✔ one reviewed group resolves to one authoritative entry, never one per member (13.132964ms)
+✔ duplicate and conflicting group outcomes fail closed instead of picking a line (4.090107ms)
+✔ a torn group append is refused whole, and recovery drops it without partial authority (12.519467ms)
+✔ fresh RESOLVE accepts a valid in-memory OpenSpec proposal when spec.md is absent (341.730855ms)
+✔ fresh RESOLVE preview writes no OpenSpec, migration artifact, registry, or project binding (118.952332ms)
+✔ confirmed fresh RESOLVE creates OpenSpec and the complete initialization set (1009.574857ms)
+✔ continuation validates the persisted OpenSpec and resumes DISCOVER_LEGACY (1104.347912ms)
+✔ missing OpenSpec after initialization blocks continuation (1026.257004ms)
+✔ changing the proposed OpenSpec makes the prior confirmation stale (267.484368ms)
+✔ failed confirmed initialization rolls back OpenSpec, migration tree, and project binding (1105.150934ms)
+✔ first setup accepts an explicit registry from monorepo and target CWD without writes (1248.354336ms)
+✔ MIGRATION_REGISTRY_PATH remains an optional first-setup CI fallback (96.285428ms)
+✔ confirmed registration persists one portable binding and reuses it automatically (585.194529ms)
+✔ confirmed migration execution persists config and target-relative state identity (1903.897216ms)
+✔ workspace-relative binding survives repository relocation (745.514277ms)
+✔ conflicting CLI, environment, project config, and state bindings fail explicitly (1455.330007ms)
+✔ missing and stale project configuration fail actionably (85.163401ms)
+✔ registry and project-config changes stale registration confirmations (99.489573ms)
+✔ the persisted binding resolves from the operator's cwd, with a clean environment (842.78988ms)
+✔ assertFigmaSource normalizes a /design/ link and converts the node id (4.17005ms)
+✔ assertFigmaSource accepts a /design/ link without a node id (6.513291ms)
+✔ assertFigmaSource resolves a branch URL to the branch as the effective file (2.10992ms)
+✔ assertFigmaSource accepts a /make/ link (0.234489ms)
+✔ assertFigmaSource refuses FigJam, Slides, non-figma hosts, and malformed input (1.368414ms)
+✔ assertFigmaSource rejects URLs carrying userinfo credentials (0.467049ms)
+✔ assertFigmaSource never persists sensitive or extra query input verbatim (0.888287ms)
+✔ assertFigmaSource canonical reference cannot disagree with nodeId on duplicate node-id (0.849827ms)
+✔ resolveDesignSource defaults to target-system and forbids stray figma links (0.383537ms)
+✔ resolveDesignSource requires at least one link and dedupes by kind#fileKey#nodeId (0.468734ms)
+✔ resolveDesignSource keeps /design/ and /make/ with the same key distinct (0.700591ms)
+✔ resolveDesignSource rejects an unknown design source (0.271892ms)
+✔ one run invocation performs exactly one advance and exits (1571.449842ms)
+✔ an unauthored checkpoint yields CONTINUE with an authoring request and no advance (1251.728906ms)
+✔ --json: stdout is exactly one JSON document; every human line goes to stderr (1318.944016ms)
+✔ emitDirective defaults to today's bytes and subtracts only the loop line and checklist (1582.062467ms)
+✔ --mode step stops at the confirmation prompt, writes no directive, executes nothing (1405.799527ms)
+✔ run refuses every operator transition by name and touches nothing (1241.15088ms)
+✔ run still rejects an unknown mode and a missing module (1.164323ms)
+✔ run accepts --design-source and repeatable --figma without consuming them (0.696512ms)
+✔ the narrowing reads candidates at DISCOVERY_COMPLETENESS and nowhere else (1864.33804ms)
+✔ a record with nothing pending derives no candidate (1867.919161ms)
+✔ no run invocation without a TTY ever writes the operator decision ledger (3110.121341ms)
+✔ run-migration.mjs cannot forge a TTY or hardcode a verdict (4.722881ms)
+✔ an approval records exactly one line and never advances the record (2984.238275ms)
+✔ a challenge mismatch writes nothing and stops the loop (3342.755057ms)
+✔ one group candidate per iteration records both members atomically (2365.567814ms)
+✔ with no TTY --mode auto resolves every candidate as AUTO and never touches the human ledger (2408.829747ms)
+✔ with no TTY --mode step writes nothing and names each candidate's own command (2424.93752ms)
+✔ a candidate set with blockers takes 4d and prompts for nothing (1454.012002ms)
+✔ a broken decision chain degrades to the authoring request, on stderr (1618.693413ms)
+✔ a failure at any other checkpoint never reaches the candidate reader (1087.87962ms)
+✔ a formatVersion 9 record has no DISCOVERY_COMPLETENESS checkpoint to narrow at (0.678681ms)
+✔ a terminal decision is raised, answered, and recorded inside one run (1442.759602ms)
+✔ record-decision remains a usable fallback and its line satisfies the census (1093.918336ms)
+✔ a later run resumes from the persisted approval and advances the checkpoint (1588.514472ms)
+✔ a bootstrap awaiting the operator still stops with a typed reason and writes nothing (144.732872ms)
+✔ a confirmed bootstrap ends with exactly one CONTINUE directive, as its last line (647.123193ms)
+✔ auto reaches the normal run contract from the directive alone, never from prose (744.521102ms)
+✔ --mode step bootstraps with no directive at either phase (738.871324ms)
+✔ run and discover accept repeatable --legacy and --adopt-target (1.813138ms)
+✔ a blocked run renders the block at its checkpoint and offers no next step (1059.013146ms)
+✔ A4-ARCH-1: slices/ has exactly one public entry, and it exports only what something outside uses (52.951678ms)
+✔ A4-ARCH-2: engine code imports slices-owned names from slices/index.mjs, never through a compatibility re-export (1959.429939ms)
+✔ A4-ARCH-3: slices/ adds no import cycle: its files import each other acyclically (73.65675ms)
+✔ A4-ARCH-4: every slices declaration has exactly one live definition, and no moved declaration survives at its old site (1096.388703ms)
+✔ A4-ARCH-5: historical compatibility exports remain, as the slices binding itself (17.133516ms)
+✔ A4: the root-relative claim spelling keeps its rules for ./, trailing and Windows separators, sibling prefixes and containment (5.985062ms)
+✔ DR4: every accepted spelling of a changed-file claim is one target path, existing or missing, and never a path outside the target (128.007004ms)
+✔ DR4: the implementation digest binds the same bytes whichever accepted spelling the record uses (56.6451ms)
+✔ DR4: the post-anchor history of a claimed path reads it as a file name, never a pattern (274.131888ms)
+✔ DR4: a POSIX file named with a literal backslash keeps resolving, and its digest, as before DR4 (96.744048ms)
+✔ A4: a settled census fact keeps its value, and a failed read rejects nothing until it is consumed (1.59151ms)
+✔ I8: the documented slice and evidence records satisfy the list-coverage rule at format 11+, and pre-11 records need no capabilityIds (7.096806ms)
+✔ A1-ARCH-1: outside its directory, store/, shared/, formats/, decisions/, census/, slices/ and visual/ are reached only through index.mjs (3512.973741ms)
+✔ A1-ARCH-2: store/, shared/, formats/, decisions/, census/, slices/ and visual/ import nothing above them, shared/ writes nothing, formats/ touches no file, none runs code at import (486.097012ms)
+✔ A1-ARCH-3: a moved declaration has no second live implementation at its old site (397.571037ms)
+✔ shared: DR1 one containment rule; resolving first matches path.relative on posix and win32 (19.854149ms)
+✔ shared: lexical containment is not physical containment; assertSecurePath still refuses the symlink (16.349386ms)
+✔ shared: sha256Hex and canonicalJson are the primitives the pins digest (20.039979ms)
+✔ store: atomicWrite refuses a symlinked path with zero mutation and leaves no temp file behind (25.031007ms)
+✔ store: appendDurably appends exact bytes through its crash boundaries and refuses a symlinked ledger (32.188106ms)
+✔ store: the history chain verifies, and a one-byte edit, a reorder or a forged head is refused (69.440415ms)
+✔ store: a torn history tail is refused until sealed, and sealing cuts a fragment but keeps a whole event (45.731303ms)
+✔ store: past the integrity anchor only the one event of the current revision may sit (1.732068ms)
+✔ store: integrity.json bytes are stable, and the artifactHashes digest ignores key order (0.56405ms)
+✔ store: readTree refuses a symlink anywhere in the tree (16.343651ms)
+✔ store: the semantic artifact pin ignores provider and session but nothing else (12.81119ms)
+✔ store: a completed slice's pinned command output and UI files are immutable; shared source it merely cites is not (106.214826ms)
+✔ A7-ARCH-1: transport/ has exactly one public entry, and it only re-exports its own files (59.486308ms)
+✔ A7-ARCH-2: engine code reaches transport/ only through its entry; only the facades take a specific file (1442.781092ms)
+✔ A7-ARCH-3: nothing below transport/ imports it, transport/ imports no facade, and no new import cycle exists (1005.900708ms)
+✔ A7-ARCH-4: one live implementation per transport declaration; the facades declare nothing and share one startup (924.286552ms)
+✔ A7-ARCH-5: every historical entry path exports its BASE names and arities, as the canonical bindings (571.903229ms)
+✔ A7-ARCH-6: all ten bins keep their paths, shebangs and startup, and answer the same through a symlink (10369.123928ms)
+✔ A7-ARCH-7: MCP and the CLI reach decisions only through the recorder; no tool or argument can approve (91.934767ms)
+✔ A7-ARCH-8: the installers stay self-contained, and the release payload carries every engine entry they load (178.364776ms)
+✔ A7-ARCH-9: importing any facade or the transport entry starts nothing (1051.066798ms)
+✔ the engine's hashed v5 contract is byte-identical to the canonical skill copy (13.860279ms)
+✔ format 20 requires every control and post-action appearance claim, including reused triggers (5.129111ms)
+✔ identical grid pixels do not mask document or ancestor scroll divergence (2.986927ms)
+✔ a reused trigger needs its own matching legacy and target pixels (103.981118ms)
+✔ format 21 holds a target-design-system claim to capture conditions and scroll behavior, not legacy pixels (25.069595ms)
+✔ format 20 verification binds every claim to both runtime proofs and fails on missing affordance or scroll parity (126.880996ms)
+✔ Slice C: PNG decode, 2x box filter, alpha matte, and pixel deltas (24.028952ms)
+✔ Slice C: antialiasing-only edge pixels are excluded (0.745198ms)
+✔ Slice C: control multiset reports missing, extra, and multiplicity (6.264881ms)
+✔ normalize: rgb() and hex land in the same colour space (1.961407ms)
+✔ normalize: named colours, hsl() and unresolved variables refuse (0.766118ms)
+✔ normalize: px, unitless and percentage lengths (6.157075ms)
+✔ normalize: context-dependent units refuse rather than coerce (3.592218ms)
+✔ normalize: keyword and numeric font weights (1.78269ms)
+✔ normalize: font family lists are deterministic (0.421403ms)
+✔ normalize: the remaining taxonomy kinds (5.832575ms)
+✔ normalize: a fact outside the taxonomy is carried, never reinterpreted (0.365344ms)
+✔ taxonomy: every group is required and structure needs one bounded count (0.355959ms)
+✔ taxonomy: a one-fact contract cannot cover it (0.811118ms)
+✔ the fixed tolerance is exactly ±1px with no ratio allowance (0.199414ms)
+✔ provenance: metadata resolves the node's own box (1.578724ms)
+✔ provenance: a dangling metadata node or attribute refuses (0.780586ms)
+✔ provenance: metadata assets stay inside their node (1.156052ms)
+✔ provenance: an RFC-6901 pointer resolves, a dangling one refuses (1.065491ms)
+✔ provenance: designContext resolves exactly one unambiguous declaration (1.239752ms)
+✔ provenance: conflicting declarations refuse instead of picking one (0.591341ms)
+✔ provenance: geometry cannot be downgraded to a weaker kind (0.578112ms)
+✔ provenance: a value defined as a variable must be cited as one (2.620805ms)
+✔ structured capture keeps exact bytes, key presence, hierarchy and deterministic digests (5.671094ms)
+✔ structured facts retain directional spacing and each node's own geometry and fill (2.622835ms)
+✔ structured typography has the text node and numeric weight axis as its source (2.104749ms)
+✔ empty structured strokes and effects prove absence; missing keys prove nothing (1.176773ms)
+✔ structured assets retain node identity and deterministic content digest (3.952617ms)
+✔ explicit gaps, applied strokes, directional weights and effects stay structured (6.061504ms)
+✔ structured provenance keeps strongest support, corroboration and token identity (4.637218ms)
+✔ semantic Tailwind aliases never establish literal facts (0.358316ms)
+✔ metadata is geometry/ancestry only and pixels cannot certify a semantic fact alone (0.178928ms)
+✔ structured node contract derives all owned facts and compares each target locator (36.083872ms)
+✔ structured capture accepts only exact integer scale (0.679438ms)
+✔ the card frame derives one browser-comparable stroke record from its structured paint (8.024618ms)
+✔ the card frame derives one browser-comparable box-shadow list from its structured effect (1.962087ms)
+✔ the card frame compares clean against a matching target and diverges on every real difference (6.796241ms)
+✔ stroke absence is unchanged and still satisfies FRAME.stroke (1.727833ms)
+✔ effect absence is unchanged and still satisfies FRAME.effects (2.986919ms)
+✔ structured fills certify one solid and fail closed on mixed applied paints (7.531299ms)
+✔ unsupported structured fill cannot be replaced by a weaker design-context literal (2.169687ms)
+✔ an unsupported stroke or effect shape is NOT_PROVABLE with its own reason, never a fact (8.164505ms)
+✔ neither domain may satisfy the record with a shape the other cannot produce (2.688882ms)
+✔ the shared engine semantics are one function for both domains (0.649634ms)
+✔ a node that returned no strokes/effects key proves neither a record nor an absence (0.402097ms)
+✔ MC2: the capture request, locator grammar and taxonomy transform are the trust boundary (16.6571ms)
+✔ MC2: a claim reached by navigation is observed after the click, not checked against the source page (4759.789033ms)
+✔ MC2: format-20 LEGACY claim captures satisfy the claim, scroll and pixel validators; the verdict stays authored (11891.534811ms)
+✔ A6-ARCH-1: visual/ has exactly one public entry, and it only re-exports its own files (68.946532ms)
+✔ A6-ARCH-2: engine code takes visual-owned names from visual/index.mjs, never through a compatibility path (3232.291219ms)
+✔ A6-ARCH-3: visual/ adds no upward edge and no import cycle (694.603104ms)
+✔ A6-ARCH-4: every visual declaration has exactly one live definition, and no moved declaration survives at its old site (1206.078406ms)
+✔ A6-ARCH-5: historical compatibility exports remain, as the visual binding itself (13.688816ms)
+✔ A6-ARCH-6: pngjs and pixelmatch load lazily, from the public visual-evidence.mjs path (570.387575ms)
+✔ A6-ARCH-7: visual never grants approval or writes: it reaches decisions only to build, read and require (227.755634ms)
+✔ A6: UI runtime evidence reads the injected implementation digests once, after the limitations and before any record (12.426463ms)
+✔ A6: each design source pins only its own authority context, and target-system pins none (1.285696ms)
+✔ A6: --reopen-ui is eligible only for COMPLETE, or ACTIVE at VERIFY_SLICES or FINALIZE (0.861093ms)
+✔ DR18: designSourceConflict compares canonical Figma identities, never order, raw links or forgeable separators (3.966941ms)
+ℹ tests 1180
+ℹ suites 0
+ℹ pass 1180
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1124781.233486
+$ node scripts/engine-test-ts.mjs
+
+ RUN  v4.1.11 /tmp/migration-tests-0apKyk
+
+
+ Test Files  2 passed (2)
+      Tests  69 passed (69)
+   Start at  09:45:42
+   Duration  47.81s (transform 2.51s, setup 0ms, import 3.28s, tests 81.78s, environment 0ms)
+
+$ node --test --test-concurrency=1 test/providers-sync.test.mjs test/provider-installation.test.mjs test/provider-progress-parity.test.mjs test/provider-runtime-matrix.test.mjs test/runtime-bootstrap.test.mjs test/release-version-discipline.test.mjs test/concurrent-suites.test.mjs test/installed-full-lifecycle.test.mjs test/rehearse-cli.test.mjs test/portability-support.test.mjs test/architecture.test.mjs test/agent-e2e-acceptance.test.mjs test/unregistered-module-bootstrap.test.mjs
+✔ black-box acceptance refuses incomplete and invalid invocations (185.544068ms)
+✔ complete acceptance requires a pin from outside the consumer (115.751799ms)
+✔ black-box acceptance requires an explicitly disposable consumer (139.787638ms)
+✔ black-box acceptance reports a missing installed runtime receipt (61.024916ms)
+✔ black-box acceptance refuses a changed independent verifier before agent execution (61.538172ms)
+✔ without OS isolation, a rewritten receipt or engine bundle is still caught after the run (11231.485055ms)
+✔ an agent that leaves no readable engine status still gets a fail-closed report (8245.870589ms)
+✔ ordinary first-time record directory creation is not a replacement event (8871.640949ms)
+✔ record deletion and recreation is detected by a trusted observer and never certified (7345.733057ms)
+✔ under OS isolation the agent cannot write the runtime, receipt, verifier or report, and nothing it starts outlives it (9897.730459ms)
+✔ OS-isolated agent deleting and recreating its migration record cannot obtain certification (7598.476828ms)
+✔ under OS isolation a verifier in a broad directory (an ancestor of HOME) seals its script and node_modules, not HOME (11784.54299ms)
+✔ black-box acceptance refuses an unverified installed engine before starting the agent (113.116332ms)
+✔ A10-ARCH: the repository passes the architecture gate (2128.451416ms)
+▶ A10-ARCH: every rule fails on the edit that breaks it, naming rule, file and edge
+  ✔ A10-ARCH-1: an entry that declares (1440.417991ms)
+  ✔ A10-ARCH-1: an entry that re-exports another module (1709.767637ms)
+  ✔ A10-ARCH-2: a module internal named from outside (1562.390676ms)
+  ✔ A10-ARCH-2: a bin that loads a second command file (1956.262058ms)
+  ✔ A10-ARCH-3: an upward lazy import (dynamic is not safe) (1890.436307ms)
+  ✔ A10-ARCH-3: a domain module importing transport (1503.635548ms)
+  ✔ A10-ARCH-3: an unclassified engine file (1467.21393ms)
+  ✔ A10-ARCH-4: a lazy cycle inside a module (1383.659727ms)
+  ✔ A10-ARCH-4: a computed engine import (1321.598779ms)
+  ✔ A10-ARCH-5: a facade that grows an implementation (1215.048748ms)
+  ✔ A10-ARCH-5: a second live definition of a module export (1166.847818ms)
+  ✔ A10-ARCH-6: engine source copied into a provider tree (1747.854103ms)
+  ✔ A10-ARCH-6: an installer that imports the engine (1934.037352ms)
+  ✔ A10-ARCH-6: a runtime.mjs that drifts from the bootstrap (1429.772583ms)
+  ✔ A10-SRC-1: a new filesystem writer outside store/ (2051.15231ms)
+  ✔ A10-SRC-1: a namespace fs import in a domain module (1637.700216ms)
+  ✔ A10-SRC-2: a second process-entry check (1591.825718ms)
+  ✔ A10-SIZE-1: an oversized file that grows (1281.753491ms)
+  ✔ A10-TEST-1: a test that imports a module internal (1618.508414ms)
+  ✔ A10-TEST-1: a domain test that goes back to a historical facade (1260.561791ms)
+  ✔ A10-TEST-1: a computed import in an ordinary test (1251.415617ms)
+  ✔ A10-TEST-2: an engine suite dropped from engine:test (1241.008838ms)
+  ✔ A10-TEST-2: a support module registered as a suite (1162.10266ms)
+  ✔ A10-TEST-2: a suite registered twice (1425.199626ms)
+  ✔ A10-TEST-2: a root suite missing from providers:test (1162.982434ms)
+  ✔ A10-OWN-1: a guarantee with two owners (1363.038248ms)
+  ✔ A10-OWN-1: an adversarial reference to a test that does not exist (1379.242824ms)
+  ✔ A10-OWN-1: an owner that is not a module (1425.464526ms)
+✔ A10-ARCH: every rule fails on the edit that breaks it, naming rule, file and edge (43368.696597ms)
+✔ A10-ARCH-7: the CLI exits 1 and prints one diagnostic per violation (4196.565581ms)
+✔ engine and Vitest overlap without touching source identity (50188.684459ms)
+✔ offline installed toolkit bootstraps a fresh consumer and completes migration (32132.855483ms)
+✔ serialized Windows paths are changed, and absent paths fail closed (1.629134ms)
+✔ claude/user: pinned install, CLI/MCP status, update gate, rollback, safe removal (57715.525108ms)
+✔ claude/project: pinned install, CLI/MCP status, update gate, rollback, safe removal (31968.064143ms)
+✔ codex/user: pinned install, CLI/MCP status, update gate, rollback, safe removal (33729.934189ms)
+✔ codex/project: pinned install, CLI/MCP status, update gate, rollback, safe removal (30621.198556ms)
+✔ opencode/user: pinned install, CLI/MCP status, update gate, rollback, safe removal (28888.718171ms)
+✔ opencode/project: pinned install, CLI/MCP status, update gate, rollback, safe removal (28793.834809ms)
+✔ copilot/project: pinned install, CLI/MCP status, update gate, rollback, safe removal (28193.583258ms)
+✔ R-W9-a / R-W9-c: installed MCP is launchable; doctor preserves and reports consumer MCP without launching it (13913.396054ms)
+✔ T1: Copilot registers nine tools without the relay by default, on install and on upgrade from a <=1.6.5 receipt (30310.653224ms)
+✔ E7: Codex grants nine tools without the relay by default, on install and on upgrade from a <=1.6.5 receipt (24449.510809ms)
+✔ T1: a root .mcp.json start-migration entry shadows .github/mcp.json and is refused naming the file (26505.768212ms)
+✔ ownership, checksums, symlinks and config conflicts fail closed (22588.486095ms)
+✔ Codex TOML merge preserves unrelated bytes and rejects alternate conflicting declarations (12611.185936ms)
+✔ provider-owned CLI forwards argv and cwd; interrupted install locks fail closed (18078.852206ms)
+✔ v1.0.0 stores without a mode or SHA256SUMS remain valid, updatable and removable (38629.960865ms)
+✔ codex: reinstall is an idempotent update that keeps unrelated configuration (50412.416438ms)
+✔ codex: without a receipt, its own current or historical registration is adopted (53136.840117ms)
+✔ codex: without a receipt, a modified, foreign-store or unowned-file registration fails closed and writes nothing (21417.585692ms)
+✔ claude: reinstall is an idempotent update that keeps unrelated configuration (48281.907169ms)
+✔ claude: without a receipt, its own current or historical registration is adopted (79751.754558ms)
+✔ claude: without a receipt, a modified, foreign-store or unowned-file registration fails closed and writes nothing (19135.73903ms)
+✖ without a receipt, a foreign .agents/mcp.json start-migration entry is a typed conflict (29892.763244ms)
+✔ SHA256SUMS disagreeing with the release manifest fails closed (24975.095284ms)
+✔ staged release ships the pinned signer runtime closure and no test credential or key (347.673002ms)
+✔ every provider projection of a released skill carries the identical identity stamp (3.981928ms)
+✔ two installers reclaiming a dead owner entry never both work under the lock (15669.915696ms)
+✔ an installer whose lock was lost releases only its own, never its replacement's (15653.971667ms)
+✔ a doctor that meets a working install fails closed and leaves its lock alone (12343.176545ms)
+✔ a failed install rolls back under contention, releasing only its own lock (16859.998721ms)
+✔ a half-built install lock is only staging: it neither blocks nor shares the published lock (13781.005766ms)
+✔ an install lock whose owner cannot be proven dead fails closed and is left untouched (225.369307ms)
+✔ an interrupted install or reclaim leaves a lock the next installer recovers (33455.515913ms)
+✔ a protocol-1 install.lock file is never reclaimed; once an operator removes it, installs work (11136.64856ms)
+✔ only ESRCH proves an installer gone: every other probe answer keeps its lock (66.360711ms)
+✔ a lock that cannot be reclaimed is refused with its path and the reason, untouched (39.081796ms)
+unshare: sigprocmask unblock failed: Invalid argument
+✔ an installer SIGKILLed in another PID namespace leaves a lock the next installer reclaims (13133.859191ms)
+✔ an install token proves its owner gone or alive; anything that is not the recorded FIFO is refused untouched (9645.982793ms)
+✔ an install into a read-only root is refused with the kernel errno, creating nothing (69.953718ms)
+✔ an install owner entry swapped for a symlink after it was vetted is never followed (13.530485ms)
+✔ a protocol-1 release is never installed, run, repaired, updated to or rolled back to; a protocol-1 receipt still updates (64805.955425ms)
+✔ every provider routes start-migration through the canonical progress contract (22.073339ms)
+✔ every provider receives the same canonical execution contract (12.969672ms)
+✔ each adapter declares its live-progress capability and the skill matrix agrees (3.393187ms)
+✔ capability metadata cannot reach the engine's progress or state (24.885373ms)
+✔ every provider receives the canonical decision authority and artifact protocol (10.680364ms)
+✔ every provider receives the same context-boundary rule and no invented reset (11.31342ms)
+✔ A/claude: fresh install creates the receipt, the registration and absolute runtime paths (26267.099825ms)
+✔ A/codex: fresh install creates the receipt, the registration and absolute runtime paths (13162.696233ms)
+✔ A/opencode: fresh install creates the receipt, the registration and absolute runtime paths (10973.606372ms)
+✔ A/copilot: fresh install creates the receipt, the registration and absolute runtime paths (8593.360708ms)
+✔ B/claude: a deleted owned registration is restored; a modified one fails closed (15081.891187ms)
+✔ B/codex: a deleted owned registration is restored; a modified one fails closed (11526.549003ms)
+✔ B/opencode: a deleted owned registration is restored; a modified one fails closed (12466.225691ms)
+✔ B/copilot: a deleted owned registration is restored; a modified one fails closed (13732.440338ms)
+✔ B-stale/claude: verified history converges; unproven or modified history stays blocked (66096.528399ms)
+✔ B-stale/codex: verified history converges; unproven or modified history stays blocked (63310.868556ms)
+✔ B-stale/opencode: verified history converges; unproven or modified history stays blocked (68414.7355ms)
+✔ B-stale/copilot: verified history converges; unproven or modified history stays blocked (64612.703356ms)
+✔ C/claude -> codex: destination reuses the verified runtime with zero network access (10622.401791ms)
+✔ C/claude -> opencode: destination reuses the verified runtime with zero network access (10833.07879ms)
+✔ C/claude -> copilot: destination reuses the verified runtime with zero network access (8277.817359ms)
+✔ C/codex -> claude: destination reuses the verified runtime with zero network access (11365.064019ms)
+✔ C/codex -> opencode: destination reuses the verified runtime with zero network access (12075.986867ms)
+✔ C/codex -> copilot: destination reuses the verified runtime with zero network access (12334.246465ms)
+✔ C/opencode -> claude: destination reuses the verified runtime with zero network access (13322.652126ms)
+✔ C/opencode -> codex: destination reuses the verified runtime with zero network access (20086.338429ms)
+✔ C/opencode -> copilot: destination reuses the verified runtime with zero network access (12306.560159ms)
+✔ C/copilot -> claude: destination reuses the verified runtime with zero network access (13320.599229ms)
+✔ C/copilot -> codex: destination reuses the verified runtime with zero network access (11913.497202ms)
+✔ C/copilot -> opencode: destination reuses the verified runtime with zero network access (11582.169776ms)
+✔ OpenCode: install and update register codemode false under mcp.servers and touch no other server (18391.710024ms)
+✔ D1: three agreeing siblings let a fourth provider install entirely offline (20854.484699ms)
+✔ D1b: siblings that agree with each other but do not satisfy the requirement are not candidates (28958.228676ms)
+✔ a provider configuration regenerated from scratch is repaired without adopting anything else (51634.453971ms)
+✔ D2a: siblings on different releases are not candidates and do not block a new provider (30385.370289ms)
+✔ D2b: two candidates claiming one requirement with different release identities fail closed (15937.824348ms)
+✔ T6: two providers on different stale releases both converge on the required identity (28898.217688ms)
+✔ T22: a sibling with the right version but the wrong skill identity cannot satisfy selection (17696.913334ms)
+✔ T10: an explicit rollback persists a scoped pin that a skill-identity change supersedes (50764.858339ms)
+✔ T13: tampering is refused at every boundary, including a hand-edited receipt.skills (13210.966599ms)
+✔ E/claude: an exact version is never satisfied by a sibling on another version (24049.529146ms)
+✔ E/codex: an exact version is never satisfied by a sibling on another version (21862.801312ms)
+✔ E/opencode: an exact version is never satisfied by a sibling on another version (26997.860942ms)
+✔ E/copilot: an exact version is never satisfied by a sibling on another version (26574.120852ms)
+✔ F: every provider format survives install, self-heal and removal intact (130446.475852ms)
+✔ G/claude: install, doctor, update, rollback and remove keep exact identity (35056.007186ms)
+✔ G/codex: install, doctor, update, rollback and remove keep exact identity (33797.462147ms)
+✔ G/opencode: install, doctor, update, rollback and remove keep exact identity (35591.760126ms)
+✔ G/copilot: install, doctor, update, rollback and remove keep exact identity (36483.981466ms)
+Synchronized 35 generated provider files.
+✔ generates the four provider trees and records ownership in the manifest (96.841409ms)
+Synchronized 35 generated provider files.
+✔ every MCP template launches the installed engine through a placeholder, never a consumer path (234.131664ms)
+Synchronized 35 generated provider files.
+✔ each adapter manifest owns exactly its own generated files and leaves release identity unrendered (44.912604ms)
+Synchronized 31 generated provider files.
+✔ no provider tree carries engine source, engine tests, or a skill package manifest (47.787463ms)
+Synchronized 35 generated provider files.
+Synchronized 35 generated provider files.
+✔ is deterministic and self-heals corrupted generated output on the second run (110.404828ms)
+Synchronized 35 generated provider files.
+Synchronized 35 generated provider files.
+✔ prunes stale manifest-owned output and its empty directories, and preserves unrelated provider files (107.2284ms)
+Synchronized 35 generated provider files.
+✔ --check reports MISSING, CHANGED and STALE, never EXTRA, and writes nothing (135.772833ms)
+Synchronized 35 generated provider files.
+Synchronized 35 generated provider files.
+✔ isolates concurrent synchronizations of different roots (62.339969ms)
+✔ rejects invalid canonical sources and unsupported providers before writing anything (124.177262ms)
+✔ the provider set is closed, and no CLI option can widen it (80.548819ms)
+✔ rejects malformed manifest ownership entries (61.745822ms)
+✔ fails before writing when an output path is an existing directory (21.069256ms)
+✔ rejects direct and nested canonical file symlinks (20.489819ms)
+✔ rejects a canonical directory junction (5.575848ms)
+✔ rejects an output file symlink without following it (20.879613ms)
+✔ rejects an output parent junction without following it (14.916163ms)
+Synchronized 35 generated provider files.
+✔ rejects a stale manifest path through a junction without deleting its target (73.736383ms)
+Synchronized 35 generated provider files.
+✔ leaves no staging residue and does not write through a planted fixed-name path (56.554782ms)
+✔ rejects an unreadable canonical source without changing outputs (11.703886ms)
+✔ the committed provider trees are byte-for-byte what the canonical skills project (82.43932ms)
+✔ every canonical file reaches all four provider trees, and only SKILL.md differs (12.377695ms)
+✔ every generated skill copy carries the toolkit-identity operator surface and its no-hand-edit rule (10.472305ms)
+✔ every generated start-migration copy carries the module recovery transitions (18.941702ms)
+✔ every provider entry point names its skill and carries no workflow logic (3.924255ms)
+✔ skills-lock.json matches the canonical skill bytes, and the hash tracks both path and content (14.552698ms)
+✔ computeSkillHash covers skill semantics and excludes the identity stamp it feeds (36.831983ms)
+✔ a staged stamp whose computedHash disagrees with skills-lock.json blocks the release (770.322476ms)
+✔ a standard tree install carries the real toolkit version, with no placeholder to resolve (20.322646ms)
+✔ the canonical AUTO rule states the real contract and reaches every provider (9.830927ms)
+✔ a committed skill identity that disagrees with the root manifest blocks the release (514.474123ms)
+✔ current guidance links and named source paths resolve (81.00049ms)
+✔ every provider discovery checklist requires tracing API responses onto the wire (4.222043ms)
+✔ rehearse accepts exactly its three documented forms (1.56361ms)
+✔ rehearse refuses unsupported arguments before any side effect (827.355702ms)
+✔ established payload identity is read-only, outside contentHash, and cannot be forced (3786.272707ms)
+✔ record uses only the verified published toolkit hash; repeat is byte-identical, conflict refuses (76.89316ms)
+✔ invalid published manifests and unsafe archives never mutate the registry or extract files (275.059886ms)
+✔ digest verification precedes every tar call; tar failures clean scratch without a write (5.708468ms)
+✔ the public resolver rejects nonpublication evidence before download or registry write (81.109358ms)
+✔ the release archive carries no builder account, only normalized ownership (13.379377ms)
+✔ a pre-v1.1.0 runtime whose doctor only wants a knowledge root it can still create is usable offline (15780.88615ms)
+✔ the legacy knowledge-root allowance distinguishes POSIX permission failures (22319.634885ms)
+✔ the legacy knowledge-root allowance does not hide other blockers (25329.482655ms)
+✔ both independently installable skills carry the one shared bootstrap source (2.31402ms)
+✔ runtime.mjs runs both directly and through a symlinked skill directory (100.230241ms)
+✔ latest and exact resolvers accept only stable immutable releases pinned to the tag commit (1.292649ms)
+✔ private GitHub metadata uses the authenticated gh CLI without reading its credential (0.511215ms)
+✔ each provider bootstraps once, registers exact MCP, runs doctors, then stays offline (44673.891444ms)
+✔ tampered release asset is refused before receipt, MCP, or migration-state writes (136.392191ms)
+✔ tar is handed only the archive basename, from inside the archive directory (555.119362ms)
+﹣ Windows: ensure succeeds with Git GNU tar first on PATH (0.385504ms) # SKIP
+✔ an unreadable archive is one typed refusal naming tar, with no store write (17.461731ms)
+✔ an exact-version override reaches the resolver unchanged, persists nothing, and does not survive one run (22780.023872ms)
+✔ T1-T5: a stale receipt converges to the exact release the installed skill requires (28780.279648ms)
+✔ T15: a changed skill identity is never answered with bootstrapped:false on the old release (29232.05933ms)
+✔ T17, T20: same SemVer with a different skill identity is refused, not reused (11057.530587ms)
+✔ T18: unreleased repository bytes and an unpublished version both fail closed (11569.597189ms)
+✔ T8, T8b: offline converges from local history, and otherwise refuses without mutating anything (36254.178398ms)
+✔ T21: an identity-less or pre-binding skill stamp fails closed and names its remedies (12317.912513ms)
+✔ T23: an incoherent installed skill set is refused, not flip-flopped (28438.003638ms)
+✔ T12: a provably dead lock owner is reclaimed once; anything ambiguous stays blocked (14218.379424ms)
+✔ a protocol-1 release is never selected, run or rolled back to, from any source (32448.552423ms)
+✔ T14: a receipt written for another root or store names both sides (10113.246169ms)
+✔ T11: a runtime update never reads or writes a migration record (27104.572169ms)
+✔ T19: a released skill stamp binds to the exact commit and contentHash of its release (14061.653993ms)
+✔ project copies of a skill converge from the verified .agents copy; skew without one is refused (12743.785169ms)
+✔ fresh unregistered module bootstrap refuses invalid OpenSpec without writes and accepts a corrected proposal (1104.135293ms)
+✔ a bootstrap named by its legacy module continues on the target-keyed record (709.895421ms)
+✔ an interrupted first bootstrap of an unregistered module is recovered by rerunning it with --target (556.46361ms)
+ℹ tests 205
+ℹ suites 0
+ℹ pass 203
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 2747867.365012
+
+✖ failing tests:
+
+test at test/provider-installation.test.mjs:537:1
+✖ without a receipt, a foreign .agents/mcp.json start-migration entry is a typed conflict (29892.763244ms)
+  Error: Conflicting or modified MCP configuration
+      at refuse (file:///home/utmwac/amt-joint-candidate/providers/install-support.mjs:18:61)
+      at conflict (file:///home/utmwac/amt-joint-candidate/providers/install-support.mjs:30:83)
+      at mergeAgents (file:///home/utmwac/amt-joint-candidate/providers/install-support.mjs:270:104)
+      at applyAdapter (file:///home/utmwac/amt-joint-candidate/providers/install-support.mjs:511:18)
+      at async adapter (file:///home/utmwac/amt-joint-candidate/providers/install-support.mjs:731:20)
+      at async TestContext.<anonymous> (file:///home/utmwac/amt-joint-candidate/test/provider-installation.test.mjs:555:20)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    code: 'INSTALL_REGISTRATION_CONFLICT',
+    state: { code: 'INSTALL_REGISTRATION_CONFLICT', file: '.agents/mcp.json' }
+  }
+[ELIFECYCLE] Command failed with exit code 1.
+[ELIFECYCLE] Test failed. See above for more details.

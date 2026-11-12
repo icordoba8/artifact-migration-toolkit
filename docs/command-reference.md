@@ -141,6 +141,10 @@ Supply `cwd`, the absolute working directory of the migration, on every MCP
 call. `migration_relay_decision` relays only the operator's explicit
 answer to the review it names; no other tool accepts an approval-shaped
 argument.
+The shipped Codex and GitHub Copilot registrations launch the server with
+`--without-relay` and grant only the other nine tools, so on those hosts the
+MCP relay tool is not granted by default and the relay is CLI-only
+(`artifact-migration-decision <module> --relay …`).
 
 The operator-only commands have no MCP tool: bootstrap, refresh, reopen,
 rework and amendment (`artifact-migration-discover`), `--approve`, `--list` and
