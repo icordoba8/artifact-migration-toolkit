@@ -84,6 +84,7 @@ const doctorCheck = async (name, requirement, probe) => {
       requirement,
       status: "BLOCKED",
       detail: error.message,
+      code: error.code ?? null,
       blocking: true,
     };
   }

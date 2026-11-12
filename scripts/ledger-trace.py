@@ -134,7 +134,8 @@ def with_env_verdict(rest):
 
 def filter_stream(trace, engines):
     """strace -o '|...' sink: discard non-ledger read/write buffers before persisting records.
-    A record that cannot be attributed is replaced by a REDACTED marker, which verify() rejects as unparsed."""
+    A record that cannot be attributed is replaced by a REDACTED marker naming only its pid and syscall, which verify()
+    rejects as unparsed."""
     # strace -DD execs the tracee in its original process. script(1) waits for all its children;
     # leave that child set, or it waits for this sink while the sink waits for the tracee's EOF.
     if os.fork():
@@ -155,7 +156,8 @@ def filter_stream(trace, engines):
         for raw in sys.stdin:
             match = LINE.match(raw.rstrip('\n'))
             if not match:
-                raw = 'REDACTED unparsable trace record\n'
+                named = LEADER.match(raw)
+                raw = 'REDACTED unparsable trace record%s\n' % (' (pid %s, syscall %s)' % named.groups() if named else '')
             else:
                 pid, name, rest, resumed = match.group(1), match.group(2), match.group(3), match.group(4)
                 if (match.group(6) or '').startswith('+++'):
@@ -172,11 +174,11 @@ def filter_stream(trace, engines):
                         continue
                 if name == 'execve':
                     record = with_env_verdict(rest)
-                    raw = '%s execve(%s\n' % (pid, record) if record else 'REDACTED unparsable trace record\n'
+                    raw = '%s execve(%s\n' % (pid, record) if record else 'REDACTED unparsable trace record (pid %s, syscall execve)\n' % pid
                 elif resumed in FILTERED:
                     known = pending.pop(pid, None)
                     if known is None:
-                        raw = 'REDACTED read resumed without its start (pid %s)\n' % pid
+                        raw = 'REDACTED read resumed without its start (pid %s, syscall %s)\n' % (pid, resumed)
                     else:
                         if resumed == 'execve':
                             execed(pid, known, match.group(5))
@@ -198,7 +200,11 @@ PATH_ARG = re.compile(r'(?:(?:AT_FDCWD|\d+)<([^<>]*)>, )?"((?:[^"\\]|\\.)*)"')
 LEDGER = re.compile(r'(?:operator|auto)-decisions\.ndjson')  # human and AUTO ledgers: both are consumed as decisions
 DESTRUCTIVE = {'creat', 'truncate', 'ftruncate', 'fallocate', 'link', 'linkat', 'unlink', 'unlinkat', 'rename',
                'renameat', 'renameat2', 'symlink', 'symlinkat'}
-LINE = re.compile(r'^(\d+) +(?:(\w+)\((.*)|<\.\.\. (\w+) resumed>(.*)|(\+\+\+ .*|--- .*))$')
+# strace names a syscall it could not read `???`: exit_group races a thread's syscall-entry stop (G4 N01). The kernel skips
+# the body of a syscall entered with a fatal signal pending, so only the no-result form (DYING) is benign; any other is refused.
+LINE = re.compile(r'^(\d+) +(?:(\w+|\?\?\?)\((.*)|<\.\.\. (\w+|\?\?\?) resumed>(.*)|(\+\+\+ .*|--- .*))$')
+DYING = re.compile(r'\s*(?:<unavailable>)?\)\s+= \?(?: <unavailable>)?$')
+LEADER = re.compile(r'(\d+) +(?:<\.\.\. )?(\w{1,32})\b')  # pid and syscall name only, for a REDACTED marker
 FAILED = re.compile(r'\)\s+= (?:-1 |\?)')
 EXECVE = re.compile(r'"((?:[^"\\]|\\.)*)", \["(?:[^"\\]|\\.)*", "((?:[^"\\]|\\.)*)"')
 STDOUT_OBJECT = re.compile(r'1(?:<.*?>)?, (?:\[\{iov_base=)?"\{')
@@ -315,6 +321,8 @@ def verify(trace, root_pid):
             bad('positioned or copy ledger write')
         elif ledger and name == 'mmap':
             bad('ledger mapping')
+        elif name == '???' and not DYING.match(text):
+            bad('unattributed syscall')
     for (owner, fd, path, _, reading), chunks in reads.items():
         if relayed(b''.join(chunks) + b'\n'):
             violations.append('RELAY_IN_SCORED_RUN: fd table of pid %s %s a relay line on ledger fd %s' %

@@ -206,7 +206,7 @@ jobs:
   acceptance-node-22-13:
     # G6: the acceptance harness on the official runtime. Node 22.13.0 exact; unprivileged user namespaces
     # allowed on this ephemeral runner only, so the isolation, native PTY and lock tests run instead of
-    # skipping; pnpm 11.21.0 verified by its pinned SHA-512. Any SKIP other than G5's local-only one fails.
+    # skipping; pnpm 11.21.0 verified by its pinned SHA-512. The SKIPs must be exactly G5's local-only one and the host-only H12 Codex CLI one.
     name: acceptance harness (Node 22.13.0, namespaces)
     runs-on: ubuntu-latest
     steps:
@@ -246,9 +246,14 @@ jobs:
         shell: bash
         run: |
           grep -E '^# (tests|pass|fail|skipped|todo) ' "$RUNNER_TEMP/acceptance.tap"
-          allowed='# SKIP local-only (G5): downloads from the live npm registry; CI stays offline-deterministic'
-          if grep -E '# SKIP' "$RUNNER_TEMP/acceptance.tap" | grep -vF "$allowed"; then
-            echo "::error::unaccounted SKIP in test/agent-e2e-acceptance.test.mjs"
+          # Exactly these SKIPs, each once: an extra one fails, and so does a missing one (the test vanished).
+          expected=$(printf '%s\n' \
+            '# SKIP host-only (H12): AMT_CODEX_CLI names no pinned Codex 0.165.0 CLI' \
+            '# SKIP local-only (G5): downloads from the live npm registry; CI stays offline-deterministic' | sort)
+          actual=$(grep -oE '# SKIP .*' "$RUNNER_TEMP/acceptance.tap" | sort)
+          if [ "$actual" != "$expected" ]; then
+            printf 'expected SKIPs:\n%s\nactual SKIPs:\n%s\n' "$expected" "$actual"
+            echo "::error::SKIPs in test/agent-e2e-acceptance.test.mjs differ from the accounted set"
             exit 1
           fi
 

@@ -37,6 +37,7 @@ export {
 } from "./artifact.mjs";
 export {
   appendDurably,
+  assertCreatable,
   atomicWrite,
   contentIdentityMatchesSource,
   fileContentIdentity,

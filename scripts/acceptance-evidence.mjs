@@ -288,8 +288,11 @@ export const traceRefusals = (trace, engines, { python = 'python3' } = {}) => {
  * A Codex 0.165.0 rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`): the provider's own per-call record.
  * Returns its session, turn count, operator prompts and every engine refusal (line number + line SHA-256).
  */
-export function codexRollout(text, engineCommands) {
+export function codexRollout(text, engineCommands, { trustedSkills } = {}) {
   const rollout = { meta: null, turns: 0, prompts: [], refusals: [] };
+  const promptsBySource = { response: [], event: [], legacy: [] };
+  const started = { task: 0, turn: 0 };
+  const responses = [], skills = [];
   text.split('\n').forEach((line, index) => {
     if (!line) return;
     const event = JSON.parse(line), payload = event.payload ?? {};
@@ -297,17 +300,91 @@ export function codexRollout(text, engineCommands) {
       if (rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one session in a rollout');
       rollout.meta = { id: payload.id, cwd: payload.cwd, timestamp: payload.timestamp };
     }
+    // Codex 0.165 persists native user input as a response_item message, not
+    // an item_completed/UserMessage. Keep the older event forms for historical
+    // diagnostics, but never count duplicate representations as extra turns.
+    if (event.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+      responses.push({ payload, metadata: event.metadata, index });
+    }
     if (event.type !== 'event_msg') return;
-    if (payload.type === 'task_started') rollout.turns += 1;
+    if (payload.type === 'task_started') started.task += 1;
+    if (payload.type === 'turn_started') started.turn += 1;
+    if (payload.type === 'user_message') promptsBySource.event.push(payload.message);
     const item = payload.type === 'item_completed' ? payload.item : null;
-    if (item?.type === 'UserMessage') rollout.prompts.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+    if (item?.type === 'UserMessage') {
+      promptsBySource.legacy.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+      for (const part of item.content ?? []) if (part.type === 'skill') skills.push({ name: part.name, path: part.path, index });
+    }
     const refusal = item?.type === 'McpToolCall' && item.server === 'start-migration' ? mcpRefusal(item)
       : item?.type === 'CommandExecution' ? cliRefusal(item, engineCommands) : null;
     if (refusal) rollout.refusals.push({ line: index + 1, sha256: sha256(line),
       source: item.type === 'McpToolCall' ? 'mcp' : 'cli', tool: item.tool ?? null, exitCode: item.exit_code ?? null, ...refusal });
   });
   if (!rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: rollout has no session_meta');
+  // 0.165 also persists injected AGENTS/environment context as role=user. Only
+  // exclude its known shape when this rollout identifies actual operator input.
+  const ordered = responses.some(({ metadata }) => Number.isInteger(metadata?.user_input_order));
+  // It also injects an invoked skill's SKILL.md as an unordered role=user message.
+  // Excluded only when an earlier legacy typed skill part names this toolkit skill
+  // at its installed path; each part vouches for one injection, so a duplicate counts.
+  // Codex 0.165.0 sometimes omits the typed part (N02b). Then, and only when the rollout has no typed
+  // part at all, one injection counts if it is byte-identical to the skill rendered from the pinned
+  // release (`trustedSkills`, never a consumer file), follows the ordered prompt that names it (a second prompt still counts and fails the caller).
+  const typedParts = skills.length, orderedInputs = responses.filter(({ metadata }) => Number.isInteger(metadata?.user_input_order));
+  let pinnedUsed = false;
+  const injectedSkill = (content, index) => {
+    const match = content.length === 1 && content[0].type === 'input_text' &&
+      /^<skill>\n<name>(start-migration|migrate-artifact)<\/name>\n<path>([^<\n]+)<\/path>\n---\nname: \1\n[\s\S]*\n<\/skill>$/.exec(content[0].text);
+    if (!match || typeof rollout.meta.cwd !== 'string' ||
+        match[2] !== path.join(rollout.meta.cwd, '.agents/skills', match[1], 'SKILL.md')) return false;
+    const vouch = skills.findIndex(part => part.index < index && part.name === match[1] && part.path === match[2]);
+    if (vouch !== -1) return skills.splice(vouch, 1).length === 1;
+    const trusted = trustedSkills instanceof Map ? trustedSkills.get(match[1]) : undefined;
+    const prompt = orderedInputs[0]?.index < index && orderedInputs[0].metadata.user_input_order === 0
+      ? orderedInputs[0].payload.content?.map(part => part.type === 'input_text' ? part.text : '').join('').trim() : '';
+    if (typedParts !== 0 || pinnedUsed || typeof trusted !== 'string' || promptsBySource.legacy.length !== 1 ||
+        content[0].text !== '<skill>\n<name>' + match[1] + '</name>\n<path>' + match[2] + '</path>\n' + trusted + '\n</skill>' ||
+        !(prompt === '$' + match[1] || prompt.startsWith('$' + match[1] + ' ') || prompt.startsWith('$' + match[1] + '\n'))) return false;
+    rollout.skillProof = 'pinned-render';
+    return pinnedUsed = true;
+  };
+  for (const { payload, metadata, index } of responses) {
+    const content = payload.content ?? [];
+    const context = ordered && !Number.isInteger(metadata?.user_input_order) && content.length > 0 &&
+      (content.every(part => part.type === 'input_text' &&
+        (/^# AGENTS\.md instructions for [^\n]+\n\n<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*$/.test(part.text) ||
+         /^<environment_context>[\s\S]*<\/environment_context>\s*$/.test(part.text))) || injectedSkill(content, index));
+    if (!context) promptsBySource.response.push(content.filter(part => part.type === 'input_text').map(part => part.text).join(''));
+  }
+  const sources = Object.values(promptsBySource).filter(prompts => prompts.length);
+  if (sources.length > 1 && sources.some(prompts => JSON.stringify(prompts) !== JSON.stringify(sources[0])))
+    throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: conflicting user-message records across rollout schemas');
+  rollout.prompts = sources[0] ?? [];
+  // A missing started event cannot erase a recorded user turn; conversely an
+  // extra started event must not be hidden by a single user-message record.
+  rollout.turns = Math.max(started.task, started.turn, rollout.prompts.length);
   return rollout;
+}
+
+/**
+ * Expected installed SKILL.md text per toolkit skill, rendered from a hash-checked pinned release the way
+ * providers/install-support.mjs renderFiles does (G0 showed byte identity; a test pins it against the real installer).
+ * shortcut: POSIX shell quoting only (the harness is Linux-only), update with renderFiles if it changes.
+ */
+export async function pinnedSkillTexts(release, manifest, node) {
+  const engine = path.join(release, 'packages/migration-engine');
+  const { bin } = JSON.parse(await readFile(path.join(engine, 'package.json'), 'utf8'));
+  const commands = Object.entries(bin).sort(([a], [b]) => b.length - a.length);
+  const texts = new Map();
+  for (const name of ['start-migration', 'migrate-artifact']) {
+    const relative = `providers/codex/skills/${name}/SKILL.md`, bytes = await readFile(path.join(release, relative));
+    if ('sha256:' + sha256(bytes) !== manifest.files[relative]) throw new Error('ACCEPTANCE_PRECONDITION: pinned skill template does not match the release manifest: ' + relative);
+    let text = bytes.toString('utf8').replaceAll('{{ENGINE_MCP_ENTRY}}', path.join(engine, 'src/mcp-server.mjs'));
+    for (const [command, entry] of commands)
+      text = text.replace(new RegExp(`(?<![\\w-])${command}(?![\\w-])`, 'g'), () => [node, path.join(engine, entry)].map(quote).join(' '));
+    texts.set(name, text);
+  }
+  return texts;
 }
 
 /**
@@ -327,6 +404,8 @@ export async function findCodexRollout(codexHome, { threadId, cwd, startedAt, en
     const meta = JSON.parse(text.slice(0, text.indexOf('\n'))).payload ?? {};
     if (threadId && (meta.id !== threadId || meta.cwd !== cwd))
       throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: ' + name + ' belongs to another thread or consumer');
+    if (threadId && startedAt && endedAt && !(meta.timestamp >= startedAt && meta.timestamp <= endedAt))
+      throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: thread rollout is outside this launch window');
     if (threadId || (meta.cwd === cwd && meta.timestamp >= startedAt && meta.timestamp <= endedAt)) found.push({ file, text });
   }
   if (found.length > 1) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one rollout matches this run');
