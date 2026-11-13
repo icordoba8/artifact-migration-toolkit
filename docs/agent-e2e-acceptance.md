@@ -89,6 +89,18 @@ requires a provider-specific receipt at
 fails with `ACCEPTANCE_PRECONDITION` rather than a raw filesystem error.
 It independently verifies the receipt's selected release against the pinned
 manifest and checks that the discover command is the binary from that bundle.
+For headless and native runs alike, each installed Codex/Copilot MCP transport must
+use a canonical Node executable whose SHA-256 independently matches the pinned Node 22.13.0
+binary (`af8d5d1e234beb26b3095e6bebf80edc781f79c9435553a383037eccec2716f8`)
+and the canonical path of the verified release's `mcp-server.mjs`,
+with no mutable alias, wrapper, foreign entry, extra arguments or environment override. This binding
+is checked before probing the server, so a substitute server is never executed.
+The receipt cannot authorize a different executable, even when its command agrees with the registration.
+The verified executable is also mounted read-only for the provider run.
+Registration paths containing symlinks refuse. Existing registration files (and their `.codex`/`.github` parent directories) are
+read-only inside the sandbox. Their exact bytes and the absence of alternate Copilot
+registration files are pinned and checked again after the run; any change fails with
+`ACCEPTANCE_REGISTRATION_CHANGED`.
 After the agent returns, it re-verifies the same release to detect on-disk
 toolkit tampering. Installing a candidate only *during* the scored invocation
 is insufficient for this harness; the installation flow requires a separate
@@ -121,6 +133,58 @@ replacement. It does not certify native task-UI recording or every supported
 platform. On a host without unprivileged namespaces the runner refuses;
 `--isolation none` yields functional evidence with `certified: false`.
 
+**Launch as a non-root user.** The agent keeps the runner's effective UID and
+GID inside its namespace (`unshare --map-current-user` maps the effective IDs
+onto themselves), never namespace root, so
+a provider's own nested sandbox (Codex bubblewrap) can still map its user
+namespace: Linux 5.12+ lets a namespace map parent UID 0 only when its creator
+held `CAP_SETFCAP`, which the agent never does. With `--isolation os` the
+runner refuses with `ACCEPTANCE_PRECONDITION`, before the isolation probe and
+the provider start, when its real **or** effective UID is 0: an effective root
+agent would own root's files, and a real root could switch back to them. GIDs
+are not checked. Compatible launch context: a non-root login whose real and
+effective UIDs are both nonzero (not under `sudo` or a setuid wrapper), on a
+host that allows unprivileged user namespaces. It needs util-linux 2.38+
+`unshare`/`setpriv`. Capability boundary: only the trusted setup shell holds
+capabilities (`--keep-caps`, in the new namespace only) to create the read-only
+bind mounts; `setpriv` empties all five capability sets and sets
+`no_new_privs` before the agent starts. A runner launched under a seccomp
+filter that refuses `socket(AF_NETLINK, NETLINK_ROUTE)` (such as a managed
+Codex session) breaks bubblewrap's loopback setup; launch from a plain
+terminal (`Seccomp: 0` in `/proc/self/status`).
+
+**Codex MCP grants (harness only).** `codex exec` never prompts, so with the
+installed `.codex/config.toml` alone every MCP call that needs approval is
+refused (`approval policy is never`). For Codex launches only, the runner adds
+invocation-scoped `-c` overrides on top of the installed `start-migration`
+entry, whose command, arguments and bytes stay untouched. It injects no tool
+filter: the installed entry's `enabled_tools` (E7) is the only one. Before the
+agent spawns, every installed Codex (`.codex/config.toml` `enabled_tools` minus
+`disabled_tools`) and Copilot CLI (`tools` of `.mcp.json`, else
+`.github/mcp.json`) registration must grant exactly `artifact_status`,
+`artifact_run`, `migration_status`, `migration_scan`,
+`migration_evidence_binding`, `migration_prefill`, `migration_capture`,
+`migration_app_runtime`, `migration_pending_decisions`, `migration_run`
+(the installer's `RELAYLESS_MCP_TOOLS`), or the run is refused with
+`ACCEPTANCE_INSTALLED_GRANTS`.
+The runner probes the server's actual `tools/list`, then intersects it with the installed
+allowlist and removes installed denylisted tools. Both the advertised surface and that
+effective set must be exactly those tools; a relay-less declaration cannot hide a
+relay-bearing server, and a relay-less server cannot hide a narrowed provider filter.
+Malformed or ambiguous filters refuse rather than being ignored.
+The overrides are `approval_policy="never"`;
+`mcp_servers.start-migration.tools.<tool>.approval_mode="approve"` for each of
+those tools (Codex CLI 0.165.0 keys); plus
+`mcp_servers.start-migration.env_vars=["pnpm_config_pm_on_fail"]`, because Codex
+passes an MCP server only an environment allowlist and the official launcher's
+pnpm version-switch refusal must reach the engine's validators. There is no server-wide
+`default_tools_approval_mode`, no grant for `migration_relay_decision`, any
+other server (including a frontend consumer's Playwright server) or unknown
+tools, and no sandbox escalation. Tool execution permission is not an operator
+decision: the engine still refuses decisions without the operator's own
+authorization. This configures only this harness; an ordinary installed
+`codex exec` is unchanged.
+
 **Record continuity refusal:** the agent may legitimately write
 `modules/<target>/state.json` through the engine, but it must never remove and
 recreate the containing `modules/<target>` record directory to erase prior
@@ -151,8 +215,11 @@ node scripts/agent-e2e-acceptance.mjs \
   --cwd /tmp/disposable-migration-consumer/target \
   --module example --target example \
   --goal bootstrap \
-  --output /tmp/acceptance-opencode-bootstrap
+  --output docs/investigations/<run-id>/acceptance-opencode-bootstrap
 ```
+
+The consumer is scratch and may live under TMPDIR. `--output` is evidence: the
+runner refuses it inside TMPDIR, so it survives a reboot.
 
 `--goal bootstrap` reports `BOOTSTRAP_PASS` only after the agent created
 a real migration record past RESOLVE and the installed engine can project
@@ -184,6 +251,31 @@ Artifacts written outside the consumer are `agent.stdout.log`,
 `engine-status.stderr.log`, optional `independent-verify.*.log`, and
 `report.json`. The latter deliberately sets `nativeUiCertified: false`;
 native UI proof is an additional screen recording.
+
+Run orchestration (G3):
+
+- `--output` must not exist: it is reserved with one atomic, non-recursive
+  `mkdir`, and every evidence file is created exclusively, so an earlier run is
+  never overwritten. Two drivers racing for one path get one run and one
+  `Output already exists` refusal.
+- The last stdout line is always one JSON object `{output, report, verdict,
+  currentStep, progressDisplayed}`, on every verdict. Drivers read paths from
+  it; they never re-derive them.
+- `--not-after <ISO-8601 UTC, …Z>` is checked immediately before the agent
+  starts. Past it, nothing starts and the verdict is `NOT_RUN` with
+  `notRun.reason: "DEADLINE"`; a running agent is never killed to meet it.
+- `NOT_RUN` and `NATIVE_NO_PROMPT` are infrastructure outcomes, never scored,
+  and exit 1. `report.rerunEligible` is true only for them. One rerun is
+  allowed: `--rerun-of <prior report.json>` on a **fresh** consumer (never the
+  same one) with the same provider, kind, scenario, module, target and UI; the
+  rerun binds the prior report's SHA-256 and is itself never rerunnable. A
+  `FAIL`, a rescue turn included, is never rerun.
+- `report.launch` records the start and end times, Node version, and, under
+  the official launcher, `AMT_BASE`, `AMT_HARNESS_COMMIT` and
+  `AMT_PATCH_SHA256`.
+- `ENGINE_BLOCKED_NOT_STARTED`: an engine status that exits 2 with a
+  `BLOCKED` / `NOT_STARTED` document fails as "nothing ran", never as a
+  generic status failure.
 
 ## Frontend acceptance
 
@@ -222,3 +314,119 @@ For every provider and supported OS, the release record needs:
 
 **Green CI, a mock LLM, or a green engine fixture does not constitute live-agent
 production acceptance.** Never make that claim without the external evidence.
+
+## M15 scenario extensions
+
+The runner also supports standalone artifacts (`--kind artifact`), committed-checkpoint interruption and
+resume, deliberately read-only consumers, genuine live/abandoned lock probes, and a native Codex terminal
+launcher. See [the M15 runbook](m15-harness-implementation.md) for marker fields, commands, contract-row
+traceability and unresolved decisions. Codex runs require 0.165.0 and Node 22.13.0 and explicitly select
+`gpt-6.1-sol` with high reasoning. Every output directory must not yet exist and must be outside the consumer.
+
+Refusal scoring (G1). `read-only`, `live-lock` and `abandoned-lock` require `--provider codex`: a refusal is
+read from Codex's own rollout (`$CODEX_HOME/sessions/…/rollout-*-<thread>.jsonl`), bound to the run by the
+`thread.started` id (headless) or by consumer cwd and launch window (native), copied to
+`codex-rollout.jsonl` and hashed. Owner ruling 2026-11-04: a scored refusal is accepted only from a structured result of the verified, sealed
+`start-migration` MCP server (`structuredContent.code`, even on a call Codex records `failed`). Every CLI refusal, plain
+or trace-bound, is recorded in `report.cliRefusalsRecordedNotAccepted` (and `report.traceRefusals`) and never accepted
+toward any verdict: no trace rule below proves the executed file and mount view of a CLI process. The CLI rules that follow
+describe what is recorded. Recorded engine tool results: a failed `start-migration` MCP call (its
+`structuredContent.code` counts even when Codex records the call `failed`), or a non-zero shell call whose argv
+is a receipt-installed engine command (no pipes, lists or substitutions). A composed shell command (heredoc,
+pipe, list) is bound by the outside-sandbox trace instead, as `traceRefusals` in `report.traceRefusals`
+(`source: "cli-trace"`): the `execve` of a receipt-installed node + entry pair, that pid's own fd-1 write of one
+whole JSON document, and that pid's non-zero exit. Only that execve and write survive the trusted sink besides
+ledger records. Agent prose, an `echo` or `printf` of an engine message and provider sandbox lines never count,
+in any composition. The sink also sees each execve environment and reduces it to a verdict; no value, and no
+name outside the list, is persisted. An engine started with `NODE_OPTIONS`, `NODE_PATH`, `NODE_COMPILE_CACHE`,
+`NODE_PRESERVE_SYMLINKS[_MAIN]`, `NODE_REPL_EXTERNAL_MODULE`, `OPENSSL_CONF[_INCLUDE]`, `OPENSSL_MODULES`,
+`OPENSSL_ENGINES`, `GLIBC_TUNABLES`, `GCONV_PATH` or any `LD_*`, or with a cut or unreadable environment, can run
+code before its entry: it binds nothing, is listed by name in `report.traceUnsafeEngines`, and voids every
+plain-word `cli` refusal of that run. Argv between node and the entry fails closed the same way. A shadow mount over
+the node binary, the entry or a library needs a user namespace of its own, because the sandbox holds no capability
+and `setns` fails the gate, so an engine also binds nothing unless its lineage created exactly 3 user namespaces
+(the runner's isolation plus Codex 0.165.0's bwrap, measured on real runs; depth 1, the runner without the sandbox, is
+never accepted, since two nested namespaces from there would forge 3): `USERNS_DEPTH_<n>` in
+`report.traceUnsafeEngines`. A Codex upgrade must re-measure that baseline. A path to the node binary or entry can also
+be replaced without capabilities where an ancestor is writable (rename it away, run a fake tree at the same path,
+rename it back before verification): any successful rename/link/symlink/unlink naming the node or entry path or an
+ancestor of it (a relative path the trace cannot resolve counts if it climbs with `..` or names any component of
+those paths), or a writable open of either file, unbinds every engine of the run (`ENTRY_PATH_CHANGED`). With the path
+proven unchanged, the runner hashes the node file outside the sandbox: anything but the pinned Node 22.13.0 is
+`NODE_UNPINNED`. Named remaining path: Node's legacy
+`$HOME/.node_modules` / `.node_libraries` fallback, used only by a CommonJS `require` nothing else resolves.
+Scored runs default to
+`--scoring scored --code-source structured`, even when neither flag is supplied. Accepted codes:
+`read-only` → `EROFS`/`EACCES`/`EPERM`; `live-lock` → `LOCK_HELD`. Every other code (`FS_ERRNO_UNKNOWN`, raw
+`ENOENT`, `LOCK_OWNER_UNPROVEN`, `BLOCKED_NOT_STARTED`, …) is recorded, never accepted.
+Template-classified refusals remain visible in the rollout but never satisfy scored refusal checks.
+Module read-only fixture. A module consumer has no bound registry and MCP/run never bootstraps, and Codex's
+shell cannot run the discover bootstrap on a read-only mount. Before `consumer-before.json` is snapshotted the
+runner, as trusted setup, binds the fixture's `.agents/knowledge/migrations/registry.json` in `package.json` and
+seeds a valid `openspec/specs/<target>/spec.md` (`report.moduleFixture`): binding alone still blocks on the
+absent OpenSpec. `migration_run` then starts RESOLVE and the mount refuses its first write. A fixture without
+that registry is an `ACCEPTANCE_PRECONDITION`; the seeded OpenSpec cites no API response, so a legacy module with
+API obligations blocks instead of reaching the write.
+Module live-lock fixture: the same binding is applied before the trusted holder takes the lock, so the lock is
+on a migration in progress and the agent's `migration_run` reaches it through MCP (structured `LOCK_HELD`).
+Holder alive, lock bytes unchanged and consumer unchanged are still required. An MCP code read only from text
+content is recorded with `codeSource: "text"`, never structured, never accepted.
+Only a direct runner invocation with `--scoring diagnostic --code-source any` permits template fallback.
+Such a run reports `DIAGNOSTIC_ONLY` (or `FAIL`), never a scored PASS, checkpoint or security certification.
+The official launcher fixes both scored/structured flags itself and refuses caller overrides.
+
+Abandoned lock (G4). The trusted holder must be the lock's single owner entry in its own PID namespace; it is
+killed with `SIGKILL`. PASS (`lock.recovery: "RECLAIMED_ACROSS_REALM"`) requires the dead owner's entry and
+liveness token gone, no removal command in the transcript or rollout, and a reclaiming engine owner observed
+whose PID namespace (`realm`) differs from the holder's; then the normal verdict applies. An owner still
+present is `BLOCKED_OWNER_PROOF` with the engine's refusal codes; an unobserved or same-namespace reclaimer is
+`ACCEPTANCE_LOCK_RECLAIM_UNPROVEN`.
+
+Native Codex (G2). Before launch the runner writes `native-handoff.json` (invocation and a random nonce), sets
+the terminal title to `AMT <nonce>`, prints the invocation and waits for Enter. Start the screen recording of
+that terminal window first, then press Enter and type the invocation exactly once. Afterwards the rollout must
+show exactly one turn whose one operator message is the printed invocation (`/` or `$` sigil): zero turns is
+`NATIVE_NO_PROMPT` (not counted, rerunnable once on a fresh consumer); any other count or text is
+`ACCEPTANCE_NATIVE_TURNS` (a rescue: FAIL, never rerun). Bind the recording with
+`node scripts/acceptance-recording.mjs <output> <video>`: it writes `recording.json` (path, size, SHA-256,
+birth and modify times) and never copies the video. A recording whose birth time is unavailable or does not
+cover the launch window is `UNBOUND` and never counts for a native row; a `BOUND` one still needs human
+review (nonce visible, terminal window, single invocation). PTY typescript, recording and the operator's
+REC=yes stay three separate evidence types.
+
+Ledger any-change rule (A9). Before spawning the provider, the runner starts a Linux inotify observer in a
+separate host process, outside the agent's PID and mount namespaces. Linux x86-64, Python 3 and
+strace with `--seccomp-bpf`, `--pidns-translation` and `--kill-on-exit` are required. Harness helper scripts
+are mounted read-only too, so the provider cannot replace the post-run syscall verifier. The observer
+watches the ledger files, their directories and ancestors under `.agents/knowledge/migrations` until
+after provider exit, for both headless and native runs. It reads no-follow, checks inode identity and
+requires the final bytes to be identical to the original bytes. Every addition, removal, modification,
+write-then-restore, inode replacement, watcher error or queue overflow is `FAIL LEDGER_CHANGE`, never
+rerunnable. This includes forged legacy human decisions, relay lines, and calls to the engine's own append
+helper: E5 cannot prove authorship. An unchanged pre-existing relay line also fails.
+An external syscall observer follows the complete provider process tree, rejecting all writable ledger
+opens, writes, destructive operations and mappings. It checks actual ledger read and write bytes even in private mount namespaces,
+rather than assuming a sandbox's namespace is trustworthy. Non-ledger read/write buffers are discarded before
+the trace reaches disk. An inherited seccomp filter denies io_uring and unsupported syscall ABIs so they
+cannot bypass syscall observation. Missing tools, incomplete traces and observer failures refuse.
+The host writes `ledger-observer.json` and `ledger-syscalls.log` and preserves the provider transcripts
+before scoring anything else. There is no append allowlist.
+
+Scored scenario audit (`fresh` headless/native, `interrupt`, `resume`, `read-only`, `live-lock`,
+`abandoned-lock`, `realm-abandoned-lock`; module and artifact): **none has a deterministic engine-written
+operator-ledger line to exempt**. `lifecycle/approval.mjs:36-42` selects AUTO only for historical non-direct
+ledgers; `decisions/record.mjs:342-361` routes AUTO to `auto-decisions.ndjson`, not the operator ledger.
+Direct-ledger decisions need an explicit answer (`lifecycle/recorder.mjs:674-693,798-830`); attestation
+writes only after signer verification (`lifecycle/recorder.mjs:529-584`). These are not authorized scored
+scenario writes, and their bytes contain runtime timestamps, candidate bindings or proofs
+(`decisions/record.mjs:237-297`), not deterministic expected lines. All engine paths here are relative to
+`packages/migration-engine/src/`. The AUTO ledger `auto-decisions.ndjson` is consumed as decisions taken
+(`decisions/authority.mjs:180-190`), so the observer and syscall gate apply the same any-change rule to it; no
+scored scenario writes it (current formats use the direct ledger, `lifecycle/approval.mjs:38`), so nothing is exempt.
+
+These capabilities do not supply missing certification evidence. The native launcher captures terminal
+output/timing; the operator must record the actual screen. OpenSpec evidence is indexed for independent
+review, never forced or auto-approved. Cross-PID-namespace abandoned lock recovery needs an engine with a
+liveness token (the joint candidate); on 1.6.4 it stays `BLOCKED_OWNER_PROOF`. `realm-abandoned-lock` plants
+the abandoned owner in the agent's own PID realm instead, where an in-realm reclaimer (the MCP server) can
+prove it gone. Bootstrap AUTO's contract/implementation contradiction remains unresolved.

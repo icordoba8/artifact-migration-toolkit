@@ -38,7 +38,7 @@ External services or privileged infrastructure may only provide optional
 enhancements and must never be required for normal migration creation,
 decision completion, format activation, testing, installation, or release.
 
-New modules default to **format 19** (supported: 19); new standalone and
+New modules default to **format 21** (supported: 21); new standalone and
 delegated artifacts default to **format 14** (supported: 14). Existing Module 18
 and Artifact 13 records retain their historical semantics and explicit upgrades.
 
@@ -264,6 +264,18 @@ Nothing here depends on Docker, a virtual machine, a privileged service, an
 external signer, a hardware authenticator or always-on network access. A
 verified local runtime that satisfies its skill works offline indefinitely.
 
+### Known limitation (1.6.6): Claude Code and GitHub Copilot in one root
+
+**Do not install the Claude Code and GitHub Copilot adapters in the same
+project root.** Claude registers `start-migration` in the root `.mcp.json`.
+Copilot CLI also reads that file, and its entry shadows Copilot's own
+relay-less `.github/mcp.json` registration with every tool,
+`migration_relay_decision` included. The Copilot installer's `install`,
+`update` and `doctor` refuse such a root with `INSTALL_REGISTRATION_CONFLICT`
+(file `.mcp.json`). The Claude installer does not check for Copilot, so
+installing Claude after Copilot shadows Copilot silently until Copilot's next
+`update` or `doctor`. Give each provider its own root.
+
 ### Development checkout
 
 A bare repository checkout has no installed skill stamp beside
@@ -376,6 +388,14 @@ Provider adapters (Claude, Codex, OpenCode, GitHub Copilot) install a pinned
 toolkit, expose generated skill documents and thin command surfaces, and render
 provider-specific MCP launch configuration. **No provider may implement
 migration transitions, decisions, validation, record mutation, or recovery.**
+
+GitHub Copilot CLI loads the project MCP server (`.github/mcp.json`) only in a
+trusted folder. Trust the consumer root once, **before** the first migration
+session — accept the trust prompt of a first `copilot` launch there and exit,
+add the root to `trustedFolders` in `$COPILOT_HOME/config.json`, or pass
+`--trust-folder` to a single `copilot -p` run. Use `--add-dir` only for the
+consumer workspace, never for the release store
+(`skills/start-migration/references/provider-compatibility.md`).
 
 ```bash
 pnpm providers:sync    # regenerate all four trees and the ownership manifest

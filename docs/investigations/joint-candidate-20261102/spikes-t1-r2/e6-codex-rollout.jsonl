@@ -1,0 +1,8 @@
+# codex-cli 0.166.0, model: gpt-6.1-sol, 1 model turn, -s workspace-write, --ephemeral; server via -c (CODEX_HOME untouched)
+{"type":"thread.started","thread_id":"01a19f1d-b4e3-7ce3-aa9b-4f8daef31c19"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll call the requested tool once and read its refusal code.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"start-migration","tool":"migration_status","arguments":{"module":"auth","cwd":"<tmp>/consumer"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"start-migration","tool":"migration_status","arguments":{"module":"auth","cwd":"<tmp>/consumer"},"result":{"content":[{"type":"text","text":"ENOENT: no such file or directory, open '<tmp>/consumer/missing/registry.json'"}],"structured_content":{"code":"ENOENT","errno":-2,"syscall":"open","path":"<tmp>/consumer/missing/registry.json"}},"error":null,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"ENOENT"}}
+{"type":"turn.completed","usage":{"input_tokens":62202,"cached_input_tokens":40960,"cache_write_input_tokens":0,"output_tokens":101,"reasoning_output_tokens":0}}

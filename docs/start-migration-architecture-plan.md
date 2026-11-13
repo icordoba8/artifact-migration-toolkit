@@ -280,7 +280,7 @@ CHECK, each PASS or FINDING with file:line:
 5. adversarial fixtures for the phase's single-owner claim (e.g. a write outside store/, an
    offer that would be refused);
 6. $ponytail-review on the diff only.
-OUTPUT: /tmp/phase-<N>-review.md with READY or NOT_READY, a table, and severities. End with "Review End".
+OUTPUT: docs/investigations/phase-<N>-review.md with READY or NOT_READY, a table, and severities. End with "Review End".
 ```
 
 ## 7. Risks and mitigations

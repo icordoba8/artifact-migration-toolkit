@@ -34,6 +34,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { codexToml, copilotCliEntry, RELAYLESS_MCP_TOOLS } from "../providers/install-support.mjs";
 
 const defaultRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -300,8 +301,9 @@ const providers = [
     }),
     mcp: {
       output: "providers/codex/config.toml",
+      // E7: relay-less like Copilot, with every tool but the relay granted by `enabled_tools`.
       render: (server) =>
-        `# ${generatedNotice}\n\n[mcp_servers.${MCP_SERVER_NAME}]\ncommand = ${JSON.stringify(server.command)}\nargs = ${JSON.stringify(server.args)}\n`,
+        `# ${generatedNotice}\n\n[mcp_servers.${MCP_SERVER_NAME}]\n${codexToml({ ...server, args: [...server.args, "--without-relay"], enabled_tools: RELAYLESS_MCP_TOOLS })}`,
     },
     install: {
       mechanism: "agent-skills-directory",
@@ -358,8 +360,15 @@ const providers = [
     }),
     mcp: {
       output: "providers/copilot/mcp.json",
-      render: (server) =>
-        renderJson({ servers: { [MCP_SERVER_NAME]: { type: "stdio", ...server } } }),
+      // `servers` is VS Code's `.vscode/mcp.json`; `mcpServers` is Copilot CLI's
+      // `.github/mcp.json`. Both omit the relay (T1).
+      render: (server) => {
+        const relayless = { type: "stdio", ...server, args: [...server.args, "--without-relay"] };
+        return renderJson({
+          servers: { [MCP_SERVER_NAME]: relayless },
+          mcpServers: { [MCP_SERVER_NAME]: copilotCliEntry(relayless) },
+        });
+      },
     },
     install: {
       // Repository scope only. Copilot documents no user-global or marketplace
@@ -367,7 +376,7 @@ const providers = [
       // host will never read.
       mechanism: "repository-archive",
       skillRoot: { user: null, project: ".github/skills" },
-      mcpConfig: { user: null, project: ".vscode/mcp.json" },
+      mcpConfig: { user: null, project: ".vscode/mcp.json", copilotCli: ".github/mcp.json" },
     },
   },
 ];

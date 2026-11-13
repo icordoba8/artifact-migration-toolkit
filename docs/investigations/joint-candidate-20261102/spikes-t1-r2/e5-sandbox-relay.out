@@ -1,0 +1,6 @@
+CapEff:	0000000000000000
+NoNewPrivs:	1
+pid:[4026535988]
+touch: cannot touch '/etc/x': Read-only file system
+Untrusted protected decision policy directory: /
+exit=1

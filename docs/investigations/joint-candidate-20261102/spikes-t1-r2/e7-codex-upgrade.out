@@ -1,0 +1,18 @@
+fresh install (candidate): toolkit 1.6.6; config block:
+[mcp_servers.start-migration]
+command = "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node"
+args = ["<tmp>/store-fresh/1.6.6-fbc217312ab689fec582655744663212edef58551d9d11df970296933706b1cf/packages/migration-engine/src/mcp-server.mjs","--without-relay"]
+enabled_tools = ["artifact_status","artifact_run","migration_status","migration_scan","migration_evidence_binding","migration_prefill","migration_capture","migration_pending_decisions","migration_run"]
+  tools/list 9; granted 9; relay granted: false
+before upgrade (v1.6.4 installer): toolkit 1.6.4; config block:
+[mcp_servers.start-migration]
+command = "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node"
+args = ["<tmp>/store-up/1.6.4-741e92cdb9b21e561a765c89109c01204cd312b3e9d495de480f7ee44831fb99/packages/migration-engine/src/mcp-server.mjs"]
+  tools/list 10; granted 10; relay granted: true
+after update (candidate installer): toolkit 1.6.6; config block:
+[mcp_servers.start-migration]
+command = "/home/utmwac/.nvm/versions/node/v26.8.2/bin/node"
+args = ["<tmp>/store-up/1.6.6-fbc217312ab689fec582655744663212edef58551d9d11df970296933706b1cf/packages/migration-engine/src/mcp-server.mjs","--without-relay"]
+enabled_tools = ["artifact_status","artifact_run","migration_status","migration_scan","migration_evidence_binding","migration_prefill","migration_capture","migration_pending_decisions","migration_run"]
+  tools/list 9; granted 9; relay granted: false
+E7_INSTALLED_GRANTS fresh=9 upgrade=10->9

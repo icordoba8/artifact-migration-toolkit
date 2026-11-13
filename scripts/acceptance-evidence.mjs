@@ -1,0 +1,443 @@
+/** Trusted-side evidence only. Never repairs a consumer or awards human acceptance. */
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readlinkSync } from 'node:fs';
+import { lstat, readdir, readFile, readlink } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+export const exists = file => lstat(file).then(() => true, error => {
+  if (error.code === 'ENOENT') return false;
+  throw error;
+});
+
+// Include directories, modes and link destinations: empty files alone cannot prove a read-only tree.
+export async function snapshotTree(root) {
+  const entries = Object.create(null);
+  async function visit(relative) {
+    const file = path.join(root, relative), info = await lstat(file);
+    const item = { mode: info.mode };
+    if (info.isSymbolicLink()) item.link = await readlink(file);
+    else if (info.isFile()) item.sha256 = sha256(await readFile(file));
+    // Never open a FIFO or socket (an engine liveness token): its identity and mode are the evidence.
+    else if (info.isFIFO()) item.type = 'fifo';
+    else if (info.isSocket()) item.type = 'socket';
+    else if (!info.isDirectory()) throw new Error('Unsupported evidence entry: ' + file);
+    entries[relative] = item;
+    if (info.isDirectory()) for (const name of (await readdir(file)).sort()) await visit(path.join(relative, name));
+  }
+  await visit('');
+  return entries;
+}
+export const sameTree = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/**
+ * A9 in-run observer (scripts/ledger-observer.py): raw inotify outside the sandbox from before spawn until after exit.
+ * Resolves once every watch is attached; `stop()` always resolves to a report whose violations are non-empty on any
+ * ledger change, relay line, watcher error/overflow or observer death, so a lost observer can never read as a clean window.
+ */
+export async function startLedgerObserver(root, { timeoutMs = 30_000, python = 'python3' } = {}) {
+  const base = path.join(root, '.agents/knowledge/migrations');
+  const child = spawn(python, [fileURLToPath(new URL('./ledger-observer.py', import.meta.url)), base, root], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '', err = '';
+  child.stdout.on('data', chunk => { out += chunk; });
+  child.stderr.on('data', chunk => { err += chunk; });
+  child.stdin.on('error', () => {});
+  const exited = new Promise(resolve => {
+    child.on('close', (code, signal) => resolve({ code, signal }));
+    child.on('error', error => { err += error.message; resolve({ code: null, signal: error.code ?? 'error' }); });
+  });
+  let readyTimer;
+  const ready = await Promise.race([
+    new Promise(resolve => child.stdout.on('data', () => out.startsWith('READY\n') && resolve(true))),
+    exited.then(() => false),
+    new Promise(resolve => { readyTimer = setTimeout(resolve, timeoutMs, false); }),
+  ]);
+  clearTimeout(readyTimer);
+  if (!ready) {
+    child.kill('SIGKILL');
+    await exited;
+    throw new Error('LEDGER_CHANGE: ledger observer did not start: ' + (err.trim() || out.trim() || 'timeout'));
+  }
+  let report, stopping = false;
+  const premature = exited.then(() => !stopping);
+  return {
+    pid: child.pid,
+    stop: () => report ??= (async () => {
+      stopping = true;
+      child.stdin.end('STOP\n');
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      const { code, signal } = await exited;
+      clearTimeout(timer);
+      try {
+        if (await premature) throw new Error('exited before stop (' + (code ?? signal) + '): the run was not fully observed');
+        if (code !== 0) throw new Error('exit ' + (code ?? signal));
+        return JSON.parse(out.slice('READY\n'.length));
+      } catch (error) {
+        return { violations: [{ code: 'LEDGER_CHANGE', reason: 'ledger observer failed (' + error.message + '): ' + err.trim() }] };
+      }
+    })(),
+  };
+}
+/**
+ * Wrap an (already isolated) command in the A9 syscall gate: strace (LEDGER_TRACE_STRACE, default `strace` on PATH)
+ * follows every descendant from outside the namespaces; -DD keeps the command itself as the spawned child, so the
+ * runner's SIGTERM/SIGKILL still reach it. no-io-uring.py installs an inherited seccomp denial of io_uring.
+ */
+const quote = arg => "'" + arg.replaceAll("'", "'\\''") + "'";
+export const ledgerTraced = ({ command, argv }, trace, { strace = process.env.LEDGER_TRACE_STRACE || 'strace', python = 'python3', engines = [] } = {}) => ({
+  command: strace,
+  // abbrev=!execve shows the sink every execve environment; it persists only a verdict (ledger-trace.py).
+  argv: ['-DD', '-f', '-yy', '-s', String(1 << 24), '--pidns-translation', '--kill-on-exit', '--seccomp-bpf', '-e', 'abbrev=!execve', '-e',
+    'trace=execve,read,readv,pread64,preadv,preadv2,write,writev,pwrite64,pwritev,pwritev2,copy_file_range,splice,sendfile,process_vm_writev,open,openat,openat2,creat,truncate,ftruncate,fallocate,link,linkat,unlink,unlinkat,rename,' +
+    'renameat,renameat2,symlink,symlinkat,fcntl,mmap,io_uring_setup,open_by_handle_at,mount,umount2,move_mount,' +
+    'open_tree,fsmount,mount_setattr,pivot_root,chroot,setns,unshare,clone,clone3,fork,vfork',
+    // Non-ledger read/write buffers are dropped by the trusted sink before anything is persisted; only an
+    // installed engine's own execve and structured stdout survive it (G1).
+    '-o', '|' + [python, fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'filter', trace, JSON.stringify(engines)].map(quote).join(' '), '--', python, fileURLToPath(new URL('./no-io-uring.py', import.meta.url)), command, ...argv],
+});
+/** Gate verdict for a finished ledgerTraced run (rootPid = the spawned child's pid). No namespace is trusted: every ledger read's bytes are inspected. */
+export const ledgerTraceVerdict = (trace, rootPid, { python = 'python3' } = {}) => {
+  const run = spawnSync(python, [fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), trace, String(rootPid)], { encoding: 'utf8', timeout: 120_000 });
+  let violations;
+  try {
+    violations = JSON.parse(run.stdout).violations;
+    if (!Array.isArray(violations) || !violations.every(value => typeof value === 'string'))
+      throw new Error('invalid syscall observer report');
+  } catch (error) { violations = ['syscall gate failed: ' + (run.error?.message ?? (run.stderr || error.message))]; }
+  if (run.status !== (violations.length ? 1 : 0)) violations = [...violations, 'syscall gate exited ' + (run.status ?? run.signal)];
+  return violations.length ? { code: 'LEDGER_CHANGE', reasons: violations.map(v => 'syscall gate: ' + v) } : null;
+};
+/** The scored-run failure code for an observer report, or null when the window was fully observed and clean. */
+export const ledgerObserverVerdict = report => {
+  const violations = Array.isArray(report?.violations) ? report.violations : [{ code: 'LEDGER_CHANGE', reason: 'no observer report' }];
+  if (!violations.length) return null;
+  return { code: 'LEDGER_CHANGE', reasons: violations.map(v => v.code + ': ' + v.reason) };
+};
+
+export const pendingTransaction = async record => await exists(path.join(record, 'transaction.json')) || await exists(path.join(record, 'advance.journal'));
+
+export async function checkpoint(record, lock) {
+  if (await exists(lock) || await pendingTransaction(record)) return null;
+  const stateBytes = await readFile(path.join(record, 'state.json'));
+  const state = JSON.parse(stateBytes);
+  const history = await readFile(path.join(record, 'history/history.ndjson'), 'utf8');
+  const events = history.trim().split('\n').map(line => JSON.parse(line));
+  const tail = events.at(-1);
+  if (!['STEP_COMPLETED', 'ADVANCED'].includes(tail?.event) || tail.revision !== state.revision ||
+      state.currentStep === 'COMPLETE' || !history.endsWith('\n')) return null;
+  const integrity = await readFile(path.join(record, 'integrity.json'));
+  const frozen = Object.create(null);
+  for (const key of Object.keys(state.artifactHashes ?? {}).sort()) {
+    if (key.includes('#')) continue; // The installed engine validates semantic/projection pins on status.
+    if (path.isAbsolute(key) || key.split(/[\\/]/).includes('..')) throw new Error('Unsafe checkpoint pin');
+    frozen[key] = sha256(await readFile(path.join(record, key)));
+  }
+  if (await exists(lock) || await pendingTransaction(record) ||
+      !stateBytes.equals(await readFile(path.join(record, 'state.json')))) return null;
+  return { revision: state.revision, step: state.currentStep, history, frozen, pins: state.artifactHashes ?? {},
+    stateSha256: sha256(stateBytes), integritySha256: sha256(integrity) };
+}
+
+export async function verifyCheckpoint(record, saved, beforeResume = false) {
+  const history = await readFile(path.join(record, 'history/history.ndjson'), 'utf8');
+  const stateBytes = await readFile(path.join(record, 'state.json'));
+  const state = JSON.parse(stateBytes);
+  if (!history.startsWith(saved.history) || state.revision < saved.revision)
+    throw new Error('ACCEPTANCE_CHECKPOINT_CHANGED: history prefix or revision regressed');
+  for (const [key, digest] of Object.entries(saved.pins ?? {})) {
+    if (state.artifactHashes?.[key] !== digest) throw new Error('ACCEPTANCE_CHECKPOINT_CHANGED: engine pin ' + key);
+  }
+  for (const [file, digest] of Object.entries(saved.frozen)) {
+    if (path.isAbsolute(file) || file.split(/[\\/]/).includes('..')) throw new Error('Unsafe checkpoint pin');
+    if (sha256(await readFile(path.join(record, file))) !== digest)
+      throw new Error('ACCEPTANCE_CHECKPOINT_CHANGED: completed artifact ' + file);
+  }
+  if (beforeResume && (sha256(stateBytes) !== saved.stateSha256 ||
+      sha256(await readFile(path.join(record, 'integrity.json'))) !== saved.integritySha256 || history !== saved.history))
+    throw new Error('ACCEPTANCE_CHECKPOINT_CHANGED: saved record differs before resume');
+}
+
+// These are review leads, never an automatic OpenSpec PASS. Agent prose is not engine evidence.
+export function openspecLeads(transcript) {
+  return transcript.split('\n').flatMap((line, index) => {
+    let event;
+    try { event = JSON.parse(line); } catch { return []; }
+    const item = event.item;
+    if (event.type !== 'item.completed' || !['command_execution', 'mcp_tool_call'].includes(item?.type)) return [];
+    const output = JSON.stringify(item.aggregated_output ?? item.result ?? item.error ?? '');
+    return /openspec|requirement|scenario/i.test(output) ? [{ line: index + 1, type: item.type,
+      exitCode: item.exit_code ?? null, sha256: sha256(line) }] : [];
+  });
+}
+
+// Review leads only: shell commands (Codex exec JSON or rollout command items, or plain trace lines) that remove or move a lock.
+export const lockRemovals = transcript => transcript.split('\n').flatMap((line, index) => {
+  let command = line;
+  try {
+    const event = JSON.parse(line), item = event?.payload?.item;
+    command = event?.item?.type === 'command_execution' ? String(event.item.command)
+      : event?.type === 'event_msg' && item?.type === 'CommandExecution' ? [].concat(item.command).join(' ') : '';
+  } catch {}
+  return command.includes('locks') && /\b(rm|rmdir|unlink|mv)\b/.test(command) ? [{ line: index + 1, sha256: sha256(line) }] : [];
+});
+
+/**
+ * G1: refusals come from engine tool results bound to the call that produced them, never from agent prose.
+ * A structured engine code (E6: MCP `isError` + `structuredContent.code`; CLI stdout refusal document; the
+ * BLOCKED / NOT_STARTED document) always wins. Otherwise the engine's exact message templates
+ * (lock.mjs lockedError, store/files.mjs mkdirCause, Node errno, registry.mjs registryUnbound) give
+ * codeSource "template". ponytail: template matching is the ceiling for engines without E6.
+ */
+const TEMPLATES = [
+  ['LOCK_PROTOCOL_1', /^Another migration command holds the lock for '[^'\n]*' at [^\n]* as a lock file from a protocol-1 release/m],
+  ['LOCK_OWNER_UNKNOWN', /^Another migration command holds the lock for '[^'\n]*' at [^\n]*cannot be proven gone from here: its entry or liveness token is unreadable/m],
+  ['LOCK_NO_LIVENESS_TOKEN', /^Another migration command holds the lock for '[^'\n]*' at [^\n]*recorded no liveness token and runs in another PID realm/m],
+  // Engine 1.6.4 has no codes: its cross-realm refusal names no reason.
+  ['LOCK_OWNER_UNPROVEN', /^Another migration command holds the lock for '[^'\n]*' at [^\n]*\) cannot be proven gone from here, so it is never reclaimed/m],
+  ['LOCK_HELD', /^Another migration command holds the lock for '[^'\n]*' at [^\n]* \(pid (?:\d+|unknown)\)\. Wait for it to finish/m],
+  ['FS_ERRNO_UNKNOWN', /^Cannot create '[^\n]*': mkdir reported ENOENT and no syscall recovered the real cause\./m],
+  // Any Node errno is recorded by its own code; only the scenario's accepted codes ever count.
+  [null, /^(E[A-Z]+): [^,\n]+, [a-z]+ '/m],
+  ['BLOCKED_NOT_STARTED', /^Migration registry is not configured\./m],
+];
+const templateCode = text => {
+  for (const [code, pattern] of TEMPLATES) { const match = pattern.exec(text); if (match) return code ?? match[1]; }
+  return null;
+};
+export const parseJson = text => { try { return JSON.parse(text); } catch { return null; } };
+const structured = doc => typeof doc?.code === 'string' ? doc.code
+  : doc?.outcome === 'BLOCKED' && doc?.status === 'NOT_STARTED' ? 'BLOCKED_NOT_STARTED' : null;
+
+const mcpRefusal = item => {
+  const result = item.result ?? {}, refused = item.status === 'failed' || result.isError;
+  // Only `structuredContent.code` is structured. Codex marks an isError result "failed" with error null: its structured code
+  // is still the engine's.
+  const code = structured(result.structuredContent);
+  if (code && (refused || code === 'BLOCKED_NOT_STARTED')) return { code, codeSource: 'structured' };
+  // A code parsed from text content is recorded as "text", never structured and never accepted (owner ruling 2026-11-04).
+  const textCode = result.structuredContent ? null : structured(parseJson(result.content?.at(-1)?.text));
+  if (textCode && (refused || textCode === 'BLOCKED_NOT_STARTED')) return { code: textCode, codeSource: 'text' };
+  if (item.status === 'failed') // Codex drops error.data: only the message after its JSON-RPC prefix is the engine's.
+    return { code: templateCode(String(item.error?.message ?? '').replace(/^[\s\S]*?Mcp error: -?\d+: /, '')), codeSource: 'template' };
+  return result.isError ? { code: templateCode((result.content ?? []).map(part => part.text ?? '').join('\n')), codeSource: 'template' } : null;
+};
+
+// Minimal POSIX word splitter. Returns null on anything but plain words and quotes (pipes, lists,
+// redirections, substitutions, globs), so a bound command's exit code is the engine's own.
+// ponytail: `cd x && engine ...`, env prefixes and heredocs are never bound; widen only with a real parser.
+// A composed command is bound by the syscall trace instead (traceRefusals).
+const shellWords = line => {
+  const words = [];
+  let word = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "'") {
+      const end = line.indexOf("'", i + 1);
+      if (end < 0) return null;
+      word = (word ?? '') + line.slice(i + 1, end); i = end;
+    } else if (c === '"') {
+      let text = '', j = i + 1;
+      for (; j < line.length && line[j] !== '"'; j++) {
+        if (line[j] === '$' || line[j] === '`') return null;
+        if (line[j] === '\\' && /["\\$`]/.test(line[j + 1] ?? '')) j++;
+        text += line[j];
+      }
+      if (j >= line.length) return null;
+      word = (word ?? '') + text; i = j;
+    } else if (c === '\\') word = (word ?? '') + (line[++i] ?? '');
+    else if (/\s/.test(c)) { if (word !== null) words.push(word); word = null; }
+    else if (/[|&;<>()`$*?[\]{}~#!]/.test(c)) return null;
+    else word = (word ?? '') + c;
+  }
+  if (word !== null) words.push(word);
+  return words;
+};
+
+// Only a failed shell call whose argv runs a receipt-installed engine command is engine evidence: an
+// `echo` of an engine message, a provider sandbox line (bwrap) or prose never is.
+const cliRefusal = (item, engineCommands) => {
+  const [shell, flag, line] = Array.isArray(item.command) ? item.command : [];
+  if (!Number.isInteger(item.exit_code) || item.exit_code === 0 || !Array.isArray(item.command) || item.command.length !== 3 ||
+      !/^\/(?:usr\/)?bin\/(?:ba)?sh$/.test(shell) || !['-c', '-lc'].includes(flag)) return null;
+  const words = shellWords(String(line).replace(/\s+2>&1\s*$/, ''));
+  if (!words || !engineCommands.some(([node, entry]) => words[0] === node && words[1] === entry)) return null;
+  const output = String(item.aggregated_output ?? '');
+  const code = structured(parseJson(output.match(/^\{\n[\s\S]*?\n\}$/m)?.[0]));
+  if (code && (code !== 'BLOCKED_NOT_STARTED' || item.exit_code === 2)) return { code, codeSource: 'structured' };
+  return { code: templateCode(output), codeSource: 'template' };
+};
+
+/**
+ * G1, any shell composition: a refusal from the outside-sandbox trace (ledger-trace.py engine-documents), never from text.
+ * Throws rather than read as no refusal: the trace already passed the ledger gate, so an unreadable one is a harness fault.
+ */
+export const traceRefusals = (trace, engines, { python = 'python3' } = {}) => {
+  const run = spawnSync(python, [fileURLToPath(new URL('./ledger-trace.py', import.meta.url)), 'engine-documents', trace, JSON.stringify(engines)],
+    { encoding: 'utf8', timeout: 120_000, maxBuffer: 1 << 26 });
+  if (run.status !== 0) throw new Error('ACCEPTANCE_TRACE_UNREADABLE: ' + (run.error?.message ?? run.stderr));
+  const { documents, unsafeEngines } = JSON.parse(run.stdout);
+  return { unsafeEngines, refusals: documents.flatMap(({ pid, entry, exitCode, document }) => {
+    const code = structured(document);
+    return code && (code !== 'BLOCKED_NOT_STARTED' || exitCode === 2) ? [{ source: 'cli-trace', pid, entry, exitCode, code, codeSource: 'structured' }] : [];
+  }) };
+};
+
+/**
+ * A Codex 0.165.0 rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`): the provider's own per-call record.
+ * Returns its session, turn count, operator prompts and every engine refusal (line number + line SHA-256).
+ */
+export function codexRollout(text, engineCommands, { trustedSkills } = {}) {
+  const rollout = { meta: null, turns: 0, prompts: [], refusals: [] };
+  const promptsBySource = { response: [], event: [], legacy: [] };
+  const started = { task: 0, turn: 0 };
+  const responses = [], skills = [];
+  text.split('\n').forEach((line, index) => {
+    if (!line) return;
+    const event = JSON.parse(line), payload = event.payload ?? {};
+    if (event.type === 'session_meta') {
+      if (rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one session in a rollout');
+      rollout.meta = { id: payload.id, cwd: payload.cwd, timestamp: payload.timestamp };
+    }
+    // Codex 0.165 persists native user input as a response_item message, not
+    // an item_completed/UserMessage. Keep the older event forms for historical
+    // diagnostics, but never count duplicate representations as extra turns.
+    if (event.type === 'response_item' && payload.type === 'message' && payload.role === 'user') {
+      responses.push({ payload, metadata: event.metadata, index });
+    }
+    if (event.type !== 'event_msg') return;
+    if (payload.type === 'task_started') started.task += 1;
+    if (payload.type === 'turn_started') started.turn += 1;
+    if (payload.type === 'user_message') promptsBySource.event.push(payload.message);
+    const item = payload.type === 'item_completed' ? payload.item : null;
+    if (item?.type === 'UserMessage') {
+      promptsBySource.legacy.push((item.content ?? []).filter(part => part.type === 'text').map(part => part.text).join(''));
+      for (const part of item.content ?? []) if (part.type === 'skill') skills.push({ name: part.name, path: part.path, index });
+    }
+    const refusal = item?.type === 'McpToolCall' && item.server === 'start-migration' ? mcpRefusal(item)
+      : item?.type === 'CommandExecution' ? cliRefusal(item, engineCommands) : null;
+    if (refusal) rollout.refusals.push({ line: index + 1, sha256: sha256(line),
+      source: item.type === 'McpToolCall' ? 'mcp' : 'cli', tool: item.tool ?? null, exitCode: item.exit_code ?? null, ...refusal });
+  });
+  if (!rollout.meta) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: rollout has no session_meta');
+  // 0.165 also persists injected AGENTS/environment context as role=user. Only
+  // exclude its known shape when this rollout identifies actual operator input.
+  const ordered = responses.some(({ metadata }) => Number.isInteger(metadata?.user_input_order));
+  // It also injects an invoked skill's SKILL.md as an unordered role=user message.
+  // Excluded only when an earlier legacy typed skill part names this toolkit skill
+  // at its installed path; each part vouches for one injection, so a duplicate counts.
+  // Codex 0.165.0 sometimes omits the typed part (N02b). Then, and only when the rollout has no typed
+  // part at all, one injection counts if it is byte-identical to the skill rendered from the pinned
+  // release (`trustedSkills`, never a consumer file), follows the ordered prompt that names it (a second prompt still counts and fails the caller).
+  const typedParts = skills.length, orderedInputs = responses.filter(({ metadata }) => Number.isInteger(metadata?.user_input_order));
+  let pinnedUsed = false;
+  const injectedSkill = (content, index) => {
+    const match = content.length === 1 && content[0].type === 'input_text' &&
+      /^<skill>\n<name>(start-migration|migrate-artifact)<\/name>\n<path>([^<\n]+)<\/path>\n---\nname: \1\n[\s\S]*\n<\/skill>$/.exec(content[0].text);
+    if (!match || typeof rollout.meta.cwd !== 'string' ||
+        match[2] !== path.join(rollout.meta.cwd, '.agents/skills', match[1], 'SKILL.md')) return false;
+    const vouch = skills.findIndex(part => part.index < index && part.name === match[1] && part.path === match[2]);
+    if (vouch !== -1) return skills.splice(vouch, 1).length === 1;
+    const trusted = trustedSkills instanceof Map ? trustedSkills.get(match[1]) : undefined;
+    const prompt = orderedInputs[0]?.index < index && orderedInputs[0].metadata.user_input_order === 0
+      ? orderedInputs[0].payload.content?.map(part => part.type === 'input_text' ? part.text : '').join('').trim() : '';
+    if (typedParts !== 0 || pinnedUsed || typeof trusted !== 'string' || promptsBySource.legacy.length !== 1 ||
+        content[0].text !== '<skill>\n<name>' + match[1] + '</name>\n<path>' + match[2] + '</path>\n' + trusted + '\n</skill>' ||
+        !(prompt === '$' + match[1] || prompt.startsWith('$' + match[1] + ' ') || prompt.startsWith('$' + match[1] + '\n'))) return false;
+    rollout.skillProof = 'pinned-render';
+    return pinnedUsed = true;
+  };
+  for (const { payload, metadata, index } of responses) {
+    const content = payload.content ?? [];
+    const context = ordered && !Number.isInteger(metadata?.user_input_order) && content.length > 0 &&
+      (content.every(part => part.type === 'input_text' &&
+        (/^# AGENTS\.md instructions for [^\n]+\n\n<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>\s*$/.test(part.text) ||
+         /^<environment_context>[\s\S]*<\/environment_context>\s*$/.test(part.text))) || injectedSkill(content, index));
+    if (!context) promptsBySource.response.push(content.filter(part => part.type === 'input_text').map(part => part.text).join(''));
+  }
+  const sources = Object.values(promptsBySource).filter(prompts => prompts.length);
+  if (sources.length > 1 && sources.some(prompts => JSON.stringify(prompts) !== JSON.stringify(sources[0])))
+    throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: conflicting user-message records across rollout schemas');
+  rollout.prompts = sources[0] ?? [];
+  // A missing started event cannot erase a recorded user turn; conversely an
+  // extra started event must not be hidden by a single user-message record.
+  rollout.turns = Math.max(started.task, started.turn, rollout.prompts.length);
+  return rollout;
+}
+
+/**
+ * Expected installed SKILL.md text per toolkit skill, rendered from a hash-checked pinned release the way
+ * providers/install-support.mjs renderFiles does (G0 showed byte identity; a test pins it against the real installer).
+ * shortcut: POSIX shell quoting only (the harness is Linux-only), update with renderFiles if it changes.
+ */
+export async function pinnedSkillTexts(release, manifest, node) {
+  const engine = path.join(release, 'packages/migration-engine');
+  const { bin } = JSON.parse(await readFile(path.join(engine, 'package.json'), 'utf8'));
+  const commands = Object.entries(bin).sort(([a], [b]) => b.length - a.length);
+  const texts = new Map();
+  for (const name of ['start-migration', 'migrate-artifact']) {
+    const relative = `providers/codex/skills/${name}/SKILL.md`, bytes = await readFile(path.join(release, relative));
+    if ('sha256:' + sha256(bytes) !== manifest.files[relative]) throw new Error('ACCEPTANCE_PRECONDITION: pinned skill template does not match the release manifest: ' + relative);
+    let text = bytes.toString('utf8').replaceAll('{{ENGINE_MCP_ENTRY}}', path.join(engine, 'src/mcp-server.mjs'));
+    for (const [command, entry] of commands)
+      text = text.replace(new RegExp(`(?<![\\w-])${command}(?![\\w-])`, 'g'), () => [node, path.join(engine, entry)].map(quote).join(' '));
+    texts.set(name, text);
+  }
+  return texts;
+}
+
+/**
+ * Finds this run's rollout: headless by the `thread.started` id Codex printed (file name and session id must
+ * both match), native by consumer cwd within the launch window. Never another thread's or consumer's session.
+ * Returns null only when no candidate exists; a foreign or ambiguous match throws.
+ */
+export async function findCodexRollout(codexHome, { threadId, cwd, startedAt, endedAt }) {
+  const sessions = path.join(codexHome, 'sessions');
+  const names = (await readdir(sessions, { recursive: true }).catch(error => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  })).filter(name => /(?:^|\/)rollout-[^/]*\.jsonl$/.test(name) && (!threadId || name.endsWith('-' + threadId + '.jsonl')));
+  const found = [];
+  for (const name of names) {
+    const file = path.join(sessions, name), text = await readFile(file, 'utf8');
+    const meta = JSON.parse(text.slice(0, text.indexOf('\n'))).payload ?? {};
+    if (threadId && (meta.id !== threadId || meta.cwd !== cwd))
+      throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: ' + name + ' belongs to another thread or consumer');
+    if (threadId && startedAt && endedAt && !(meta.timestamp >= startedAt && meta.timestamp <= endedAt))
+      throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: thread rollout is outside this launch window');
+    if (threadId || (meta.cwd === cwd && meta.timestamp >= startedAt && meta.timestamp <= endedAt)) found.push({ file, text });
+  }
+  if (found.length > 1) throw new Error('ACCEPTANCE_ROLLOUT_UNBOUND: more than one rollout matches this run');
+  return found[0] ?? null;
+}
+
+// A real engine lock, owned by a separate trusted process in the host PID realm.
+export async function startLockHolder(node, moduleUrl, root, name) {
+  const { spawn } = await import('node:child_process');
+  const child = spawn(node, ['--input-type=module', '-e', `
+    const { acquireModuleLock } = await import(process.argv[1]);
+    const release = await acquireModuleLock(process.argv[2], process.argv[3], { timeoutMs: 0 });
+    process.on('SIGTERM', async () => { await release(); process.exit(0); });
+    setInterval(() => {}, 1000);
+    console.log('HELD');
+  `, moduleUrl, root, name], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const closed = new Promise(resolve => child.once('close', resolve));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Lock holder timed out')); }, 10000);
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    child.once('exit', () => { clearTimeout(timer); reject(new Error('Lock holder failed: ' + stderr)); });
+    child.stdout.once('data', data => {
+      clearTimeout(timer);
+      if (data.toString().trim() === 'HELD') resolve();
+      else { child.kill('SIGKILL'); reject(new Error('Unexpected lock holder output')); }
+    });
+  });
+  // A5: the holder's own PID namespace, read from the host side before it can die.
+  const pidns = readlinkSync(`/proc/${child.pid}/ns/pid`);
+  return { pid: child.pid, pidns, alive: () => child.exitCode === null && child.signalCode === null,
+    // Resolves with the signal that ended the holder: an abandoned owner must have died by SIGKILL.
+    stop: async (abandon = false) => { child.kill(abandon ? 'SIGKILL' : 'SIGTERM'); await closed; return child.signalCode; } };
+}

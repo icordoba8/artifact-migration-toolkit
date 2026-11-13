@@ -1,0 +1,14 @@
+{
+  "rollouts": 11,
+  "McpToolCall": 102,
+  "CommandExecution": 209,
+  "custom_tool_call": 195,
+  "relayInvocations": 0,
+  "operatorLedgers": 0,
+  "ledgers": []
+}
+SUMS_OK
+e78825971c6e7402bb4c0d15ea2228044ba0007caa4af5e8677bdca8b1c772f3  SHA256SUMS
+# R6, R6b, R6c produced no rollout (no model turn / no invocation reached the provider).
+# Non-rollout artifacts (R6*/, */terminal.typescript) grepped for
+#   artifact-migration-decision .*--relay | AGENT_RELAYED | migration_relay_decision invocation: 0 files.

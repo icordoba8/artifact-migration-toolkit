@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readlinkSync } from 'node:fs';
+import { constants as fsConstants, readlinkSync } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { adapter, digest, verifyBundle } from '../providers/install-support.mjs';
+import { promisify } from 'node:util';
+import { adapter, RELAYLESS_MCP_TOOLS, digest, verifyBundle } from '../providers/install-support.mjs';
 import { buildRelease } from '../scripts/release.mjs';
 import { candidateReleaseRoot } from '../packages/migration-engine/test/support/candidate-release-root.mjs';
 import { createUnstampedRecord } from '../packages/migration-engine/test/support/consumer-fixture.mjs';
@@ -87,15 +88,15 @@ const advance = async (receipt, cwd) => {
   const id = preview.output.match(/Confirmation ID: ([0-9a-f]+)/)?.[1];
   return id ? run(receipt, 'artifact-migration-advance', ['auth', '--confirm-advance', id], cwd) : preview;
 };
-async function mcpStatus(receipt, cwd) {
-  const [command, ...args] = Array.isArray(receipt.mcp.command) ? receipt.mcp.command : [receipt.mcp.command, ...receipt.mcp.args];
+async function mcpStatus(receipt, cwd, request = { method: 'tools/call', params: { name: 'migration_status', arguments: { module: 'auth' } } }, server = receipt.mcp) {
+  const [command, ...args] = Array.isArray(server.command) ? server.command : [server.command, ...server.args];
   const id = childId++;
   const inputPath = path.join(scratch, `child-${id}.stdin`);
   const outputPath = path.join(scratch, `child-${id}.stdout`);
   const errorPath = path.join(scratch, `child-${id}.stderr`);
   await writeFile(inputPath,
     `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'provider-acceptance', version: '1' } } })}\n` +
-    `${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'migration_status', arguments: { module: 'auth' } } })}\n`);
+    `${JSON.stringify({ jsonrpc: '2.0', id: 2, ...request })}\n`);
   const input = await open(inputPath, 'r');
   const output = await open(outputPath, 'w');
   const errors = await open(errorPath, 'w');
@@ -242,6 +243,122 @@ test('R-W9-a / R-W9-c: installed MCP is launchable; doctor preserves and reports
   assert.ok(!(await mcpStatus(installed, consumer.root)).result.isError);
   await adapter('copilot', { ...options, action: 'remove' });
   assert.deepEqual(JSON.parse(await readFile(config)), { servers: { playwright: browser, figma }, inputs: [{ id: 'preserved' }] });
+});
+
+test('T1: Copilot registers every tool but the relay by default, on install and on upgrade from a <=1.6.5 or 1.6.6 receipt', async t => {
+  const b = await bundles();
+  const consumer = await createUnstampedRecord({ prefix: 'copilot T1 ' });
+  t.after(() => consumer.cleanup());
+  const options = { scope: 'project', root: consumer.root, store: path.join(scratch, 'T1 store'), bundle: b.first, pin: b.pin };
+  const vscode = path.join(consumer.root, '.vscode/mcp.json');
+  const cli = path.join(consumer.root, '.github/mcp.json');
+  const receiptFile = path.join(consumer.root, '.artifact-migration-tools/copilot.json');
+  const toolsOf = async (receipt, server) => (await mcpStatus(receipt, consumer.root, { method: 'tools/list' }, server)).result.tools.map(tool => tool.name);
+  const expectNine = async receipt => {
+    const registered = JSON.parse(await readFile(cli, 'utf8')).mcpServers['start-migration'];
+    assert.deepEqual(registered, { ...receipt.mcp, tools: RELAYLESS_MCP_TOOLS, env: { pnpm_config_pm_on_fail: 'error' } });
+    assert.equal(registered.args.at(-1), '--without-relay');
+    assert.deepEqual(JSON.parse(await readFile(vscode, 'utf8')).servers['start-migration'], receipt.mcp);
+    assert.deepEqual(await toolsOf(receipt, registered), RELAYLESS_MCP_TOOLS);
+    assert.equal(RELAYLESS_MCP_TOOLS.length, 10);
+    assert.ok(!RELAYLESS_MCP_TOOLS.includes('migration_relay_decision'));
+  };
+  await expectNine(await adapter('copilot', options));
+
+  // A <=1.6.5 receipt: the relay-carrying `.vscode` entry and no `.github` registration.
+  const legacy = JSON.parse(await readFile(receiptFile, 'utf8'));
+  legacy.mcp = { ...legacy.mcp, args: legacy.mcp.args.slice(0, 1) };
+  legacy.configOwned = legacy.mcp;
+  delete legacy.cliConfigOwned;
+  await writeFile(receiptFile, JSON.stringify(legacy, null, 2));
+  await writeFile(vscode, JSON.stringify({ servers: { 'start-migration': legacy.mcp } }));
+  await rm(cli);
+  assert.equal((await toolsOf(legacy, legacy.mcp)).length, 11);
+  await expectNine(await adapter('copilot', { ...options, action: 'update', bundle: b.second, pin: b.nextPin }));
+
+  // A 1.6.6 receipt: relay-less, but granting the nine tools before migration_app_runtime.
+  const before = JSON.parse(await readFile(receiptFile, 'utf8'));
+  const nine = { ...before.cliConfigOwned, tools: RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime') };
+  await writeFile(receiptFile, JSON.stringify({ ...before, cliConfigOwned: nine }, null, 2));
+  await writeFile(cli, JSON.stringify({ mcpServers: { 'start-migration': nine } }));
+  await expectNine(await adapter('copilot', { ...options, action: 'update', bundle: b.first, pin: b.pin }));
+
+  // Doctor repairs a removed `.github` registration; remove takes only ours.
+  const current = JSON.parse(await readFile(receiptFile, 'utf8'));
+  await writeFile(cli, JSON.stringify({ mcpServers: { other: { type: 'http', url: 'https://example.invalid/mcp' } } }));
+  await adapter('copilot', { ...options, action: 'doctor', bundle: b.second, pin: b.nextPin });
+  await expectNine(current);
+  await adapter('copilot', { ...options, action: 'remove' });
+  assert.deepEqual(JSON.parse(await readFile(cli, 'utf8')), { mcpServers: { other: { type: 'http', url: 'https://example.invalid/mcp' } } });
+});
+
+test('E7: Codex grants every tool but the relay by default, on install and on upgrade from a <=1.6.5 or 1.6.6 receipt', async t => {
+  const b = await bundles();
+  const consumer = await createUnstampedRecord({ prefix: 'codex E7 ' });
+  t.after(() => consumer.cleanup());
+  const options = { scope: 'project', root: consumer.root, store: path.join(scratch, 'E7 store'), bundle: b.first, pin: b.pin };
+  const config = path.join(consumer.root, '.codex/config.toml');
+  const receiptFile = path.join(consumer.root, '.artifact-migration-tools/codex.json');
+  const toolsOf = async server => (await mcpStatus(null, consumer.root, { method: 'tools/list' }, server)).result.tools.map(tool => tool.name);
+  const expectNine = async receipt => {
+    assert.equal(receipt.mcp.args.at(-1), '--without-relay');
+    assert.deepEqual(receipt.mcp.enabled_tools, RELAYLESS_MCP_TOOLS);
+    const toml = await readFile(config, 'utf8');
+    assert.ok(toml.includes(`args = ${JSON.stringify(receipt.mcp.args)}\nenabled_tools = ${JSON.stringify(RELAYLESS_MCP_TOOLS)}\n`));
+    assert.deepEqual(await toolsOf(receipt.mcp), RELAYLESS_MCP_TOOLS);
+  };
+  await mkdir(path.dirname(config), { recursive: true });
+  await writeFile(config, 'model = "consumer"\n');
+  await expectNine(await adapter('codex', options));
+
+  // A <=1.6.5 (e.g. 1.6.4) receipt: the relay-carrying block, no filter.
+  const legacy = JSON.parse(await readFile(receiptFile, 'utf8'));
+  legacy.mcp = { command: legacy.mcp.command, args: legacy.mcp.args.slice(0, 1) };
+  legacy.configOwned = `# BEGIN artifact-migration-tools\n[mcp_servers.start-migration]\ncommand = ${JSON.stringify(legacy.mcp.command)}\nargs = ${JSON.stringify(legacy.mcp.args)}\n# END artifact-migration-tools\n`;
+  await writeFile(receiptFile, JSON.stringify(legacy, null, 2));
+  await writeFile(config, `model = "consumer"\n${legacy.configOwned}`);
+  assert.equal((await toolsOf(legacy.mcp)).length, 11);
+  await expectNine(await adapter('codex', { ...options, action: 'update', bundle: b.second, pin: b.nextPin }));
+
+  // A 1.6.6 receipt: relay-less, but granting the nine tools before migration_app_runtime.
+  const before = JSON.parse(await readFile(receiptFile, 'utf8'));
+  const nine = { ...before.mcp, enabled_tools: RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime') };
+  const nineOwned = before.configOwned.replace(JSON.stringify(RELAYLESS_MCP_TOOLS), JSON.stringify(nine.enabled_tools));
+  assert.notEqual(nineOwned, before.configOwned);
+  await writeFile(receiptFile, JSON.stringify({ ...before, mcp: nine, configOwned: nineOwned }, null, 2));
+  await writeFile(config, `model = "consumer"\n${nineOwned}`);
+  await expectNine(await adapter('codex', { ...options, action: 'update', bundle: b.first, pin: b.pin }));
+  await adapter('codex', { ...options, action: 'remove' });
+  assert.equal(await readFile(config, 'utf8'), 'model = "consumer"\n');
+});
+
+test('T1: a root .mcp.json start-migration entry shadows .github/mcp.json and is refused naming the file', async () => {
+  const b = await bundles();
+  const root = path.join(scratch, 'T1 shadow root');
+  const options = { scope: 'project', root, store: path.join(scratch, 'T1 shadow store'), bundle: b.first, pin: b.pin };
+  await mkdir(root, { recursive: true });
+  const shadow = JSON.stringify({ mcpServers: { 'start-migration': { command: 'node', args: ['x'] } } });
+  await writeFile(path.join(root, '.mcp.json'), shadow);
+  const refused = { code: 'INSTALL_REGISTRATION_CONFLICT', message: /'\.mcp\.json' registers 'start-migration'/ };
+  await assert.rejects(adapter('copilot', options), error => { assert.equal(error.state?.file, '.mcp.json'); return true; });
+  await assert.rejects(adapter('copilot', options), refused);
+  for (const file of ['.vscode', '.github', '.artifact-migration-tools/copilot.json']) await assert.rejects(lstat(path.join(root, file)), { code: 'ENOENT' });
+  await writeFile(path.join(root, '.mcp.json'), '{}');
+  await adapter('copilot', options);
+  await writeFile(path.join(root, '.mcp.json'), shadow);
+  for (const action of ['update', 'doctor']) await assert.rejects(adapter('copilot', { ...options, action }), refused);
+  await writeFile(path.join(root, '.mcp.json'), '{}');
+  // A tampered `.github` entry is a conflict for doctor; a foreign one for a fresh install.
+  const cli = path.join(root, '.github/mcp.json');
+  const owned = await readFile(cli, 'utf8');
+  const foreign = JSON.stringify({ mcpServers: { 'start-migration': { type: 'stdio', command: 'node', args: ['x'], tools: ['*'] } } });
+  await writeFile(cli, foreign);
+  await assert.rejects(adapter('copilot', { ...options, action: 'doctor' }), { code: 'INSTALL_REGISTRATION_CONFLICT' });
+  await writeFile(cli, owned);
+  await adapter('copilot', { ...options, action: 'remove' });
+  await writeFile(cli, foreign);
+  await assert.rejects(adapter('copilot', options), { code: 'INSTALL_REGISTRATION_CONFLICT' });
+  assert.equal(await readFile(cli, 'utf8'), foreign);
 });
 
 test('ownership, checksums, symlinks and config conflicts fail closed', async () => {
@@ -433,6 +550,67 @@ for (const provider of ['codex', 'claude']) {
   });
 }
 
+test('E7/T1: without a receipt, a 1.6.6 nine-tool registration from the same store is historical and converges', async () => {
+  const b = await bundles();
+  const nine = RELAYLESS_MCP_TOOLS.filter(tool => tool !== 'migration_app_runtime');
+  // A 1.6.6-shaped release: the synthetic next release with the grant it shipped before migration_app_runtime.
+  const old = path.join(scratch, 'release 1.6.6 grant');
+  await cp(b.second, old, { recursive: true });
+  const manifest = JSON.parse(await readFile(path.join(old, 'release-manifest.json')));
+  const rewrite = async (relative, edit) => {
+    const text = await readFile(path.join(old, relative), 'utf8');
+    const bytes = edit(text);
+    assert.notEqual(bytes, text);
+    await writeFile(path.join(old, relative), bytes);
+    manifest.files[relative] = digest(bytes);
+  };
+  await rewrite('providers/codex/config.toml', text => text.replace(JSON.stringify(RELAYLESS_MCP_TOOLS), JSON.stringify(nine)));
+  await rewrite('providers/copilot/mcp.json', text => {
+    const json = JSON.parse(text);
+    json.mcpServers['start-migration'].tools = nine;
+    return `${JSON.stringify(json, null, 2)}\n`;
+  });
+  await writeFile(path.join(old, 'SHA256SUMS'), `${Object.entries(manifest.files).map(([relative, hash]) => `${hash.slice(7)}  ${relative}`).join('\n')}\n`);
+  await writeFile(path.join(old, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  const oldPin = digest(await readFile(path.join(old, 'release-manifest.json')));
+  // Installing the 1.6.6-shaped release writes its own nine-tool grant, as 1.6.6 itself did.
+  const grantOfFile = {
+    codex: ['.codex/config.toml', text => JSON.parse(text.match(/^enabled_tools = (.*)$/m)[1])],
+    copilot: ['.github/mcp.json', text => JSON.parse(text).mcpServers['start-migration'].tools],
+  };
+  for (const [provider, [relative, toolsIn]] of Object.entries(grantOfFile)) {
+    const root = path.join(scratch, `${provider} 1.6.6 adopt`);
+    const options = { scope: 'project', root, store: path.join(scratch, `${provider} 1.6.6 adopt store`) };
+    const file = path.join(root, relative);
+    const agents = path.join(root, '.agents/mcp.json');
+    const agentsTools = async () => JSON.parse(await readFile(agents, 'utf8')).mcpServers['start-migration']?.enabled_tools;
+    await mkdir(path.join(root, '.agents'), { recursive: true });
+    await writeFile(agents, '{"mcpServers":{}}\n');
+    const installed = await adapter(provider, { ...options, bundle: old, pin: oldPin });
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), nine, provider);
+    // Consumer tooling (`agents:sync`) shares the receipt's launch in .agents/mcp.json.
+    if (provider === 'codex') {
+      assert.deepEqual(installed.mcp.enabled_tools, nine);
+      await writeFile(agents, `${JSON.stringify({ mcpServers: { 'start-migration': { ...installed.mcp, targets: ['codex'] } } }, null, 2)}\n`);
+    }
+    // Doctor keeps the receipt's own grant, twice over (no flip to the current grant).
+    for (const round of [1, 2]) assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', `${provider} doctor ${round}`);
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), nine, provider);
+    // Without a receipt, the 1.6.6 registrations (shared .agents entry included) are adopted and converge.
+    await dropReceipts(root);
+    const adopted = await adapter(provider, { ...options, bundle: b.first, pin: b.pin });
+    assert.deepEqual(adopted.releases.map(item => item.pin), [oldPin, b.pin], provider);
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), RELAYLESS_MCP_TOOLS, provider);
+    if (provider === 'codex') assert.deepEqual(await agentsTools(), RELAYLESS_MCP_TOOLS);
+    assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', provider);
+    // Rolling back restores 1.6.6's own grant, the one its installer accepts.
+    await adapter(provider, { ...options, action: 'rollback', bundle: old, pin: oldPin });
+    assert.deepEqual(toolsIn(await readFile(file, 'utf8')), nine, provider);
+    if (provider === 'codex') assert.deepEqual(await agentsTools(), nine);
+    assert.equal((await adapter(provider, { ...options, action: 'doctor' })).outcome, 'OK', provider);
+  }
+});
+
 test('without a receipt, a foreign .agents/mcp.json start-migration entry is a typed conflict', async () => {
   const b = await bundles();
   const root = path.join(scratch, 'agents adopt');
@@ -448,11 +626,17 @@ test('without a receipt, a foreign .agents/mcp.json start-migration entry is a t
   // Its own entry for this store is adopted with the rest.
   await writeFile(path.join(root, '.agents/mcp.json'), '{"mcpServers":{}}\n');
   const first = await adapter('codex', options);
-  const agents = { mcpServers: { 'start-migration': { ...first.mcp, targets: ['codex'] } } };
+  // E7: a Claude-shaped (<=1.6.5) shared entry targeting Codex converges on Codex's relay-less one.
+  const agents = { mcpServers: { 'start-migration': { command: first.mcp.command, args: first.mcp.args.slice(0, 1), targets: ['codex'] } } };
   await writeFile(path.join(root, '.agents/mcp.json'), `${JSON.stringify(agents, null, 2)}\n`);
   await dropReceipts(root);
   assert.deepEqual(await adapter('codex', options), first);
-  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), agents);
+  const relayless = { mcpServers: { 'start-migration': { ...first.mcp, targets: ['codex'] } } };
+  assert.equal(first.mcp.args.at(-1), '--without-relay');
+  assert.deepEqual(first.mcp.enabled_tools, RELAYLESS_MCP_TOOLS);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), relayless);
+  assert.equal((await adapter('codex', { ...options, action: 'doctor' })).mcpRepair, null);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, '.agents/mcp.json'), 'utf8')), relayless);
 });
 
 test('SHA256SUMS disagreeing with the release manifest fails closed', async () => {
@@ -581,6 +765,7 @@ async function treeOf(dir, tree = {}) {
     const file = path.join(dir, name);
     const info = await lstat(file);
     if (info.isSymbolicLink()) tree[file] = `-> ${await readlink(file)}`;
+    else if (info.isFIFO()) tree[file] = `fifo ${info.ino}`; // reading one would block
     else if (info.isDirectory()) await treeOf(file, Object.assign(tree, { [file]: 'dir' }));
     else tree[file] = await readFile(file, 'utf8');
   }
@@ -814,19 +999,95 @@ test('only ESRCH proves an installer gone: every other probe answer keeps its lo
 });
 
 test('a lock that cannot be reclaimed is refused with its path and the reason, untouched', LOCK_TIMEOUT, async () => {
-  for (const [label, owner, reason] of [
-    ['live', { pid: process.pid }, /held by pid \d+ \(install, started .+\), which is still running/],
-    ['other namespace', { realm: 'linux:pid:[1]' }, /in another PID namespace \(linux:pid:\[1\]; this process: .+\)/],
-    ['other host', { hostname: 'elsewhere.invalid' }, /on host elsewhere\.invalid/],
+  for (const [label, owner, reason, code] of [
+    ['live', { pid: process.pid }, /held by pid \d+ \(install, started .+\), which is still running/, 'LOCK_HELD'],
+    ['other namespace', { realm: 'linux:pid:[1]' }, /recorded no liveness token, in another PID namespace \(linux:pid:\[1\]; this process: .+\)/, 'LOCK_NO_LIVENESS_TOKEN'],
+    ['other host', { hostname: 'elsewhere.invalid' }, /on host elsewhere\.invalid/, 'LOCK_OWNER_UNKNOWN'],
   ]) {
     const { root, lock, options } = await lockRoot(`diagnosed ${label}`);
     await seedOwner(lock, owner);
     const before = await treeOf(root);
-    const refusal = await adapter('codex', options).then(() => assert.fail(`${label}: installed`), error => error.message);
+    const error = await adapter('codex', options).then(() => assert.fail(`${label}: installed`), error => error);
+    assert.equal(error.code, code, label);
+    const refusal = error.message;
     assert.ok(refusal.startsWith(`Installation locked; inspect interrupted installation before retrying: ${lock}: `), refusal);
     assert.match(refusal, reason, label);
     assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched`);
   }
+});
+
+// E2: the installer mirrors the engine's liveness token.
+const TOKENS = process.platform === 'win32' ? 'Windows has no FIFOs' : false;
+const execFileAsync = promisify(execFile);
+const userns = TOKENS || await execFileAsync('unshare', ['-Urpf', 'true']).then(() => false, () => 'unprivileged user and PID namespaces are unavailable here');
+const installSupport = new URL('../providers/install-support.mjs', import.meta.url).href;
+/** An owner entry bound to a fresh FIFO nobody holds open, in another PID realm. */
+async function seedTokenOwner(lock, owner = {}) {
+  const uuid = await seedOwner(lock, { realm: 'linux:pid:[1]' });
+  const fifo = path.join(lock, `${uuid}.fifo`);
+  await execFileAsync('mkfifo', [fifo]);
+  const { dev, ino } = await lstat(fifo, { bigint: true });
+  const entry = path.join(lock, `${uuid}.json`);
+  await writeFile(entry, JSON.stringify({ ...JSON.parse(await readFile(entry, 'utf8')), fifo: { dev: String(dev), ino: String(ino) }, ...owner }));
+  return fifo;
+}
+
+test('an installer SIGKILLed in another PID namespace leaves a lock the next installer reclaims', { ...LOCK_TIMEOUT, skip: userns }, async () => {
+  const { root, lock, options } = await lockRoot('killed in another namespace');
+  // The real installer process parks once it holds the lock.
+  const script = `import { createRequire, syncBuiltinESMExports } from 'node:module';\n` +
+    `const fsp = createRequire(import.meta.url)('node:fs/promises');\n` +
+    `const options = JSON.parse(process.argv[1]);\nconst real = fsp.rename;\n` +
+    `fsp.rename = async (from, to) => { await real(from, to); if (String(to).endsWith('install.lock')) { process.stdout.write('HELD\\n'); await new Promise(() => setInterval(() => {}, 1000)); } };\n` +
+    `syncBuiltinESMExports();\nawait (await import(${JSON.stringify(installSupport)})).adapter('codex', options);\n`;
+  const child = spawn('unshare', ['-Urpf', process.execPath, '--input-type=module', '-e', script, JSON.stringify(options)], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); exited.then(() => reject(new Error('the installer exited before holding the lock'))); });
+    assert.equal((await readdir(lock)).length, 2, 'the owner holds no liveness token');
+    await assert.rejects(adapter('codex', options), { code: 'LOCK_HELD' });
+    const installer = Number(await readFile(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8'));
+    assert.ok(installer > 0, 'no installer process under unshare'); // never kill(0): the whole group
+    process.kill(installer, 'SIGKILL'); // the installer itself, not the unshare wrapper
+    await exited;
+    assert.equal((await adapter('codex', options)).recoveredLock, true);
+    assert.deepEqual(await lockLeftovers(root), []);
+    await doctorOk(options);
+  } finally { child.kill('SIGKILL'); }
+});
+
+test('an install token proves its owner gone or alive; anything that is not the recorded FIFO is refused untouched', { ...LOCK_TIMEOUT, skip: TOKENS }, async () => {
+  for (const [label, seed, code] of [
+    ['a missing token', async lock => rm(await seedTokenOwner(lock)), 'LOCK_OWNER_UNKNOWN'],
+    ['a token replaced by a regular file', async lock => { const fifo = await seedTokenOwner(lock); await rm(fifo); await writeFile(fifo, ''); }, 'LOCK_OWNER_UNKNOWN'],
+    ['a token replaced by another FIFO', async (lock, root) => { const fifo = await seedTokenOwner(lock); const other = path.join(root, 'other.fifo'); await execFileAsync('mkfifo', [other]); await rename(other, fifo); }, 'LOCK_OWNER_UNKNOWN'],
+    ['a token on another host', lock => seedTokenOwner(lock, { hostname: 'elsewhere.invalid' }), 'LOCK_OWNER_UNKNOWN'],
+  ]) {
+    const { root, lock, options } = await lockRoot(`token ${label}`);
+    await seed(lock, root);
+    const before = await treeOf(root);
+    await assert.rejects(adapter('codex', options), { code, message: /^Installation locked; / }, label);
+    assert.deepEqual(await treeOf(root), before, `${label}: the lock was touched or something was installed`);
+  }
+  const { root, lock, options } = await lockRoot('token live then dead');
+  const reader = await open(await seedTokenOwner(lock), fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    await assert.rejects(adapter('codex', options), { code: 'LOCK_HELD' }, 'a live token');
+  } finally { await reader.close(); }
+  assert.equal((await adapter('codex', options)).recoveredLock, true, 'a dead token in another PID realm');
+  assert.deepEqual(await lockLeftovers(root), []);
+});
+
+test('an install into a read-only root is refused with the kernel errno, creating nothing', { ...LOCK_TIMEOUT, skip: userns }, async () => {
+  const { options } = await lockRoot('read-only root');
+  const root = path.join(scratch, 'read-only root bare');
+  await mkdir(root);
+  const script = `await (await import(${JSON.stringify(installSupport)})).adapter('codex', JSON.parse(process.argv[1]))` +
+    `.then(() => console.log('{}'), error => console.log(JSON.stringify({ code: error.code, cause: error.cause?.code })));\n`;
+  const { stdout } = await execFileAsync('unshare', ['-Urm', 'sh', '-c', 'mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" "$1" && exec "$2" --input-type=module -e "$3" "$4"',
+    'sh', root, process.execPath, script, JSON.stringify({ ...options, root })]);
+  assert.deepEqual(JSON.parse(stdout), { code: 'EROFS', cause: 'ENOENT' });
+  assert.deepEqual(await readdir(root), []);
 });
 
 test('an install owner entry swapped for a symlink after it was vetted is never followed', LOCK_TIMEOUT, async () => {
