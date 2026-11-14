@@ -1278,8 +1278,9 @@ current checkpoint is missing.
   (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuses here.
   First prepare the applications (see **Applications** below); open the browser
   only at an origin it reported. If the browser lands on a sign-in page, do not
-  type credentials and do not ask for any; discovery continues from source.
-  Record the unobserved runtime
+  type credentials and do not ask for any. An application whose row says
+  `"onSignIn": "wait-for-operator"` follows **Operator sign-in** below;
+  otherwise discovery continues from source. Record the unobserved runtime
   in `inventories/legacy.json`: the behavior's `RUNTIME_OBSERVATION` evidence
   item gets `status: "BLOCKED"` and a `reason` naming the cause (not running,
   wrong app, sign-in required) — never `NOT_APPLICABLE`, which claims runtime
@@ -1331,7 +1332,7 @@ this engine in the same namespace.
 | State | Meaning | Do |
 | --- | --- | --- |
 | `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. |
-| `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | Continue with an authorized session if the operator has supplied one; otherwise record the gap as below. Never type or request a credential. |
+| `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | With `"onSignIn": "wait-for-operator"`, follow **Operator sign-in** below. Otherwise continue with an authorized session if the operator has supplied one, or record the gap as below. Never type or request a credential. |
 | `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
 | `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address. | Report it. Never reuse it, stop it or capture from it. |
 | `IDENTITY_UNPROVEN` | It answers, but no inspectable local process holds it, such as a forwarded port. | Report it; treat it as `WRONG_APP`. |
@@ -1342,23 +1343,57 @@ this engine in the same namespace.
 No state changes the record, so a runtime problem is never recorded as a passed
 check, and once it is corrected a normal status-first resume continues.
 
+Every row reports `trust` and `onSignIn`. When a row says
+`"trust": "operator-local"`, say once per run: `operator-local is active: the
+browser session runs in this agent's account.`
+
+**Operator sign-in.** The engine probe is always unauthenticated and the
+registered Playwright MCP browser may keep a sign-in across runs, so the skill
+never assumes a fresh or a kept session: it checks the browser first. For each
+row that is `AUTH_REQUIRED` with `"onSignIn": "wait-for-operator"`, in role
+order (`LEGACY`, then `TARGET`), each in its own tab, `browser_navigate` to the
+row's `protectedRoute`. Signed in (not redirected to `signInPath`, no sign-in
+form): say `browser session reused for <ROLE>` and continue, with no wait.
+Otherwise `browser_navigate` that tab to `<origin><signInPath>`. After every
+row is checked, print once per waiting row exactly
+
+`Waiting for your login at <origin><signInPath>. Log in in the open browser window, then reply "continue".`
+
+and end the turn once. There is no timeout. Never type, ask for, read or print a
+credential or cookie, and never use `browser_evaluate` on a signed-in page. On
+`continue`, `browser_navigate` each waiting tab to its `protectedRoute` once.
+Signed in: continue the same checkpoint. Still on sign-in: record the BLOCKED
+runtime gap below with the reason `operator sign-in not completed`; there is no
+second wait. With `"onSignIn": "record-gap"`, the default, nothing changes. Whether
+the browser keeps a sign-in across runs is the operator's browser configuration
+(for example a `--user-data-dir` registration described under captures), never
+the toolkit's.
+
 The authority is `.artifact-migration-tools/runtime-apps.json` in the target
 root, written by the operator, kept out of Git (a tracked copy is refused) and
 never taken from a migration record, an application response or a tool argument.
 A `start` is honored only when that file is owned by another account and this
 engine's account cannot write it: a file you could have written grants nothing.
-Never change its ownership or permissions; that is the operator's step:
+Never change its ownership or permissions; that is the operator's step.
+`"trust": "operator-local"`, the operator's choice for a machine that is theirs
+alone, waives only that ownership check: the Git, namespace and identity checks
+stay, and `stop` still ends only what `ensure` started. It also allows
+`"onSignIn": "wait-for-operator"` and an argv `start`. Never write or change
+this file, least of all its `trust`:
 
 ```json
 {
   "version": 1,
   "namespace": "win32 | wsl | linux | darwin",
+  "trust": "operator-isolated | operator-local",
   "applications": {
     "LEGACY": {
       "origin": "http://localhost:<port>",
       "project": "<directory relative to the target root>",
       "identity": { "route": "<public route>", "includes": "<text only this application serves>" },
       "protectedRoute": "<route that needs a session>",
+      "signInPath": "<sign-in route>",
+      "onSignIn": "record-gap | wait-for-operator",
       "start": { "manager": "npm | pnpm | yarn", "script": "<package script name>" },
       "startTimeoutMs": 60000
     }
@@ -1366,10 +1401,15 @@ Never change its ownership or permissions; that is the operator's step:
 }
 ```
 
-`LEGACY` and `TARGET` are required and `BACKEND` is optional. `protectedRoute`,
-`start` and `startTimeoutMs` are optional, and only an application with `start`
-may be started: it names a script of that project's own `package.json`, never a
-command line. The started process inherits a minimal environment, with no ambient
+`LEGACY` and `TARGET` are required and `BACKEND` is optional. `trust` defaults
+to `operator-isolated`, `onSignIn` to `record-gap`; `wait-for-operator` needs
+`signInPath` and `operator-local`. `protectedRoute`, `signInPath`, `start` and
+`startTimeoutMs` are optional, and only an application with `start` may be
+started: it names a script of that project's own `package.json`, never a
+command line. Under `operator-local` only, `start` may instead be
+`{"command": ["<program>", "<argument>", ...]}`, run in the project directory
+without a shell (on Windows through `cmd.exe`, so `.cmd` shims resolve); no
+argument may contain `" & | < > ^ % !` or a line break. The started process inherits a minimal environment, with no ambient
 token, and writes to `.artifact-migration-tools/app-runtime/`.
 
 Capture protocol, per required UI behavior:
@@ -1437,10 +1477,10 @@ capture refuses a file with no cookie for the origin's host (cookies bind to a
 host, not a port) and no stored value for its exact origin, or whose cookies
 have all expired; the browser reaching the route signed in is the real check,
 and a sign-in redirect is `CAPTURE_SESSION_EXPIRED`). The registered Playwright
-MCP keeps a sign-in across runs only when its registration sets `--user-data-dir`
-to a private directory outside the repository (its default is a temporary
-profile): trusted local configuration the operator owns, never a toolkit
-setting. Neither that profile nor a session file isolates credentials from an
+MCP may keep a sign-in across runs (observed without `--user-data-dir`), so the
+skill never assumes a fresh or a kept session and always checks the browser; a
+private `--user-data-dir` outside the repository is trusted local configuration
+the operator owns, never a toolkit setting. Neither that profile nor a session file isolates credentials from an
 agent that can read the user's files; this skill states no such guarantee. Every control the
 state shows must be visible, or the state counts as not reached. The capture
 never overwrites, pins or marks PASS. A refusal names what was not reached and
