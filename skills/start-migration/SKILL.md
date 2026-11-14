@@ -1346,22 +1346,27 @@ Every row reports `trust` and `onSignIn`. When a row says
 `"trust": "operator-local"`, say once per run: `operator-local is active: the
 browser session runs in this agent's account.`
 
-**Operator sign-in.** When the browser reaches a sign-in page, or a row is
-`AUTH_REQUIRED`, and that row says `"onSignIn": "wait-for-operator"`: keep the
-Playwright MCP browser open, `browser_navigate` it to the row's
-`<origin><signInPath>`, print exactly
+**Operator sign-in.** The engine probe is always unauthenticated and the
+registered Playwright MCP browser may keep a sign-in across runs, so the skill
+never assumes a fresh or a kept session: it checks the browser first. For each
+row that is `AUTH_REQUIRED` with `"onSignIn": "wait-for-operator"`, in role
+order (`LEGACY`, then `TARGET`), each in its own tab, `browser_navigate` to the
+row's `protectedRoute`. Signed in (not redirected to `signInPath`, no sign-in
+form): say `browser session reused for <ROLE>` and continue, with no wait.
+Otherwise `browser_navigate` that tab to `<origin><signInPath>`. After every
+row is checked, print once per waiting row exactly
 
 `Waiting for your login at <origin><signInPath>. Log in in the open browser window, then reply "continue".`
 
-and end the turn. There is no timeout. Never type, ask for, read or print a
+and end the turn once. There is no timeout. Never type, ask for, read or print a
 credential or cookie, and never use `browser_evaluate` on a signed-in page. On
-`continue`, `browser_navigate` the same browser to the row's `protectedRoute`.
+`continue`, `browser_navigate` each waiting tab to its `protectedRoute` once.
 Signed in: continue the same checkpoint. Still on sign-in: record the BLOCKED
 runtime gap below with the reason `operator sign-in not completed`; there is no
-second wait. With `"onSignIn": "record-gap"`, the default, nothing changes. The
-browser keeps the sign-in across runs only with the `--user-data-dir`
-registration described under captures; that is the operator's configuration,
-never the toolkit's.
+second wait. With `"onSignIn": "record-gap"`, the default, nothing changes. Whether
+the browser keeps a sign-in across runs is the operator's browser configuration
+(for example a `--user-data-dir` registration described under captures), never
+the toolkit's.
 
 The authority is `.artifact-migration-tools/runtime-apps.json` in the target
 root, written by the operator, kept out of Git (a tracked copy is refused) and
@@ -1471,10 +1476,10 @@ capture refuses a file with no cookie for the origin's host (cookies bind to a
 host, not a port) and no stored value for its exact origin, or whose cookies
 have all expired; the browser reaching the route signed in is the real check,
 and a sign-in redirect is `CAPTURE_SESSION_EXPIRED`). The registered Playwright
-MCP keeps a sign-in across runs only when its registration sets `--user-data-dir`
-to a private directory outside the repository (its default is a temporary
-profile): trusted local configuration the operator owns, never a toolkit
-setting. Neither that profile nor a session file isolates credentials from an
+MCP may keep a sign-in across runs (observed without `--user-data-dir`), so the
+skill never assumes a fresh or a kept session and always checks the browser; a
+private `--user-data-dir` outside the repository is trusted local configuration
+the operator owns, never a toolkit setting. Neither that profile nor a session file isolates credentials from an
 agent that can read the user's files; this skill states no such guarantee. Every control the
 state shows must be visible, or the state counts as not reached. The capture
 never overwrites, pins or marks PASS. A refusal names what was not reached and
