@@ -603,7 +603,7 @@ test("--json: stdout is exactly one JSON document; every human line goes to stde
 
 // Nested (no directive), the sub-CLI also leaves the checklist to the one
 // post-iteration block `run-migration` prints, so it is never shown twice.
-const withoutChecklist = (stdout) => stdout.replace(/^progress: [\s\S]*?^next: .*\n/m, "");
+const withoutChecklist = (stdout) => stdout.replace(/^progress: [\s\S]*?^Next: .*\n/m, "");
 
 test("emitDirective defaults to today's bytes and subtracts only the loop line and checklist", async () => {
   const fixture = await createFixture();
@@ -1552,9 +1552,9 @@ test("a blocked run renders the block at its checkpoint and offers no next step"
       runMigration(["auth", "--mode", "auto", "--json"]));
     // A. the happy path is untouched: active checkpoint, executable next step.
     assert.equal(active.result.outcome, "CONTINUE");
-    assert.match(active.result.progressChecklist, /^\[x\] 2\/9 DISCOVER_LEGACY$/m);
-    assert.match(active.result.progressChecklist, /^\[>\] 3\/9 DISCOVERY_COMPLETENESS$/m);
-    assert.match(active.result.progressChecklist, /^next: DISCOVERY_COMPLETENESS$/m);
+    assert.match(active.result.progressChecklist, /^✅ DONE +2\. Discover legacy behavior +DISCOVER_LEGACY$/m);
+    assert.match(active.result.progressChecklist, /^🔄 IN PROGRESS 3\. Check discovery completeness +DISCOVERY_COMPLETENESS$/m);
+    assert.match(active.result.progressChecklist, /^Next: .+ — run \/start-migration auth$/m);
     assert.doesNotMatch(active.result.progressChecklist, /^stop reason:/m);
     assert.equal(
       active.result.progress.nextWork.command,
@@ -1570,14 +1570,14 @@ test("a blocked run renders the block at its checkpoint and offers no next step"
     // B. the human form names the block where it happened.
     assert.equal(blocked.result.outcome, "BLOCKED");
     const checklist = blocked.result.progressChecklist;
-    assert.match(checklist, /^\[x\] 1\/9 RESOLVE$/m);
-    assert.match(checklist, /^\[!\] 3\/9 DISCOVERY_COMPLETENESS$/m);
-    assert.doesNotMatch(checklist, /^\[>\]/m);
-    assert.match(checklist, /^\[ \] 4\/9 ASSESS_TARGET$/m);
+    assert.match(checklist, /^✅ DONE +1\. Resolve module and target +RESOLVE$/m);
+    assert.match(checklist, /^⛔ BLOCKED +3\. Check discovery completeness +DISCOVERY_COMPLETENESS$/m);
+    assert.doesNotMatch(checklist, /IN PROGRESS/);
+    assert.match(checklist, /^⏳ TODO +4\. Assess target architecture +ASSESS_TARGET$/m);
     assert.match(checklist, /^stop reason: BLOCKED$/m);
     assert.match(checklist, /^blocker: Legacy revision changed from /m);
-    assert.match(checklist, /^next: none until the blocker is cleared$/m);
-    assert.doesNotMatch(checklist, /^next: DISCOVERY_COMPLETENESS$/m);
+    assert.match(checklist, /^Next: none until the blocker is cleared$/m);
+    assert.doesNotMatch(checklist, / — run /);
     assert.equal(
       directiveOf(blocked.stderr),
       "loop: STOP reason=BLOCKED",

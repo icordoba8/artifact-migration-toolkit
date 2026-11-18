@@ -478,6 +478,8 @@ test("A-02 artifact invocation mismatch emits canonical BLOCKED progress and rec
     const status = await getArtifactStatus({ ...fixture.options, target: "src/wrong.ts" });
     assert.equal(status.outcome, "BLOCKED");
     assert.match(status.progressChecklist, /stop reason: BLOCKED/);
+    // The artifact skill's own label map, not the module one.
+    assert.match(status.progressChecklist, /^✅ DONE +1\. Resolve artifact and target +RESOLVE$/m);
   } finally {
     await fixture.cleanup();
   }

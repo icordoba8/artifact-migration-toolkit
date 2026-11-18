@@ -36,7 +36,7 @@ import {
 import { assertTransactionReplayable, proveFormatUpgradeTransaction } from "./artifact-transaction.mjs";
 import { readJournal } from "./journal.mjs";
 import { exitCodeFor, MIGRATION_OUTCOMES } from "./policy.mjs";
-import { migrationProgress, renderProgress } from "./progress.mjs";
+import { ARTIFACT_STEP_LABELS, migrationProgress, renderProgress } from "./progress.mjs";
 
 export const startMetrics = () =>
   Object.assign(metrics, {
@@ -145,7 +145,7 @@ export const outcomeResult = (state, outcome, reason, mode, extra = {}, status =
     reason,
     exitCode: exitCodeFor(outcome),
     progress,
-    progressChecklist: renderProgress(progress),
+    progressChecklist: renderProgress(progress, ARTIFACT_STEP_LABELS),
     metrics: artifactMetrics(),
     ...extra,
   };
@@ -284,7 +284,7 @@ const readArtifactStatus = async (options = {}) => {
     validation,
     ...(validation?.decisionProjection ? { decisionProjection: validation.decisionProjection } : {}),
     progress,
-    progressChecklist: renderProgress(progress),
+    progressChecklist: renderProgress(progress, ARTIFACT_STEP_LABELS),
     ...ponytailReport(ponytailEvidence),
     visualApplicability: await visualOwnership(location, state),
     // Same protocol as a module migration's `formatUpgrade`, and read-only like

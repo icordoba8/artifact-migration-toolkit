@@ -764,18 +764,18 @@ for (const [label, prepare, expected] of [
         assert.equal(mcp.progress.stopReason, "BLOCKED");
         assert.match(mcp.progress.blocker, /Legacy revision changed from /);
         assert.equal(mcp.progress.nextWork.command, null);
-        assert.match(mcp.progressChecklist, /^\[!\] \d\/\d \w+$/m);
-        assert.doesNotMatch(mcp.progressChecklist, /^\[>\]/m);
+        assert.match(mcp.progressChecklist, /^⛔ BLOCKED +\d\. .+ {2}[A-Z_]+$/m);
+        assert.doesNotMatch(mcp.progressChecklist, /IN PROGRESS/);
         assert.match(
           mcp.progressChecklist,
-          /^next: none until the blocker is cleared$/m,
+          /^Next: none until the blocker is cleared$/m,
         );
         // The CLI relays the same block. The two fixtures are separate Git
         // repositories, so the blocker quotes different revisions; the markers
         // and the refusal to name a runnable next step are the parity.
-        assert.match(cli.log, /^\[!\] \d\/\d \w+$/m);
-        assert.doesNotMatch(cli.log, /^\[>\]/m);
-        assert.match(cli.log, /^next: none until the blocker is cleared$/m);
+        assert.match(cli.log, /^⛔ BLOCKED +\d\. .+ {2}[A-Z_]+$/m);
+        assert.doesNotMatch(cli.log, /IN PROGRESS/);
+        assert.match(cli.log, /^Next: none until the blocker is cleared$/m);
       }
     } finally {
       await viaMcp.cleanup();
@@ -1431,7 +1431,7 @@ test("progress tools put the status block first, the unchanged JSON last, and se
       await only(fixture, call(2, "migration_run", { module: "auth" })),
       "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE");
     assert.equal(payload.outcome, "CONTINUE");
-    assert.match(block, /^\[>\] 3\/9 DISCOVERY_COMPLETENESS$/m);
+    assert.match(block, /^🔄 IN PROGRESS 3\. Check discovery completeness +DISCOVERY_COMPLETENESS$/m);
     assert.ok(block.endsWith("loop: CONTINUE next=/start-migration auth\n"));
     // Every other tool is unchanged.
     const other = await only(fixture, call(3, "migration_pending_decisions", { module: "auth" }));
@@ -1482,7 +1482,8 @@ test("the status block names checkpoint, slice and outcome for every outcome", a
       const loop = renderLoopDirective({ moduleName: "auth", mode: "auto", outcome });
       const block = renderProgressBlock({ progress, progressChecklist, outcome }, loop);
       assert.equal(block, `${firstLine}\n${progressChecklist}${loop}`);
-      assert.match(block, /^[\x20-\x7e\n]*$/, "ASCII only");
+      // The status line stays ASCII; the checklist under it is UTF-8.
+      assert.match(firstLine, /^[\x20-\x7e]*$/, "ASCII status line");
     }
     assert.equal(renderProgressBlock({ progress: null, progressChecklist: null }), "");
   } finally {

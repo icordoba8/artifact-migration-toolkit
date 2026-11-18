@@ -110,6 +110,10 @@ it that way.
    `type`, `sourceRoot`, `targetRoot` and the current absolute `cwd` (plus supplied
    options). The engine uses the same explicit review/elicitation path on every
    provider; a tool argument never supplies a decision.
+   Show progress as the engine renders it: relay `progressChecklist` verbatim
+   inside a fenced code block, and never add, change or remove an emoji or a
+   label. A native task UI row is `<index>. <label>` copied from that
+   checkpoint's row, with the engine's state for that checkpoint.
 3. Author only the paths named by `request.artifacts`, using
    `references/artifact-contract.md`. At `FINALIZE` those include the four
    matrices, whose rows become terminal there. With `--ponytail full`, invoke

@@ -165,23 +165,57 @@ export const migrationProgress = (
   };
 };
 
+// Icon first, then the state in words, so the row still reads correctly on a
+// terminal that drops or mangles the glyph.
 const CHECKPOINT_MARKERS = {
-  COMPLETED: "[x]",
-  ACTIVE: "[>]",
-  PENDING: "[ ]",
-  BLOCKED: "[!]",
+  COMPLETED: ["✅", "DONE"],
+  ACTIVE: ["🔄", "IN PROGRESS"],
+  PENDING: ["⏳", "TODO"],
+  BLOCKED: ["⛔", "BLOCKED"],
 };
+// Padded on the words, not the whole marker: the glyphs differ in UTF-16
+// length but every one of them is a single wide (two-column) character.
+const STATE_WIDTH = Math.max(
+  ...Object.values(CHECKPOINT_MARKERS).map(([, word]) => word.length),
+);
+const marker = (state) => {
+  const [icon, word] = CHECKPOINT_MARKERS[state];
+  return `${icon} ${word.padEnd(STATE_WIDTH)}`;
+};
+
+/**
+ * The checklist label of every lifecycle step, one map per skill. Engine-owned
+ * so every provider shows the same words; a step missing here is a test
+ * failure (the full-render test in `migration-contract.test.mjs` pins all of
+ * them), never a guessed label.
+ */
+const MODULE_STEP_LABELS = Object.freeze({
+  RESOLVE: "Resolve module and target",
+  DISCOVER_LEGACY: "Discover legacy behavior",
+  DISCOVERY_COMPLETENESS: "Check discovery completeness",
+  ASSESS_TARGET: "Assess target architecture",
+  BUILD_BASELINE: "Build baseline",
+  PLAN: "Plan slices",
+  IMPLEMENT_SLICES: "Implement slices",
+  VERIFY_SLICES: "Verify slices",
+  FINALIZE: "Finalize",
+});
+export const ARTIFACT_STEP_LABELS = Object.freeze({
+  ...MODULE_STEP_LABELS,
+  RESOLVE: "Resolve artifact and target",
+});
 
 /**
  * The deterministic progress block the agent relays verbatim, rendered from
  * the projection above and from nothing else -- one source, so a provider that
  * reads `progress` and a provider that reads this text can never drift.
  *
- * Pure by contract: no I/O, no timestamps, no randomness, and ASCII only --
- * the five-tree `--status` parity test compares this byte for byte, and emoji
- * do not survive a Windows terminal.
+ * Pure by contract: no I/O, no timestamps, no randomness. UTF-8: each row is
+ * an emoji followed by its state in words, so meaning survives a terminal that
+ * drops the glyph; every other line is ASCII apart from the `Next:` dash. The
+ * five-tree `--status` parity test compares this byte for byte.
  */
-export const renderProgress = (progress) => {
+export const renderProgress = (progress, labels = MODULE_STEP_LABELS) => {
   const lines = [];
   // The owed increment, stated before the checklist it concerns. Absent -- which
   // is every record at the runtime format -- the block is not rendered and the
@@ -232,27 +266,32 @@ export const renderProgress = (progress) => {
       `  status=${progress.status}  revision=${progress.revision}` +
       `  mode=${progress.mode}`,
   );
-  for (const checkpoint of progress.checkpoints) {
-    const active =
-      checkpoint.name === progress.activeCheckpoint && progress.activeSlice
-        ? `  active=${progress.activeSlice}`
-        : "";
+  // Slices sit under the checkpoint working on them, else under
+  // IMPLEMENT_SLICES, the step that owns them.
+  const sliceAnchor = ["IMPLEMENT_SLICES", "VERIFY_SLICES"].includes(progress.activeCheckpoint)
+    ? progress.activeCheckpoint
+    : "IMPLEMENT_SLICES";
+  const titles = progress.checkpoints.map((checkpoint) => {
+    const label = labels[checkpoint.name];
+    if (!label) throw new Error(`No progress label for step '${checkpoint.name}'.`);
+    return `${checkpoint.index}. ${label}`;
+  });
+  const titleWidth = Math.max(...titles.map((title) => title.length));
+  progress.checkpoints.forEach((checkpoint, position) => {
     lines.push(
-      `${CHECKPOINT_MARKERS[checkpoint.state]} ${checkpoint.index}/${checkpoint.total} ${checkpoint.name}${active}`,
+      `${marker(checkpoint.state)} ${titles[position].padEnd(titleWidth)}  ${checkpoint.name}`,
     );
-  }
-  if (progress.slices.items.length > 0) {
+    if (checkpoint.name !== sliceAnchor || progress.slices.items.length === 0) return;
     lines.push(
-      `slices: ${progress.slices.completed}/${progress.slices.total} done`,
+      `  slices: ${progress.slices.completed}/${progress.slices.total} done`,
     );
     for (const slice of progress.slices.items) {
-      // Byte-identical for a slice that was never reworked.
       const rework = slice.rework
         ? ` (rework ${slice.rework.attempt}/${slice.rework.limit})`
         : "";
-      lines.push(`  ${CHECKPOINT_MARKERS[slice.state]} ${slice.id}${rework}`);
+      lines.push(`    ${marker(slice.state)} ${slice.id}${rework}`);
     }
-  }
+  });
   if (progress.uiEvidence?.applicable) {
     const ui = progress.uiEvidence;
     lines.push(
@@ -267,16 +306,17 @@ export const renderProgress = (progress) => {
     lines.push(`stop reason: ${progress.stopReason}`);
     if (progress.blocker) lines.push(`blocker: ${progress.blocker}`);
   }
-  // A stop has no executable next step. Naming the checkpoint here read as
-  // work the operator could start, directly under a `[!]` row saying they
-  // could not -- the one line in the block that contradicted the rest of it.
-  if (progress.nextWork) {
-    lines.push(
-      progress.stopReason
-        ? "next: none until the blocker is cleared"
-        : `next: ${progress.nextWork.checkpoint}`,
-    );
-  }
+  // A stop has no executable next step. Naming one here read as work the
+  // operator could start, directly under a BLOCKED row saying they could not.
+  const next = progress.nextWork;
+  lines.push(
+    !next
+      ? "Next: none — migration complete"
+      : progress.stopReason
+        ? "Next: none until the blocker is cleared"
+        : `Next: ${next.action ?? labels[next.checkpoint]}` +
+          (next.command ? ` — run ${next.command}` : ""),
+  );
   return `${lines.join("\n")}\n`;
 };
 
@@ -284,7 +324,8 @@ export const renderProgress = (progress) => {
  * What a tool row or terminal shows first, with no agent in between: one status
  * line, `progressChecklist` verbatim, then the loop line. Read from the same
  * projection `renderProgress` reads, so it cannot disagree with the checklist
- * under it; ASCII for the same reason. Empty when there is no progress.
+ * under it. The status line is ASCII; the checklist is UTF-8. Empty when there
+ * is no progress.
  */
 export const renderProgressBlock = (
   { progress, progressChecklist, outcome = null },
