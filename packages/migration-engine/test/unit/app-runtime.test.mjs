@@ -67,6 +67,7 @@ const SERVER = (port, routes, marker) => `
 import { appendFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 appendFileSync("starts.log", process.pid + "\\n");
+console.log("fixture starting");
 writeFileSync("env.json", JSON.stringify(process.env));
 writeFileSync("argv.json", JSON.stringify(process.argv.slice(2)));
 const routes = ${JSON.stringify(routes)};
@@ -152,6 +153,12 @@ const starts = async (project) =>
 
 const NPM_START = { manager: "npm", script: "dev" };
 
+/** Empties a role's start log, so the next start alone decides what it holds. */
+const logOf = (space, role) => {
+  const file = path.join(space.targetRoot, ".artifact-migration-tools/app-runtime", `${role}.log`);
+  return { clear: () => rm(file, { force: true }), size: async () => (await readFile(file).catch(() => "")).length };
+};
+
 test("an application already running in its project is reused, never started again", async () => {
   const space = await twoApps({});
   await launch(space.legacy, space.port);
@@ -172,6 +179,7 @@ test("a stopped application starts through its authorized script, once, and stop
   assert.equal(row(first, "LEGACY").state, "AUTH_REQUIRED");
   assert.equal(row(first, "LEGACY").started, true);
   assert.match(row(first, "LEGACY").log, /^\.artifact-migration-tools\/app-runtime\/LEGACY\.log$/);
+  assert.ok(await logOf(space, "LEGACY").size() > 0, "the started script's output reaches its log");
 
   const second = await space.runAppRuntime("ensure");
   assert.equal(row(second, "LEGACY").reused, true);
@@ -337,6 +345,14 @@ test("a startup that never becomes ready is timed out and killed; a failing one 
   const failed = await failing.runAppRuntime("ensure");
   assert.equal(row(failed, "LEGACY").failure, "STARTUP_FAILED");
   assert.match(row(failed, "LEGACY").reason, /exited \(3\)/);
+
+  // win32 runs the shell under a node relay: the exit code and the output still come through.
+  const log = logOf(failing, "LEGACY");
+  await log.clear();
+  const relayed = await failing.runAppRuntime("ensure", { system: { platform: "win32" } });
+  assert.equal(row(relayed, "LEGACY").failure, "STARTUP_FAILED");
+  assert.match(row(relayed, "LEGACY").reason, /exited \(3\)/);
+  assert.ok(await log.size() > 0, "the failed start's output reaches its log");
 });
 
 test("concurrent ensures start one process", async () => {
@@ -603,7 +619,7 @@ test("an argv command starts only under operator-local, with no shell outside Wi
     TARGET: application("../target-app", space.sibling),
   });
   await space.write({ version: 1, namespace: OWN_NAMESPACE, applications: apps(command) });
-  assert.match((await space.runAppRuntime("ensure")).reason, /start must be exactly/);
+  assert.match((await space.runAppRuntime("ensure")).reason, /start must be exactly .*under trust "operator-local" only, \{command/);
 
   for (const start of [{ command: [] }, { command: ["node", "a & b"] }, { command: ["node", 'a"b'] }, { command: ["node", "%PATH%"] }, { command: ["node", ""] }, { command: "node server.mjs" }, { ...command, manager: "npm" }]) {
     await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps(start) });
@@ -615,9 +631,12 @@ test("an argv command starts only under operator-local, with no shell outside Wi
 
   await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps(command) });
   // Windows package managers are .cmd shims, so win32 runs the quoted line through a shell; /bin/sh reads that quoting as cmd.exe does.
+  const log = logOf(space, "LEGACY");
   for (const platform of [process.platform, "win32"]) {
+    await log.clear();
     const report = await space.runAppRuntime("ensure", { system: { platform } });
     assert.equal(row(report, "LEGACY").started, true, platform);
+    assert.ok(await log.size() > 0, `${platform}: the started command's output reaches its log`);
     assert.deepEqual(JSON.parse(await readFile(path.join(space.legacy, "argv.json"), "utf8")), ["--name=My App"], platform);
     assert.equal((await space.runAppRuntime("stop")).applications.find((item) => item.role === "LEGACY").stopped, true);
     await until(() => refused(space.port), "the owned server to stop");

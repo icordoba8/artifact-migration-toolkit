@@ -1331,7 +1331,7 @@ this engine in the same namespace.
 
 | State | Meaning | Do |
 | --- | --- | --- |
-| `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. |
+| `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. A `"onSignIn": "wait-for-operator"` row whose page lands on sign-in follows **Operator sign-in** below. |
 | `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | With `"onSignIn": "wait-for-operator"`, follow **Operator sign-in** below. Otherwise continue with an authorized session if the operator has supplied one, or record the gap as below. Never type or request a credential. |
 | `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
 | `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address. | Report it. Never reuse it, stop it or capture from it. |
@@ -1349,22 +1349,27 @@ browser session runs in this agent's account.`
 
 **Operator sign-in.** The engine probe is always unauthenticated and the
 registered Playwright MCP browser may keep a sign-in across runs, so the skill
-never assumes a fresh or a kept session: it checks the browser first. For each
-row that is `AUTH_REQUIRED` with `"onSignIn": "wait-for-operator"`, in role
-order (`LEGACY`, then `TARGET`), each in its own tab, `browser_navigate` to the
-row's `protectedRoute`. Signed in (not redirected to `signInPath`, no sign-in
-form): say `browser session reused for <ROLE>` and continue, with no wait.
-Otherwise `browser_navigate` that tab to `<origin><signInPath>`. After every
-row is checked, print once per waiting row exactly
+never assumes a fresh or a kept session: it checks the browser first. This
+applies to every row with `"onSignIn": "wait-for-operator"`, with or without a
+`protectedRoute`. A page is on sign-in when its URL path equals the row's
+`signInPath` or its `browser_snapshot` shows a password field; never use
+`browser_evaluate` to tell. Check each such row that is `AUTH_REQUIRED`, in role
+order (`LEGACY`, then `TARGET`), each in its own tab, by `browser_navigate` to
+its `protectedRoute`; check again whenever a `browser_navigate` to such a row's
+origin lands on sign-in, on the page being opened. Not on sign-in: say
+`browser session reused for <ROLE>` and continue, with no wait. On sign-in:
+`browser_navigate` that tab to `<origin><signInPath>`. After every row is
+checked, print once per waiting row exactly
 
 `Waiting for your login at <origin><signInPath>. Log in in the open browser window, then reply "continue".`
 
 and end the turn once. There is no timeout. Never type, ask for, read or print a
 credential or cookie, and never use `browser_evaluate` on a signed-in page. On
-`continue`, `browser_navigate` each waiting tab to its `protectedRoute` once.
-Signed in: continue the same checkpoint. Still on sign-in: record the BLOCKED
-runtime gap below with the reason `operator sign-in not completed`; there is no
-second wait. With `"onSignIn": "record-gap"`, the default, nothing changes. Whether
+`continue`, `browser_navigate` each waiting tab once back to the page it was
+opening (an `AUTH_REQUIRED` row's `protectedRoute`). Signed in: continue the same
+checkpoint. Still on sign-in: record the BLOCKED runtime gap below with the
+reason `operator sign-in not completed`. A row waits at most once per run: a
+later landing on sign-in records that gap, with no second wait. With `"onSignIn": "record-gap"`, the default, nothing changes. Whether
 the browser keeps a sign-in across runs is the operator's browser configuration
 (for example a `--user-data-dir` registration described under captures), never
 the toolkit's.
@@ -1478,7 +1483,7 @@ host, not a port) and no stored value for its exact origin, or whose cookies
 have all expired; the browser reaching the route signed in is the real check,
 and a sign-in redirect is `CAPTURE_SESSION_EXPIRED`). The registered Playwright
 MCP may keep a sign-in across runs (observed without `--user-data-dir`), so the
-skill never assumes a fresh or a kept session and always checks the browser; a
+browser is checked as in **Operator sign-in**; a
 private `--user-data-dir` outside the repository is trusted local configuration
 the operator owns, never a toolkit setting. Neither that profile nor a session file isolates credentials from an
 agent that can read the user's files; this skill states no such guarantee. Every control the

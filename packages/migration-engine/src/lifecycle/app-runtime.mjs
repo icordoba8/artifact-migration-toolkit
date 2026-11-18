@@ -336,9 +336,7 @@ const parseApplication = async (role, value, targetRoot, trust) => {
     const argv = local && manager === undefined && script === undefined && Array.isArray(command) && command.length > 0 &&
       command.every((word) => typeof word === "string" && COMMAND_ARGUMENT.test(word));
     if (!(packageScript || argv) || Object.keys(extra).length > 0) {
-      throw new Error(local
-        ? `${label}.start must be exactly {manager: npm|pnpm|yarn, script: <package script name>} or {command: [<argument>...]} with no " & | < > ^ % ! or line break.`
-        : `${label}.start must be exactly {manager: npm|pnpm|yarn, script: <package script name>}.`);
+      throw new Error(`${label}.start must be exactly {manager: npm|pnpm|yarn, script: <package script name>}, or, under trust "operator-local" only, {command: [<argument>...]} with no " & | < > ^ % ! or line break.`);
     }
   }
   const startTimeoutMs = value.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
@@ -454,15 +452,23 @@ const untilSettled = async (app, system, exited) => {
   }
 };
 
+// The line arrives as a JSON argument, never as source. Exit code and signal pass through, so a failed start stays one.
+const WIN32_RELAY = "const c=require('node:child_process').spawn(JSON.parse(process.argv[1]),{shell:true,stdio:'inherit',windowsHide:true});" +
+  "c.on('exit',(code,signal)=>signal?process.kill(process.pid,signal):process.exit(code));c.on('error',()=>process.exit(1));";
+
 /**
  * How a start runs. A package script goes through a shell, as it always has. An
  * argv command runs without one, except on win32, where package managers are
  * `.cmd` shims only cmd.exe resolves; its arguments carry no character cmd.exe reads.
+ * On win32 the shell runs under a detached node relay: a detached cmd.exe has no
+ * console, so the console program it runs gets a new one and writes there instead
+ * of the log. The relay holds the log and its shell, an ordinary child, inherits it.
  */
 const startSpawn = (start, platform) => {
-  if (!start.command) return { file: `${start.manager} run ${start.script}`, args: [], shell: true };
-  if (platform !== "win32") return { file: start.command[0], args: start.command.slice(1), shell: false };
-  return { file: start.command.map((word) => (/\s/.test(word) ? `"${word}"` : word)).join(" "), args: [], shell: true };
+  const line = start.command ? start.command.map((word) => (/\s/.test(word) ? `"${word}"` : word)).join(" ") : `${start.manager} run ${start.script}`;
+  if (platform === "win32") return { file: process.execPath, args: ["-e", WIN32_RELAY, JSON.stringify(line)], shell: false };
+  if (!start.command) return { file: line, args: [], shell: true };
+  return { file: start.command[0], args: start.command.slice(1), shell: false };
 };
 
 const startApplication = async (targetRoot, app, system) => {
@@ -476,7 +482,6 @@ const startApplication = async (targetRoot, app, system) => {
   await atomicWrite(targetRoot, path.join(directory, ".gitignore"), "*\n");
   const logFile = path.join(directory, `${app.role}.log`);
   const log = await open(await assertSecurePath(targetRoot, logFile), "a", 0o600);
-  // A shell is unavoidable on win32, where package managers are `.cmd` shims.
   // A script's two words were checked against an allowlist and the project's own manifest.
   const { file, args, shell } = startSpawn(app.start, system.platform);
   const child = spawn(file, args, {
