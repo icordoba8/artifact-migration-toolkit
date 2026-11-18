@@ -7,7 +7,9 @@
  * or a tool argument: it may only name a package script of the project it
  * describes, and a copy tracked by Git is refused, so a clone cannot grant a
  * startup. Probes send no credential, and nothing a response or a process said
- * is returned: no body, cookie, query string or command line.
+ * is returned: no body, cookie, query string or command line. `trust:
+ * "operator-local"` is the operator's waiver of the ownership half of that
+ * authority only (`configAuthority`), for a machine that is theirs alone.
  *
  * Identity takes two proofs because either alone was wrong on a real consumer: a
  * same-named production copy passes the HTTP marker, and only the process
@@ -46,7 +48,11 @@ export const APP_RUNTIME_ACTIONS = Object.freeze(["check", "ensure", "stop"]);
 // BACKEND first: the two front ends call it while they render.
 const ROLES = ["BACKEND", "LEGACY", "TARGET"];
 const REQUIRED_ROLES = ["LEGACY", "TARGET"];
-const APPLICATION_KEYS = new Set(["origin", "project", "identity", "protectedRoute", "start", "startTimeoutMs"]);
+const APPLICATION_KEYS = new Set(["origin", "project", "identity", "protectedRoute", "signInPath", "onSignIn", "start", "startTimeoutMs"]);
+const TRUSTS = ["operator-isolated", "operator-local"];
+const ON_SIGN_IN = ["record-gap", "wait-for-operator"];
+// cmd.exe would read these; refusing them everywhere keeps one config valid on every host and Windows quoting inert.
+const COMMAND_ARGUMENT = /^[^"&|<>^%!\r\n]+$/;
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 // A module name cannot contain `_`, so this lock can never be a module's.
 const LOCK_NAME = "_app-runtime";
@@ -195,6 +201,7 @@ const hostNamespace = () =>
 
 const hostSystem = {
   namespace: hostNamespace(),
+  platform: process.platform,
   // shortcut: an uninspectable host answers null and nothing it serves can be proven; add a reader per platform when one matters.
   listeners: (port) => (process.platform === "win32" ? windowsListeners(port) : posixListeners(port)).catch(() => null),
   processStart,
@@ -297,7 +304,7 @@ const route = (value, label) => {
   return value;
 };
 
-const parseApplication = async (role, value, targetRoot) => {
+const parseApplication = async (role, value, targetRoot, trust) => {
   assertPlainObject(value, `applications.${role}`);
   const label = `applications.${role}`;
   const unknown = Object.keys(value).filter((key) => !APPLICATION_KEYS.has(key));
@@ -314,17 +321,31 @@ const parseApplication = async (role, value, targetRoot) => {
   }
   route(value.identity.route, `${label}.identity.route`);
   if (value.protectedRoute !== undefined) route(value.protectedRoute, `${label}.protectedRoute`);
+  if (value.signInPath !== undefined) route(value.signInPath, `${label}.signInPath`);
+  const onSignIn = value.onSignIn ?? "record-gap";
+  if (!ON_SIGN_IN.includes(onSignIn)) throw new Error(`${label}.onSignIn must be ${ON_SIGN_IN.join(" or ")}.`);
+  if (onSignIn === "wait-for-operator") {
+    // A browser signed in as this agent's account is exactly what operator-isolated keeps away from the agent.
+    if (trust !== "operator-local") throw new Error(`${label}.onSignIn "wait-for-operator" is allowed only under trust "operator-local".`);
+    if (value.signInPath === undefined) throw new Error(`${label}.onSignIn "wait-for-operator" needs signInPath.`);
+  }
   if (value.start !== undefined) {
-    const { manager, script, ...extra } = isPlainObject(value.start) ? value.start : { manager: null };
-    if (!PACKAGE_MANAGERS.has(manager) || typeof script !== "string" || !SCRIPT_NAME.test(script) || Object.keys(extra).length > 0) {
-      throw new Error(`${label}.start must be exactly {manager: npm|pnpm|yarn, script: <package script name>}.`);
+    const local = trust === "operator-local";
+    const { manager, script, command, ...extra } = isPlainObject(value.start) ? value.start : { manager: null };
+    const packageScript = PACKAGE_MANAGERS.has(manager) && typeof script === "string" && SCRIPT_NAME.test(script) && command === undefined;
+    const argv = local && manager === undefined && script === undefined && Array.isArray(command) && command.length > 0 &&
+      command.every((word) => typeof word === "string" && COMMAND_ARGUMENT.test(word));
+    if (!(packageScript || argv) || Object.keys(extra).length > 0) {
+      throw new Error(local
+        ? `${label}.start must be exactly {manager: npm|pnpm|yarn, script: <package script name>} or {command: [<argument>...]} with no " & | < > ^ % ! or line break.`
+        : `${label}.start must be exactly {manager: npm|pnpm|yarn, script: <package script name>}.`);
     }
   }
   const startTimeoutMs = value.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
   if (!Number.isInteger(startTimeoutMs) || startTimeoutMs < 1 || startTimeoutMs > MAX_START_TIMEOUT_MS) {
     throw new Error(`${label}.startTimeoutMs must be 1..${MAX_START_TIMEOUT_MS}.`);
   }
-  return { ...value, role, project, startTimeoutMs };
+  return { ...value, role, project, startTimeoutMs, onSignIn, trust };
 };
 
 /** The trust boundary. Anything short of a local, well-formed file is a refusal with a reason, never a default. */
@@ -345,6 +366,8 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
     if (document.version !== 1 || typeof document.namespace !== "string" || !isPlainObject(document.applications)) {
       throw new Error("The configuration must be {version: 1, namespace: win32|wsl|linux|darwin, applications}.");
     }
+    const trust = document.trust ?? "operator-isolated";
+    if (!TRUSTS.includes(trust)) throw new Error(`trust must be ${TRUSTS.join(" or ")}.`);
     const unknown = Object.keys(document.applications).filter((role) => !ROLES.includes(role));
     const missing = REQUIRED_ROLES.filter((role) => !document.applications[role]);
     if (unknown.length > 0 || missing.length > 0) {
@@ -352,14 +375,15 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
     }
     const applications = [];
     for (const role of ROLES.filter((name) => document.applications[name])) {
-      applications.push(await parseApplication(role, document.applications[role], targetRoot));
+      applications.push(await parseApplication(role, document.applications[role], targetRoot, trust));
     }
     const broker = document.sessionBroker;
     if (broker !== undefined && (!isPlainObject(broker) || Object.keys(broker).length !== 2 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(broker.url) ||
         typeof broker.tokenFile !== "string" || !path.isAbsolute(broker.tokenFile))) {
       throw new Error("sessionBroker must be exactly {url: http://127.0.0.1:<port>, tokenFile: <absolute path to the client token>}.");
     }
-    const refusal = applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
+    // operator-local: the operator accepts that this account, the agent's, may author starts. Only ownership is waived.
+    const refusal = trust !== "operator-local" && applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
     return {
       namespace: document.namespace,
       sessionBroker: document.sessionBroker,
@@ -430,19 +454,33 @@ const untilSettled = async (app, system, exited) => {
   }
 };
 
+/**
+ * How a start runs. A package script goes through a shell, as it always has. An
+ * argv command runs without one, except on win32, where package managers are
+ * `.cmd` shims only cmd.exe resolves; its arguments carry no character cmd.exe reads.
+ */
+const startSpawn = (start, platform) => {
+  if (!start.command) return { file: `${start.manager} run ${start.script}`, args: [], shell: true };
+  if (platform !== "win32") return { file: start.command[0], args: start.command.slice(1), shell: false };
+  return { file: start.command.map((word) => (/\s/.test(word) ? `"${word}"` : word)).join(" "), args: [], shell: true };
+};
+
 const startApplication = async (targetRoot, app, system) => {
-  const manifest = await readJson(path.join(app.project, "package.json"), "Project manifest").catch(() => null);
-  if (!Object.hasOwn(manifest?.scripts ?? {}, app.start.script)) {
-    return { state: "CONFIGURATION_MISSING", reason: `'${app.project}' has no package script '${app.start.script}'.` };
+  if (!app.start.command) {
+    const manifest = await readJson(path.join(app.project, "package.json"), "Project manifest").catch(() => null);
+    if (!Object.hasOwn(manifest?.scripts ?? {}, app.start.script)) {
+      return { state: "CONFIGURATION_MISSING", reason: `'${app.project}' has no package script '${app.start.script}'.` };
+    }
   }
   const directory = path.join(targetRoot, OWNED_DIRECTORY);
   await atomicWrite(targetRoot, path.join(directory, ".gitignore"), "*\n");
   const logFile = path.join(directory, `${app.role}.log`);
   const log = await open(await assertSecurePath(targetRoot, logFile), "a", 0o600);
   // A shell is unavoidable on win32, where package managers are `.cmd` shims.
-  // Both words were checked against an allowlist and the project's own manifest.
-  const child = spawn(`${app.start.manager} run ${app.start.script}`, [], {
-    cwd: app.project, env: childEnvironment(), shell: true, detached: true, windowsHide: true, stdio: ["ignore", log.fd, log.fd],
+  // A script's two words were checked against an allowlist and the project's own manifest.
+  const { file, args, shell } = startSpawn(app.start, system.platform);
+  const child = spawn(file, args, {
+    cwd: app.project, env: childEnvironment(), shell, detached: true, windowsHide: true, stdio: ["ignore", log.fd, log.fd],
   });
   const exited = new Promise((resolve) => {
     child.once("exit", (code, signal) => resolve({ code, signal }));
@@ -451,7 +489,7 @@ const startApplication = async (targetRoot, app, system) => {
   await log.close();
   child.unref();
   const logPath = path.relative(targetRoot, logFile).replaceAll("\\", "/");
-  if (!child.pid) return { state: "RUNTIME_DOWN", reason: `'${app.start.manager}' could not be started (${(await exited).error}).`, failure: "STARTUP_FAILED", log: logPath };
+  if (!child.pid) return { state: "RUNTIME_DOWN", reason: `'${app.start.manager ?? app.start.command[0]}' could not be started (${(await exited).error}).`, failure: "STARTUP_FAILED", log: logPath };
   const owned = { version: 1, role: app.role, pid: child.pid, namespace: system.namespace, processStart: await system.processStart(child.pid), origin: app.origin };
   await atomicWrite(targetRoot, ownedFile(targetRoot, app.role), `${JSON.stringify(owned, null, 2)}\n`);
   const row = await untilSettled(app, system, exited);
@@ -478,7 +516,8 @@ const ensureApplication = async (targetRoot, app, system) => {
 };
 
 const publicRow = ({ occupied, ...row }, app) => ({
-  role: app.role, origin: app.origin, startAuthorized: Boolean(app.start), reused: false, started: false, ...row,
+  role: app.role, origin: app.origin, trust: app.trust, onSignIn: app.onSignIn, signInPath: app.signInPath,
+  startAuthorized: Boolean(app.start), reused: false, started: false, ...row,
 });
 
 /** `check` and `ensure` over the configured applications, `stop` over the toolkit's own. */

@@ -155,7 +155,10 @@ Add the broker to the target's `.artifact-migration-tools/runtime-apps.json`:
 ```
 
 The engine starts an application only from a `runtime-apps.json` that another
-account owns and this one cannot write. If it should start them, lock the file
+account owns and this one cannot write, unless the file says
+`"trust": "operator-local"`, which waives that check on a machine that is the
+operator's alone and gives this boundary up: the agent's account then authors
+starts and may hold a signed-in browser. If it should start them, lock the file
 from the elevated PowerShell:
 
 ```powershell

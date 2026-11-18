@@ -68,6 +68,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 appendFileSync("starts.log", process.pid + "\\n");
 writeFileSync("env.json", JSON.stringify(process.env));
+writeFileSync("argv.json", JSON.stringify(process.argv.slice(2)));
 const routes = ${JSON.stringify(routes)};
 http.createServer((request, response) => {
   if (request.url === "/public") { response.writeHead(200, { "set-cookie": "sid=${CANARY}" }); response.end("<title>${marker}</title> ${CANARY}"); return; }
@@ -550,6 +551,103 @@ test("a file another account owns and this one cannot write authorizes the start
   } finally {
     await sudo("rm", "-f", file);
   }
+});
+
+test("operator-local starts from a file this account owns; operator-isolated still refuses it", async () => {
+  const space = await twoApps({}, { start: NPM_START });
+  await launch(space.target, space.sibling);
+  const real = (action) => runReal({ registryPath: space.registryPath, moduleName: "orders", action });
+  const apps = (extra = {}) => ({
+    LEGACY: application("../legacy-app", space.port, { protectedRoute: "/private", start: NPM_START, ...extra }),
+    TARGET: application("../target-app", space.sibling),
+  });
+
+  for (const trust of [undefined, "operator-isolated"]) {
+    await space.write({ version: 1, namespace: OWN_NAMESPACE, trust, applications: apps() });
+    const isolated = await real("ensure");
+    assert.equal(row(isolated, "LEGACY").startAuthorized, false, String(trust));
+    assert.match(row(isolated, "LEGACY").reason, /owned by the account this engine runs as/);
+    assert.equal(row(isolated, "LEGACY").trust, "operator-isolated");
+    assert.equal(row(isolated, "LEGACY").onSignIn, "record-gap");
+    assert.equal(await starts(space.legacy), 0);
+  }
+
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps({ signInPath: "/login", onSignIn: "wait-for-operator" }) });
+  const local = await real("ensure");
+  assert.equal(row(local, "LEGACY").started, true);
+  assert.equal(row(local, "LEGACY").state, "AUTH_REQUIRED");
+  assert.equal(row(local, "LEGACY").trust, "operator-local");
+  assert.equal(row(local, "LEGACY").onSignIn, "wait-for-operator");
+  assert.equal(row(local, "LEGACY").signInPath, "/login");
+  assert.equal(row(local, "TARGET").onSignIn, "record-gap");
+  assert.equal(row(local, "TARGET").signInPath, undefined);
+  // Reuse is unchanged: a second ensure starts nothing.
+  assert.equal(row(await real("ensure"), "LEGACY").reused, true);
+  assert.equal(await starts(space.legacy), 1);
+  await real("stop");
+  await until(() => refused(space.port), "the owned server to stop");
+
+  // Everything but ownership still binds: a tracked copy is refused.
+  await execFileAsync("git", ["init", "-q"], { cwd: space.targetRoot });
+  await execFileAsync("git", ["add", "-f", APP_RUNTIME_CONFIG], { cwd: space.targetRoot });
+  assert.match((await real("ensure")).reason, /tracked by Git/);
+  assert.equal(await starts(space.legacy), 1);
+});
+
+test("an argv command starts only under operator-local, with no shell outside Windows", async () => {
+  const space = await twoApps({});
+  await launch(space.target, space.sibling);
+  const command = { command: [process.execPath, "server.mjs", "--name=My App"] };
+  const apps = (start) => ({
+    LEGACY: application("../legacy-app", space.port, { protectedRoute: "/private", start }),
+    TARGET: application("../target-app", space.sibling),
+  });
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, applications: apps(command) });
+  assert.match((await space.runAppRuntime("ensure")).reason, /start must be exactly/);
+
+  for (const start of [{ command: [] }, { command: ["node", "a & b"] }, { command: ["node", 'a"b'] }, { command: ["node", "%PATH%"] }, { command: ["node", ""] }, { command: "node server.mjs" }, { ...command, manager: "npm" }]) {
+    await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps(start) });
+    const report = await space.runAppRuntime("ensure");
+    assert.equal(report.state, "CONFIGURATION_MISSING", JSON.stringify(start));
+    assert.match(report.reason, /start must be/);
+  }
+  assert.equal(await starts(space.legacy), 0);
+
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps(command) });
+  // Windows package managers are .cmd shims, so win32 runs the quoted line through a shell; /bin/sh reads that quoting as cmd.exe does.
+  for (const platform of [process.platform, "win32"]) {
+    const report = await space.runAppRuntime("ensure", { system: { platform } });
+    assert.equal(row(report, "LEGACY").started, true, platform);
+    assert.deepEqual(JSON.parse(await readFile(path.join(space.legacy, "argv.json"), "utf8")), ["--name=My App"], platform);
+    assert.equal((await space.runAppRuntime("stop")).applications.find((item) => item.role === "LEGACY").stopped, true);
+    await until(() => refused(space.port), "the owned server to stop");
+  }
+  assert.equal(await starts(space.legacy), 2);
+});
+
+test("signInPath and onSignIn are exact, and waiting for the operator needs operator-local", async () => {
+  const space = await twoApps({});
+  const apps = (extra) => ({ LEGACY: application("../legacy-app", space.port, extra), TARGET: application("../target-app", space.sibling) });
+  const refusals = [
+    [undefined, { signInPath: "login" }, /signInPath must be an absolute path/],
+    [undefined, { signInPath: "/login?next=/" }, /signInPath must be an absolute path/],
+    [undefined, { signInPath: "//evil.example/login" }, /signInPath must be an absolute path/],
+    [undefined, { onSignIn: "wait" }, /onSignIn must be/],
+    ["operator-local", { onSignIn: "wait-for-operator" }, /needs signInPath/],
+    [undefined, { signInPath: "/login", onSignIn: "wait-for-operator" }, /only under trust "operator-local"/],
+    ["operator-isolated", { signInPath: "/login", onSignIn: "wait-for-operator" }, /only under trust "operator-local"/],
+    ["local", {}, /trust must be/],
+  ];
+  for (const [trust, extra, reason] of refusals) {
+    await space.write({ version: 1, namespace: OWN_NAMESPACE, trust, applications: apps(extra) });
+    const report = await space.runAppRuntime("check");
+    assert.equal(report.state, "CONFIGURATION_MISSING", String(reason));
+    assert.match(report.reason, reason);
+  }
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, applications: apps({ signInPath: "/login", onSignIn: "record-gap" }) });
+  const report = await space.runAppRuntime("check");
+  assert.equal(row(report, "LEGACY").signInPath, "/login");
+  assert.equal(row(report, "LEGACY").onSignIn, "record-gap");
 });
 
 test("the session broker is asked with the client token, and a loose spelling of it is refused", async () => {
