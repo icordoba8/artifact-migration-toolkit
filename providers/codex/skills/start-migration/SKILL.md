@@ -1377,8 +1377,10 @@ the browser keeps a sign-in across runs is the operator's browser configuration
 (for example a `--user-data-dir` registration described under captures), never
 the toolkit's.
 
-The authority is `.artifact-migration-tools/runtime-apps.json` in the target
-root, written by the operator, kept out of Git (a tracked copy is refused) and
+The authority is `.artifact-migration-tools/runtime-apps.json` in the consumer
+root, the folder holding the installer receipts (the nearest one at or above
+the target, inside its Git work tree; the target itself when none is),
+written by the operator, kept out of Git (a tracked copy is refused) and
 never taken from a migration record, an application response or a tool argument.
 A `start` is honored only when that file is owned by another account and this
 engine's account cannot write it: a file you could have written grants nothing.
@@ -1391,13 +1393,13 @@ this file, least of all its `trust`:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "namespace": "win32 | wsl | linux | darwin",
   "trust": "operator-isolated | operator-local",
   "applications": {
     "LEGACY": {
       "origin": "http://localhost:<port>",
-      "project": "<directory relative to the target root>",
+      "project": "<directory relative to the consumer root>",
       "identity": { "route": "<public route>", "includes": "<text only this application serves>" },
       "protectedRoute": "<route that needs a session>",
       "signInPath": "<sign-in route>",
@@ -1418,7 +1420,16 @@ command line. Under `operator-local` only, `start` may instead be
 `{"command": ["<program>", "<argument>", ...]}`, run in the project directory
 without a shell (on Windows through `cmd.exe`, so `.cmd` shims resolve); no
 argument may contain `" & | < > ^ % !` or a line break. The started process inherits a minimal environment, with no ambient
-token, and writes to `.artifact-migration-tools/app-runtime/`.
+token, and writes to `.artifact-migration-tools/app-runtime/` beside that file.
+A version 2 file serves one target, the one its `TARGET` project lives in.
+
+The target root's own `.artifact-migration-tools/runtime-apps.json` (version 1,
+projects relative to the target) is the deprecated location: it is still read,
+and the report's `reason` names both paths. A copy in both places is refused,
+naming both, and nothing is probed or started. Relay the move to the operator,
+never do it: `stop`; copy the file to the consumer root with `"version": 2` and
+every `project` relative to the consumer root; reapply its ownership; move the
+target copy aside; `check`.
 
 Capture protocol, per required UI behavior:
 

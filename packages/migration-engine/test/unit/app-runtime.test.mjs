@@ -101,6 +101,8 @@ const launch = async (directory, port) => {
 const workspace = async ({ applications, namespace = OWN_NAMESPACE, moduleName = "orders" }) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "amt-app-runtime-")));
   scratch.push(root);
+  // The configuration is looked for inside the target's Git work tree only.
+  await execFileAsync("git", ["init", "-q"], { cwd: root });
   const targetRoot = path.join(root, "target");
   const registryPath = path.join(targetRoot, ".agents/knowledge/migrations/registry.json");
   await mkdir(path.dirname(registryPath), { recursive: true });
@@ -707,4 +709,155 @@ test("the engine names no consumer, and the CLI exposes exactly the three action
   const space = await workspace({});
   await assert.rejects(space.runAppRuntime("restart"), /Unknown application runtime action/);
   assert.equal((await space.runAppRuntime("check")).namespace, OWN_NAMESPACE);
+});
+
+/** An installed consumer: its Git top level holds a receipt, and the target, with its TARGET application, is one directory down. */
+const installed = async () => {
+  const space = await twoApps({}, { start: NPM_START });
+  await rm(path.join(space.targetRoot, ".artifact-migration-tools"), { recursive: true });
+  await writeProject(space.targetRoot, space.sibling);
+  await mkdir(path.join(space.root, ".artifact-migration-tools"));
+  await writeFile(path.join(space.root, ".artifact-migration-tools/claude.json"), "{}");
+  const home = path.join(space.root, APP_RUNTIME_CONFIG);
+  const old = path.join(space.targetRoot, APP_RUNTIME_CONFIG);
+  const v1 = { version: 1, namespace: OWN_NAMESPACE, applications: { LEGACY: application("../legacy-app", space.port, { start: NPM_START }), TARGET: application(".", space.sibling) } };
+  const v2 = (target = "target") => ({ version: 2, namespace: OWN_NAMESPACE, applications: { LEGACY: application("legacy-app", space.port, { start: NPM_START }), TARGET: application(target, space.sibling) } });
+  const writeHome = (document) => writeFile(home, JSON.stringify(document));
+  const homeFolder = () => readdir(path.join(space.root, ".artifact-migration-tools"));
+  return { ...space, home, old, v1, v2, writeHome, homeFolder };
+};
+
+const ownedAt = (base, role) => path.join(base, ".artifact-migration-tools/app-runtime", `${role}.json`);
+
+test("an installed consumer keeps its configuration and its started applications in the consumer root", async () => {
+  const space = await installed();
+  await space.writeHome(space.v2());
+  await launch(space.targetRoot, space.sibling);
+  const report = await space.runAppRuntime("ensure");
+  assert.equal(row(report, "LEGACY").started, true);
+  assert.equal(row(report, "LEGACY").log, ".artifact-migration-tools/app-runtime/LEGACY.log");
+  assert.equal(report.reason, undefined, "the current location carries no notice");
+  assert.ok((await lstat(ownedAt(space.root, "LEGACY"))).isFile());
+  assert.ok((await readFile(path.join(space.root, ".artifact-migration-tools/app-runtime/LEGACY.log"))).length > 0);
+  await assert.rejects(lstat(path.join(space.targetRoot, ".artifact-migration-tools")), { code: "ENOENT" });
+  assert.equal(row(await space.runAppRuntime("stop"), "LEGACY").stopped, true);
+  await until(() => refused(space.port), "the owned server to stop");
+  await assert.rejects(lstat(ownedAt(space.root, "LEGACY")), { code: "ENOENT" });
+});
+
+test("the deprecated target-root file still works, says so once, and writes nothing in the consumer root", async () => {
+  const space = await installed();
+  await space.write(space.v1);
+  await launch(space.targetRoot, space.sibling);
+  const checked = await space.runAppRuntime("check");
+  assert.equal(row(checked, "LEGACY").state, "RUNTIME_DOWN");
+  assert.ok(checked.reason.includes(space.old) && checked.reason.includes(space.home), checked.reason);
+  assert.match(checked.reason, /deprecated target-root location; move it to .* as version 2/);
+  const started = await space.runAppRuntime("ensure");
+  assert.equal(row(started, "LEGACY").started, true);
+  assert.ok((await lstat(ownedAt(space.targetRoot, "LEGACY"))).isFile());
+  assert.deepEqual(await space.homeFolder(), ["claude.json"], "nothing is written in the consumer root");
+  await space.runAppRuntime("stop");
+  await until(() => refused(space.port), "the owned server to stop");
+});
+
+test("a configuration in both places is refused, naming both, and nothing is probed or started", async () => {
+  const space = await installed();
+  await space.writeHome(space.v2());
+  await space.write(space.v1);
+  const untouched = { listeners: async () => assert.fail("probed"), killTree: async () => assert.fail("killed") };
+  for (const action of ["check", "ensure"]) {
+    const report = await space.runAppRuntime(action, { system: untouched });
+    assert.equal(report.state, "CONFIGURATION_MISSING", action);
+    assert.equal(report.configFile, APP_RUNTIME_CONFIG);
+    assert.ok(report.reason.includes(space.home) && report.reason.includes(space.old), report.reason);
+  }
+  assert.equal(await starts(space.legacy), 0);
+  assert.deepEqual((await space.runAppRuntime("stop")).applications.map((item) => item.stopped), [false, false, false], "stop is never blocked by it");
+});
+
+test("each location reads only its own version, so a file moved without its projects never starts", async () => {
+  const space = await installed();
+  await space.writeHome(space.v1);
+  assert.match((await space.runAppRuntime("ensure")).reason, /is version 1, whose projects are relative to the target root/);
+  await rm(space.home);
+  await space.write({ ...space.v1, version: 2 });
+  assert.match((await space.runAppRuntime("ensure")).reason, /is version 2, which belongs at the consumer root/);
+  assert.equal(await starts(space.legacy), 0);
+  // Without a receipt the target is the consumer root, and both versions are read there.
+  await rm(path.join(space.root, ".artifact-migration-tools/claude.json"));
+  for (const version of [1, 2]) {
+    await space.write({ ...space.v1, version });
+    const report = await space.runAppRuntime("check");
+    assert.equal(row(report, "LEGACY").state, "RUNTIME_DOWN", String(version));
+    assert.equal(report.reason, undefined);
+  }
+});
+
+test("a consumer-root file serves only the target its TARGET application lives in", async () => {
+  const space = await installed();
+  await space.writeHome(space.v2("target-app"));
+  for (const action of ["check", "ensure", "stop"]) {
+    const report = await space.runAppRuntime(action);
+    assert.equal(report.state, "CONFIGURATION_MISSING", action);
+    assert.match(report.reason, /serves the target at .*, not this module's target/);
+    assert.deepEqual(report.applications, []);
+  }
+  assert.equal(await starts(space.legacy), 0);
+});
+
+test("the consumer-root file passes the same local-authority checks", async () => {
+  const space = await installed();
+  await space.writeHome(space.v2());
+  await launch(space.targetRoot, space.sibling);
+  const real = (action) => runReal({ registryPath: space.registryPath, moduleName: "orders", action });
+  assert.match(row(await real("ensure"), "LEGACY").reason, /owned by the account this engine runs as/);
+
+  await execFileAsync("git", ["add", "-f", APP_RUNTIME_CONFIG], { cwd: space.root });
+  assert.match((await space.runAppRuntime("ensure")).reason, /tracked by Git/);
+  await execFileAsync("git", ["rm", "-q", "--cached", APP_RUNTIME_CONFIG], { cwd: space.root });
+
+  const elsewhere = path.join(space.root, "elsewhere");
+  await mkdir(elsewhere);
+  for (const name of await space.homeFolder()) await writeFile(path.join(elsewhere, name), await readFile(path.join(space.root, ".artifact-migration-tools", name)));
+  await rm(path.join(space.root, ".artifact-migration-tools"), { recursive: true });
+  await symlink(elsewhere, path.join(space.root, ".artifact-migration-tools"));
+  assert.match((await space.runAppRuntime("ensure")).reason, /symlink/);
+  assert.equal(await starts(space.legacy), 0);
+});
+
+test("stop ends what the deprecated folder recorded once the file has moved, and nothing it did not start", async () => {
+  const space = await installed();
+  await space.write(space.v1);
+  const target = await launch(space.targetRoot, space.sibling);
+  assert.equal(row(await space.runAppRuntime("ensure"), "LEGACY").started, true);
+  await rm(space.old);
+  await space.writeHome(space.v2());
+  // A record of a process this toolkit did not start: its start time is not this PID's.
+  await mkdir(path.dirname(ownedAt(space.root, "TARGET")), { recursive: true });
+  await writeFile(ownedAt(space.root, "TARGET"), JSON.stringify({ version: 1, role: "TARGET", pid: target.pid, namespace: OWN_NAMESPACE, processStart: "never", origin: "x" }));
+  const stopped = await space.runAppRuntime("stop");
+  assert.equal(row(stopped, "LEGACY").stopped, true);
+  assert.equal(row(stopped, "TARGET").stopped, false);
+  await until(() => refused(space.port), "the owned server to stop");
+  assert.equal(await refused(space.sibling), false, "stop must leave a process it did not start");
+  await assert.rejects(lstat(ownedAt(space.targetRoot, "LEGACY")), { code: "ENOENT" });
+});
+
+test("nothing above the target's Git work tree is read, and no work tree is a refusal", async () => {
+  const space = await installed();
+  await rm(path.join(space.root, ".git"), { recursive: true });
+  await execFileAsync("git", ["init", "-q"], { cwd: space.targetRoot });
+  // Planted above the work tree: a receipt and a file that would start LEGACY.
+  await space.writeHome(space.v2());
+  await space.write(space.v1);
+  const report = await space.runAppRuntime("check");
+  assert.equal(row(report, "LEGACY").state, "RUNTIME_DOWN");
+  assert.equal(report.reason, undefined, "the target is its own consumer root");
+
+  await rm(path.join(space.targetRoot, ".git"), { recursive: true });
+  const outside = await space.runAppRuntime("ensure");
+  assert.equal(outside.state, "CONFIGURATION_MISSING");
+  assert.match(outside.reason, /not in a Git work tree/);
+  assert.equal(await starts(space.legacy), 0);
 });
