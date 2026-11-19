@@ -15,7 +15,7 @@ The exact candidate SHA must have, before any release command runs:
 
 | Check | Requirement |
 | --- | --- |
-| `ci / toolkit (ubuntu-latest)` | **SUCCESS** — required, blocking; succeeds only if every `toolkit shard N/3 (ubuntu-latest)` succeeded |
+| `ci / toolkit (ubuntu-latest)` | **SUCCESS** — required, blocking; succeeds only if every `toolkit shard k/N (ubuntu-latest)` succeeded |
 
 Ubuntu is the only required CI and release platform. Windows CI is **not**
 mandatory and is not part of routine CI: `.github/workflows/ci.yml` has no
@@ -30,7 +30,7 @@ historical failures and the conditions for any future reconsideration.
 the `main` rulesets restrict updates to the owner and block deletion and
 force-push, and require no status check. Nothing in GitHub prevents a red or
 unrun SHA from landing on `main`. The release operator must independently
-confirm that all three `toolkit shard N/3 (ubuntu-latest)` jobs executed and
+confirm that every `toolkit shard k/N (ubuntu-latest)` job executed and
 succeeded, and that `toolkit (ubuntu-latest)` succeeded, on the exact release
 SHA. Local `release:check` cannot query or substitute for that evidence.
 The recommended future ruleset configuration is described in
@@ -60,6 +60,12 @@ script. An unnamed suite is an unrun suite. Adding a suite means adding it to a
 runner in the same change; `P3-2` asserts every named suite exists and is not
 git-ignored, and CI runs all three on Ubuntu.
 
+For local iteration, `pnpm test:fast` runs every suite that needs no real
+provider install, toolkit bootstrap or browser, and `pnpm test:heavy` runs the
+rest; together they are exactly `pnpm test`, which `scripts/check-shards.mjs`
+proves in CI. A new suite goes into its runner script, exactly one tier and
+exactly one `providers:test:k` shard.
+
 The two provider-installation proofs now run in
 `test/provider-installation.test.mjs`: R-W9-a starts the rendered installed MCP
 entry and checks a retained consumer launcher; R-W9-c reports the installed
@@ -80,7 +86,7 @@ that candidate commit.
 
 After the candidate SHA is green on Ubuntu, prepare the release version and
 generated stamps as a new commit, then require CI on that **exact new SHA**:
-all three Ubuntu shards executed and succeeded, and `toolkit (ubuntu-latest)`
+every Ubuntu shard executed and succeeded, and `toolkit (ubuntu-latest)`
 succeeded. The previous commit's checks do not transfer to the version commit,
 so the release and version commits carry no `CI-Validated-Review` trailer.
 For the green release SHA, run `pnpm release:check`, `pnpm release:build`,
