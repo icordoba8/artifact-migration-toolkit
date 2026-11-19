@@ -12,10 +12,17 @@ routine CI and is not required for publication. See *Windows CI status* below.
 ## Development CI
 
 `.github/workflows/ci.yml` runs on every branch push and pull request. The
-`ubuntu` job runs as three parallel shards (`toolkit shard N/3 (ubuntu-latest)`). `providers:test` is split **per test file**
-into `providers:test:1..3` (never within a file); every shard first asserts the
-three lists partition `providers:test` exactly, and shard 3 also runs the engine
-suites. The `toolkit` job, named `toolkit (ubuntu-latest)`, needs every Ubuntu
+`ubuntu` job runs as `N` parallel shards (`toolkit shard k/N (ubuntu-latest)`,
+currently `N` = 4). `N` is written once, as `SHARDS` in the provenance job, and
+the matrix, the shard names and the CI-reuse job list derive from it.
+`providers:test` is split **per test file** into `providers:test:1..N` (never
+within a file), balanced by measured duration. Every shard first runs
+`node scripts/check-shards.mjs N`, which reads the workflow and `package.json`
+and proves that every `providers:test` and `engine:test` file runs exactly once
+across the shards, that `engine:test`, `engine:test:ts`, `rehearse`,
+`rehearse:negative` and `architecture:check` each run in exactly one shard
+(shard 2), and that the local `test:fast` + `test:heavy` tiers run every file
+exactly once. The `toolkit` job, named `toolkit (ubuntu-latest)`, needs every Ubuntu
 shard, runs `if: always()`, and succeeds only when `needs.ubuntu.result` is
 `success` — so it is the one gate result to check (GitHub does not currently
 require it; see *Release preconditions*):
@@ -27,7 +34,7 @@ require it; see *Release preconditions*):
 | Consumer-relative path scan | yes | yes | yes | installed engine path safety |
 | `pnpm providers:test` | yes | yes | yes | providers, release fixtures, installed acceptance |
 | `pnpm rehearse`, `pnpm rehearse:negative` (shard 2) | yes | yes | yes | installed lifecycle replay against the golden trace |
-| `pnpm architecture:check` (shard 3) | yes | yes | yes | module boundaries and source pins |
+| `pnpm architecture:check` (shard 2) | yes | yes | yes | module boundaries and source pins |
 | `pnpm engine:test` | yes | yes | yes | engine and external acceptance |
 | `pnpm engine:test:ts` | yes | yes | yes | TypeScript filesystem/recovery |
 | `pnpm release:check` | no | no | after green CI | clean SHA, version, immutable content identity |
@@ -142,7 +149,7 @@ separate. Add a helper only when a second real caller needs the same mechanism.
 
 The candidate and final version commits each need, on their **own exact SHA**:
 
-- `ci / toolkit shard 1/3, 2/3, 3/3 (ubuntu-latest)` = **executed and
+- `ci / toolkit shard 1/N … N/N (ubuntu-latest)` = every shard **executed and
   SUCCESS** on that SHA, and `ci / toolkit (ubuntu-latest)` = **SUCCESS**.
   Required. A red or missing Ubuntu result means the SHA is not release-ready,
   with no exceptions. Release and version commits carry no
@@ -158,7 +165,7 @@ rulesets (`main-owner-only`, `main-safety`) restrict updates to the owner and
 block deletion and non-fast-forward pushes; neither requires a status check,
 and `main` has no classic branch protection. No workflow or local script
 verifies remote check status. The release operator must independently read
-all three Ubuntu shard conclusions and the gate for the exact release SHA
+every Ubuntu shard conclusion and the gate for the exact release SHA
 before running `release:check`.
 
 **Recommended future configuration (not in effect).** Add a
