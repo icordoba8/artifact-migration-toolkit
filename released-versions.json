@@ -142,5 +142,9 @@
   {
     "version": "1.8.3",
     "contentHash": "sha256:f6d7f3dad72f82e6c63046bf786792b573d88ba6c988b11a81861f14446940c6"
+  },
+  {
+    "version": "1.8.4",
+    "contentHash": "sha256:13f114f79d9874827465521bbb426b16ebf82249ac189a48f7762cb962a021c6"
   }
 ]
