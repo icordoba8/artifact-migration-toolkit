@@ -913,7 +913,8 @@ Where the provider has a stable native task/progress surface (OpenCode todos,
 Claude Code's todo list, the equivalent Codex or Copilot surface), map
 `progress` into it — one row per `checkpoints[]` entry, and nothing else:
 
-- the row label is `<index>/<total> <name>`, the engine's checkpoint name,
+- the row label is `<index>. <label>`, copied from that checkpoint's row in
+  `progressChecklist`: the engine's label for the engine's checkpoint name,
   never a paraphrase;
 - the row state is that entry's `state`: `COMPLETED`, `ACTIVE`, `PENDING` or
   `BLOCKED`;
@@ -937,7 +938,9 @@ works, and a native surface is never required to execute a migration.
 Different rendering is allowed; different progress is not.
 
 Never reformat, re-order, translate, summarize, add emoji to, or add
-percentages to either form. A record born before the `DISCOVERY_COMPLETENESS`
+percentages to either form. The checklist already carries its emoji, state
+words and labels: relay them verbatim, and never add, change or remove an emoji
+or a label. A record born before the `DISCOVERY_COMPLETENESS`
 checkpoint renders eight rows, not nine; that is correct, not a missing
 checkpoint.
 

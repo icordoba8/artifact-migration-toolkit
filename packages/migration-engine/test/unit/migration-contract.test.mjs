@@ -9600,7 +9600,67 @@ test("an unfinished upgrade transaction blocks --mode auto exactly as it blocks 
 
 // --- progress checklist ------------------------------------------------------
 
-test("the progress checklist is deterministic and ASCII-only", async () => {
+/** A checkpoint row: icon, state word, `<index>. <label>`, the engine key. */
+const CHECKPOINT_ROW = /^(?:✅ DONE|🔄 IN PROGRESS|⏳ TODO|⛔ BLOCKED) +\d+\. .+ {2}[A-Z_]+$/gm;
+const rowFor = (icon, key) => new RegExp(`^${icon} +\\d+\\. .+ {2}${key}$`, "m");
+
+test("the checklist pins every state, the slices and the three Next lines", () => {
+  const states = ["COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED",
+    "COMPLETED", "ACTIVE", "PENDING", "PENDING"];
+  const projection = {
+    module: "partners", target: "partners", status: "ACTIVE", revision: 12, mode: "auto",
+    checkpoints: MIGRATION_STEPS.map((name, index) => ({ index: index + 1, total: 9, name, state: states[index] })),
+    activeCheckpoint: "IMPLEMENT_SLICES", activeSlice: "s-2",
+    slices: { completed: 1, total: 3, items: [
+      { id: "s-1", state: "COMPLETED" },
+      { id: "s-2", state: "ACTIVE", rework: { attempt: 1, limit: 3 } },
+      { id: "s-3", state: "PENDING" },
+    ] },
+    uiEvidence: null, formatUpgrade: null, blocker: null, stopReason: null,
+    nextWork: { checkpoint: "IMPLEMENT_SLICES", slice: "s-2", action: "Implement slice s-2.", artifact: null, command: "/start-migration partners" },
+  };
+  const rows = (lines) => `${lines.join("\n")}\n`;
+  const checklist = (state7, slice2, tail) => rows([
+    "progress: partners -> partners  status=ACTIVE  revision=12  mode=auto",
+    "✅ DONE        1. Resolve module and target     RESOLVE",
+    "✅ DONE        2. Discover legacy behavior      DISCOVER_LEGACY",
+    "✅ DONE        3. Check discovery completeness  DISCOVERY_COMPLETENESS",
+    "✅ DONE        4. Assess target architecture    ASSESS_TARGET",
+    "✅ DONE        5. Build baseline                BUILD_BASELINE",
+    "✅ DONE        6. Plan slices                   PLAN",
+    `${state7} 7. Implement slices              IMPLEMENT_SLICES`,
+    "  slices: 1/3 done",
+    "    ✅ DONE        s-1",
+    `    ${slice2} s-2 (rework 1/3)`,
+    "    ⏳ TODO        s-3",
+    "⏳ TODO        8. Verify slices                 VERIFY_SLICES",
+    "⏳ TODO        9. Finalize                      FINALIZE",
+    ...tail,
+  ]);
+  assert.equal(renderProgress(projection), checklist("🔄 IN PROGRESS", "🔄 IN PROGRESS",
+    ["Next: Implement slice s-2. — run /start-migration partners"]));
+  // No action: the checkpoint's label; no command: no `— run` suffix.
+  assert.match(renderProgress({ ...projection, nextWork: { ...projection.nextWork, action: null, command: null } }),
+    /\nNext: Implement slices\n$/);
+  const blocked = {
+    ...projection,
+    checkpoints: projection.checkpoints.map((row) => (row.state === "ACTIVE" ? { ...row, state: "BLOCKED" } : row)),
+    slices: { ...projection.slices, items: projection.slices.items.map((item) => (item.state === "ACTIVE" ? { ...item, state: "BLOCKED" } : item)) },
+    stopReason: "BLOCKED", blocker: "Legacy revision changed.",
+    nextWork: { ...projection.nextWork, command: null },
+  };
+  assert.equal(renderProgress(blocked), checklist("⛔ BLOCKED    ", "⛔ BLOCKED    ",
+    ["stop reason: BLOCKED", "blocker: Legacy revision changed.", "Next: none until the blocker is cleared"]));
+  const complete = renderProgress({ ...projection, status: "COMPLETE", activeCheckpoint: null, activeSlice: null, nextWork: null });
+  assert.match(complete, /\nNext: none — migration complete\n$/);
+  assert.match(complete, /^  slices: 1\/3 done$/m);
+  // A step without a label is refused, never guessed.
+  assert.throws(() => renderProgress({ ...projection, checkpoints: [{ index: 1, total: 1, name: "NEW_STEP", state: "PENDING" }] }),
+    /No progress label for step 'NEW_STEP'/);
+  assert.equal(Buffer.from(renderProgress(blocked), "utf8").toString("utf8"), renderProgress(blocked));
+});
+
+test("the progress checklist is deterministic, UTF-8, with a fixed vocabulary", async () => {
   const fixture = await createFixture();
   try {
     await driveTo(fixture, "PLAN");
@@ -9610,14 +9670,11 @@ test("the progress checklist is deterministic and ASCII-only", async () => {
     for (let index = 0; index < 100; index += 1) {
       assert.equal(renderProgressChecklist(persisted, "auto"), rendered);
     }
-    // Emoji and box drawing do not survive a Windows terminal, and the
-    // five-tree parity test compares this string byte for byte.
-    assert.match(rendered, /^[\x20-\x7e\n]*$/);
-    for (const marker of rendered.match(/\[.\]/g)) {
-      assert.ok(
-        ["[x]", "[>]", "[ ]"].includes(marker),
-        `unexpected marker ${marker}`,
-      );
+    // The five-tree parity test compares this string byte for byte; every
+    // non-ASCII line is a state row or the Next line, nothing else.
+    for (const line of rendered.trimEnd().split("\n")) {
+      if (/^[\x20-\x7e]*$/.test(line)) continue;
+      assert.match(line, /^(?: {4})?(?:✅ DONE|🔄 IN PROGRESS|⏳ TODO) |^Next: /, line);
     }
     assert.match(
       rendered,
@@ -9633,14 +9690,14 @@ test("the checklist renders the lifecycle the record was actually born under", a
   try {
     await driveTo(fixture, "DISCOVERY_COMPLETENESS");
     const modern = renderProgressChecklist(await state(fixture), "auto");
-    assert.equal(modern.match(/^\[.\] \d+\/9 /gm).length, 9);
+    assert.equal(modern.match(CHECKPOINT_ROW).length, 9);
     assert.match(modern, /DISCOVERY_COMPLETENESS/);
 
     // A format-9 record never had a DISCOVERY_COMPLETENESS checkpoint, so
     // rendering one would invent a checkpoint the operator cannot close.
     await downgradeToFormat9(fixture);
     const born9 = renderProgressChecklist(await state(fixture), "auto");
-    assert.equal(born9.match(/^\[.\] \d+\/8 /gm).length, 8);
+    assert.equal(born9.match(CHECKPOINT_ROW).length, 8);
     assert.doesNotMatch(born9, /DISCOVERY_COMPLETENESS/);
   } finally {
     await fixture.cleanup();
@@ -9655,8 +9712,9 @@ test("a COMPLETE record renders every checkpoint done and nothing in progress", 
     assert.equal(persisted.status, "COMPLETE");
     const rendered = renderProgressChecklist(persisted, null);
 
-    assert.doesNotMatch(rendered, /\[>\]/);
-    assert.equal(rendered.match(/^\[x\] /gm).length, 9);
+    assert.doesNotMatch(rendered, /IN PROGRESS/);
+    assert.equal(rendered.match(/^✅ DONE +\d+\. /gm).length, 9);
+    assert.match(rendered, /\nNext: none — migration complete\n$/);
     assert.match(rendered, /mode=none/);
   } finally {
     await fixture.cleanup();
@@ -9680,15 +9738,16 @@ test("the slice block appears only once slices exist, in progression order", asy
         },
         "auto",
       ),
-      /^slices:/m,
+      /^ {2}slices:/m,
     );
     const rendered = renderProgressChecklist(planned, "auto");
-    assert.match(rendered, /^slices: 0\/2 done$/m);
-    assert.deepEqual(rendered.match(/^ {2}\[.\] .+$/gm), [
-      "  [>] slice-a",
-      "  [ ] slice-b",
+    assert.match(rendered, /^ {2}slices: 0\/2 done$/m);
+    assert.deepEqual(rendered.match(/^ {4}\S.+$/gm), [
+      "    🔄 IN PROGRESS slice-a",
+      "    ⏳ TODO        slice-b",
     ]);
-    assert.match(rendered, /^\[>\] 7\/9 IMPLEMENT_SLICES {2}active=slice-a$/m);
+    // Indented under the checkpoint that owns them.
+    assert.match(rendered, /^🔄 IN PROGRESS 7\. Implement slices +IMPLEMENT_SLICES\n {2}slices: /m);
 
     // Close the first slice and the order becomes completed -> active.
     await authorSlice(fixture, "slice-a");
@@ -9696,10 +9755,10 @@ test("the slice block appears only once slices exist, in progression order", asy
     await authorEvidence(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
     const afterFirst = renderProgressChecklist(await state(fixture), "auto");
-    assert.match(afterFirst, /^slices: 1\/2 done$/m);
-    assert.deepEqual(afterFirst.match(/^ {2}\[.\] .+$/gm), [
-      "  [x] slice-a",
-      "  [>] slice-b",
+    assert.match(afterFirst, /^ {2}slices: 1\/2 done$/m);
+    assert.deepEqual(afterFirst.match(/^ {4}\S.+$/gm), [
+      "    ✅ DONE        slice-a",
+      "    🔄 IN PROGRESS slice-b",
     ]);
   } finally {
     await fixture.cleanup();
@@ -9840,7 +9899,7 @@ test("visible-UI progress is reported from persisted evidence, beneath the check
     );
     // Sub-work, never a tenth row: the checkpoint count is untouched.
     assert.equal(status.progress.checkpoints.length, MIGRATION_STEPS.length);
-    assert.doesNotMatch(status.progressChecklist, /^\[.\] \d+\/\d+ UI/m);
+    assert.equal(status.progressChecklist.match(CHECKPOINT_ROW).length, MIGRATION_STEPS.length);
 
     // A record with no visible UI renders byte for byte what it rendered
     // before UI verification existed -- the line is absent, not empty.
@@ -10123,7 +10182,7 @@ test("a blocked run still prints the checklist on both entry points", async () =
     assert.equal(run.exitCode, BLOCKED_EXIT_CODE);
     assert.match(run.stdout, /Execution: BLOCKED\./);
     assert.match(run.stdout, /^progress: auth -> auth/m);
-    assert.match(run.stdout, /^slices: 0\/2 done$/m);
+    assert.match(run.stdout, /^ {2}slices: 0\/2 done$/m);
 
     const blockedAdvance = await advanceCli(fixture, [
       ...AUTO,
@@ -10134,7 +10193,7 @@ test("a blocked run still prints the checklist on both entry points", async () =
     assert.equal(blockedAdvance.exitCode, BLOCKED_EXIT_CODE);
     assert.match(blockedAdvance.stdout, /Advance: BLOCKED\./);
     assert.match(blockedAdvance.stdout, /^progress: auth -> auth/m);
-    assert.match(blockedAdvance.stdout, /^slices: 0\/2 done$/m);
+    assert.match(blockedAdvance.stdout, /^ {2}slices: 0\/2 done$/m);
 
     assert.deepEqual(await snapshot(fixture.root), before);
   } finally {
@@ -22275,7 +22334,7 @@ test("FU-7: read-only status projects the pending increment and writes nothing",
       ready.progressChecklist,
       /--- normal progress \(frozen behind the upgrade\) ---\nprogress: /,
     );
-    assert.match(ready.progressChecklist, /\[!\] \d+\/\d+ IMPLEMENT_SLICES/);
+    assert.match(ready.progressChecklist, rowFor("⛔ BLOCKED", "IMPLEMENT_SLICES"));
 
     // NEEDS_INPUT names the canonical candidate path and the legacy authority.
     const candidatePath = path.join(fixture.migrationRoot, UI_CANDIDATE);
@@ -22660,7 +22719,7 @@ test("FU-12: an early format-17 record reports the increment INACTIVE and keeps 
     );
     assert.doesNotMatch(status.progressChecklist, /FORMAT UPGRADE REQUIRED/);
     assert.doesNotMatch(status.progressChecklist, /frozen behind the upgrade/);
-    assert.match(status.progressChecklist, /\[>\] \d+\/\d+ DISCOVER_LEGACY/);
+    assert.match(status.progressChecklist, rowFor("🔄 IN PROGRESS", "DISCOVER_LEGACY"));
     assert.equal(status.progress.stopReason, null);
     assert.equal(status.progress.blocker, null);
 
