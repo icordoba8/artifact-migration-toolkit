@@ -533,7 +533,7 @@ const TOOLS = [
   {
     name: "migration_app_runtime",
     description:
-      "Classify the LEGACY, BACKEND and TARGET applications from the operator's local configuration as READY, AUTH_REQUIRED, RUNTIME_DOWN, WRONG_APP, IDENTITY_UNPROVEN, WRONG_NAMESPACE or CONFIGURATION_MISSING. `check` writes nothing; `ensure` also starts a stopped application through its authorized package script and reuses a running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
+      "Classify the LEGACY, BACKEND and TARGET applications from the operator's local configuration (the consumer root's .artifact-migration-tools/runtime-apps.json) as READY, AUTH_REQUIRED, RUNTIME_DOWN, WRONG_APP, IDENTITY_UNPROVEN, WRONG_NAMESPACE or CONFIGURATION_MISSING. `check` writes nothing; `ensure` also starts a stopped application through its authorized package script and reuses a running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
     inputSchema: {
       ...INPUT_SCHEMA,
       properties: {

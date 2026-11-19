@@ -22,13 +22,13 @@
 import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { constants } from "node:fs";
-import { open, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, open, readFile, realpath, stat } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
 import { initialArtifacts } from "../formats/index.mjs";
-import { assertPlainObject, assertSecurePath, execFileAsync, isPlainObject, PACKAGE_MANAGERS, SCRIPT_NAME } from "../shared/index.mjs";
+import { assertPlainObject, assertSecurePath, execFileAsync, isLexicallyWithin, isPlainObject, PACKAGE_MANAGERS, samePath, SCRIPT_NAME } from "../shared/index.mjs";
 import {
   atomicWrite,
   migrationRoot,
@@ -43,6 +43,8 @@ import { withModuleLock } from "./lock.mjs";
 
 export const APP_RUNTIME_CONFIG = ".artifact-migration-tools/runtime-apps.json";
 const OWNED_DIRECTORY = ".artifact-migration-tools/app-runtime";
+// What the installer writes into the consumer root's `.artifact-migration-tools/`; its presence marks that root.
+const RECEIPTS = ["claude", "codex", "opencode", "copilot"].map((provider) => `.artifact-migration-tools/${provider}.json`);
 export const APP_RUNTIME_ACTIONS = Object.freeze(["check", "ensure", "stop"]);
 
 // BACKEND first: the two front ends call it while they render.
@@ -304,7 +306,53 @@ const route = (value, label) => {
   return value;
 };
 
-const parseApplication = async (role, value, targetRoot, trust) => {
+/**
+ * The consumer root: the nearest directory from the target up to its Git top
+ * level, inclusive, whose `.artifact-migration-tools/` holds an installer
+ * receipt; the target itself when none does. Nothing above the work tree is
+ * ever read, so a file planted there cannot become this target's authority.
+ */
+const configHome = async (targetRoot) => {
+  const start = await realpath(targetRoot);
+  const top = await execFileAsync("git", ["-C", start, "rev-parse", "--show-toplevel"]).then(({ stdout }) => stdout.trim(), () => null);
+  const limit = top && await realpath(top).catch(() => null);
+  if (!limit || !isLexicallyWithin(limit, start)) {
+    throw new Error(`The target root '${start}' is not in a Git work tree, so the consumer root holding ${APP_RUNTIME_CONFIG} cannot be bounded.`);
+  }
+  for (let current = start; ; current = path.dirname(current)) {
+    for (const receipt of RECEIPTS) {
+      if ((await lstat(path.join(current, receipt)).catch(() => null))?.isFile()) return current;
+    }
+    if (samePath(current, limit) || path.dirname(current) === current) return start;
+  }
+};
+
+const present = (file) => lstat(file).then(() => true, (error) => {
+  if (error.code === "ENOENT") return false;
+  throw error;
+});
+
+/**
+ * Which configuration this target uses, and the folder its started
+ * applications are recorded in. The engine never moves an operator's file:
+ * a target-root copy beside a consumer-root one is refused, naming both.
+ */
+const locate = async (targetRoot) => {
+  const home = await configHome(targetRoot);
+  const target = await realpath(targetRoot);
+  const at = (base, versions) => ({ base, file: path.join(base, APP_RUNTIME_CONFIG), target, home, versions });
+  if (samePath(home, target)) return at(target, [1, 2]);
+  const legacy = at(target, [1]);
+  const current = at(home, [2]);
+  const [old, now] = [await present(legacy.file), await present(current.file)];
+  if (old && now) {
+    throw new Error(`Two application runtime configurations exist, '${current.file}' and '${legacy.file}'; nothing was probed or started. Keep only '${current.file}' (version 2) and move the other aside.`);
+  }
+  if (!old) return current;
+  return { ...legacy, notice: `'${legacy.file}' is in the deprecated target-root location; move it to '${current.file}' as version 2, with every project relative to '${home}'.` };
+};
+
+const parseApplication = async (role, value, base, trust) => {
   assertPlainObject(value, `applications.${role}`);
   const label = `applications.${role}`;
   const unknown = Object.keys(value).filter((key) => !APPLICATION_KEYS.has(key));
@@ -314,8 +362,8 @@ const parseApplication = async (role, value, targetRoot, trust) => {
   if (url.protocol !== "http:" || !LOOPBACK.has(url.hostname) || !url.port || url.origin !== value.origin) {
     throw new Error(`${label}.origin must be exactly http://<localhost|127.0.0.1|[::1]>:<port>; another address is another network namespace.`);
   }
-  if (typeof value.project !== "string" || !value.project) throw new Error(`${label}.project must be a directory relative to the target root.`);
-  const project = await realpath(path.resolve(targetRoot, value.project)).catch(() => { throw new Error(`${label}.project '${value.project}' does not exist.`); });
+  if (typeof value.project !== "string" || !value.project) throw new Error(`${label}.project must be a directory relative to the root holding the configuration.`);
+  const project = await realpath(path.resolve(base, value.project)).catch(() => { throw new Error(`${label}.project '${value.project}' does not exist.`); });
   if (!isPlainObject(value.identity) || typeof value.identity.includes !== "string" || !value.identity.includes) {
     throw new Error(`${label}.identity must be {route, includes}: a public route and text only this application serves.`);
   }
@@ -348,21 +396,28 @@ const parseApplication = async (role, value, targetRoot, trust) => {
 
 /** The trust boundary. Anything short of a local, well-formed file is a refusal with a reason, never a default. */
 const readConfiguration = async (targetRoot, system = hostSystem) => {
-  const file = path.join(targetRoot, APP_RUNTIME_CONFIG);
   let handle;
   try {
-    await assertSecurePath(targetRoot, file);
+    const located = await locate(targetRoot);
+    const { base, file, versions } = located;
+    await assertSecurePath(base, file);
     handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error) => {
-      if (error.code === "ENOENT") throw new Error(`${APP_RUNTIME_CONFIG} does not exist; the operator creates it. Its port numbers come from the project, never from a migration record.`);
+      if (error.code === "ENOENT") throw new Error(`${APP_RUNTIME_CONFIG} does not exist at '${file}'; the operator creates it. Its port numbers come from the project, never from a migration record.`);
       throw error;
     });
     let document;
     try { document = JSON.parse(await handle.readFile("utf8")); } catch { throw new Error(`${APP_RUNTIME_CONFIG} is not valid JSON.`); }
-    const tracked = await execFileAsync("git", ["-C", targetRoot, "ls-files", "--error-unmatch", "--", APP_RUNTIME_CONFIG]).then(() => true, () => false);
+    const tracked = await execFileAsync("git", ["-C", base, "ls-files", "--error-unmatch", "--", APP_RUNTIME_CONFIG]).then(() => true, () => false);
     if (tracked) throw new Error(`${APP_RUNTIME_CONFIG} is tracked by Git; authority to start processes must stay local, so a clone cannot grant it.`);
     assertPlainObject(document, "Application runtime configuration");
-    if (document.version !== 1 || typeof document.namespace !== "string" || !isPlainObject(document.applications)) {
-      throw new Error("The configuration must be {version: 1, namespace: win32|wsl|linux|darwin, applications}.");
+    if (![1, 2].includes(document.version) || typeof document.namespace !== "string" || !isPlainObject(document.applications)) {
+      throw new Error("The configuration must be {version: 1|2, namespace: win32|wsl|linux|darwin, applications}.");
+    }
+    // Version 1 resolves its projects against the target root, version 2 against the consumer root: a file moved without its projects is refused, never started.
+    if (!versions.includes(document.version)) {
+      throw new Error(document.version === 1
+        ? `'${file}' is version 1, whose projects are relative to the target root; at the consumer root it must be version 2, with every project relative to '${base}'.`
+        : `'${file}' is version 2, which belongs at the consumer root '${path.join(located.home, APP_RUNTIME_CONFIG)}'; in the target root only version 1 is read.`);
     }
     const trust = document.trust ?? "operator-isolated";
     if (!TRUSTS.includes(trust)) throw new Error(`trust must be ${TRUSTS.join(" or ")}.`);
@@ -373,7 +428,12 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
     }
     const applications = [];
     for (const role of ROLES.filter((name) => document.applications[name])) {
-      applications.push(await parseApplication(role, document.applications[role], targetRoot, trust));
+      applications.push(await parseApplication(role, document.applications[role], base, trust));
+    }
+    // One consumer-root file serves one target: the one its TARGET application lives in.
+    const own = applications.find((app) => app.role === "TARGET").project;
+    if (document.version === 2 && !isLexicallyWithin(located.target, own)) {
+      throw Object.assign(new Error(`'${file}' serves the target at '${own}', not this module's target '${located.target}'; nothing was probed, started or stopped.`), { foreign: true });
     }
     const broker = document.sessionBroker;
     if (broker !== undefined && (!isPlainObject(broker) || Object.keys(broker).length !== 2 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(broker.url) ||
@@ -383,12 +443,14 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
     // operator-local: the operator accepts that this account, the agent's, may author starts. Only ownership is waived.
     const refusal = trust !== "operator-local" && applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
     return {
+      base,
+      notice: located.notice,
       namespace: document.namespace,
       sessionBroker: document.sessionBroker,
       applications: refusal ? applications.map(({ start, ...app }) => ({ ...app, startRefusal: refusal })) : applications,
     };
   } catch (error) {
-    return { problem: error.message };
+    return { problem: error.message, foreign: error.foreign };
   } finally {
     await handle?.close();
   }
@@ -421,24 +483,32 @@ const requirement = async (targetRoot, moduleName) => {
   return inventory?.hasVisibleUi === false ? "The module declares no visible UI; no browser or application evidence applies." : null;
 };
 
-const ownedFile = (targetRoot, role) => path.join(targetRoot, OWNED_DIRECTORY, `${role}.json`);
+// `base` is the folder holding the configuration in use: the consumer root, or a deprecated target root.
+const ownedFile = (base, role) => path.join(base, OWNED_DIRECTORY, `${role}.json`);
+
+/** Both folders a started application may be recorded in, so moving the configuration never strands a process. */
+const stateFolders = async (targetRoot) => {
+  const target = await realpath(targetRoot);
+  const home = await configHome(target).catch(() => target);
+  return samePath(home, target) ? [target] : [target, home];
+};
 
 /** A record names a live process only while its PID still has the same start time; anything else is stale. */
-const liveOwned = async (targetRoot, role, system) => {
-  const file = ownedFile(targetRoot, role);
+const liveOwned = async (base, role, system) => {
+  const file = ownedFile(base, role);
   const owned = await readOptionalJson(file, "Owned application record");
   if (!owned) return null;
   // Another namespace's PID means nothing here, so that record is not ours to judge.
   if (owned.namespace !== system.namespace) return null;
   const started = await system.processStart(owned.pid);
   if (started !== null && started === owned.processStart) return owned;
-  await removeDurably(targetRoot, file);
+  await removeDurably(base, file);
   return null;
 };
 
-const release = async (targetRoot, owned, system) => {
+const release = async (base, owned, system) => {
   await system.killTree(owned.pid);
-  await removeDurably(targetRoot, ownedFile(targetRoot, owned.role));
+  await removeDurably(base, ownedFile(base, owned.role));
 };
 
 const untilSettled = async (app, system, exited) => {
@@ -471,17 +541,17 @@ const startSpawn = (start, platform) => {
   return { file: start.command[0], args: start.command.slice(1), shell: false };
 };
 
-const startApplication = async (targetRoot, app, system) => {
+const startApplication = async (base, app, system) => {
   if (!app.start.command) {
     const manifest = await readJson(path.join(app.project, "package.json"), "Project manifest").catch(() => null);
     if (!Object.hasOwn(manifest?.scripts ?? {}, app.start.script)) {
       return { state: "CONFIGURATION_MISSING", reason: `'${app.project}' has no package script '${app.start.script}'.` };
     }
   }
-  const directory = path.join(targetRoot, OWNED_DIRECTORY);
-  await atomicWrite(targetRoot, path.join(directory, ".gitignore"), "*\n");
+  const directory = path.join(base, OWNED_DIRECTORY);
+  await atomicWrite(base, path.join(directory, ".gitignore"), "*\n");
   const logFile = path.join(directory, `${app.role}.log`);
-  const log = await open(await assertSecurePath(targetRoot, logFile), "a", 0o600);
+  const log = await open(await assertSecurePath(base, logFile), "a", 0o600);
   // A script's two words were checked against an allowlist and the project's own manifest.
   const { file, args, shell } = startSpawn(app.start, system.platform);
   const child = spawn(file, args, {
@@ -493,31 +563,31 @@ const startApplication = async (targetRoot, app, system) => {
   });
   await log.close();
   child.unref();
-  const logPath = path.relative(targetRoot, logFile).replaceAll("\\", "/");
+  const logPath = path.relative(base, logFile).replaceAll("\\", "/");
   if (!child.pid) return { state: "RUNTIME_DOWN", reason: `'${app.start.manager ?? app.start.command[0]}' could not be started (${(await exited).error}).`, failure: "STARTUP_FAILED", log: logPath };
   const owned = { version: 1, role: app.role, pid: child.pid, namespace: system.namespace, processStart: await system.processStart(child.pid), origin: app.origin };
-  await atomicWrite(targetRoot, ownedFile(targetRoot, app.role), `${JSON.stringify(owned, null, 2)}\n`);
+  await atomicWrite(base, ownedFile(base, app.role), `${JSON.stringify(owned, null, 2)}\n`);
   const row = await untilSettled(app, system, exited);
   if (row.state !== "READY" && row.state !== "AUTH_REQUIRED") {
-    await release(targetRoot, owned, system);
+    await release(base, owned, system);
     return { ...row, log: logPath };
   }
   return { ...row, started: true, log: logPath };
 };
 
-const ensureApplication = async (targetRoot, app, system) => {
+const ensureApplication = async (base, app, system) => {
   const row = await inspect(app, system);
   if (row.state !== "RUNTIME_DOWN") return { ...row, reused: row.state === "READY" || row.state === "AUTH_REQUIRED" };
   // Started earlier and still coming up: wait for it, never start a second one.
-  const owned = await liveOwned(targetRoot, app.role, system);
+  const owned = await liveOwned(base, app.role, system);
   if (owned) {
     const settled = await untilSettled(app, system, new Promise(() => {}));
     if (settled.state === "READY" || settled.state === "AUTH_REQUIRED") return { ...settled, reused: true };
-    await release(targetRoot, owned, system);
+    await release(base, owned, system);
     return settled;
   }
   if (row.occupied) return row;
-  return app.start ? startApplication(targetRoot, app, system) : { ...row, reason: `${row.reason} ${app.startRefusal ?? "Its configuration authorizes no start."}` };
+  return app.start ? startApplication(base, app, system) : { ...row, reason: `${row.reason} ${app.startRefusal ?? "Its configuration authorizes no start."}` };
 };
 
 const publicRow = ({ occupied, ...row }, app) => ({
@@ -534,12 +604,20 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
   const base = { module: resolved.canonical, action, namespace: system.namespace };
 
   if (action === "stop") {
+    // A missing or doubled configuration never blocks ending what ensure started; a file serving another target does.
+    const configuration = await readConfiguration(targetRoot, system);
+    if (configuration.foreign) return { ...base, state: "CONFIGURATION_MISSING", reason: configuration.problem, configFile: APP_RUNTIME_CONFIG, applications: [] };
+    const folders = await stateFolders(targetRoot);
     return withModuleLock(targetRoot, LOCK_NAME, async () => {
       const applications = [];
       for (const role of ROLES) {
-        const owned = await liveOwned(targetRoot, role, system);
-        if (owned) await release(targetRoot, owned, system);
-        applications.push({ role, stopped: Boolean(owned) });
+        let stopped = false;
+        for (const folder of folders) {
+          const owned = await liveOwned(folder, role, system);
+          if (owned) await release(folder, owned, system);
+          stopped ||= Boolean(owned);
+        }
+        applications.push({ role, stopped });
       }
       return { ...base, applications };
     });
@@ -561,7 +639,7 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
   const inspectOrEnsure = async () => {
     const applications = [];
     for (const app of configuration.applications) {
-      const row = action === "ensure" ? await ensureApplication(targetRoot, app, system) : await inspect(app, system);
+      const row = action === "ensure" ? await ensureApplication(configuration.base, app, system) : await inspect(app, system);
       applications.push(publicRow(row, app));
     }
     return applications;
@@ -572,5 +650,8 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
     : await inspectOrEnsure();
   const states = applications.map((row) => row.state);
   const state = ["CONFIGURATION_MISSING", ...STATE_RANK].find((name) => states.includes(name));
-  return { ...base, required: true, state, applications, ...(configuration.sessionBroker ? { sessions: await sessionStates(targetRoot) } : {}) };
+  return {
+    ...base, required: true, state, ...(configuration.notice ? { reason: configuration.notice } : {}), applications,
+    ...(configuration.sessionBroker ? { sessions: await sessionStates(targetRoot) } : {}),
+  };
 };

@@ -148,7 +148,8 @@ Administrators.
 
 ### 3. Point the target at it and make that file the operator's
 
-Add the broker to the target's `.artifact-migration-tools/runtime-apps.json`:
+Add the broker to the consumer root's `.artifact-migration-tools/runtime-apps.json`
+(the folder holding the installer receipts):
 
 ```json
 "sessionBroker": { "url": "http://127.0.0.1:11900", "tokenFile": "C:/Users/<you>/AppData/Local/artifact-migration-tools/session-broker.token" }
@@ -162,8 +163,8 @@ starts and may hold a signed-in browser. If it should start them, lock the file
 from the elevated PowerShell:
 
 ```powershell
-icacls <target>\.artifact-migration-tools\runtime-apps.json /setowner '*S-1-5-32-544'
-icacls <target>\.artifact-migration-tools\runtime-apps.json /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R'
+icacls <consumer>\.artifact-migration-tools\runtime-apps.json /setowner '*S-1-5-32-544'
+icacls <consumer>\.artifact-migration-tools\runtime-apps.json /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R'
 ```
 
 ### 4. Prove the boundary, then sign in
