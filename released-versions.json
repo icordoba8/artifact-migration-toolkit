@@ -138,5 +138,9 @@
   {
     "version": "1.8.2",
     "contentHash": "sha256:f995d23b475f510f2b889d63ed3fb9397d5be3be686744c1538d73c124abf0c1"
+  },
+  {
+    "version": "1.8.3",
+    "contentHash": "sha256:f6d7f3dad72f82e6c63046bf786792b573d88ba6c988b11a81861f14446940c6"
   }
 ]
