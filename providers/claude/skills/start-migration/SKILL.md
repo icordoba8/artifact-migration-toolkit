@@ -1338,7 +1338,7 @@ this engine in the same namespace.
 | `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. A `"onSignIn": "wait-for-operator"` row whose page lands on sign-in follows **Operator sign-in** below. |
 | `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | With `"onSignIn": "wait-for-operator"`, follow **Operator sign-in** below. Otherwise continue with an authorized session if the operator has supplied one, or record the gap as below. Never type or request a credential. |
 | `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
-| `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address. | Report it. Never reuse it, stop it or capture from it. |
+| `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address; `reason` then names its PID (and its pm2 app, when pm2 runs it) and the operator's command to free the port. | Report it with that command for the operator. Never reuse it, stop it, run that command or capture from it. |
 | `IDENTITY_UNPROVEN` | It answers, but no inspectable local process holds it, such as a forwarded port. | Report it; treat it as `WRONG_APP`. |
 | `WRONG_NAMESPACE` | The engine runs in a different namespace from the applications. Nothing was probed. | Run the engine where the configuration says. |
 | `CONFIGURATION_MISSING` | No usable local configuration; `reason` says why. | Ask the operator to fix the file. Never write it yourself. |
@@ -1422,6 +1422,8 @@ command line. Under `operator-local` only, `start` may instead be
 without a shell (on Windows through `cmd.exe`, so `.cmd` shims resolve); no
 argument may contain `" & | < > ^ % !` or a line break. The started process inherits a minimal environment, with no ambient
 token, and writes to `.artifact-migration-tools/app-runtime/` beside that file.
+On Windows it is created through WMI, never as the engine's child, so the
+command that ran `ensure` returns as soon as the report is printed.
 A version 2 file serves one target, the one its `TARGET` project lives in.
 
 The target root's own `.artifact-migration-tools/runtime-apps.json` (version 1,
