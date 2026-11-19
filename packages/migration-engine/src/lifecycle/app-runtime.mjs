@@ -198,6 +198,35 @@ const configAuthority = async (file, handle) => {
   return `${APP_RUNTIME_CONFIG} is ${mine ? "owned" : "writable"} by the account this engine runs as, which is the agent's: a file the agent can write cannot authorize starting a process. The operator makes it owned by another account and read-only here, or starts the application.`;
 };
 
+/**
+ * Creates a process through WMI, so its parent is the WMI service: it holds no handle of this engine or of what
+ * called it, and joins none of their jobs. Started as this engine's child, the application tree held the caller's
+ * pipe open and kept `Start-Process -Wait` waiting until the applications exited (F-W7). Its console is hidden.
+ * ponytail: every word is quoted as is; the words passed here (node's path, `-e`, the relay, base64) carry no `"`.
+ */
+const createDetached = async (argv, cwd) => {
+  const quote = (text) => `'${text.replaceAll("'", "''")}'`;
+  const line = argv.map((word) => `"${word}"`).join(" ");
+  const { ReturnValue, ProcessId } = JSON.parse(await powershell(
+    "$s = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow = [uint16]0}; " +
+    `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine = ${quote(line)}; CurrentDirectory = ${quote(cwd)}; ProcessStartupInformation = $s} | Select-Object ReturnValue,ProcessId | ConvertTo-Json -Compress`,
+  ));
+  if (ReturnValue !== 0) throw new Error(`Win32_Process.Create returned ${ReturnValue}`);
+  return ProcessId;
+};
+
+const PM2_CHILD = /[\\/]pm2[\\/]lib[\\/]ProcessContainer(Fork)?\.js/;
+
+/** The pm2 app name of a PID, or null. Asked only of a pm2 child, so its daemon is up and none is started here; best effort. */
+const pm2App = async (pid) => {
+  const { stdout } = await execFileAsync("pm2 jlist", [], { shell: true, windowsHide: true, timeout: 15_000, maxBuffer: 64 << 20 }).catch(() => ({ stdout: "" }));
+  try {
+    return JSON.parse(stdout.slice(stdout.indexOf("["))).find((app) => app.pid === pid)?.name ?? null;
+  } catch {
+    return null;
+  }
+};
+
 const hostNamespace = () =>
   process.platform === "linux" && /microsoft/i.test(os.release()) ? "wsl" : process.platform;
 
@@ -209,6 +238,15 @@ const hostSystem = {
   processStart,
   killTree,
   configAuthority,
+  createDetached,
+  pm2App,
+};
+
+/** Who holds the port, and how the operator frees it; never the holder's command line. */
+const foreignHolder = async (listener, system) => {
+  const name = PM2_CHILD.test(listener.command ?? "") ? await system.pm2App(listener.pid).catch(() => null) : null;
+  if (name) return `PID ${listener.pid} (pm2 app ${JSON.stringify(name)}); free the port with \`pm2 stop ${name}\``;
+  return `PID ${listener.pid}; free the port with \`${system.platform === "win32" ? `taskkill /PID ${listener.pid}` : `kill ${listener.pid}`}\``;
 };
 
 /**
@@ -292,8 +330,12 @@ const inspect = async (app, system) => {
     if (!answer.body.includes(app.identity.includes)) return row("WRONG_APP", `${answer.address} serves '${app.identity.route}' without the configured identity marker.`);
   }
   for (const answer of answering) {
-    const verdicts = holdersOf(listeners ?? [], answer).map((listener) => runsProject(listener, app.project));
-    if (verdicts.includes(false)) return row("WRONG_APP", `${answer.address} is held by a process outside '${app.project}'.`);
+    const holders = holdersOf(listeners ?? [], answer);
+    const verdicts = holders.map((listener) => runsProject(listener, app.project));
+    if (verdicts.includes(false)) {
+      const foreign = await foreignHolder(holders[verdicts.indexOf(false)], system);
+      return row("WRONG_APP", `${answer.address} is held by a process outside '${app.project}': ${foreign}, or point ${app.role}.origin at this project's own port.`);
+    }
     if (verdicts.length === 0 || verdicts.includes(null)) return row("IDENTITY_UNPROVEN", `no inspectable process in this namespace holds ${answer.address}; a forwarded port, or a process of another user, proves nothing.`);
   }
   if (!app.protectedRoute) return row("READY", `identity proven for every address of ${url.host}.`);
@@ -516,29 +558,52 @@ const untilSettled = async (app, system, exited) => {
   for (;;) {
     const row = await inspect(app, system);
     if (row.state === "READY" || row.state === "AUTH_REQUIRED" || row.state === "WRONG_APP" || row.state === "IDENTITY_UNPROVEN") return row;
-    const stopped = await Promise.race([exited, sleep(POLL_MS).then(() => null)]);
-    if (stopped) return { ...row, reason: `the start script exited (${stopped.code ?? stopped.signal ?? stopped.error}) before the application was ready.`, failure: "STARTUP_FAILED" };
+    await sleep(POLL_MS);
+    const stopped = await exited();
+    if (stopped != null) return { ...row, reason: `the start script exited (${stopped}) before the application was ready.`, failure: "STARTUP_FAILED" };
     if (Date.now() >= deadline) return { ...row, reason: `the application was not ready within ${app.startTimeoutMs} ms.`, failure: "STARTUP_TIMEOUT" };
   }
 };
 
-// The line arrives as a JSON argument, never as source. Exit code and signal pass through, so a failed start stays one.
-const WIN32_RELAY = "const c=require('node:child_process').spawn(JSON.parse(process.argv[1]),{shell:true,stdio:'inherit',windowsHide:true});" +
-  "c.on('exit',(code,signal)=>signal?process.kill(process.pid,signal):process.exit(code));c.on('error',()=>process.exit(1));";
+/**
+ * The win32 start: a node relay that holds the log and runs the line through a shell, an ordinary child that
+ * shares the relay's console (a console-less cmd.exe would give its console program a new one, writing there
+ * instead of the log). Its one argument is base64 JSON, never source, and the relay has no `"`, so neither needs
+ * quoting. The engine is not its parent, so the relay writes how the shell ended to the exit file.
+ */
+const WIN32_RELAY = "const a=JSON.parse(Buffer.from(process.argv[1],'base64'));const fs=require('node:fs');const f=fs.openSync(a.log,'a');" +
+  "const c=require('node:child_process').spawn(a.line,{shell:true,cwd:a.cwd,env:a.env,stdio:['ignore',f,f],windowsHide:true});" +
+  "const end=(how)=>{fs.writeFileSync(a.exit,String(how));process.exit()};" +
+  "c.on('exit',(code,signal)=>end(signal??code));c.on('error',(error)=>end(error.code??'error'));";
 
 /**
  * How a start runs. A package script goes through a shell, as it always has. An
  * argv command runs without one, except on win32, where package managers are
  * `.cmd` shims only cmd.exe resolves; its arguments carry no character cmd.exe reads.
- * On win32 the shell runs under a detached node relay: a detached cmd.exe has no
- * console, so the console program it runs gets a new one and writes there instead
- * of the log. The relay holds the log and its shell, an ordinary child, inherits it.
  */
-const startSpawn = (start, platform) => {
-  const line = start.command ? start.command.map((word) => (/\s/.test(word) ? `"${word}"` : word)).join(" ") : `${start.manager} run ${start.script}`;
-  if (platform === "win32") return { file: process.execPath, args: ["-e", WIN32_RELAY, JSON.stringify(line)], shell: false };
-  if (!start.command) return { file: line, args: [], shell: true };
-  return { file: start.command[0], args: start.command.slice(1), shell: false };
+const startLine = (start) => start.command ? start.command.map((word) => (/\s/.test(word) ? `"${word}"` : word)).join(" ") : `${start.manager} run ${start.script}`;
+
+/** A started process's PID and `exited()`: how its start ended, or null while it runs. */
+const spawnStart = async (base, app, logFile, system) => {
+  if (system.platform === "win32") {
+    const exitFile = `${logFile.slice(0, -".log".length)}.exit`;
+    await removeDurably(base, exitFile);
+    const payload = Buffer.from(JSON.stringify({ line: startLine(app.start), cwd: app.project, env: childEnvironment(), log: logFile, exit: exitFile })).toString("base64");
+    const pid = await system.createDetached([process.execPath, "-e", WIN32_RELAY, payload], app.project);
+    return { pid, exited: () => readFile(exitFile, "utf8").catch(() => null) };
+  }
+  const log = await open(logFile, "a", 0o600);
+  const [file, args, shell] = app.start.command ? [app.start.command[0], app.start.command.slice(1), false] : [startLine(app.start), [], true];
+  const child = spawn(file, args, { cwd: app.project, env: childEnvironment(), shell, detached: true, windowsHide: true, stdio: ["ignore", log.fd, log.fd] });
+  let exit = null;
+  const ended = new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve(exit = code ?? signal));
+    child.once("error", (error) => resolve(exit = error.code ?? error.message));
+  });
+  await log.close();
+  child.unref();
+  if (!child.pid) throw new Error(String(await ended));
+  return { pid: child.pid, exited: () => exit };
 };
 
 const startApplication = async (base, app, system) => {
@@ -550,22 +615,12 @@ const startApplication = async (base, app, system) => {
   }
   const directory = path.join(base, OWNED_DIRECTORY);
   await atomicWrite(base, path.join(directory, ".gitignore"), "*\n");
-  const logFile = path.join(directory, `${app.role}.log`);
-  const log = await open(await assertSecurePath(base, logFile), "a", 0o600);
-  // A script's two words were checked against an allowlist and the project's own manifest.
-  const { file, args, shell } = startSpawn(app.start, system.platform);
-  const child = spawn(file, args, {
-    cwd: app.project, env: childEnvironment(), shell, detached: true, windowsHide: true, stdio: ["ignore", log.fd, log.fd],
-  });
-  const exited = new Promise((resolve) => {
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-    child.once("error", (error) => resolve({ error: error.code ?? error.message }));
-  });
-  await log.close();
-  child.unref();
+  const logFile = await assertSecurePath(base, path.join(directory, `${app.role}.log`));
   const logPath = path.relative(base, logFile).replaceAll("\\", "/");
-  if (!child.pid) return { state: "RUNTIME_DOWN", reason: `'${app.start.manager ?? app.start.command[0]}' could not be started (${(await exited).error}).`, failure: "STARTUP_FAILED", log: logPath };
-  const owned = { version: 1, role: app.role, pid: child.pid, namespace: system.namespace, processStart: await system.processStart(child.pid), origin: app.origin };
+  // A script's two words were checked against an allowlist and the project's own manifest.
+  const { pid, exited, error } = await spawnStart(base, app, logFile, system).catch((failure) => ({ error: failure }));
+  if (error) return { state: "RUNTIME_DOWN", reason: `'${app.start.manager ?? app.start.command[0]}' could not be started (${error.message}).`, failure: "STARTUP_FAILED", log: logPath };
+  const owned = { version: 1, role: app.role, pid, namespace: system.namespace, processStart: await system.processStart(pid), origin: app.origin };
   await atomicWrite(base, ownedFile(base, app.role), `${JSON.stringify(owned, null, 2)}\n`);
   const row = await untilSettled(app, system, exited);
   if (row.state !== "READY" && row.state !== "AUTH_REQUIRED") {
@@ -581,7 +636,7 @@ const ensureApplication = async (base, app, system) => {
   // Started earlier and still coming up: wait for it, never start a second one.
   const owned = await liveOwned(base, app.role, system);
   if (owned) {
-    const settled = await untilSettled(app, system, new Promise(() => {}));
+    const settled = await untilSettled(app, system, () => null);
     if (settled.state === "READY" || settled.state === "AUTH_REQUIRED") return { ...settled, reused: true };
     await release(base, owned, system);
     return settled;

@@ -155,6 +155,14 @@ const starts = async (project) =>
 
 const NPM_START = { manager: "npm", script: "dev" };
 
+/** WMI's stand-in on Ubuntu: a detached process holding no stdio of the engine. */
+const createDetached = async (argv, cwd) => {
+  const child = spawn(argv[0], argv.slice(1), { cwd, detached: true, stdio: "ignore" });
+  child.unref();
+  return child.pid;
+};
+const WIN32 = { platform: "win32", createDetached };
+
 /** Empties a role's start log, so the next start alone decides what it holds. */
 const logOf = (space, role) => {
   const file = path.join(space.targetRoot, ".artifact-migration-tools/app-runtime", `${role}.log`);
@@ -290,10 +298,22 @@ test("an answer with no local process behind it, or a shadow on the other addres
   assert.equal(row(forwarded, "LEGACY").state, "IDENTITY_UNPROVEN");
   const uninspectable = await space.runAppRuntime("check", { system: injected(null) });
   assert.equal(row(uninspectable, "LEGACY").state, "IDENTITY_UNPROVEN");
+  const asked = [];
+  const pm2App = async (pid) => { asked.push(pid); return "milla7-web"; };
   const shadow = await space.runAppRuntime("check", {
-    system: injected([{ address: "0.0.0.0", pid: 1, command: "node /srv/process-manager/fork.js", cwd: "/" }]),
+    system: { ...injected([{ address: "0.0.0.0", pid: 1, command: "node /srv/process-manager/fork.js", cwd: "/" }]), pm2App },
   });
   assert.equal(row(shadow, "LEGACY").state, "WRONG_APP");
+  assert.match(row(shadow, "LEGACY").reason, /outside .*: PID 1; free the port with `kill 1`, or point LEGACY\.origin at this project's own port\.$/);
+  assert.deepEqual(asked, [], "pm2 is asked only about a pm2 child, so no pm2 daemon is ever started");
+
+  // The observed holder: a production copy that pm2 runs; its command line names only pm2's container.
+  const pm2Child = { address: "0.0.0.0", pid: 11452, command: String.raw`node C:\Users\dev\AppData\Roaming\npm\node_modules\pm2\lib\ProcessContainerFork.js`, cwd: null };
+  const named = await space.runAppRuntime("check", { system: { ...injected([pm2Child]), pm2App, platform: "win32" } });
+  assert.equal(row(named, "LEGACY").state, "WRONG_APP");
+  assert.match(row(named, "LEGACY").reason, /PID 11452 \(pm2 app "milla7-web"\); free the port with `pm2 stop milla7-web`/);
+  const unnamed = await space.runAppRuntime("check", { system: { ...injected([pm2Child]), pm2App: async () => { throw new Error("no pm2"); }, platform: "win32" } });
+  assert.match(row(unnamed, "LEGACY").reason, /PID 11452; free the port with `taskkill \/PID 11452`/, "naming the holder is best effort");
 });
 
 test("listener parsing and ownership hold the rows real hosts produced", () => {
@@ -351,10 +371,42 @@ test("a startup that never becomes ready is timed out and killed; a failing one 
   // win32 runs the shell under a node relay: the exit code and the output still come through.
   const log = logOf(failing, "LEGACY");
   await log.clear();
-  const relayed = await failing.runAppRuntime("ensure", { system: { platform: "win32" } });
+  const relayed = await failing.runAppRuntime("ensure", { system: WIN32 });
   assert.equal(row(relayed, "LEGACY").failure, "STARTUP_FAILED");
   assert.match(row(relayed, "LEGACY").reason, /exited \(3\)/);
   assert.ok(await log.size() > 0, "the failed start's output reaches its log");
+});
+
+test("win32 starts through a process the engine is not the parent of, so its caller returns at once", async () => {
+  const space = await twoApps({}, { start: NPM_START });
+  await launch(space.target, space.sibling);
+  // A separate engine with piped stdio, as an agent host calls it; WMI's stand-in holds none of its handles.
+  const engine = new URL("../../src/lifecycle/index.mjs", import.meta.url).href;
+  const script = `import { spawn } from "node:child_process"; import { runAppRuntime } from ${JSON.stringify(engine)};
+const calls = [];
+const createDetached = async (argv, cwd) => { calls.push({ argv, cwd }); const child = spawn(argv[0], argv.slice(1), { cwd, detached: true, stdio: "ignore" }); child.unref(); return child.pid; };
+const report = await runAppRuntime({ registryPath: process.argv[1], moduleName: "orders", action: "ensure", system: { platform: "win32", createDetached, configAuthority: async () => null } });
+console.log(JSON.stringify({ report, calls }));`;
+  const caller = spawn(process.execPath, ["--input-type=module", "-e", script, space.registryPath], { stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH, SESSION_TOKEN: CANARY } });
+  let output = "";
+  caller.stdout.on("data", (chunk) => { output += chunk; });
+  caller.stderr.on("data", (chunk) => { output += chunk; });
+  const exitedAt = new Promise((resolve) => caller.once("exit", () => resolve(Date.now())));
+  await new Promise((resolve) => caller.once("close", resolve));
+  assert.ok(Date.now() - await exitedAt < 2_000, "the caller's pipes close when the engine exits");
+  const { report, calls } = JSON.parse(output);
+  assert.equal(row(report, "LEGACY").started, true);
+  assert.equal(await refused(space.port), false, "the started application outlives the engine");
+  assert.ok(await logOf(space, "LEGACY").size() > 0, "the relay holds the log");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].argv.slice(0, 2), [process.execPath, "-e"]);
+  assert.equal(calls[0].cwd, space.legacy);
+  assert.ok(calls[0].argv.every((word) => !word.includes('"')), "every word survives quoting into one command line");
+  const payload = JSON.parse(Buffer.from(calls[0].argv[3], "base64").toString("utf8"));
+  assert.equal(payload.line, "npm run dev");
+  assert.ok(!JSON.stringify(payload.env).includes(CANARY), "the relay passes on only the child environment");
+  await space.runAppRuntime("stop");
+  await until(() => refused(space.port), "the owned server to stop");
 });
 
 test("concurrent ensures start one process", async () => {
@@ -636,7 +688,7 @@ test("an argv command starts only under operator-local, with no shell outside Wi
   const log = logOf(space, "LEGACY");
   for (const platform of [process.platform, "win32"]) {
     await log.clear();
-    const report = await space.runAppRuntime("ensure", { system: { platform } });
+    const report = await space.runAppRuntime("ensure", { system: platform === "win32" ? WIN32 : { platform } });
     assert.equal(row(report, "LEGACY").started, true, platform);
     assert.ok(await log.size() > 0, `${platform}: the started command's output reaches its log`);
     assert.deepEqual(JSON.parse(await readFile(path.join(space.legacy, "argv.json"), "utf8")), ["--name=My App"], platform);
