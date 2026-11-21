@@ -199,6 +199,15 @@ If persisted migration state exists, resume from it. Do not:
 
 ### 3. Obtain `nextWork` from the engine
 
+For a mutating invocation, run the **Application configuration preflight**
+as soon as the current work is known to need runtime evidence. That means
+visible behavior at `DISCOVER_LEGACY`, a legacy-runtime capture at
+`ASSESS_TARGET`, or runtime verification of a visible slice. If status
+already establishes that need, do this before `migration_run`. During first
+discovery, use the bounded source evidence and preflight as soon as you find
+visible behavior. A status-only invocation ends with status. Skip this
+preflight during an unconfirmed `--mode step` preview.
+
 - MCP: `migration_run`
 - CLI fallback:
   `artifact-migration-run <module> ... --json`
@@ -1280,7 +1289,9 @@ current checkpoint is missing.
   Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only), never
   `migration_capture`: that operation is legal only at `ASSESS_TARGET`
   (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuses here.
-  First prepare the applications (see **Applications** below); open the browser
+  Preflight configuration as soon as bounded source evidence identifies visible
+  behavior, before authoring runtime observations or requesting the browser.
+  Then prepare the applications (see **Applications** below); open the browser
   only at an origin it reported. If the browser lands on a sign-in page, do not
   type credentials and do not ask for any. An application whose row says
   `"onSignIn": "wait-for-operator"` follows **Operator sign-in** below;
@@ -1324,15 +1335,25 @@ and genuinely non-UI workflows need no application configuration. Mock mode
 changes the target data source. A mock slice with required visible behavior
 still needs its runtime UI evidence.
 
-Before the first browser or capture step of `DISCOVER_LEGACY`, `ASSESS_TARGET`
-or `VERIFY_SLICES`, and again after any browser failure, run
+#### Application configuration preflight
+
+Run `migration_app_runtime { module, cwd, action: "prepare" }` (CLI:
+`artifact-migration-validate <module> --app-runtime prepare`) at the first
+mutating preflight for runtime-dependent work. Call it before asking for the
+browser or authoring runtime evidence. It creates the missing template and
+returns its path and unresolved fields without probing or starting any app.
+An existing valid file returns `CONFIGURED` without writes. For
+`CONFIGURATION_MISSING`, follow **Operator configuration** before continuing
+that work. For `WRONG_NAMESPACE`, run in the configured namespace.
+When runtime is unnecessary, skip this action.
+
+Before each browser or capture phase, and after any browser failure, run
 `migration_app_runtime { module, cwd, action: "ensure" }` (CLI:
-`artifact-migration-validate <module> --app-runtime ensure`). For a runtime that needs configuration, `ensure` generates an incomplete
-template if the file is missing. Once configured, it reuses proven applications
-and starts only authorized stopped ones. Never start an application yourself. It is idempotent, so
-repeat it if a client timeout cuts it short. `check` is the same report with no
-start and no write. `stop` ends only what `ensure` started; it never touches a
-process the toolkit did not start.
+`artifact-migration-validate <module> --app-runtime ensure`). It reuses
+proven applications and starts only authorized stopped ones. Retry `ensure`
+if a client timeout interrupts it. Never start an application yourself. Use
+`check` to probe without writes or starts. Use
+`stop` only for processes previously started by `ensure`.
 
 Use exactly the `origin` it reports. A port number alone proves nothing: another
 network namespace's address, or the other address family of `localhost`, can
@@ -1341,6 +1362,7 @@ this engine in the same namespace.
 
 | State | Meaning | Do |
 | --- | --- | --- |
+| `CONFIGURED` | `prepare` accepted the local configuration without probing. | Continue the checkpoint. Use `ensure` when applications are needed. |
 | `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. A `"onSignIn": "wait-for-operator"` row whose page lands on sign-in follows **Operator sign-in** below. |
 | `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | With `"onSignIn": "wait-for-operator"`, follow **Operator sign-in** below. Otherwise continue with an authorized session if the operator has supplied one, or record the gap as below. Never type or request a credential. |
 | `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
@@ -1418,9 +1440,10 @@ starts a process or writes files. If the check still reports
 persisted checkpoint and use the normal `ensure` flow when runtime work needs
 it. An application can be stopped at the time of a valid check.
 
-The generated file uses `operator-isolated` and has no startup commands.
-Every `REPLACE_WITH_...` value is a required placeholder that prevents any
-probe or startup until the operator replaces it.
+The generated file uses `operator-isolated`. Each optional `start` object
+shows the package-script format with an unresolved script name. Replace every
+remaining `REPLACE_WITH_...` value before the toolkit can probe or start an
+application. Delete any `start` object if the application is started separately.
 
 ```json
 {
@@ -1434,7 +1457,8 @@ probe or startup until the operator replaces it.
       "identity": {
         "route": "REPLACE_WITH_LEGACY_PUBLIC_ROUTE",
         "includes": "REPLACE_WITH_LEGACY_RESPONSE_MARKER"
-      }
+      },
+      "start": { "manager": "pnpm", "script": "REPLACE_WITH_LEGACY_PACKAGE_SCRIPT" }
     },
     "BACKEND": {
       "origin": "REPLACE_WITH_BACKEND_HTTP_ORIGIN",
@@ -1442,7 +1466,8 @@ probe or startup until the operator replaces it.
       "identity": {
         "route": "REPLACE_WITH_BACKEND_PUBLIC_ROUTE",
         "includes": "REPLACE_WITH_BACKEND_RESPONSE_MARKER"
-      }
+      },
+      "start": { "manager": "pnpm", "script": "REPLACE_WITH_BACKEND_PACKAGE_SCRIPT" }
     },
     "TARGET": {
       "origin": "REPLACE_WITH_TARGET_HTTP_ORIGIN",
@@ -1450,7 +1475,8 @@ probe or startup until the operator replaces it.
       "identity": {
         "route": "REPLACE_WITH_TARGET_PUBLIC_ROUTE",
         "includes": "REPLACE_WITH_TARGET_RESPONSE_MARKER"
-      }
+      },
+      "start": { "manager": "pnpm", "script": "REPLACE_WITH_TARGET_PACKAGE_SCRIPT" }
     }
   }
 }
@@ -1467,11 +1493,13 @@ probe or startup until the operator replaces it.
   contains `identity.includes`, text specific to that application.
 - `start` is optional for each role. Each application may have its own start.
   Copy the intended script name from that project's `package.json`.
-  Package-script syntax is `{"manager":"pnpm","script":"dev"}`, which runs
-  `pnpm run dev`. The manager may be `npm`, `pnpm`, or `yarn`. Under
+  For example, LEGACY and TARGET could each use `{"manager":"pnpm","script":"dev"}`
+  if their own manifest defines `dev`. BACKEND could use
+  `{"manager":"pnpm","script":"start:dev"}` if its manifest defines
+  `start:dev`. The manager may be `npm`, `pnpm`, or `yarn`. Under
   `operator-local` only, argv syntax is
   `{"command":["pnpm.cmd","exec","next","dev","-p","11090"]}`.
-  Both examples, including the script and port, are illustrative and unverified.
+  All commands, script names and ports above are illustrative and unverified.
   Both formats run in the configured project directory. Only Windows uses
   `cmd.exe` for argv so shims resolve. Arguments cannot contain `" & | < > ^ % !`
   or a line break. `startTimeoutMs` defaults to 60000. For isolated startup,

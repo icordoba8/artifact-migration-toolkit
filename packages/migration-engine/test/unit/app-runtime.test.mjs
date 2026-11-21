@@ -454,7 +454,7 @@ test("a module with no browser work needs no application and no configuration", 
   await writeFile(statePath, JSON.stringify({ status: "ACTIVE", completedSteps: ["RESOLVE"] }));
   assert.equal((await nonvisual.runAppRuntime("check")).state, "CONFIGURATION_MISSING");
   await writeFile(statePath, JSON.stringify({ status: "ACTIVE", completedSteps: ["RESOLVE", "DISCOVER_LEGACY"] }));
-  for (const action of ["check", "ensure"]) {
+  for (const action of ["check", "prepare", "ensure"]) {
     const report = await nonvisual.runAppRuntime(action);
     assert.equal(report.state, "NOT_REQUIRED");
     assert.deepEqual(report.applications, []);
@@ -464,7 +464,10 @@ test("a module with no browser work needs no application and no configuration", 
   const module = path.join(complete.targetRoot, ".agents/knowledge/migrations/modules/orders");
   await mkdir(module, { recursive: true });
   await writeFile(path.join(module, "state.json"), JSON.stringify({ status: "COMPLETE" }));
+  assert.equal((await complete.runAppRuntime("prepare")).state, "NOT_REQUIRED");
   assert.equal((await complete.runAppRuntime("ensure")).state, "NOT_REQUIRED");
+  await assert.rejects(lstat(path.join(nonvisual.targetRoot, APP_RUNTIME_CONFIG)), { code: "ENOENT" });
+  await assert.rejects(lstat(path.join(complete.targetRoot, APP_RUNTIME_CONFIG)), { code: "ENOENT" });
 });
 
 const treeDigest = async (root) => {
@@ -491,6 +494,13 @@ test("an ACTIVE record is untouched by every action, status is unchanged, and it
   assert.equal(notConfigured.configPath, configFile);
   assert.ok(notConfigured.reason.includes(configFile), "the operator gets the absolute path");
   await assert.rejects(lstat(configFile), { code: "ENOENT" });
+  assert.equal(JSON.stringify(await getMigrationStatus(options)), checkpoint);
+  const prepared = await runReal({ ...options, action: "prepare", system: {
+    lookup: async () => assert.fail("the skill preflight must not probe applications"),
+  } });
+  assert.equal(prepared.state, "CONFIGURATION_MISSING");
+  assert.equal(prepared.templateCreated, true);
+  assert.equal(prepared.configPath, configFile);
   assert.equal(JSON.stringify(await getMigrationStatus(options)), checkpoint);
   await writeFile(configFile, JSON.stringify({ version: 1, namespace: OWN_NAMESPACE, applications: {
     LEGACY: application("../legacy-app", port, { start: NPM_START }),
@@ -762,9 +772,10 @@ test("the session broker is asked with the client token, and a loose spelling of
   }
 });
 
-test("the engine names no consumer, and the CLI exposes exactly the three actions", async () => {
+test("the engine names no consumer, and the CLI exposes runtime preflight and its existing actions", async () => {
   const source = await readFile(fileURLToPath(new URL("../../src/lifecycle/app-runtime.mjs", import.meta.url)), "utf8");
   assert.doesNotMatch(source, /\bwms\b|partners|\b\d{4,5}\b/i);
+  assert.equal(parseValidateArguments(["auth", "--app-runtime", "prepare"]).appRuntime, "prepare");
   assert.equal(parseValidateArguments(["auth", "--app-runtime", "ensure"]).appRuntime, "ensure");
   assert.throws(() => parseValidateArguments(["--app-runtime", "ensure"]), /Usage/);
   assert.throws(() => parseValidateArguments(["auth", "--app-runtime", "ensure", "--prefill"]), /Usage/);
@@ -811,6 +822,12 @@ test("the deprecated target-root file still works, says so once, and writes noth
   const space = await installed();
   await space.write(space.v1);
   await launch(space.targetRoot, space.sibling);
+  const prepared = await space.runAppRuntime("prepare", { system: {
+    listeners: async () => assert.fail("preparing the deprecated configuration must not probe"),
+  } });
+  assert.equal(prepared.state, "CONFIGURED");
+  assert.equal(prepared.configPath, space.old);
+  await assert.rejects(lstat(space.home), { code: "ENOENT" });
   const checked = await space.runAppRuntime("check");
   assert.equal(row(checked, "LEGACY").state, "RUNTIME_DOWN");
   assert.ok(checked.reason.includes(space.old) && checked.reason.includes(space.home), checked.reason);
@@ -1024,13 +1041,13 @@ test("review regression: a missing startup script refuses read-only check and en
 
 test("version 2 onboarding checks missing, malformed and valid configuration before starting all three roles", async () => {
   const space = await installed();
-  const noProbe = { system: { listeners: async () => assert.fail("refused configuration must not probe") } };
+  const noProbe = { system: { lookup: async () => assert.fail("the configuration preflight must not probe") } };
   const missing = await space.runAppRuntime("check", noProbe);
   assert.equal(missing.state, "CONFIGURATION_MISSING");
   assert.equal(missing.configPath, space.home);
   await assert.rejects(lstat(space.home), { code: "ENOENT" });
 
-  const reports = await Promise.all([space.runAppRuntime("ensure", noProbe), space.runAppRuntime("ensure", noProbe)]);
+  const reports = await Promise.all([space.runAppRuntime("prepare", noProbe), space.runAppRuntime("prepare", noProbe)]);
   assert.equal(reports.filter((report) => report.templateCreated).length, 1);
   const initial = await readFile(space.home, "utf8");
   assert.equal((await execFileAsync("git", ["check-ignore", APP_RUNTIME_CONFIG], { cwd: space.root })).stdout.trim(), APP_RUNTIME_CONFIG);
@@ -1038,6 +1055,9 @@ test("version 2 onboarding checks missing, malformed and valid configuration bef
   assert.equal(template.version, 2);
   assert.equal(template.trust, "operator-isolated");
   assert.deepEqual(Object.keys(template.applications), ["LEGACY", "BACKEND", "TARGET"]);
+  for (const [role, app] of Object.entries(template.applications)) {
+    assert.deepEqual(app.start, { manager: "pnpm", script: `REPLACE_WITH_${role}_PACKAGE_SCRIPT` });
+  }
   assert.deepEqual(template, JSON.parse(
     (await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8"))
       .split("#### Operator configuration\n")[1].match(/```json\n([\s\S]+?)\n```/)[1],
@@ -1047,27 +1067,49 @@ test("version 2 onboarding checks missing, malformed and valid configuration bef
     assert.equal(report.configPath, space.home);
     assert.ok(report.unresolved.includes("namespace"));
     assert.ok(report.unresolved.includes("applications.BACKEND.identity.includes"));
+    assert.ok(report.unresolved.includes("applications.TARGET.start.script"));
     assert.deepEqual(report.applications, []);
   }
   assert.deepEqual((await space.homeFolder()).sort(), [".gitignore", "claude.json", "runtime-apps.json"]);
   await assert.rejects(lstat(space.old), { code: "ENOENT" });
 
-  const pending = space.v2();
-  pending.applications.LEGACY.identity.includes = template.applications.LEGACY.identity.includes;
-  await space.writeHome(pending);
-  const digest = await treeDigest(space.root);
-  const refused = await space.runAppRuntime("ensure", noProbe);
-  assert.deepEqual(refused.unresolved, ["applications.LEGACY.identity.includes"]);
-  assert.equal(refused.templateCreated, undefined);
-  assert.equal(await treeDigest(space.root), digest);
+  const withMarker = space.v2();
+  withMarker.applications.LEGACY.identity.includes = template.applications.LEGACY.identity.includes;
+  const withScript = space.v2();
+  withScript.applications.LEGACY.start = template.applications.LEGACY.start;
+  for (const [pending, unresolved] of [
+    [withMarker, "applications.LEGACY.identity.includes"],
+    [withScript, "applications.LEGACY.start.script"],
+  ]) {
+    await space.writeHome(pending);
+    const digest = await treeDigest(space.root);
+    const refused = await space.runAppRuntime("ensure", noProbe);
+    assert.deepEqual(refused.unresolved, [unresolved]);
+    assert.equal(refused.templateCreated, undefined);
+    assert.equal(await treeDigest(space.root), digest);
+  }
 
   await writeFile(space.home, "{");
   assert.match((await space.runAppRuntime("ensure", noProbe)).reason, /not valid JSON/);
   assert.equal(await readFile(space.home, "utf8"), "{");
 
-  await space.writeHome(space.v2());
+  const prepared = space.v2();
+  delete prepared.applications.LEGACY.start;
+  await space.writeHome(prepared);
+  const configuredDigest = await treeDigest(space.root);
+  assert.equal((await space.runAppRuntime("prepare", noProbe)).state, "CONFIGURED");
+  assert.equal(await treeDigest(space.root), configuredDigest);
   const optional = await space.runAppRuntime("check");
   assert.deepEqual(optional.applications.map(({ role }) => role), ["LEGACY", "TARGET"]);
+
+  const argv = { ...prepared, trust: "operator-local" };
+  argv.applications.LEGACY.start = { command: [process.execPath, "server.mjs"] };
+  await space.writeHome(argv);
+  assert.equal((await space.runAppRuntime("prepare", noProbe)).state, "CONFIGURED");
+  await space.writeHome({ ...argv, trust: "operator-isolated" });
+  const denied = await space.runAppRuntime("prepare", noProbe);
+  assert.equal(denied.state, "CONFIGURATION_MISSING");
+  assert.match(denied.reason, /under trust "operator-local" only/);
 
   const backendPort = await freePort();
   const backend = await writeProject(path.join(space.root, "backend"), backendPort);
@@ -1082,6 +1124,9 @@ test("version 2 onboarding checks missing, malformed and valid configuration bef
   }
   await space.writeHome(config);
   const before = await treeDigest(space.root);
+  const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+  const { stdout } = await execFileAsync(process.execPath, [cli, "orders", "--registry", space.registryPath, "--app-runtime", "prepare"], { cwd: space.targetRoot });
+  assert.equal(JSON.parse(stdout).state, "CONFIGURED");
   assert.equal((await space.runAppRuntime("check")).state, "RUNTIME_DOWN");
   assert.equal(await treeDigest(space.root), before);
   try {

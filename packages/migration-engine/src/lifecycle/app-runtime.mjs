@@ -1,7 +1,8 @@
 /**
  * Lifecycle: the applications a migration observes (LEGACY, BACKEND, TARGET).
- * `check` classifies them and writes nothing. `ensure` seeds a missing template
- * or starts an authorized stopped application. `stop` ends only what `ensure` started.
+ * `prepare` seeds a missing template without probing or starting applications.
+ * `check` probes without writes. `ensure` can start an authorized application.
+ * `stop` ends only what `ensure` started.
  *
  * Authority is one local file the operator configures, never the record, a response
  * or a tool argument. An incomplete generated template confers no authority.
@@ -46,7 +47,7 @@ export const APP_RUNTIME_CONFIG = ".artifact-migration-tools/runtime-apps.json";
 const OWNED_DIRECTORY = ".artifact-migration-tools/app-runtime";
 // What the installer writes into the consumer root's `.artifact-migration-tools/`; its presence marks that root.
 const RECEIPTS = ["claude", "codex", "opencode", "copilot"].map((provider) => `.artifact-migration-tools/${provider}.json`);
-export const APP_RUNTIME_ACTIONS = Object.freeze(["check", "ensure", "stop"]);
+export const APP_RUNTIME_ACTIONS = Object.freeze(["check", "prepare", "ensure", "stop"]);
 
 // BACKEND first: the two front ends call it while they render.
 const ROLES = ["BACKEND", "LEGACY", "TARGET"];
@@ -460,6 +461,7 @@ const configurationTemplate = () => ({
       route: placeholder(`${role}_PUBLIC_ROUTE`),
       includes: placeholder(`${role}_RESPONSE_MARKER`),
     },
+    start: { manager: "pnpm", script: placeholder(`${role}_PACKAGE_SCRIPT`) },
   }])),
 });
 
@@ -502,7 +504,7 @@ const createTemplate = async ({ base, file, target }) => {
 };
 
 const incompleteConfiguration = (file, unresolved, templateCreated = false) => ({
-  problem: `${templateCreated ? "Created the application template at" : "Edit"} '${file}'. Replace unresolved values: ${unresolved.join(", ")}. Remove BACKEND entirely if unused. Startup is optional.`,
+  problem: `${templateCreated ? "Created the application template at" : "Edit"} '${file}'. Replace unresolved values: ${unresolved.join(", ")}. Remove BACKEND entirely if unused. Remove start from any application that the toolkit should not start.`,
   file, unresolved, ...(templateCreated ? { templateCreated } : {}),
 });
 
@@ -531,7 +533,7 @@ const readConfiguration = async (targetRoot, system = hostSystem, { validateScri
         if (template) return incompleteConfiguration(file, unresolvedFields(template), true);
         return readConfiguration(targetRoot, system, { validateScripts });
       }
-      throw new Error(`${APP_RUNTIME_CONFIG} does not exist at '${file}'. Run the application preflight ensure to generate a template when runtime is needed.`);
+      throw new Error(`${APP_RUNTIME_CONFIG} does not exist at '${file}'. Run the application preflight prepare to generate a template when runtime is needed.`);
     }
     await assertUntracked(base, file);
     let document;
@@ -579,6 +581,7 @@ const readConfiguration = async (targetRoot, system = hostSystem, { validateScri
     const refusal = trust !== "operator-local" && applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
     return {
       base,
+      file,
       notice: located.notice,
       namespace: document.namespace,
       sessionBroker: document.sessionBroker,
@@ -740,7 +743,7 @@ const publicRow = ({ occupied, ...row }, app) => ({
   startAuthorized: Boolean(app.start), reused: false, started: false, ...row,
 });
 
-/** `check` and `ensure` over the configured applications, `stop` over the toolkit's own. */
+/** Prepare configuration, check or ensure applications, or stop toolkit-owned processes. */
 export const runAppRuntime = async ({ registryPath, moduleName, action = "check", system: injected = {} }) => {
   const system = { ...hostSystem, ...injected };
   if (!APP_RUNTIME_ACTIONS.includes(action)) throw new Error(`Unknown application runtime action '${action}'; use ${APP_RUNTIME_ACTIONS.join(", ")}.`);
@@ -770,7 +773,7 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
 
   const notRequired = await requirement(targetRoot, resolved.canonical);
   if (notRequired) return { ...base, required: false, state: "NOT_REQUIRED", reason: notRequired, applications: [] };
-  const configuration = await readConfiguration(targetRoot, system, { validateScripts: true, seedTemplate: action === "ensure" });
+  const configuration = await readConfiguration(targetRoot, system, { validateScripts: true, seedTemplate: action === "prepare" || action === "ensure" });
   if (configuration.problem) {
     const { problem, file, unresolved, templateCreated } = configuration;
     return {
@@ -783,6 +786,13 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
     return {
       ...base, required: true, state: "WRONG_NAMESPACE", configFile: APP_RUNTIME_CONFIG, applications: [],
       reason: `The applications run in the '${configuration.namespace}' network namespace but this engine runs in '${system.namespace}': loopback here is a different machine, so nothing was probed or started. Run the engine in '${configuration.namespace}'.`,
+    };
+  }
+
+  if (action === "prepare") {
+    return {
+      ...base, required: true, state: "CONFIGURED", configPath: configuration.file,
+      ...(configuration.notice ? { reason: configuration.notice } : {}), applications: [],
     };
   }
 
