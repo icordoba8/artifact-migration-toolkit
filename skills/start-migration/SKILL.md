@@ -197,6 +197,15 @@ If persisted migration state exists, resume from it. Do not:
 
 ### 3. Obtain `nextWork` from the engine
 
+For a mutating invocation, run the **Application configuration preflight**
+as soon as the current work is known to need runtime evidence. That means
+visible behavior at `DISCOVER_LEGACY`, a legacy-runtime capture at
+`ASSESS_TARGET`, or runtime verification of a visible slice. If status
+already establishes that need, do this before `migration_run`. During first
+discovery, use the bounded source evidence and preflight as soon as you find
+visible behavior. A status-only invocation ends with status. Skip this
+preflight during an unconfirmed `--mode step` preview.
+
 - MCP: `migration_run`
 - CLI fallback:
   `artifact-migration-run <module> ... --json`
@@ -1278,7 +1287,9 @@ current checkpoint is missing.
   Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only), never
   `migration_capture`: that operation is legal only at `ASSESS_TARGET`
   (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuses here.
-  First prepare the applications (see **Applications** below); open the browser
+  Preflight configuration as soon as bounded source evidence identifies visible
+  behavior, before authoring runtime observations or requesting the browser.
+  Then prepare the applications (see **Applications** below); open the browser
   only at an origin it reported. If the browser lands on a sign-in page, do not
   type credentials and do not ask for any. An application whose row says
   `"onSignIn": "wait-for-operator"` follows **Operator sign-in** below;
@@ -1289,7 +1300,8 @@ current checkpoint is missing.
   observation does not apply. That is a tracked gap, not evidence: `VERIFY_SLICES`
   still requires LEGACY and TARGET runtime evidence and refuses without it, so
   report the cause and its remedy to the operator once, now, instead of after
-  the first slice is implemented.
+  the first slice is implemented. For missing or invalid application configuration,
+  follow **Operator configuration** before doing runtime-dependent work.
   Record the responses in the scan's `apiContract` exactly as derived; they are
   already the OpenSpec's `Response:` lines.
   Trace external JSX package imports reported by scanner algorithm 4 to
@@ -1316,15 +1328,30 @@ current checkpoint is missing.
 
 ### Applications
 
-Before the first browser or capture step of `DISCOVER_LEGACY`, `ASSESS_TARGET`
-or `VERIFY_SLICES`, and again after any browser failure, run
+Application setup is only for runtime-dependent work. Status-only, completed
+and genuinely non-UI workflows need no application configuration. Mock mode
+changes the target data source. A mock slice with required visible behavior
+still needs its runtime UI evidence.
+
+#### Application configuration preflight
+
+Run `migration_app_runtime { module, cwd, action: "prepare" }` (CLI:
+`artifact-migration-validate <module> --app-runtime prepare`) at the first
+mutating preflight for runtime-dependent work. Call it before asking for the
+browser or authoring runtime evidence. It creates the missing template and
+returns its path and unresolved fields without probing or starting any app.
+An existing valid file returns `CONFIGURED` without writes. For
+`CONFIGURATION_MISSING`, follow **Operator configuration** before continuing
+that work. For `WRONG_NAMESPACE`, run in the configured namespace.
+When runtime is unnecessary, skip this action.
+
+Before each browser or capture phase, and after any browser failure, run
 `migration_app_runtime { module, cwd, action: "ensure" }` (CLI:
-`artifact-migration-validate <module> --app-runtime ensure`). It reuses what is
-running and starts what is stopped, so never ask the operator to start an
-application it can prepare, and never start one yourself. It is idempotent, so
-repeat it if a client timeout cuts it short. `check` is the same report with no
-start and no write. `stop` ends only what `ensure` started; it never touches a
-process the toolkit did not start.
+`artifact-migration-validate <module> --app-runtime ensure`). It reuses
+proven applications and starts only authorized stopped ones. Retry `ensure`
+if a client timeout interrupts it. Never start an application yourself. Use
+`check` to probe without writes or starts. Use
+`stop` only for processes previously started by `ensure`.
 
 Use exactly the `origin` it reports. A port number alone proves nothing: another
 network namespace's address, or the other address family of `localhost`, can
@@ -1333,13 +1360,14 @@ this engine in the same namespace.
 
 | State | Meaning | Do |
 | --- | --- | --- |
+| `CONFIGURED` | `prepare` accepted the local configuration without probing. | Continue the checkpoint. Use `ensure` when applications are needed. |
 | `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. A `"onSignIn": "wait-for-operator"` row whose page lands on sign-in follows **Operator sign-in** below. |
 | `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | With `"onSignIn": "wait-for-operator"`, follow **Operator sign-in** below. Otherwise continue with an authorized session if the operator has supplied one, or record the gap as below. Never type or request a credential. |
 | `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
 | `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address; `reason` then names its PID (and its pm2 app, when pm2 runs it) and the operator's command to free the port. | Report it with that command for the operator. Never reuse it, stop it, run that command or capture from it. |
 | `IDENTITY_UNPROVEN` | It answers, but no inspectable local process holds it, such as a forwarded port. | Report it; treat it as `WRONG_APP`. |
 | `WRONG_NAMESPACE` | The engine runs in a different namespace from the applications. Nothing was probed. | Run the engine where the configuration says. |
-| `CONFIGURATION_MISSING` | No usable local configuration; `reason` says why. | Ask the operator to fix the file. Never write it yourself. |
+| `CONFIGURATION_MISSING` | No usable local configuration; `reason` says why. | Follow **Operator configuration** and stop before runtime-dependent work. |
 | `NOT_REQUIRED` | COMPLETE record, or closed discovery found no visible UI. | No application and no browser. |
 
 No state changes the record, so a runtime problem is never recorded as a passed
@@ -1376,6 +1404,8 @@ the browser keeps a sign-in across runs is the operator's browser configuration
 (for example a `--user-data-dir` registration described under captures), never
 the toolkit's.
 
+#### Operator configuration
+
 The authority is `.artifact-migration-tools/runtime-apps.json` in the consumer
 root, the folder holding the installer receipts (the nearest one at or above
 the target, inside its Git work tree; the target itself when none is),
@@ -1387,38 +1417,101 @@ Never change its ownership or permissions; that is the operator's step.
 `"trust": "operator-local"`, the operator's choice for a machine that is theirs
 alone, waives only that ownership check: the Git, namespace and identity checks
 stay, and `stop` still ends only what `ensure` started. It also allows
-`"onSignIn": "wait-for-operator"` and an argv `start`. Never write or change
-this file, least of all its `trust`:
+`"onSignIn": "wait-for-operator"` and an argv `start`. Only the toolkit may create the incomplete template. Never create, edit,
+overwrite, or commit the file yourself.
+
+On `CONFIGURATION_MISSING`, show the exact absolute `configPath` and
+the engine's reason, including any `unresolved` field paths. If `templateCreated`
+is true, say that the engine generated the template. Ask the operator to fill
+in the required values in that file and remove the entire `BACKEND` entry
+if unused. Explain the optional settings below and stop until the operator
+reports the file is ready. Keep the current checkpoint pending. Existing
+files, including the deprecated target-root copy, are preserved. The engine
+creates a local ignore file when absent. Keep this configuration out of Git
+if your existing ignore rules do not already cover it.
+
+When the operator reports the file is ready, read migration status first and run
+`migration_app_runtime { module, cwd, action: "check" }` or
+`artifact-migration-validate <module> --app-runtime check`. The check never
+starts a process or writes files. If the check still reports
+`CONFIGURATION_MISSING` or `WRONG_NAMESPACE`, relay the reason and stop again. Once the check accepts the configuration, resume the
+persisted checkpoint and use the normal `ensure` flow when runtime work needs
+it. An application can be stopped at the time of a valid check.
+
+The generated file uses `operator-isolated`. Each optional `start` object
+shows the package-script format with an unresolved script name. Replace every
+remaining `REPLACE_WITH_...` value before the toolkit can probe or start an
+application. Delete any `start` object if the application is started separately.
 
 ```json
 {
   "version": 2,
-  "namespace": "win32 | wsl | linux | darwin",
-  "trust": "operator-isolated | operator-local",
+  "namespace": "REPLACE_WITH_NAMESPACE",
+  "trust": "operator-isolated",
   "applications": {
     "LEGACY": {
-      "origin": "http://localhost:<port>",
-      "project": "<directory relative to the consumer root>",
-      "identity": { "route": "<public route>", "includes": "<text only this application serves>" },
-      "protectedRoute": "<route that needs a session>",
-      "signInPath": "<sign-in route>",
-      "onSignIn": "record-gap | wait-for-operator",
-      "start": { "manager": "npm | pnpm | yarn", "script": "<package script name>" },
-      "startTimeoutMs": 60000
+      "origin": "REPLACE_WITH_LEGACY_HTTP_ORIGIN",
+      "project": "REPLACE_WITH_LEGACY_PROJECT",
+      "identity": {
+        "route": "REPLACE_WITH_LEGACY_PUBLIC_ROUTE",
+        "includes": "REPLACE_WITH_LEGACY_RESPONSE_MARKER"
+      },
+      "start": { "manager": "pnpm", "script": "REPLACE_WITH_LEGACY_PACKAGE_SCRIPT" }
+    },
+    "BACKEND": {
+      "origin": "REPLACE_WITH_BACKEND_HTTP_ORIGIN",
+      "project": "REPLACE_WITH_BACKEND_PROJECT",
+      "identity": {
+        "route": "REPLACE_WITH_BACKEND_PUBLIC_ROUTE",
+        "includes": "REPLACE_WITH_BACKEND_RESPONSE_MARKER"
+      },
+      "start": { "manager": "pnpm", "script": "REPLACE_WITH_BACKEND_PACKAGE_SCRIPT" }
+    },
+    "TARGET": {
+      "origin": "REPLACE_WITH_TARGET_HTTP_ORIGIN",
+      "project": "REPLACE_WITH_TARGET_PROJECT",
+      "identity": {
+        "route": "REPLACE_WITH_TARGET_PUBLIC_ROUTE",
+        "includes": "REPLACE_WITH_TARGET_RESPONSE_MARKER"
+      },
+      "start": { "manager": "pnpm", "script": "REPLACE_WITH_TARGET_PACKAGE_SCRIPT" }
     }
   }
 }
 ```
 
-`LEGACY` and `TARGET` are required and `BACKEND` is optional. `trust` defaults
-to `operator-isolated`, `onSignIn` to `record-gap`; `wait-for-operator` needs
-`signInPath` and `operator-local`. `protectedRoute`, `signInPath`, `start` and
-`startTimeoutMs` are optional, and only an application with `start` may be
-started: it names a script of that project's own `package.json`, never a
-command line. Under `operator-local` only, `start` may instead be
-`{"command": ["<program>", "<argument>", ...]}`, run in the project directory
-without a shell (on Windows through `cmd.exe`, so `.cmd` shims resolve); no
-argument may contain `" & | < > ^ % !` or a line break. The started process inherits a minimal environment, with no ambient
+- Keep `version` at 2. Set `namespace` to where the engine and apps actually run: `win32`, `wsl`,
+  `linux`, or `darwin`. `trust` defaults to `operator-isolated`. Only the
+  operator may choose `operator-local` for their own machine.
+- `LEGACY` and `TARGET` are required. Include `BACKEND` only when this
+  runtime needs it. Each role needs an HTTP loopback `origin` with a port,
+  a `project` directory relative to the consumer root, and `identity`.
+  Use the local application settings for the port and project. Choose a public
+  `identity.route` with no query or fragment and verify its successful response
+  contains `identity.includes`, text specific to that application.
+- `start` is optional for each role. Each application may have its own start.
+  Copy the intended script name from that project's `package.json`.
+  For example, LEGACY and TARGET could each use `{"manager":"pnpm","script":"dev"}`
+  if their own manifest defines `dev`. BACKEND could use
+  `{"manager":"pnpm","script":"start:dev"}` if its manifest defines
+  `start:dev`. The manager may be `npm`, `pnpm`, or `yarn`. Under
+  `operator-local` only, argv syntax is
+  `{"command":["pnpm.cmd","exec","next","dev","-p","11090"]}`.
+  All commands, script names and ports above are illustrative and unverified.
+  Both formats run in the configured project directory. Only Windows uses
+  `cmd.exe` for argv so shims resolve. Arguments cannot contain `" & | < > ^ % !`
+  or a line break. `startTimeoutMs` defaults to 60000. For isolated startup,
+  retain the ownership and write restrictions above. Omit `start` to let the
+  engine use an application that the operator starts.
+- `protectedRoute` is an optional path used to probe whether a session is
+  needed. `signInPath` is the application's optional sign-in path.
+  `onSignIn` defaults to `record-gap`. Use `wait-for-operator` only with
+  `operator-local` and a verified `signInPath`.
+- `sessionBroker` is optional and applies only when captures need brokered
+  sessions. It takes a loopback `url` and an absolute `tokenFile` path to the
+  operator-provisioned client token. Keep the token out of this file and out of Git.
+
+The started process inherits a minimal environment, with no ambient
 token, and writes to `.artifact-migration-tools/app-runtime/` beside that file.
 On Windows it is created through WMI, never as the engine's child, so the
 command that ran `ensure` returns as soon as the report is printed.

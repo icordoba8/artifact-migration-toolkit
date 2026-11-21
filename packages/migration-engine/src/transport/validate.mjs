@@ -32,7 +32,7 @@ export const parseValidateArguments = (arguments_) => {
     (values.reference && !values["evidence-binding"])
   ) {
     throw new Error(
-      "Usage: validate-migration.mjs [<module>] [--registry <path>] [--step <step> [--slice <id>] | --complete | --evidence-binding [--reference <path>]... | --prefill | --capture <request.json> | --app-runtime check|ensure|stop]",
+      "Usage: validate-migration.mjs [<module>] [--registry <path>] [--step <step> [--slice <id>] | --complete | --evidence-binding [--reference <path>]... | --prefill | --capture <request.json> | --app-runtime check|prepare|ensure|stop]",
     );
   }
   assertOptionCombination("validate", { positionals, values });
@@ -82,7 +82,7 @@ export const runValidateCli = async (arguments_) => {
     // The same call as `migration_app_runtime`; the JSON is the answer, the exit code its summary.
     const report = await runAppRuntime({ ...options, action: options.appRuntime });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    if (report.state !== undefined && report.state !== "READY" && report.state !== "NOT_REQUIRED") process.exitCode = BLOCKED_EXIT_CODE;
+    if (report.state !== undefined && !["CONFIGURED", "READY", "NOT_REQUIRED"].includes(report.state)) process.exitCode = BLOCKED_EXIT_CODE;
     return report;
   }
   const result = await validateResumableMigration(options);

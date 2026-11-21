@@ -454,7 +454,7 @@ test("a module with no browser work needs no application and no configuration", 
   await writeFile(statePath, JSON.stringify({ status: "ACTIVE", completedSteps: ["RESOLVE"] }));
   assert.equal((await nonvisual.runAppRuntime("check")).state, "CONFIGURATION_MISSING");
   await writeFile(statePath, JSON.stringify({ status: "ACTIVE", completedSteps: ["RESOLVE", "DISCOVER_LEGACY"] }));
-  for (const action of ["check", "ensure"]) {
+  for (const action of ["check", "prepare", "ensure"]) {
     const report = await nonvisual.runAppRuntime(action);
     assert.equal(report.state, "NOT_REQUIRED");
     assert.deepEqual(report.applications, []);
@@ -464,7 +464,10 @@ test("a module with no browser work needs no application and no configuration", 
   const module = path.join(complete.targetRoot, ".agents/knowledge/migrations/modules/orders");
   await mkdir(module, { recursive: true });
   await writeFile(path.join(module, "state.json"), JSON.stringify({ status: "COMPLETE" }));
+  assert.equal((await complete.runAppRuntime("prepare")).state, "NOT_REQUIRED");
   assert.equal((await complete.runAppRuntime("ensure")).state, "NOT_REQUIRED");
+  await assert.rejects(lstat(path.join(nonvisual.targetRoot, APP_RUNTIME_CONFIG)), { code: "ENOENT" });
+  await assert.rejects(lstat(path.join(complete.targetRoot, APP_RUNTIME_CONFIG)), { code: "ENOENT" });
 });
 
 const treeDigest = async (root) => {
@@ -485,6 +488,20 @@ test("an ACTIVE record is untouched by every action, status is unchanged, and it
   const target = await writeProject(path.join(consumer.root, "target-app"), sibling);
   await mkdir(path.join(consumer.targetRoot, ".artifact-migration-tools"), { recursive: true });
   const configFile = path.join(consumer.targetRoot, APP_RUNTIME_CONFIG);
+  const checkpoint = JSON.stringify(await getMigrationStatus(options));
+  const notConfigured = await runReal({ ...options, action: "check" });
+  assert.equal(notConfigured.state, "CONFIGURATION_MISSING");
+  assert.equal(notConfigured.configPath, configFile);
+  assert.ok(notConfigured.reason.includes(configFile), "the operator gets the absolute path");
+  await assert.rejects(lstat(configFile), { code: "ENOENT" });
+  assert.equal(JSON.stringify(await getMigrationStatus(options)), checkpoint);
+  const prepared = await runReal({ ...options, action: "prepare", system: {
+    lookup: async () => assert.fail("the skill preflight must not probe applications"),
+  } });
+  assert.equal(prepared.state, "CONFIGURATION_MISSING");
+  assert.equal(prepared.templateCreated, true);
+  assert.equal(prepared.configPath, configFile);
+  assert.equal(JSON.stringify(await getMigrationStatus(options)), checkpoint);
   await writeFile(configFile, JSON.stringify({ version: 1, namespace: OWN_NAMESPACE, applications: {
     LEGACY: application("../legacy-app", port, { start: NPM_START }),
     TARGET: application("../target-app", sibling, { start: NPM_START }),
@@ -624,7 +641,9 @@ test("a file another account owns and this one cannot write authorizes the start
 });
 
 test("operator-local starts from a file this account owns; operator-isolated still refuses it", async () => {
-  const space = await twoApps({}, { start: NPM_START });
+  const space = await twoApps({}, { start: NPM_START }, {
+    routes: { "/private": { status: 307, headers: { location: "/operator-entry" } } },
+  });
   await launch(space.target, space.sibling);
   const real = (action) => runReal({ registryPath: space.registryPath, moduleName: "orders", action });
   const apps = (extra = {}) => ({
@@ -642,13 +661,14 @@ test("operator-local starts from a file this account owns; operator-isolated sti
     assert.equal(await starts(space.legacy), 0);
   }
 
-  await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps({ signInPath: "/login", onSignIn: "wait-for-operator" }) });
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, trust: "operator-local", applications: apps({ signInPath: "/operator-entry", onSignIn: "wait-for-operator" }) });
   const local = await real("ensure");
   assert.equal(row(local, "LEGACY").started, true);
   assert.equal(row(local, "LEGACY").state, "AUTH_REQUIRED");
   assert.equal(row(local, "LEGACY").trust, "operator-local");
   assert.equal(row(local, "LEGACY").onSignIn, "wait-for-operator");
-  assert.equal(row(local, "LEGACY").signInPath, "/login");
+  assert.equal(row(local, "LEGACY").signInPath, "/operator-entry");
+  assert.equal(row(local, "LEGACY").protectedRoute, "/private");
   assert.equal(row(local, "TARGET").onSignIn, "record-gap");
   assert.equal(row(local, "TARGET").signInPath, undefined);
   // Reuse is unchanged: a second ensure starts nothing.
@@ -752,9 +772,10 @@ test("the session broker is asked with the client token, and a loose spelling of
   }
 });
 
-test("the engine names no consumer, and the CLI exposes exactly the three actions", async () => {
+test("the engine names no consumer, and the CLI exposes runtime preflight and its existing actions", async () => {
   const source = await readFile(fileURLToPath(new URL("../../src/lifecycle/app-runtime.mjs", import.meta.url)), "utf8");
   assert.doesNotMatch(source, /\bwms\b|partners|\b\d{4,5}\b/i);
+  assert.equal(parseValidateArguments(["auth", "--app-runtime", "prepare"]).appRuntime, "prepare");
   assert.equal(parseValidateArguments(["auth", "--app-runtime", "ensure"]).appRuntime, "ensure");
   assert.throws(() => parseValidateArguments(["--app-runtime", "ensure"]), /Usage/);
   assert.throws(() => parseValidateArguments(["auth", "--app-runtime", "ensure", "--prefill"]), /Usage/);
@@ -801,6 +822,12 @@ test("the deprecated target-root file still works, says so once, and writes noth
   const space = await installed();
   await space.write(space.v1);
   await launch(space.targetRoot, space.sibling);
+  const prepared = await space.runAppRuntime("prepare", { system: {
+    listeners: async () => assert.fail("preparing the deprecated configuration must not probe"),
+  } });
+  assert.equal(prepared.state, "CONFIGURED");
+  assert.equal(prepared.configPath, space.old);
+  await assert.rejects(lstat(space.home), { code: "ENOENT" });
   const checked = await space.runAppRuntime("check");
   assert.equal(row(checked, "LEGACY").state, "RUNTIME_DOWN");
   assert.ok(checked.reason.includes(space.old) && checked.reason.includes(space.home), checked.reason);
@@ -912,4 +939,227 @@ test("nothing above the target's Git work tree is read, and no work tree is a re
   assert.equal(outside.state, "CONFIGURATION_MISSING");
   assert.match(outside.reason, /not in a Git work tree/);
   assert.equal(await starts(space.legacy), 0);
+});
+
+test("review regression: the Git index must prove that operator configuration is untracked", async () => {
+  const space = await installed();
+  await space.writeHome(space.v2());
+  const run = (action, listeners = async () => []) => space.runAppRuntime(action, { system: { listeners } });
+  assert.equal((await run("check")).state, "RUNTIME_DOWN", "a successful empty index query permits the probes");
+
+  await execFileAsync("git", ["add", "-f", APP_RUNTIME_CONFIG], { cwd: space.root });
+  const noProbe = async () => assert.fail("refused configuration must not probe");
+  assert.match((await run("ensure", noProbe)).reason, /tracked by Git/);
+  await rm(space.home);
+  assert.match((await run("ensure", noProbe)).reason, /tracked by Git/);
+  await assert.rejects(lstat(space.home), { code: "ENOENT" });
+  await space.writeHome(space.v2());
+
+  await writeFile(path.join(space.root, ".git", "index"), "invalid index fixture");
+  const before = await treeDigest(space.root);
+  const report = await run("ensure", noProbe);
+  assert.equal(report.state, "CONFIGURATION_MISSING");
+  assert.match(report.reason, /could not verify.*Git index/i);
+  assert.equal(await treeDigest(space.root), before);
+  assert.equal(await starts(space.legacy), 0);
+});
+
+test("review regression: an unanswered alternate address cannot hide a foreign listener", async () => {
+  const space = await twoApps({});
+  await launch(space.legacy, space.port);
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, applications: {
+    LEGACY: { ...application("../legacy-app", space.port), origin: `http://localhost:${space.port}` },
+    TARGET: application("../target-app", space.sibling),
+  } });
+  const owned = { address: "127.0.0.1", pid: 100, cwd: space.legacy, command: null };
+  const other = { address: "::1", pid: 101, cwd: space.target, command: null };
+  const run = (alternate) => space.runAppRuntime("ensure", { system: {
+    lookup: async (host) => host === "localhost"
+      ? [{ address: "127.0.0.1", family: 4 }, { address: "::1", family: 6 }]
+      : [{ address: host, family: 4 }],
+    listeners: async (port) => port === space.port ? [owned, ...(alternate ? [alternate] : [])] : [],
+  } });
+  assert.equal(row(await run(null), "LEGACY").reused, true, "an unused address is harmless");
+  const foreign = row(await run(other), "LEGACY");
+  assert.equal(foreign.state, "WRONG_APP");
+  assert.equal(foreign.reused, false);
+  const unknown = row(await run({ ...other, cwd: null }), "LEGACY");
+  assert.equal(unknown.state, "IDENTITY_UNPROVEN");
+  assert.equal(unknown.reused, false);
+  const unavailable = row(await run({ ...other, cwd: space.legacy }), "LEGACY");
+  assert.equal(unavailable.state, "RUNTIME_DOWN");
+  assert.equal(unavailable.reused, false);
+  assert.equal(await starts(space.legacy), 1);
+});
+
+test("review regression: invalid projects, roles and identity fail before any probe", async () => {
+  const space = await installed();
+  const invalid = [
+    [{ project: space.legacy }, /project.*relative/],
+    [{ project: "legacy-app/package.json" }, /project.*directory/],
+    [{ identity: { route: "/health/\u0100", includes: "fixture-app" } }, /identity\.route/],
+    [{ identity: { route: "/%broken", includes: "fixture-app" } }, /identity\.route/],
+    [{ identity: { route: "/public", includes: " \t" } }, /identity/],
+  ];
+  const run = () => space.runAppRuntime("check", { system: { listeners: async () => assert.fail("invalid configuration was probed") } });
+  for (const [overrides, reason] of invalid) {
+    const config = space.v2();
+    Object.assign(config.applications.LEGACY, overrides);
+    await space.writeHome(config);
+    const report = await run();
+    assert.equal(report.state, "CONFIGURATION_MISSING", JSON.stringify(overrides));
+    assert.match(report.reason, reason);
+  }
+  for (const backend of [false, null, 0, "", []]) {
+    const config = space.v2();
+    config.applications.BACKEND = backend;
+    await space.writeHome(config);
+    const report = await run();
+    assert.equal(report.state, "CONFIGURATION_MISSING", JSON.stringify(backend));
+    assert.match(report.reason, /applications\.BACKEND/);
+  }
+});
+
+test("review regression: a missing startup script refuses read-only check and ensure before mutations", async () => {
+  const space = await installed();
+  const config = space.v2();
+  config.applications.LEGACY.start = { ...NPM_START, script: "not-declared" };
+  config.applications.TARGET.start = NPM_START;
+  await space.writeHome(config);
+  const before = await treeDigest(space.root);
+  for (const action of ["check", "ensure"]) {
+    const report = await space.runAppRuntime(action, {
+      system: { listeners: async () => assert.fail("invalid startup configuration was probed") },
+    });
+    assert.equal(report.state, "CONFIGURATION_MISSING", action);
+    assert.match(report.reason, /no package script 'not-declared'/);
+    assert.equal(await treeDigest(space.root), before, action);
+  }
+  assert.equal(await starts(space.legacy), 0);
+  assert.equal(await starts(space.targetRoot), 0);
+});
+
+test("version 2 onboarding checks missing, malformed and valid configuration before starting all three roles", async () => {
+  const space = await installed();
+  const noProbe = { system: { lookup: async () => assert.fail("the configuration preflight must not probe") } };
+  const missing = await space.runAppRuntime("check", noProbe);
+  assert.equal(missing.state, "CONFIGURATION_MISSING");
+  assert.equal(missing.configPath, space.home);
+  await assert.rejects(lstat(space.home), { code: "ENOENT" });
+
+  const reports = await Promise.all([space.runAppRuntime("prepare", noProbe), space.runAppRuntime("prepare", noProbe)]);
+  assert.equal(reports.filter((report) => report.templateCreated).length, 1);
+  const initial = await readFile(space.home, "utf8");
+  assert.equal((await execFileAsync("git", ["check-ignore", APP_RUNTIME_CONFIG], { cwd: space.root })).stdout.trim(), APP_RUNTIME_CONFIG);
+  const template = JSON.parse(initial);
+  assert.equal(template.version, 2);
+  assert.equal(template.trust, "operator-isolated");
+  assert.deepEqual(Object.keys(template.applications), ["LEGACY", "BACKEND", "TARGET"]);
+  for (const [role, app] of Object.entries(template.applications)) {
+    assert.deepEqual(app.start, { manager: "pnpm", script: `REPLACE_WITH_${role}_PACKAGE_SCRIPT` });
+  }
+  assert.deepEqual(template, JSON.parse(
+    (await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8"))
+      .split("#### Operator configuration\n")[1].match(/```json\n([\s\S]+?)\n```/)[1],
+  ), "the guide shows the exact generated file");
+  for (const report of reports) {
+    assert.equal(report.state, "CONFIGURATION_MISSING");
+    assert.equal(report.configPath, space.home);
+    assert.ok(report.unresolved.includes("namespace"));
+    assert.ok(report.unresolved.includes("applications.BACKEND.identity.includes"));
+    assert.ok(report.unresolved.includes("applications.TARGET.start.script"));
+    assert.deepEqual(report.applications, []);
+  }
+  assert.deepEqual((await space.homeFolder()).sort(), [".gitignore", "claude.json", "runtime-apps.json"]);
+  await assert.rejects(lstat(space.old), { code: "ENOENT" });
+
+  const withMarker = space.v2();
+  withMarker.applications.LEGACY.identity.includes = template.applications.LEGACY.identity.includes;
+  const withScript = space.v2();
+  withScript.applications.LEGACY.start = template.applications.LEGACY.start;
+  for (const [pending, unresolved] of [
+    [withMarker, "applications.LEGACY.identity.includes"],
+    [withScript, "applications.LEGACY.start.script"],
+  ]) {
+    await space.writeHome(pending);
+    const digest = await treeDigest(space.root);
+    const refused = await space.runAppRuntime("ensure", noProbe);
+    assert.deepEqual(refused.unresolved, [unresolved]);
+    assert.equal(refused.templateCreated, undefined);
+    assert.equal(await treeDigest(space.root), digest);
+  }
+
+  await writeFile(space.home, "{");
+  assert.match((await space.runAppRuntime("ensure", noProbe)).reason, /not valid JSON/);
+  assert.equal(await readFile(space.home, "utf8"), "{");
+
+  const prepared = space.v2();
+  delete prepared.applications.LEGACY.start;
+  await space.writeHome(prepared);
+  const configuredDigest = await treeDigest(space.root);
+  assert.equal((await space.runAppRuntime("prepare", noProbe)).state, "CONFIGURED");
+  assert.equal(await treeDigest(space.root), configuredDigest);
+  const optional = await space.runAppRuntime("check");
+  assert.deepEqual(optional.applications.map(({ role }) => role), ["LEGACY", "TARGET"]);
+
+  const argv = { ...prepared, trust: "operator-local" };
+  argv.applications.LEGACY.start = { command: [process.execPath, "server.mjs"] };
+  await space.writeHome(argv);
+  assert.equal((await space.runAppRuntime("prepare", noProbe)).state, "CONFIGURED");
+  await space.writeHome({ ...argv, trust: "operator-isolated" });
+  const denied = await space.runAppRuntime("prepare", noProbe);
+  assert.equal(denied.state, "CONFIGURATION_MISSING");
+  assert.match(denied.reason, /under trust "operator-local" only/);
+
+  const backendPort = await freePort();
+  const backend = await writeProject(path.join(space.root, "backend"), backendPort);
+  const config = space.v2();
+  config.applications.BACKEND = application("backend", backendPort, { start: NPM_START });
+  config.applications.TARGET.start = NPM_START;
+  const orderFile = path.join(space.root, "start-order");
+  for (const [role, project] of [["BACKEND", backend], ["LEGACY", space.legacy], ["TARGET", space.targetRoot]]) {
+    const server = path.join(project, "server.mjs");
+    const order = `appendFileSync(${JSON.stringify(orderFile)}, ${JSON.stringify(role + "\n")});`;
+    await writeFile(server, (await readFile(server, "utf8")).replace("const routes =", `${order}\nconst routes =`));
+  }
+  await space.writeHome(config);
+  const before = await treeDigest(space.root);
+  const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+  const { stdout } = await execFileAsync(process.execPath, [cli, "orders", "--registry", space.registryPath, "--app-runtime", "prepare"], { cwd: space.targetRoot });
+  assert.equal(JSON.parse(stdout).state, "CONFIGURED");
+  assert.equal((await space.runAppRuntime("check")).state, "RUNTIME_DOWN");
+  assert.equal(await treeDigest(space.root), before);
+  try {
+    const report = await space.runAppRuntime("ensure");
+    assert.equal(report.state, "READY");
+    assert.deepEqual(report.applications.map(({ role, started }) => [role, started]), [["BACKEND", true], ["LEGACY", true], ["TARGET", true]]);
+    assert.deepEqual((await readFile(orderFile, "utf8")).trim().split("\n"), ["BACKEND", "LEGACY", "TARGET"]);
+  } finally {
+    await space.runAppRuntime("stop");
+  }
+});
+
+test("an unused IPv4 address does not block a proven IPv6-only wildcard", async (t) => {
+  const server = http.createServer((_, response) => response.end("fixture-app"));
+  t.after(() => server.close());
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "::", port: 0, ipv6Only: true }, resolve);
+  });
+  const space = await twoApps({});
+  const port = server.address().port;
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, applications: {
+    LEGACY: { ...application("../legacy-app", port), origin: `http://localhost:${port}` },
+    TARGET: application("../target-app", space.sibling),
+  } });
+  const report = await space.runAppRuntime("ensure", { system: {
+    lookup: async (host) => host === "localhost"
+      ? [{ address: "127.0.0.1", family: 4 }, { address: "::1", family: 6 }]
+      : [{ address: host, family: 4 }],
+    listeners: async (candidatePort) => candidatePort === port
+      ? [{ address: "::", pid: process.pid, command: null, cwd: space.legacy }]
+      : [],
+  } });
+  assert.equal(row(report, "LEGACY").state, "READY");
+  assert.equal(row(report, "LEGACY").reused, true);
 });
