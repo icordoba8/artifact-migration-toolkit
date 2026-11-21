@@ -156,6 +156,18 @@ after verifying it against its release manifest, and lists the replaced paths in
 copy are refused as `SKILL_PROJECTION_SKEW`; copies owned by a provider receipt
 are left to that provider's installer.
 
+### Local applications for UI migration
+
+When start-migration first needs browser evidence, its application preflight
+creates `<consumer-root>/.artifact-migration-tools/runtime-apps.json` if absent.
+Fill in the generated placeholders and keep the file outside Git.
+Version 2 requires `LEGACY` and `TARGET`. Add `BACKEND` when needed. Use
+verified local origins, project directories, response markers, and, if needed,
+startup scripts from the projects' manifests. The skill shows the expected
+path and unresolved fields. Validate changes with
+`artifact-migration-validate <module> --app-runtime check`, then resume from
+the saved checkpoint. See the [operator configuration template](skills/start-migration/SKILL.md#operator-configuration).
+
 ### What selects the runtime
 
 **The installed skill's exact identity decides which toolkit release runs.**

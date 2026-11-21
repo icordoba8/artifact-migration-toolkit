@@ -1359,3 +1359,23 @@ test("every provider discovery checklist requires tracing API responses onto the
       assert.ok(text.replace(/\s+/g, " ").includes(rule), `${dir} discovery checklist lacks: ${rule}`);
   }
 });
+
+test("start-migration gives operators a complete runtime template and a read-only recovery path", async () => {
+  const skill = await readText(repositoryRoot, "skills/start-migration/SKILL.md");
+  const section = skill.split("#### Operator configuration\n")[1].split("Capture protocol")[0];
+  const example = JSON.parse(section.match(/```json\n([\s\S]+?)\n```/)[1]);
+  assert.equal(example.version, 2);
+  assert.deepEqual(Object.keys(example.applications), ["LEGACY", "BACKEND", "TARGET"]);
+  for (const configuration of Object.values(example.applications)) {
+    assert.ok(configuration.origin && configuration.project && configuration.identity.includes);
+    assert.match(configuration.identity.route, /^REPLACE_WITH_/);
+    assert.equal(configuration.start, undefined);
+  }
+  assert.match(section, /illustrative and unverified/);
+  assert.match(section, /exact absolute `configPath`/);
+  assert.match(section, /"manager":"pnpm","script":"dev"/);
+  assert.match(section, /"command":\["pnpm\.cmd"/);
+  assert.match(section, /stop until the operator\s+reports the file is ready/);
+  assert.match(section, /Never create, edit,\s+overwrite, or commit the file yourself/);
+  assert.match(section, /action: "check"[\s\S]*resume the\s+persisted checkpoint/);
+});

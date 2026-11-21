@@ -1,10 +1,11 @@
 /**
  * Lifecycle: the applications a migration observes (LEGACY, BACKEND, TARGET).
- * `check` classifies them and writes nothing; `ensure` also starts a stopped one
- * through its authorized package script; `stop` ends only what `ensure` started.
+ * `check` classifies them and writes nothing. `ensure` seeds a missing template
+ * or starts an authorized stopped application. `stop` ends only what `ensure` started.
  *
- * Authority is one local file the operator owns, never the record, a response
- * or a tool argument: it may only name a package script of the project it
+ * Authority is one local file the operator configures, never the record, a response
+ * or a tool argument. An incomplete generated template confers no authority.
+ * An isolated start may only name a package script of the project it
  * describes, and a copy tracked by Git is refused, so a clone cannot grant a
  * startup. Probes send no credential, and nothing a response or a process said
  * is returned: no body, cookie, query string or command line. `trust:
@@ -234,6 +235,7 @@ const hostSystem = {
   namespace: hostNamespace(),
   platform: process.platform,
   // shortcut: an uninspectable host answers null and nothing it serves can be proven; add a reader per platform when one matters.
+  lookup,
   listeners: (port) => (process.platform === "win32" ? windowsListeners(port) : posixListeners(port)).catch(() => null),
   processStart,
   killTree,
@@ -266,10 +268,10 @@ export const runsProject = ({ command, cwd }, project, platform = process.platfo
 };
 
 /** A dual-stack `::` serves IPv4 too, unless an IPv4 listener took that address first. */
-export const holdersOf = (listeners, { address, family }) => {
+export const holdersOf = (listeners, { address, family }, assumeDualStack = true) => {
   const wildcard = family === 4 ? "0.0.0.0" : "::";
   const exact = listeners.filter((listener) => listener.address === address || listener.address === wildcard);
-  return exact.length > 0 || family !== 4 ? exact : listeners.filter((listener) => listener.address === "::");
+  return exact.length > 0 || family !== 4 || !assumeDualStack ? exact : listeners.filter((listener) => listener.address === "::");
 };
 
 const request = (url, address, route) => new Promise((resolve) => {
@@ -299,7 +301,7 @@ const protectedRouteState = (url, app, answer) => {
   if (status >= 300 && status < 400 && answer.location) {
     // The header is the application's own text; an unparsable one is no sign-in.
     const landed = URL.canParse(answer.location, url.origin) ? new URL(answer.location, url.origin) : null;
-    if (landed && (landed.origin !== url.origin || AUTH_PATH.test(landed.pathname))) {
+    if (landed && (landed.origin !== url.origin || landed.pathname === app.signInPath || AUTH_PATH.test(landed.pathname))) {
       return { state: "AUTH_REQUIRED", reason: `protected route '${app.protectedRoute}' redirected to sign-in${landed.origin === url.origin ? ` at '${landed.pathname}'` : " on another origin"}.` };
     }
   }
@@ -312,39 +314,46 @@ const protectedRouteState = (url, app, answer) => {
 const inspect = async (app, system) => {
   const url = new URL(app.origin);
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  const addresses = await lookup(host, { all: true, verbatim: true });
-  const answers = await Promise.all(addresses.map(async (entry) => ({ ...entry, ...(await request(url, entry.address, app.identity.route)) })));
-  const answering = answers.filter((answer) => answer.answered);
+  const addresses = await system.lookup(host, { all: true, verbatim: true });
+  const probes = await Promise.all(addresses.map(async (entry) => ({ ...entry, ...(await request(url, entry.address, app.identity.route)) })));
   const listeners = await system.listeners(Number(url.port));
+  // An IPv6 wildcard is only evidence of an IPv4 holder when IPv4 answered.
+  const answers = probes.map((answer) => ({ ...answer, holders: holdersOf(listeners ?? [], answer, answer.answered) }));
+  const answering = answers.filter((answer) => answer.answered);
   // Occupied means never start here, whatever else is wrong with what answers.
   const occupied = answering.length > 0 || addresses.some((entry) => holdersOf(listeners ?? [], entry).length > 0);
   const evidence = { occupied, answers: answering.map(({ address, status }) => ({ address, status })), listeners: (listeners ?? []).map(({ address, pid }) => ({ address, pid })) };
   const row = (state, reason) => ({ state, reason, ...evidence });
 
-  if (answering.length === 0) {
-    return row("RUNTIME_DOWN", occupied ? `a process holds ${url.host} but does not answer HTTP.` : `nothing listens at ${url.host} (${[...new Set(answers.map((answer) => answer.code))].join(", ")}).`);
-  }
   for (const answer of answering) {
-    if (answer.status >= 500) return row("RUNTIME_DOWN", `${answer.address} answered HTTP ${answer.status} on '${app.identity.route}'.`);
+    if (answer.status >= 500) continue;
     if (answer.status < 200 || answer.status >= 300) return row("WRONG_APP", `${answer.address} answered HTTP ${answer.status} on the identity route '${app.identity.route}'.`);
     if (!answer.body.includes(app.identity.includes)) return row("WRONG_APP", `${answer.address} serves '${app.identity.route}' without the configured identity marker.`);
   }
-  for (const answer of answering) {
-    const holders = holdersOf(listeners ?? [], answer);
+  let unproven;
+  for (const { address, answered, holders } of answers) {
     const verdicts = holders.map((listener) => runsProject(listener, app.project));
     if (verdicts.includes(false)) {
       const foreign = await foreignHolder(holders[verdicts.indexOf(false)], system);
-      return row("WRONG_APP", `${answer.address} is held by a process outside '${app.project}': ${foreign}, or point ${app.role}.origin at this project's own port.`);
+      return row("WRONG_APP", `${address} is held by a process outside '${app.project}': ${foreign}, or point ${app.role}.origin at this project's own port.`);
     }
-    if (verdicts.length === 0 || verdicts.includes(null)) return row("IDENTITY_UNPROVEN", `no inspectable process in this namespace holds ${answer.address}; a forwarded port, or a process of another user, proves nothing.`);
+    if (verdicts.includes(null) || (answered && verdicts.length === 0)) unproven ??= address;
   }
-  if (!app.protectedRoute) return row("READY", `identity proven for every address of ${url.host}.`);
+  const serverError = answering.find(({ status }) => status >= 500);
+  if (serverError) return row("RUNTIME_DOWN", `${serverError.address} answered HTTP ${serverError.status} on '${app.identity.route}'.`);
+  if (answering.length === 0) {
+    return row("RUNTIME_DOWN", occupied ? `a process holds ${url.host} but does not answer HTTP.` : `nothing listens at ${url.host} (${[...new Set(answers.map((answer) => answer.code))].join(", ")}).`);
+  }
+  if (unproven) return row("IDENTITY_UNPROVEN", `no inspectable process in this namespace holds ${unproven}; a forwarded port, or a process of another user, proves nothing.`);
+  const silent = answers.find(({ answered, holders }) => !answered && holders.length > 0);
+  if (silent) return row("RUNTIME_DOWN", `a process holds ${silent.address} but does not answer HTTP on '${app.identity.route}' (${silent.code}).`);
+  if (!app.protectedRoute) return row("READY", `identity proven on the listening addresses of ${url.host}.`);
   const { state, reason } = protectedRouteState(url, app, await request(url, answering[0].address, app.protectedRoute));
   return row(state, reason);
 };
 
 const route = (value, label) => {
-  if (typeof value !== "string" || !/^\/(?!\/)[^?#\s]*$/.test(value)) throw new Error(`${label} must be an absolute path with no query.`);
+  if (typeof value !== "string" || !/^\/(?!\/)(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9a-f]{2})*$/i.test(value)) throw new Error(`${label} must be an absolute path with no query.`);
   return value;
 };
 
@@ -404,9 +413,10 @@ const parseApplication = async (role, value, base, trust) => {
   if (url.protocol !== "http:" || !LOOPBACK.has(url.hostname) || !url.port || url.origin !== value.origin) {
     throw new Error(`${label}.origin must be exactly http://<localhost|127.0.0.1|[::1]>:<port>; another address is another network namespace.`);
   }
-  if (typeof value.project !== "string" || !value.project) throw new Error(`${label}.project must be a directory relative to the root holding the configuration.`);
+  if (typeof value.project !== "string" || !value.project.trim() || path.parse(value.project).root) throw new Error(`${label}.project must be a directory relative to the root holding the configuration.`);
   const project = await realpath(path.resolve(base, value.project)).catch(() => { throw new Error(`${label}.project '${value.project}' does not exist.`); });
-  if (!isPlainObject(value.identity) || typeof value.identity.includes !== "string" || !value.identity.includes) {
+  if (!(await stat(project)).isDirectory()) throw new Error(`${label}.project '${value.project}' is not a directory.`);
+  if (!isPlainObject(value.identity) || typeof value.identity.includes !== "string" || !value.identity.includes.trim()) {
     throw new Error(`${label}.identity must be {route, includes}: a public route and text only this application serves.`);
   }
   route(value.identity.route, `${label}.identity.route`);
@@ -436,21 +446,96 @@ const parseApplication = async (role, value, base, trust) => {
   return { ...value, role, project, startTimeoutMs, onSignIn, trust };
 };
 
+const placeholder = (field) => `REPLACE_WITH_${field}`;
+const placeholderValue = (value) => typeof value === "string" && /^\/?REPLACE_WITH_[A-Z0-9_]+$/.test(value);
+
+const configurationTemplate = () => ({
+  version: 2,
+  namespace: placeholder("NAMESPACE"),
+  trust: "operator-isolated",
+  applications: Object.fromEntries(["LEGACY", "BACKEND", "TARGET"].map((role) => [role, {
+    origin: placeholder(`${role}_HTTP_ORIGIN`),
+    project: placeholder(`${role}_PROJECT`),
+    identity: {
+      route: placeholder(`${role}_PUBLIC_ROUTE`),
+      includes: placeholder(`${role}_RESPONSE_MARKER`),
+    },
+  }])),
+});
+
+const unresolvedFields = (document) => {
+  const unresolved = [];
+  const record = (key, value) => { if (placeholderValue(value)) unresolved.push(key); };
+  record("namespace", document.namespace);
+  for (const [role, app] of Object.entries(document.applications)) {
+    const prefix = `applications.${role}`;
+    for (const field of ["origin", "project", "protectedRoute", "signInPath"]) record(`${prefix}.${field}`, app?.[field]);
+    record(`${prefix}.identity.route`, app?.identity?.route);
+    record(`${prefix}.identity.includes`, app?.identity?.includes);
+    record(`${prefix}.start.script`, app?.start?.script);
+    if (Array.isArray(app?.start?.command)) {
+      app.start.command.forEach((value, i) => record(`${prefix}.start.command[${i}]`, value));
+    }
+  }
+  return unresolved;
+};
+
+const assertUntracked = async (base, file) => {
+  const { stdout } = await execFileAsync("git", ["-C", base, "ls-files", "--", APP_RUNTIME_CONFIG]).catch(() => {
+    throw new Error(`could not verify '${file}' against the Git index; repair the index and retry.`);
+  });
+  if (stdout.trim()) throw new Error(`${APP_RUNTIME_CONFIG} is tracked by Git; authority to start processes must stay local, so a clone cannot grant it.`);
+};
+
+const createTemplate = async ({ base, file, target }) => {
+  await assertUntracked(base, file);
+  // If a deprecated copy appeared after locate(), leave it for the next read.
+  if (!samePath(base, target) && await present(path.join(target, APP_RUNTIME_CONFIG))) return null;
+  const template = configurationTemplate();
+  const create = (filename, content) => atomicWrite(base, filename, content, { exclusive: true }).then(
+    () => true,
+    (error) => error.code === "EEXIST" ? false : Promise.reject(error),
+  );
+  await create(path.join(path.dirname(file), ".gitignore"), "/runtime-apps.json\n/.gitignore\n");
+  if (!(await create(file, `${JSON.stringify(template, null, 2)}\n`))) return null;
+  return template;
+};
+
+const incompleteConfiguration = (file, unresolved, templateCreated = false) => ({
+  problem: `${templateCreated ? "Created the application template at" : "Edit"} '${file}'. Replace unresolved values: ${unresolved.join(", ")}. Remove BACKEND entirely if unused. Startup is optional.`,
+  file, unresolved, ...(templateCreated ? { templateCreated } : {}),
+});
+
+const startScriptProblem = async ({ project, start }) => {
+  if (!start || start.command) return null;
+  const manifest = await readJson(path.join(project, "package.json"), "Project manifest").catch(() => null);
+  return Object.hasOwn(manifest?.scripts ?? {}, start.script) ? null : `'${project}' has no package script '${start.script}'.`;
+};
+
 /** The trust boundary. Anything short of a local, well-formed file is a refusal with a reason, never a default. */
-const readConfiguration = async (targetRoot, system = hostSystem) => {
+const readConfiguration = async (targetRoot, system = hostSystem, { validateScripts = false, seedTemplate = false } = {}) => {
   let handle;
+  let file;
   try {
     const located = await locate(targetRoot);
-    const { base, file, versions } = located;
+    const { base, versions } = located;
+    file = located.file;
     await assertSecurePath(base, file);
     handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error) => {
-      if (error.code === "ENOENT") throw new Error(`${APP_RUNTIME_CONFIG} does not exist at '${file}'; the operator creates it. Its port numbers come from the project, never from a migration record.`);
+      if (error.code === "ENOENT") return null;
       throw error;
     });
+    if (!handle) {
+      if (seedTemplate) {
+        const template = await createTemplate(located);
+        if (template) return incompleteConfiguration(file, unresolvedFields(template), true);
+        return readConfiguration(targetRoot, system, { validateScripts });
+      }
+      throw new Error(`${APP_RUNTIME_CONFIG} does not exist at '${file}'. Run the application preflight ensure to generate a template when runtime is needed.`);
+    }
+    await assertUntracked(base, file);
     let document;
     try { document = JSON.parse(await handle.readFile("utf8")); } catch { throw new Error(`${APP_RUNTIME_CONFIG} is not valid JSON.`); }
-    const tracked = await execFileAsync("git", ["-C", base, "ls-files", "--error-unmatch", "--", APP_RUNTIME_CONFIG]).then(() => true, () => false);
-    if (tracked) throw new Error(`${APP_RUNTIME_CONFIG} is tracked by Git; authority to start processes must stay local, so a clone cannot grant it.`);
     assertPlainObject(document, "Application runtime configuration");
     if (![1, 2].includes(document.version) || typeof document.namespace !== "string" || !isPlainObject(document.applications)) {
       throw new Error("The configuration must be {version: 1|2, namespace: win32|wsl|linux|darwin, applications}.");
@@ -461,21 +546,29 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
         ? `'${file}' is version 1, whose projects are relative to the target root; at the consumer root it must be version 2, with every project relative to '${base}'.`
         : `'${file}' is version 2, which belongs at the consumer root '${path.join(located.home, APP_RUNTIME_CONFIG)}'; in the target root only version 1 is read.`);
     }
+    const unresolved = unresolvedFields(document);
+    if (unresolved.length > 0) return incompleteConfiguration(file, unresolved);
     const trust = document.trust ?? "operator-isolated";
     if (!TRUSTS.includes(trust)) throw new Error(`trust must be ${TRUSTS.join(" or ")}.`);
     const unknown = Object.keys(document.applications).filter((role) => !ROLES.includes(role));
-    const missing = REQUIRED_ROLES.filter((role) => !document.applications[role]);
+    const missing = REQUIRED_ROLES.filter((role) => !Object.hasOwn(document.applications, role));
     if (unknown.length > 0 || missing.length > 0) {
       throw new Error(`applications needs LEGACY and TARGET and may add BACKEND${unknown.length ? `; unknown ${unknown.join(", ")}` : ""}${missing.length ? `; missing ${missing.join(", ")}` : ""}.`);
     }
     const applications = [];
-    for (const role of ROLES.filter((name) => document.applications[name])) {
+    for (const role of ROLES.filter((name) => Object.hasOwn(document.applications, name))) {
       applications.push(await parseApplication(role, document.applications[role], base, trust));
     }
     // One consumer-root file serves one target: the one its TARGET application lives in.
     const own = applications.find((app) => app.role === "TARGET").project;
     if (document.version === 2 && !isLexicallyWithin(located.target, own)) {
       throw Object.assign(new Error(`'${file}' serves the target at '${own}', not this module's target '${located.target}'; nothing was probed, started or stopped.`), { foreign: true });
+    }
+    if (validateScripts && document.namespace === system.namespace) {
+      for (const app of applications) {
+        const problem = await startScriptProblem(app);
+        if (problem) throw new Error(problem);
+      }
     }
     const broker = document.sessionBroker;
     if (broker !== undefined && (!isPlainObject(broker) || Object.keys(broker).length !== 2 || !/^http:\/\/127\.0\.0\.1:\d+$/.test(broker.url) ||
@@ -492,7 +585,7 @@ const readConfiguration = async (targetRoot, system = hostSystem) => {
       applications: refusal ? applications.map(({ start, ...app }) => ({ ...app, startRefusal: refusal })) : applications,
     };
   } catch (error) {
-    return { problem: error.message, foreign: error.foreign };
+    return { problem: error.message, foreign: error.foreign, file };
   } finally {
     await handle?.close();
   }
@@ -607,12 +700,8 @@ const spawnStart = async (base, app, logFile, system) => {
 };
 
 const startApplication = async (base, app, system) => {
-  if (!app.start.command) {
-    const manifest = await readJson(path.join(app.project, "package.json"), "Project manifest").catch(() => null);
-    if (!Object.hasOwn(manifest?.scripts ?? {}, app.start.script)) {
-      return { state: "CONFIGURATION_MISSING", reason: `'${app.project}' has no package script '${app.start.script}'.` };
-    }
-  }
+  const problem = await startScriptProblem(app);
+  if (problem) return { state: "CONFIGURATION_MISSING", reason: problem };
   const directory = path.join(base, OWNED_DIRECTORY);
   await atomicWrite(base, path.join(directory, ".gitignore"), "*\n");
   const logFile = await assertSecurePath(base, path.join(directory, `${app.role}.log`));
@@ -646,7 +735,8 @@ const ensureApplication = async (base, app, system) => {
 };
 
 const publicRow = ({ occupied, ...row }, app) => ({
-  role: app.role, origin: app.origin, trust: app.trust, onSignIn: app.onSignIn, signInPath: app.signInPath,
+  role: app.role, origin: app.origin, trust: app.trust, onSignIn: app.onSignIn,
+  protectedRoute: app.protectedRoute, signInPath: app.signInPath,
   startAuthorized: Boolean(app.start), reused: false, started: false, ...row,
 });
 
@@ -680,9 +770,14 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
 
   const notRequired = await requirement(targetRoot, resolved.canonical);
   if (notRequired) return { ...base, required: false, state: "NOT_REQUIRED", reason: notRequired, applications: [] };
-  const configuration = await readConfiguration(targetRoot, system);
+  const configuration = await readConfiguration(targetRoot, system, { validateScripts: true, seedTemplate: action === "ensure" });
   if (configuration.problem) {
-    return { ...base, required: true, state: "CONFIGURATION_MISSING", reason: configuration.problem, configFile: APP_RUNTIME_CONFIG, applications: [] };
+    const { problem, file, unresolved, templateCreated } = configuration;
+    return {
+      ...base, required: true, state: "CONFIGURATION_MISSING", reason: problem, configFile: APP_RUNTIME_CONFIG,
+      ...(file ? { configPath: file } : {}), ...(unresolved ? { unresolved } : {}), ...(templateCreated ? { templateCreated } : {}),
+      applications: [],
+    };
   }
   if (configuration.namespace !== system.namespace) {
     return {

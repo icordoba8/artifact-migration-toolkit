@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, open, readFile, rename, rmdir, unlink } from "node:fs/promises";
+import { access, link, mkdir, open, readFile, rename, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -103,9 +103,10 @@ export const renameDurably = async (from, to) => {
  * over it, and the directory is fsynced after the rename. A reader or a crash
  * sees the old bytes or the new ones, never a mix, and a failure removes the
  * temp file. A replaced file takes `mode` (operator-only unless the caller
- * keeps a plain file's default).
+ * keeps a plain file's default). An exclusive write publishes the same staged
+ * bytes only if the destination does not exist.
  */
-export const atomicWrite = async (targetRoot, destination, content, { mode = 0o600 } = {}) => {
+export const atomicWrite = async (targetRoot, destination, content, { mode = 0o600, exclusive = false } = {}) => {
   const absoluteDestination = await assertSecurePath(targetRoot, destination);
   const parent = path.dirname(absoluteDestination);
   await mkdirDurably(parent);
@@ -122,7 +123,12 @@ export const atomicWrite = async (targetRoot, destination, content, { mode = 0o6
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temporary, absoluteDestination);
+    if (exclusive) {
+      await link(temporary, absoluteDestination);
+      await unlink(temporary);
+    } else {
+      await rename(temporary, absoluteDestination);
+    }
   } catch (error) {
     if (handle) await handle.close().catch(() => undefined);
     await unlink(temporary).catch((cleanupError) => {

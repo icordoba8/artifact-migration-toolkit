@@ -128,7 +128,7 @@ export const SAME_NAME_OTHER_RULE = {
  */
 export const FS_WRITERS = {
   // store/: the one replace-write, the one durable append and the one durable removal (DR7, DR8, DR13), staged trees.
-  "store/files.mjs": ["mkdir", "open", "rename", "rmdir", "unlink"],
+  "store/files.mjs": ["link", "mkdir", "open", "rename", "rmdir", "unlink"],
   "store/record.mjs": ["open"],
   "store/tree.mjs": ["cp", "open"],
   // decisions/: the O_RDONLY|O_NOFOLLOW protected-policy read (the ledger append is store's since DR8).
