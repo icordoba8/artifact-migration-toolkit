@@ -36,7 +36,7 @@ An optional protected high-assurance policy requires the retained WebAuthn
 
 | Argument | What it does | When to use it | Default / requirement |
 | --- | --- | --- | --- |
-| `<module>` | Identifies the migration. With `--legacy`, it names the **target** module; without it, it names the single legacy module. | Always; for example, `auth`. | **Required.** |
+| `<module>` | Identifies the migration. At bootstrap it names the legacy module, or the target when `--legacy` is supplied. On resume it can name the saved record directly. | Always; for example, `auth`. | **Required.** |
 | `--registry <path>` | Selects the target project's migration registry. | First setup when the project has no saved registry binding. Do not use it to override an existing binding. | Optional when already configured; accepted only before a binding or migration state exists. |
 | `--target <target-module>` | Maps the migration to its target feature/module name. | First setup of an unregistered mapping, especially when the names differ. | Required for an unregistered single-legacy mapping. With `--legacy`, `<module>` supplies the target; an existing mapping supplies its saved target. Conflicts are rejected. |
 | `--legacy <module>` | Adds a legacy source module; repeat to merge several sources into one target. | Several legacy modules converge on one target. Do not use it to change the source set after bootstrap. | Optional; without it, `<module>` is the sole legacy source. |
@@ -75,6 +75,7 @@ An optional protected high-assurance policy requires the retained WebAuthn
 - **Multiple `--legacy` modules:** Each flag adds one legacy module to the same target migration. Use them when several old modules converge on one new module. The positional `<module>` then names the target; the source set is fixed after bootstrap.
 - **`--target` has two meanings:** In `migrate-artifact` it is a target **file path**; in `start-migration` it is a target **module name**. Use the artifact form to relocate one file and the module form to establish an unregistered mapping.
 - **Bootstrap choices:** `--mock`, `--design-source`, `--legacy`, and `--adopt-target` describe the migration being started; an existing record keeps its saved choices. `--registry` establishes a project binding only on first setup. Use these when starting the record, then resume with the module name.
+- **Renamed targets:** Resume with the persisted record name returned by the engine. An unregistered legacy source name also resolves when exactly one persisted record names it. If several do, select the target record explicitly.
 
 ## Common examples
 

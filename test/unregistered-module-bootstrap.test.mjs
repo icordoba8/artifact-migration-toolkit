@@ -92,8 +92,10 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
   const registry = path.join(target, ".agents/knowledge/migrations/registry.json");
   try {
     await mkdir(path.join(legacy, "partners"), { recursive: true });
+    await mkdir(path.join(legacy, "suppliers"), { recursive: true });
     await mkdir(path.dirname(registry), { recursive: true });
     await writeFile(path.join(legacy, "partners/marker.txt"), "partner fixture\n");
+    await writeFile(path.join(legacy, "suppliers/marker.txt"), "supplier fixture\n");
     await writeFile(path.join(target, "package.json"), '{"name":"legacy-named-consumer","private":true}\n');
     await writeFile(registry, JSON.stringify({ version: 1, projects: {
       legacy: { root: path.relative(path.dirname(registry), legacy) },
@@ -114,8 +116,44 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
     assert.match(bootstrap.stdout, /^loop: CONTINUE next=\/start-migration partner-registry$/m);
     assert.equal((await getMigrationStatus({ registryPath: registry, moduleName: "partner-registry" })).currentStep,
       "DISCOVER_LEGACY");
-    await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
-      /not registered\. .*recorded as 'partner-registry': use \/start-migration partner-registry/);
+    const status = await getMigrationStatus({ registryPath: registry, moduleName: "partners" });
+    assert.equal(status.target, "partner-registry");
+    assert.equal(status.currentStep, "DISCOVER_LEGACY");
+    const run = spawnSync(process.execPath,
+      [fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+        "partners", "--json"], { cwd: target, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.outcome, "CONTINUE");
+    assert.equal(result.request.step, "DISCOVER_LEGACY");
+    assert.deepEqual(result.continuation, {
+      module: "partner-registry", mode: "auto", command: "/start-migration partner-registry",
+    });
+    assert.match(run.stderr, /^loop: CONTINUE next=\/start-migration partner-registry$/m);
+    await assert.rejects(readFile(path.join(target, ".agents/knowledge/migrations/modules/partners/state.json")), { code: "ENOENT" });
+
+    const supplierSetup = spawnSync(process.execPath, [cli, "suppliers", "--target",
+      "supplier-registry", "--mode", "auto", "--openspec-proposal-stdin"],
+    { cwd: target, input: spec.replaceAll("PARTNERS-", "SUPPLIERREGISTRY-"), encoding: "utf8" });
+    assert.equal(supplierSetup.status, 0, supplierSetup.stderr + supplierSetup.stdout);
+    const registryDocument = JSON.parse(await readFile(registry, "utf8"));
+    registryDocument.modules.suppliers = { target: "supplier-registry", aliases: ["partner-registry"] };
+    await writeFile(registry, JSON.stringify(registryDocument));
+    const supplierRecord = path.join(target, ".agents/knowledge/migrations/modules/supplier-registry/state.json");
+    const supplierBefore = await readFile(supplierRecord, "utf8");
+    const canonicalRun = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+      result.continuation.module, "--json",
+    ], { cwd: target, encoding: "utf8" });
+    assert.equal(canonicalRun.status, 0, canonicalRun.stderr + canonicalRun.stdout);
+    assert.equal(JSON.parse(canonicalRun.stdout).progress.target, "partner-registry");
+    const wrongTarget = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+      "partners", "--target", "supplier-registry", "--json",
+    ], { cwd: target, encoding: "utf8" });
+    assert.equal(wrongTarget.status, 1, wrongTarget.stderr + wrongTarget.stdout);
+    assert.match(JSON.parse(wrongTarget.stdout).reason, /no recorded legacy source 'partners'/);
+    assert.equal(await readFile(supplierRecord, "utf8"), supplierBefore);
     // A corrupt record might be this name's: never NOT_STARTED.
     await writeFile(path.join(target, ".agents/knowledge/migrations/modules/partner-registry/state.json"), "{");
     await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),

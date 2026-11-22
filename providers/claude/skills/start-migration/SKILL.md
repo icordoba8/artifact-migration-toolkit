@@ -12,6 +12,17 @@ Execute exactly one validated migration checkpoint, or one implementation/
 verification slice, per iteration. A later session — possibly a different model
 or provider — resumes from the saved state, never from conversation memory.
 
+An actionable `CONTINUE` keeps the current turn open. Use commentary or the
+native progress display for updates while working. If the result includes a
+`request`, do that work now, including any required prefill, then call the
+engine again in the same turn. With no request, call it again immediately.
+Use `continuation.module` and `continuation.mode` for the next
+`migration_run` call in the same `cwd`, or the installed CLI with that
+module and mode. Use the module named by `loop: CONTINUE` after bootstrap.
+Keep bootstrap-only arguments out of the next iteration. End the turn only
+at a stop condition, for an explicitly requested status, or in step mode
+when the engine is waiting for confirmation.
+
 ## Runtime preflight
 
 Before migration status or any other migration work, run the installed skill's
@@ -247,7 +258,8 @@ approval. Those are still yours to author, or the operator's.
 
 ### 5. Obey the typed outcome literally
 
-- `CONTINUE` — execute exactly the next iteration the engine requires.
+- `CONTINUE` — do any work in `request`, then use `continuation` to execute
+  the next iteration in the same turn.
 - `STOP` — relay the typed stop and do not improvise progression.
 - `FORMAT_UPGRADE` — the record owes a format increment and the whole migration
   lifecycle is frozen behind it. Stop. Supply only the input the engine's
@@ -1216,7 +1228,8 @@ Obey it literally. A command that exits non-zero without printing one has
 already failed and stops the loop; `--mode step` prints none at all, because
 the operator drives every iteration there by hand.
 
-On `CONTINUE`, run exactly the command `next=` names, immediately. Do not
+On `CONTINUE`, complete any pending authoring request, then run the command
+`next=` names in the same turn. Do not
 emit a handoff block, do not print a `Next command:` line, and never ask the
 operator to say "continue" — a successful checkpoint or slice advance is not a
 stopping point. It is a safe context boundary (see Execution protocol,

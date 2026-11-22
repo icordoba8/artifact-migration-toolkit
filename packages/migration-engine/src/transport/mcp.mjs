@@ -422,6 +422,7 @@ const runTool = async (arguments_, session) => {
     reason: result.reason ?? null,
     ...refusalOf(result),
     request: result.request ?? null,
+    continuation: result.continuation ?? null,
     progress: result.progress ?? null,
     progressChecklist: result.progressChecklist ?? null,
     // Legacy wire field, empty on the direct-ledger path: a format-19 record
@@ -553,10 +554,11 @@ const TOOLS = [
   {
     name: "migration_run",
     description:
-      "Perform one migration iteration: preflight, validate, and at most one advance. Every write happens in the core, under its existing lock and journal.",
+      "Perform one migration iteration. When continuation is present, complete any requested work and call migration_run again with continuation.module and continuation.mode in the same turn and cwd.",
     inputSchema: RUN_INPUT_SCHEMA,
     call: runTool,
-    loop: ({ module, mode }, { outcome }) => renderLoopDirective({ moduleName: module, mode, outcome }),
+    loop: ({ module, mode }, { outcome, continuation }) =>
+      renderLoopDirective({ moduleName: module, mode, outcome, next: continuation?.command }),
     /** The one tool whose body may need the connection's human channel. */
     sessionAware: true,
   },

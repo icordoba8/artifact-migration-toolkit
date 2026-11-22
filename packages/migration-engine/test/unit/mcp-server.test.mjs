@@ -1431,6 +1431,8 @@ test("progress tools put the status block first, the unchanged JSON last, and se
       await only(fixture, call(2, "migration_run", { module: "auth" })),
       "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE");
     assert.equal(payload.outcome, "CONTINUE");
+    assert.equal(payload.request, null);
+    assert.deepEqual(payload.continuation, { module: "auth", mode: "auto", command: "/start-migration auth" });
     assert.match(block, /^🔄 IN PROGRESS 3\. Check discovery completeness +DISCOVERY_COMPLETENESS$/m);
     assert.ok(block.endsWith("loop: CONTINUE next=/start-migration auth\n"));
     // Every other tool is unchanged.
@@ -1450,6 +1452,7 @@ test("an OPERATOR_DECISION stop and the resume after the relay both show the blo
       const stop = progressReply(await only(fixture, call(1, "migration_run", { module: "auth" })),
         "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | OPERATOR_DECISION");
       assert.ok(stop.block.endsWith("loop: STOP reason=OPERATOR_DECISION\n"));
+      assert.equal(stop.payload.continuation, null);
       const relay = await only(fixture, call(2, "migration_relay_decision", {
         module: "auth", reference: stop.payload.operatorApproval.reference, decision: "APPROVE" }));
       assert.equal(JSON.parse(relay.result.content.at(-1).text).outcome, "CONTINUE");

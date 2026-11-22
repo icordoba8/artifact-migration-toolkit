@@ -2,7 +2,6 @@
  * Lifecycle: the status projection and the resumable-record validation. Moved
  * verbatim from `resumable-migration.mjs` (Track A8).
  */
-import { readdir } from "node:fs/promises";
 import path from "node:path";
 import {
   assertDiscoveryCompletenessFormat,
@@ -64,24 +63,6 @@ const refuseRecordWithoutState = async (targetRoot, recordKey) => {
     throw new Error(`Migration initialization for '${recordKey}' is unfinished (journal ${journal}); it is not NOT_STARTED. Rerun the bootstrap so the engine recovers it.`);
 };
 
-// A legacy name whose migration is recorded under another target is not a fresh
-// module: refuse, naming that record. A record whose state cannot be read might
-// be this name's, so it fails closed too. ponytail: one readdir of the records
-// directory per unregistered status; index records if it grows.
-const refuseLegacyNameOfRecord = async (targetRoot, moduleName, error) => {
-  const records = path.dirname(migrationRoot(targetRoot, moduleName));
-  const entries = await readdir(records, { withFileTypes: true }).catch((e) => { if (e.code === "ENOENT") return []; throw e; });
-  for (const key of entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)) {
-    let state;
-    try { state = await readOptionalJson(statePathFor(targetRoot, key)); }
-    catch { state = undefined; }
-    if (!state)
-      throw new Error(`${error.message} Migration record '${key}' has no readable state, so '${moduleName}' cannot be reported as NOT_STARTED.`);
-    if (state.legacyModule === moduleName || state.legacySources?.includes?.(moduleName))
-      throw new Error(`${error.message} Its migration is recorded as '${key}': use /start-migration ${key}.`);
-  }
-};
-
 export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   let registryData;
   let resolved;
@@ -92,7 +73,6 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
       throw error;
     const { targetRoot } = await readRegistry(registryPath);
     await refuseRecordWithoutState(targetRoot, moduleName);
-    await refuseLegacyNameOfRecord(targetRoot, moduleName, error);
     return notStarted(moduleName);
   }
   let context;

@@ -3,8 +3,10 @@
  * record recovery, and the discovery-scan preview. Moved verbatim from
  * `resumable-migration.mjs` (Track A8).
  */
-import { readCanonicalModuleBoundary, resolveLegacySources } from "../census/index.mjs";
-import { assertDiscoveryCompletenessFormat } from "../formats/index.mjs";
+import { readdir } from "node:fs/promises";
+import path from "node:path";
+import { legacySourcesOf, readCanonicalModuleBoundary, resolveLegacySources } from "../census/index.mjs";
+import { assertDiscoveryCompletenessFormat, usesMultiSource } from "../formats/index.mjs";
 import { assertSafeName } from "../shared/index.mjs";
 import {
   fileExists,
@@ -20,6 +22,41 @@ import { readJournal } from "./journal.mjs";
 import { withModuleLock } from "./lock.mjs";
 import { validateStateShape } from "./checkpoints.mjs";
 import { readState, recoverPendingAdvance } from "./record.mjs";
+
+// Resolve an unregistered legacy spelling only if the persisted record is
+// unique. An unreadable record prevents proving uniqueness.
+const recordForLegacyName = async (targetRoot, moduleName) => {
+  const records = path.dirname(migrationRoot(targetRoot, moduleName));
+  const entries = await readdir(records, { withFileTypes: true }).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const matches = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    let state;
+    try {
+      state = validateStateShape(await readJson(statePathFor(targetRoot, entry.name), "Migration state"));
+    } catch (error) {
+      throw new Error(`Migration record '${entry.name}' has no readable state, so '${moduleName}' cannot be resolved.`, { cause: error });
+    }
+    if (state.migrationId !== entry.name) {
+      throw new Error(`Migration record '${entry.name}' has a mismatched record identity '${state.migrationId}'.`);
+    }
+    if (legacySourcesOf(state).includes(moduleName)) matches.push(state);
+  }
+  if (matches.length > 1) {
+    throw new Error(`Legacy module '${moduleName}' matches multiple migration records: ${matches.map(({ migrationId }) => migrationId).sort().join(", ")}. Use the target record name.`);
+  }
+  return matches[0];
+};
+
+const recordedResolution = (registryData, state) => ({
+  canonical: state.migrationId,
+  target: state.targetModule,
+  legacyModule: state.legacyModule,
+  registered: Object.values(registryData.modules).some(({ target }) => target === state.targetModule),
+});
 
 /**
  * The public recovery entry point. Every mutating command already recovers on
@@ -56,38 +93,46 @@ export const readContext = async ({
   legacy,
 }) => {
   const registryData = await readRegistry(registryPath);
+  const { targetRoot } = registryData;
   assertSafeName(moduleName);
+  if (targetOverride !== undefined) assertSafeName(targetOverride, "target");
   const legacySources = resolveLegacySources(legacy);
+  const exactPath = statePathFor(targetRoot, moduleName);
+  const exactState = (await fileExists(exactPath))
+    ? await readJson(exactPath, "Migration state")
+    : null;
   let resolved;
-  try {
-    // With `--legacy` the bare positional *is* the target module (there is no
-    // single legacy name left for it to be), so it resolves to itself unless
-    // the operator says otherwise.
-    resolved = resolveModule(
-      registryData,
-      moduleName,
-      targetOverride ?? (legacySources.length > 0 ? moduleName : undefined),
-    );
-  } catch (error) {
-    if (targetOverride !== undefined || !/not registered/.test(error.message)) {
-      throw error;
+  // A target-keyed record must remain addressable by its exact key even when
+  // a registry alias or another legacy module uses the same name.
+  if (exactState && usesMultiSource(exactState)) {
+    if (exactState.migrationId !== moduleName || exactState.targetModule !== moduleName) {
+      throw new Error(`Migration record '${moduleName}' has a mismatched target identity.`);
     }
-    const candidatePath = statePathFor(registryData.targetRoot, moduleName);
-    if (!(await fileExists(candidatePath))) throw error;
-    const state = validateStateShape(
-      await readJson(candidatePath, "Migration state"),
-    );
-    resolved = {
-      // The record key, whichever identity rule the record was born under:
-      // `migrationId` is the legacy module at format <= 14 and the target
-      // module at format >= 15, which is exactly the directory it lives in.
-      canonical: state.migrationId,
-      target: state.targetModule,
-      registered: false,
-    };
+    if (targetOverride !== undefined && targetOverride !== moduleName) {
+      throw new Error(`Target '${targetOverride}' conflicts with recorded target '${moduleName}'.`);
+    }
+    resolved = recordedResolution(registryData, exactState);
+  } else {
+    try {
+      // With `--legacy` the positional names the target by default.
+      resolved = resolveModule(
+        registryData,
+        moduleName,
+        targetOverride ?? (legacySources.length > 0 ? moduleName : undefined),
+      );
+    } catch (error) {
+      if (targetOverride !== undefined || !/not registered/.test(error.message)) throw error;
+      const state = exactState ? validateStateShape(exactState, moduleName) : (
+        await fileExists(migrationRoot(targetRoot, moduleName))
+          ? null
+          : await recordForLegacyName(targetRoot, moduleName)
+      );
+      if (!state) throw error;
+      resolved = recordedResolution(registryData, state);
+    }
   }
   resolved.legacySources = legacySources;
-  resolved.legacyModule = legacySources[0] ?? resolved.canonical;
+  resolved.legacyModule = legacySources[0] ?? resolved.legacyModule ?? resolved.canonical;
   // The record key is `migrationId`, and the two identity rules disagree about
   // what that is: the legacy module for a record born at format <= 14, the
   // target module from format 15 on. An existing legacy-keyed record therefore
@@ -101,22 +146,24 @@ export const readContext = async ({
   ) {
     resolved.canonical = resolved.target;
   }
-  const candidatePath = statePathFor(
-    registryData.targetRoot,
-    resolved.canonical,
-  );
-  if (await fileExists(candidatePath)) {
-    const persisted = await readJson(candidatePath, "Migration state");
-    if (persisted.registry !== undefined) {
-      const current = registryIdentity(
-        registryData.targetRoot,
-        registryData.registryPath,
+  const candidatePath = statePathFor(targetRoot, resolved.canonical);
+  const persisted = candidatePath === exactPath && exactState
+    ? exactState
+    : (await fileExists(candidatePath)) ? await readJson(candidatePath, "Migration state") : null;
+  if (persisted && targetOverride !== undefined && !resolved.registered &&
+      moduleName !== resolved.canonical && legacySources.length === 0 &&
+      !legacySourcesOf(persisted).includes(moduleName)) {
+    throw new Error(`Target '${resolved.target}' has no recorded legacy source '${moduleName}'.`);
+  }
+  if (persisted?.registry !== undefined) {
+    const current = registryIdentity(
+      targetRoot,
+      registryData.registryPath,
+    );
+    if (persisted.registry !== current) {
+      throw new Error(
+        `Migration registry binding mismatch: existing migration state records '${persisted.registry}', but the resolved registry identity is '${current}'.`,
       );
-      if (persisted.registry !== current) {
-        throw new Error(
-          `Migration registry binding mismatch: existing migration state records '${persisted.registry}', but the resolved registry identity is '${current}'.`,
-        );
-      }
     }
   }
   return { registryData, resolved };

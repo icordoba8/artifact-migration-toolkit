@@ -12,7 +12,7 @@
  * `run` performs at most one advance and always exits (D3-2). That is not a
  * policy choice: every checkpoint requires an artifact an agent has to author,
  * so a second advance inside one process could never be legal. Continuation is
- * the `loop:` line, obeyed by re-invoking the same bare command.
+ * the typed continuation and the matching `loop:` line.
  */
 
 import path from "node:path";
@@ -271,21 +271,31 @@ export const runMigration = async (
   let latestPreview = null;
   let nextWork = null;
   const finish = (outcome, extra = {}) => {
+    const mode = options.mode ?? DEFAULT_MODE;
     const progress = latestState
       ? migrationProgress(latestState, {
-          mode: options.mode ?? DEFAULT_MODE,
+          mode,
           outcome,
           reason: extra.reason ?? null,
           nextWorkKind: nextWork?.kind ?? null,
           artifactMigration: nextWork?.artifactMigration ?? null,
         })
       : (latestPreview?.progress ?? null);
+    const continuation =
+      mode === "auto" && (outcome === "CONTINUE" || outcome === "FORMAT_UPGRADED")
+        ? {
+            module: latestState.migrationId,
+            mode,
+            command: `/start-migration ${latestState.migrationId}`,
+          }
+        : null;
     const result = {
       outcome,
       request: null,
       decisionReferences,
       decisions,
       ...extra,
+      continuation,
       progress,
       progressChecklist: progress ? renderProgress(progress) : null,
     };
@@ -306,6 +316,7 @@ export const runMigration = async (
         moduleName: options.moduleName,
         mode: options.mode,
         outcome,
+        next: continuation?.command,
       }),
     );
     process.exitCode = exitCodeFor(outcome);
@@ -340,16 +351,15 @@ export const runMigration = async (
     // The binding is persisted by the bootstrap above, so no `--registry` is
     // passed here: after step 1 there is exactly one registry this module can
     // resolve to, and re-supplying the flag is refused as a second setup.
-    const { registryPath } = await resolveRegistryPath({
-      moduleName: options.moduleName,
-    });
+    const moduleName = latestState.migrationId;
+    const { registryPath } = await resolveRegistryPath({ moduleName });
 
     // Delegation is detected by the lock-free module preflight before normal
     // module validation. A healthy child is work, not a module validation
     // failure, and this iteration never takes the module lock.
     const delegated = await previewAdvance({
       registryPath,
-      moduleName: options.moduleName,
+      moduleName,
       slice: options.slice,
       mode: options.mode,
     });
@@ -399,7 +409,7 @@ export const runMigration = async (
     try {
       await validateResumableMigration({
         registryPath,
-        moduleName: options.moduleName,
+        moduleName,
         slice: options.slice,
       });
     } catch (error) {
@@ -437,7 +447,7 @@ export const runMigration = async (
           step,
           state: discovered.result.state,
           registryPath,
-          moduleName: options.moduleName,
+          moduleName,
         });
         candidates = pending.candidates;
         group = pending.group ?? null;
@@ -460,7 +470,7 @@ export const runMigration = async (
         return finish("BLOCKED", { reason: error.message, next: step, blocker: error.message });
       }
       if (approvable.length > 0) {
-        const approver = moduleApprover(recorderFor({ recordTrustedDecision, mode: options.mode, directLedger, stdout: human }), options.moduleName);
+        const approver = moduleApprover(recorderFor({ recordTrustedDecision, mode: options.mode, directLedger, stdout: human }), moduleName);
         if (directLedger && (group?.blocked ?? approvable[0].blocked)) {
           const review = group?.review ?? approvable[0].review;
           const blocked = group?.blocked ?? approvable[0].blocked;
@@ -495,7 +505,7 @@ export const runMigration = async (
         const decided = new Set(decisionReferences.map((reference) => reference.candidateId));
         let remaining = approvable.filter((candidate) => !decided.has(candidate.id));
         if (directLedger && recorded.length > 0) {
-          const fresh = await pendingDecisionCandidates({ registryPath, moduleName: options.moduleName });
+          const fresh = await pendingDecisionCandidates({ registryPath, moduleName });
           decisions = fresh.decisions;
           remaining = fresh.candidates.filter((candidate) => candidate.approvable);
           group = fresh.group;
@@ -564,7 +574,7 @@ export const runMigration = async (
     }
 
     // 5. Advance. One checkpoint, one lock, one history event.
-    const advanced = await runAdvanceCli(advanceArguments(options), {
+    const advanced = await runAdvanceCli(advanceArguments({ ...options, moduleName }), {
       emitDirective: false,
       stdout: human,
     });
