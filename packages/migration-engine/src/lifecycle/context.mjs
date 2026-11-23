@@ -23,9 +23,11 @@ import { withModuleLock } from "./lock.mjs";
 import { validateStateShape } from "./checkpoints.mjs";
 import { readState, recoverPendingAdvance } from "./record.mjs";
 
-// Resolve an unregistered legacy spelling only if the persisted record is
-// unique. An unreadable record prevents proving uniqueness.
-const recordForLegacyName = async (targetRoot, moduleName) => {
+// Resolve an unregistered legacy spelling only if it is the sole source of a
+// unique persisted record: an explicit legacy-to-target mapping. One source of
+// a multi-source record is not an alias for it; refuse, naming the record. An
+// unreadable record prevents proving uniqueness.
+const recordForLegacyName = async (targetRoot, moduleName, unregistered) => {
   const records = path.dirname(migrationRoot(targetRoot, moduleName));
   const entries = await readdir(records, { withFileTypes: true }).catch((error) => {
     if (error.code === "ENOENT") return [];
@@ -43,7 +45,11 @@ const recordForLegacyName = async (targetRoot, moduleName) => {
     if (state.migrationId !== entry.name) {
       throw new Error(`Migration record '${entry.name}' has a mismatched record identity '${state.migrationId}'.`);
     }
-    if (legacySourcesOf(state).includes(moduleName)) matches.push(state);
+    const sources = legacySourcesOf(state);
+    if (sources.length === 1 && sources[0] === moduleName) matches.push(state);
+    else if (sources.includes(moduleName)) {
+      throw new Error(`${unregistered.message} Its migration is recorded as '${entry.name}': use /start-migration ${entry.name}.`);
+    }
   }
   if (matches.length > 1) {
     throw new Error(`Legacy module '${moduleName}' matches multiple migration records: ${matches.map(({ migrationId }) => migrationId).sort().join(", ")}. Use the target record name.`);
@@ -103,8 +109,10 @@ export const readContext = async ({
     : null;
   let resolved;
   // A target-keyed record must remain addressable by its exact key even when
-  // a registry alias or another legacy module uses the same name.
-  if (exactState && usesMultiSource(exactState)) {
+  // a registry alias or another legacy module uses the same name. A registered
+  // module of that name stays authoritative, so a conflicting mapping still
+  // reaches the state-mapping check instead of being reinterpreted.
+  if (exactState && usesMultiSource(exactState) && !registryData.modules[moduleName]) {
     if (exactState.migrationId !== moduleName || exactState.targetModule !== moduleName) {
       throw new Error(`Migration record '${moduleName}' has a mismatched target identity.`);
     }
@@ -125,7 +133,7 @@ export const readContext = async ({
       const state = exactState ? validateStateShape(exactState, moduleName) : (
         await fileExists(migrationRoot(targetRoot, moduleName))
           ? null
-          : await recordForLegacyName(targetRoot, moduleName)
+          : await recordForLegacyName(targetRoot, moduleName, error)
       );
       if (!state) throw error;
       resolved = recordedResolution(registryData, state);
