@@ -809,7 +809,7 @@ const verifiedConfiguration = async ({ registryData, system, report }) => {
   for (const [role, project, descriptor] of projects) {
     const { port, identity } = assertPlainObject(descriptor, `${role} config.startMigration.runtime`);
     if (!Number.isInteger(port) || port < 1 || port > 0xffff || port === 80) {
-      throw new Error(`${role} runtime.port must be a TCP port from 1 to 65535 other than HTTP default port 80.`);
+      throw new Error(`${role} runtime.port must be a valid, nonzero TCP port other than HTTP default port 80.`);
     }
     const old = document.applications[role] ?? {};
     assertPlainObject(old, `applications.${role}`);
