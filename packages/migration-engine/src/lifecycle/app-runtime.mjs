@@ -1,6 +1,7 @@
 /**
  * Lifecycle: the applications a migration observes (LEGACY, BACKEND, TARGET).
  * `prepare` seeds a missing template without probing or starting applications.
+ * `configure` verifies project-declared endpoints before saving local facts.
  * `check` probes without writes. `ensure` can start an authorized application.
  * `stop` ends only what `ensure` started.
  *
@@ -30,7 +31,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { initialArtifacts } from "../formats/index.mjs";
-import { assertPlainObject, assertSecurePath, execFileAsync, isLexicallyWithin, isPlainObject, PACKAGE_MANAGERS, samePath, SCRIPT_NAME } from "../shared/index.mjs";
+import { assertPlainObject, assertSecurePath, execFileAsync, isLexicallyWithin, isPlainObject, PACKAGE_MANAGERS, samePath, SCRIPT_NAME, sha256Hex } from "../shared/index.mjs";
 import {
   atomicWrite,
   migrationRoot,
@@ -47,7 +48,7 @@ export const APP_RUNTIME_CONFIG = ".artifact-migration-tools/runtime-apps.json";
 const OWNED_DIRECTORY = ".artifact-migration-tools/app-runtime";
 // What the installer writes into the consumer root's `.artifact-migration-tools/`; its presence marks that root.
 const RECEIPTS = ["claude", "codex", "opencode", "copilot"].map((provider) => `.artifact-migration-tools/${provider}.json`);
-export const APP_RUNTIME_ACTIONS = Object.freeze(["check", "prepare", "ensure", "stop"]);
+export const APP_RUNTIME_ACTIONS = Object.freeze(["check", "configure", "prepare", "ensure", "stop"]);
 
 // BACKEND first: the two front ends call it while they render.
 const ROLES = ["BACKEND", "LEGACY", "TARGET"];
@@ -316,6 +317,9 @@ const inspect = async (app, system) => {
   const url = new URL(app.origin);
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const addresses = await system.lookup(host, { all: true, verbatim: true });
+  if (addresses.some(({ address }) => address !== "127.0.0.1" && address !== "::1")) {
+    return { state: "WRONG_APP", occupied: true, reason: `${url.hostname} resolves outside loopback.`, answers: [], listeners: [] };
+  }
   const probes = await Promise.all(addresses.map(async (entry) => ({ ...entry, ...(await request(url, entry.address, app.identity.route)) })));
   const listeners = await system.listeners(Number(url.port));
   // An IPv6 wildcard is only evidence of an IPv4 holder when IPv4 answered.
@@ -483,23 +487,26 @@ const unresolvedFields = (document) => {
 };
 
 const assertUntracked = async (base, file) => {
-  const { stdout } = await execFileAsync("git", ["-C", base, "ls-files", "--", APP_RUNTIME_CONFIG]).catch(() => {
+  const relative = path.relative(base, file).replaceAll("\\", "/");
+  const { stdout } = await execFileAsync("git", ["-C", base, "ls-files", "--", relative]).catch(() => {
     throw new Error(`could not verify '${file}' against the Git index; repair the index and retry.`);
   });
-  if (stdout.trim()) throw new Error(`${APP_RUNTIME_CONFIG} is tracked by Git; authority to start processes must stay local, so a clone cannot grant it.`);
+  if (stdout.trim()) throw new Error(`${relative} is tracked by Git; authority to start processes must stay local, so a clone cannot grant it.`);
 };
+
+const createLocalFile = (base, file, contents) =>
+  atomicWrite(base, file, contents, { exclusive: true }).then(
+    () => true,
+    (error) => error.code === "EEXIST" ? false : Promise.reject(error),
+  );
 
 const createTemplate = async ({ base, file, target }) => {
   await assertUntracked(base, file);
   // If a deprecated copy appeared after locate(), leave it for the next read.
   if (!samePath(base, target) && await present(path.join(target, APP_RUNTIME_CONFIG))) return null;
   const template = configurationTemplate();
-  const create = (filename, content) => atomicWrite(base, filename, content, { exclusive: true }).then(
-    () => true,
-    (error) => error.code === "EEXIST" ? false : Promise.reject(error),
-  );
-  await create(path.join(path.dirname(file), ".gitignore"), "/runtime-apps.json\n/.gitignore\n");
-  if (!(await create(file, `${JSON.stringify(template, null, 2)}\n`))) return null;
+  await createLocalFile(base, path.join(path.dirname(file), ".gitignore"), "/runtime-apps.json\n/.gitignore\n");
+  if (!(await createLocalFile(base, file, `${JSON.stringify(template, null, 2)}\n`))) return null;
   return template;
 };
 
@@ -515,7 +522,7 @@ const startScriptProblem = async ({ project, start }) => {
 };
 
 /** The trust boundary. Anything short of a local, well-formed file is a refusal with a reason, never a default. */
-const readConfiguration = async (targetRoot, system = hostSystem, { validateScripts = false, seedTemplate = false } = {}) => {
+const readConfiguration = async (targetRoot, system = hostSystem, { validateScripts = false, seedTemplate = false, proposal } = {}) => {
   let handle;
   let file;
   try {
@@ -523,11 +530,11 @@ const readConfiguration = async (targetRoot, system = hostSystem, { validateScri
     const { base, versions } = located;
     file = located.file;
     await assertSecurePath(base, file);
-    handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error) => {
+    if (proposal === undefined) handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
-    if (!handle) {
+    if (proposal === undefined && !handle) {
       if (seedTemplate) {
         const template = await createTemplate(located);
         if (template) return incompleteConfiguration(file, unresolvedFields(template), true);
@@ -536,8 +543,10 @@ const readConfiguration = async (targetRoot, system = hostSystem, { validateScri
       throw new Error(`${APP_RUNTIME_CONFIG} does not exist at '${file}'. Run the application preflight prepare to generate a template when runtime is needed.`);
     }
     await assertUntracked(base, file);
-    let document;
-    try { document = JSON.parse(await handle.readFile("utf8")); } catch { throw new Error(`${APP_RUNTIME_CONFIG} is not valid JSON.`); }
+    let document = proposal;
+    if (handle) {
+      try { document = JSON.parse(await handle.readFile("utf8")); } catch { throw new Error(`${APP_RUNTIME_CONFIG} is not valid JSON.`); }
+    }
     assertPlainObject(document, "Application runtime configuration");
     if (![1, 2].includes(document.version) || typeof document.namespace !== "string" || !isPlainObject(document.applications)) {
       throw new Error("The configuration must be {version: 1|2, namespace: win32|wsl|linux|darwin, applications}.");
@@ -578,7 +587,7 @@ const readConfiguration = async (targetRoot, system = hostSystem, { validateScri
       throw new Error("sessionBroker must be exactly {url: http://127.0.0.1:<port>, tokenFile: <absolute path to the client token>}.");
     }
     // operator-local: the operator accepts that this account, the agent's, may author starts. Only ownership is waived.
-    const refusal = trust !== "operator-local" && applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
+    const refusal = handle && trust !== "operator-local" && applications.some((app) => app.start) ? await system.configAuthority(file, handle) : null;
     return {
       base,
       file,
@@ -632,7 +641,7 @@ const stateFolders = async (targetRoot) => {
 };
 
 /** A record names a live process only while its PID still has the same start time; anything else is stale. */
-const liveOwned = async (base, role, system) => {
+const liveOwned = async (base, role, system, { prune = true } = {}) => {
   const file = ownedFile(base, role);
   const owned = await readOptionalJson(file, "Owned application record");
   if (!owned) return null;
@@ -640,7 +649,7 @@ const liveOwned = async (base, role, system) => {
   if (owned.namespace !== system.namespace) return null;
   const started = await system.processStart(owned.pid);
   if (started !== null && started === owned.processStart) return owned;
-  await removeDurably(base, file);
+  if (prune) await removeDurably(base, file);
   return null;
 };
 
@@ -743,6 +752,140 @@ const publicRow = ({ occupied, ...row }, app) => ({
   startAuthorized: Boolean(app.start), reused: false, started: false, ...row,
 });
 
+const runtimeDescriptor = async (base, project) => {
+  const file = await assertSecurePath(base, path.join(project, "package.json"));
+  return (await readOptionalJson(file, "Project manifest"))?.config?.startMigration?.runtime;
+};
+
+const verifiedConfiguration = async ({ registryData, system, report }) => {
+  const { legacyRoot, targetRoot } = registryData;
+  const { base, file, versions } = await locate(targetRoot);
+  const legacy = await runtimeDescriptor(base, legacyRoot);
+  const target = await runtimeDescriptor(base, targetRoot);
+  if (legacy === undefined && target === undefined) {
+    return { ...report, state: "DISCOVERY_UNAVAILABLE", reason: "The project manifests declare no application runtime endpoints.", applications: [] };
+  }
+  await assertSecurePath(base, file);
+  await assertUntracked(base, file);
+  const readCurrent = () => readFile(file, {
+    flag: constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+  }).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  const before = await readCurrent();
+  let previous = null;
+  if (before !== null) {
+    try { previous = JSON.parse(before.toString("utf8")); } catch { throw new Error(`${APP_RUNTIME_CONFIG} is not valid JSON.`); }
+    assertPlainObject(previous, "Application runtime configuration");
+  }
+  if (!versions.includes(2) || (previous && (previous.version !== 2 || !isPlainObject(previous.applications)))) {
+    throw new Error("Use the current consumer-root version 2 configuration before synchronizing project endpoints.");
+  }
+  const namespace = previous?.namespace;
+  if (namespace !== undefined && !placeholderValue(namespace) && namespace !== system.namespace) {
+    return { ...report, state: "WRONG_NAMESPACE", reason: `The configuration is for '${namespace}', not this engine's '${system.namespace}' namespace.`, applications: [] };
+  }
+  const hasOperatorAuthority = previous && (previous.sessionBroker !== undefined ||
+    Object.values(previous.applications).some((app) =>
+      (app?.start !== undefined && !placeholderValue(app.start?.script)) || app?.onSignIn === "wait-for-operator",
+    ));
+  if (hasOperatorAuthority) {
+    const prior = await readConfiguration(targetRoot, system, { proposal: previous, validateScripts: true });
+    if (prior.problem) throw new Error(`Resolve the project binding and endpoint configuration before preserving startup or sign-in settings. ${prior.problem}`);
+  }
+  const document = previous ? structuredClone(previous) : { version: 2, trust: "operator-isolated", applications: {} };
+  document.namespace = system.namespace;
+  const projects = [["LEGACY", legacyRoot, legacy], ["TARGET", targetRoot, target]];
+  if (target?.backendProject !== undefined) {
+    if (typeof target.backendProject !== "string" || !target.backendProject.trim() || path.isAbsolute(target.backendProject)) {
+      throw new Error("TARGET runtime.backendProject must be a relative project directory.");
+    }
+    const project = await assertSecurePath(base, path.resolve(targetRoot, target.backendProject));
+    projects.push(["BACKEND", project, await runtimeDescriptor(base, project)]);
+  } else if (JSON.stringify(document.applications.BACKEND) === JSON.stringify(configurationTemplate().applications.BACKEND)) {
+    delete document.applications.BACKEND;
+  }
+  for (const [role, project, descriptor] of projects) {
+    const { port, identity } = assertPlainObject(descriptor, `${role} config.startMigration.runtime`);
+    if (!Number.isInteger(port) || port < 1 || port > 0xffff || port === 80) {
+      throw new Error(`${role} runtime.port must be a TCP port from 1 to 65535 other than HTTP default port 80.`);
+    }
+    const old = document.applications[role] ?? {};
+    assertPlainObject(old, `applications.${role}`);
+    const configured = typeof old.project === "string" && !placeholderValue(old.project) && !path.isAbsolute(old.project)
+      ? await realpath(path.resolve(base, old.project)).catch(() => null)
+      : null;
+    const hasStart = old.start !== undefined && !placeholderValue(old.start?.script);
+    const previousOrigin = typeof old.origin === "string" && URL.canParse(old.origin) ? new URL(old.origin) : null;
+    const hostname = previousOrigin?.protocol === "http:" && LOOPBACK.has(previousOrigin.hostname)
+      ? previousOrigin.hostname
+      : "localhost";
+    const origin = `http://${hostname}:${port}`;
+    const usesSession = old.onSignIn === "wait-for-operator" || (role !== "BACKEND" && document.sessionBroker !== undefined);
+    if ((configured && !samePath(configured, project)) || (!configured && hasStart) ||
+        (usesSession && (!configured || old.origin !== origin))) {
+      throw new Error(`The discovered ${role} project or session origin differs from its local configuration. Resolve the project binding before changing its runtime endpoints.`);
+    }
+    const app = {
+      ...old,
+      project: configured ? old.project : path.relative(base, project).replaceAll("\\", "/") || ".",
+      origin,
+      identity: { route: identity?.route, includes: identity?.includes },
+    };
+    if (!hasStart) delete app.start;
+    document.applications[role] = app;
+  }
+
+  const candidate = await readConfiguration(targetRoot, system, { proposal: document, validateScripts: true });
+  if (candidate.problem || candidate.file !== file) throw new Error(candidate.problem ?? "The configuration path changed during discovery.");
+  for (const { role, origin } of candidate.applications) {
+    const owned = await liveOwned(base, role, system, { prune: false });
+    if (owned && owned.origin !== origin) {
+      throw new Error(`Stop the toolkit-owned ${role} process at ${owned.origin} before changing its runtime origin.`);
+    }
+  }
+  const applications = await Promise.all(candidate.applications.map(async ({ start, ...app }) => publicRow(await inspect(app, system), app)));
+  const state = STATE_RANK.find((status) => applications.some((app) => app.state === status));
+  if (!["READY", "AUTH_REQUIRED"].includes(state)) return { ...report, state, applications };
+
+  const changed = before === null || JSON.stringify(previous) !== JSON.stringify(document);
+  let rollbackPath;
+  if (changed) {
+    if ((await locate(targetRoot)).file !== file) throw new Error("The configuration path changed during discovery.");
+    await assertUntracked(base, file);
+    await createLocalFile(base, path.join(path.dirname(file), ".gitignore"), "/runtime-apps.json\n/.gitignore\n");
+    await execFileAsync("git", ["-C", base, "check-ignore", "--", APP_RUNTIME_CONFIG]);
+    if (before === null) {
+      if (!(await createLocalFile(base, file, `${JSON.stringify(document, null, 2)}\n`))) throw new Error("The local configuration appeared during discovery. Retry.");
+    } else {
+      // Respect the existing file's write permissions before replacing its directory entry.
+      const handle = await open(file, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const original = await handle.stat({ bigint: true });
+        if (!(await handle.readFile()).equals(before)) throw new Error("The local configuration changed during discovery. Retry.");
+        rollbackPath = path.join(base, OWNED_DIRECTORY, `runtime-apps.previous-${sha256Hex(before)}.json`);
+        await assertUntracked(base, rollbackPath);
+        await createLocalFile(base, path.join(path.dirname(rollbackPath), ".gitignore"), "*\n");
+        await execFileAsync("git", ["-C", base, "check-ignore", "--", path.relative(base, rollbackPath)]);
+        if (!(await createLocalFile(base, rollbackPath, before)) && !(await readFile(rollbackPath)).equals(before)) {
+          throw new Error(`Rollback copy '${rollbackPath}' does not match the current configuration.`);
+        }
+        const current = await lstat(file, { bigint: true });
+        if (!current.isFile() || current.dev !== original.dev || current.ino !== original.ino || !(await readCurrent())?.equals(before)) {
+          throw new Error("The local configuration changed during discovery. Retry.");
+        }
+      } finally {
+        await handle.close();
+      }
+      await atomicWrite(base, file, `${JSON.stringify(document, null, 2)}\n`).catch((error) => {
+        throw new Error(`Cannot publish the verified configuration. The previous bytes are at '${rollbackPath}'. ${error.message}`, { cause: error });
+      });
+    }
+  }
+  return { ...report, state: "CONFIGURED", configPath: file, changed, ...(rollbackPath ? { rollbackPath } : {}), applications };
+};
+
 /** Prepare configuration, check or ensure applications, or stop toolkit-owned processes. */
 export const runAppRuntime = async ({ registryPath, moduleName, action = "check", system: injected = {} }) => {
   const system = { ...hostSystem, ...injected };
@@ -773,45 +916,52 @@ export const runAppRuntime = async ({ registryPath, moduleName, action = "check"
 
   const notRequired = await requirement(targetRoot, resolved.canonical);
   if (notRequired) return { ...base, required: false, state: "NOT_REQUIRED", reason: notRequired, applications: [] };
-  const configuration = await readConfiguration(targetRoot, system, { validateScripts: true, seedTemplate: action === "prepare" || action === "ensure" });
-  if (configuration.problem) {
-    const { problem, file, unresolved, templateCreated } = configuration;
-    return {
-      ...base, required: true, state: "CONFIGURATION_MISSING", reason: problem, configFile: APP_RUNTIME_CONFIG,
-      ...(file ? { configPath: file } : {}), ...(unresolved ? { unresolved } : {}), ...(templateCreated ? { templateCreated } : {}),
-      applications: [],
-    };
+  if (action === "configure") {
+    const report = { ...base, required: true, configFile: APP_RUNTIME_CONFIG };
+    return withModuleLock(targetRoot, LOCK_NAME, () =>
+      verifiedConfiguration({ registryData, system, report }).catch((error) => ({
+        ...report, state: "CONFIGURATION_MISSING", reason: error.message, applications: [],
+      })),
+    );
   }
-  if (configuration.namespace !== system.namespace) {
-    return {
-      ...base, required: true, state: "WRONG_NAMESPACE", configFile: APP_RUNTIME_CONFIG, applications: [],
-      reason: `The applications run in the '${configuration.namespace}' network namespace but this engine runs in '${system.namespace}': loopback here is a different machine, so nothing was probed or started. Run the engine in '${configuration.namespace}'.`,
-    };
-  }
-
-  if (action === "prepare") {
-    return {
-      ...base, required: true, state: "CONFIGURED", configPath: configuration.file,
-      ...(configuration.notice ? { reason: configuration.notice } : {}), applications: [],
-    };
-  }
-
-  const inspectOrEnsure = async () => {
+  const inspectOrEnsure = async (configuration) => {
+    if (configuration.problem) {
+      const { problem, file, unresolved, templateCreated } = configuration;
+      return {
+        ...base, required: true, state: "CONFIGURATION_MISSING", reason: problem, configFile: APP_RUNTIME_CONFIG,
+        ...(file ? { configPath: file } : {}), ...(unresolved ? { unresolved } : {}), ...(templateCreated ? { templateCreated } : {}),
+        applications: [],
+      };
+    }
+    if (configuration.namespace !== system.namespace) {
+      return {
+        ...base, required: true, state: "WRONG_NAMESPACE", configFile: APP_RUNTIME_CONFIG, applications: [],
+        reason: `The applications run in the '${configuration.namespace}' network namespace but this engine runs in '${system.namespace}': loopback here is a different machine, so nothing was probed or started. Run the engine in '${configuration.namespace}'.`,
+      };
+    }
+    if (action === "prepare") {
+      return {
+        ...base, required: true, state: "CONFIGURED", configPath: configuration.file,
+        ...(configuration.notice ? { reason: configuration.notice } : {}), applications: [],
+      };
+    }
     const applications = [];
     for (const app of configuration.applications) {
       const row = action === "ensure" ? await ensureApplication(configuration.base, app, system) : await inspect(app, system);
       applications.push(publicRow(row, app));
     }
-    return applications;
+    const states = applications.map((row) => row.state);
+    const state = ["CONFIGURATION_MISSING", ...STATE_RANK].find((name) => states.includes(name));
+    return {
+      ...base, required: true, state, ...(configuration.notice ? { reason: configuration.notice } : {}), applications,
+      ...(configuration.sessionBroker ? { sessions: await sessionStates(targetRoot) } : {}),
+    };
   };
+  const configuration = await readConfiguration(targetRoot, system, { validateScripts: true, seedTemplate: action === "prepare" || action === "ensure" });
+  if (action !== "ensure" || configuration.problem || configuration.namespace !== system.namespace) return inspectOrEnsure(configuration);
   const budget = configuration.applications.reduce((total, app) => total + app.startTimeoutMs, 30_000);
-  const applications = action === "ensure"
-    ? await withModuleLock(targetRoot, LOCK_NAME, inspectOrEnsure, { timeoutMs: budget })
-    : await inspectOrEnsure();
-  const states = applications.map((row) => row.state);
-  const state = ["CONFIGURATION_MISSING", ...STATE_RANK].find((name) => states.includes(name));
-  return {
-    ...base, required: true, state, ...(configuration.notice ? { reason: configuration.notice } : {}), applications,
-    ...(configuration.sessionBroker ? { sessions: await sessionStates(targetRoot) } : {}),
-  };
+  return withModuleLock(targetRoot, LOCK_NAME, async () =>
+    inspectOrEnsure(await readConfiguration(targetRoot, system, { validateScripts: true })),
+    { timeoutMs: budget },
+  );
 };

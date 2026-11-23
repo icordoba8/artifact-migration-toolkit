@@ -1348,15 +1348,21 @@ still needs its runtime UI evidence.
 
 #### Application configuration preflight
 
-Run `migration_app_runtime { module, cwd, action: "prepare" }` (CLI:
-`artifact-migration-validate <module> --app-runtime prepare`) at the first
-mutating preflight for runtime-dependent work. Call it before asking for the
-browser or authoring runtime evidence. It creates the missing template and
-returns its path and unresolved fields without probing or starting any app.
-An existing valid file returns `CONFIGURED` without writes. For
-`CONFIGURATION_MISSING`, follow **Operator configuration** before continuing
-that work. For `WRONG_NAMESPACE`, run in the configured namespace.
-When runtime is unnecessary, skip this action.
+At the first mutating preflight for runtime-dependent work, call
+`migration_app_runtime { module, cwd, action: "configure" }` (CLI:
+`artifact-migration-validate <module> --app-runtime configure`) before using
+the browser or authoring runtime evidence. It verifies locally running
+applications against the project declarations and saves their endpoints.
+It never starts a process or grants startup or sign-in authority.
+
+If discovery is unavailable, configuration is missing, or a declared app
+is down, call `migration_app_runtime { module, cwd, action: "prepare" }`
+(CLI: `artifact-migration-validate <module> --app-runtime prepare`). Prepare
+creates a missing template without probing or starting apps. An existing
+usable file returns `CONFIGURED` and can proceed through `ensure`. If it
+still returns `CONFIGURATION_MISSING`, report the discovery result and follow
+**Operator configuration**. For `WRONG_NAMESPACE`, run in the configured
+namespace. When runtime is unnecessary, skip application preflight.
 
 Before each browser or capture phase, and after any browser failure, run
 `migration_app_runtime { module, cwd, action: "ensure" }` (CLI:
@@ -1373,7 +1379,7 @@ this engine in the same namespace.
 
 | State | Meaning | Do |
 | --- | --- | --- |
-| `CONFIGURED` | `prepare` accepted the local configuration without probing. | Continue the checkpoint. Use `ensure` when applications are needed. |
+| `CONFIGURED` | `configure` verified and saved the endpoints, or `prepare` accepted an existing local file. | Continue the checkpoint. Use `ensure` when applications are needed. |
 | `READY` | Identity proven; the protected route, if configured, is served without a session. | Continue. A `"onSignIn": "wait-for-operator"` row whose page lands on sign-in follows **Operator sign-in** below. |
 | `AUTH_REQUIRED` | Identity proven and running; the protected route needs a session. Not a startup failure. | With `"onSignIn": "wait-for-operator"`, follow **Operator sign-in** below. Otherwise continue with an authorized session if the operator has supplied one, or record the gap as below. Never type or request a credential. |
 | `RUNTIME_DOWN` | Not serving. `failure` is `STARTUP_FAILED` or `STARTUP_TIMEOUT` after a start; `startAuthorized: false` means the configuration authorizes none, or is a file your own account could have written (`reason` says which). | Report the row once. A `log` path is the operator's; do not paste it. |
@@ -1422,16 +1428,25 @@ the toolkit's.
 The authority is `.artifact-migration-tools/runtime-apps.json` in the consumer
 root, the folder holding the installer receipts (the nearest one at or above
 the target, inside its Git work tree; the target itself when none is),
-written by the operator, kept out of Git (a tracked copy is refused) and
-never taken from a migration record, an application response or a tool argument.
+kept out of Git (a tracked copy is refused). Endpoint declarations in each
+project's `package.json` belong under `config.startMigration.runtime` and
+contain a non-default HTTP `port` (1 to 65535, excluding 80) and
+`identity: { route, includes }`. The target can also name
+its `backendProject`, relative to the target and inside the consumer. The
+registry identifies the legacy and target projects. A declared endpoint is
+saved only when its public response and the process holding its port prove
+that identity. The operator controls all other configuration.
 A `start` is honored only when that file is owned by another account and this
 engine's account cannot write it: a file you could have written grants nothing.
 Never change its ownership or permissions; that is the operator's step.
 `"trust": "operator-local"`, the operator's choice for a machine that is theirs
 alone, waives only that ownership check: the Git, namespace and identity checks
 stay, and `stop` still ends only what `ensure` started. It also allows
-`"onSignIn": "wait-for-operator"` and an argv `start`. Only the toolkit may create the incomplete template. Never create, edit,
-overwrite, or commit the file yourself.
+`"onSignIn": "wait-for-operator"` and an argv `start`. The toolkit can
+create the incomplete template or synchronize verified project endpoints.
+It retains the previous bytes at the reported `rollbackPath` when an update
+changes an existing file. The operator can restore that file and run
+`check` again. Never create, edit, overwrite, or commit the file yourself.
 
 On `CONFIGURATION_MISSING`, show the exact absolute `configPath` and
 the engine's reason, including any `unresolved` field paths. If `templateCreated`

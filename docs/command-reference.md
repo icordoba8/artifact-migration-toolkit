@@ -131,7 +131,7 @@ absolute path; run every command from the repository being migrated.
 | `migration_evidence_binding` | `artifact-migration-validate <module> --evidence-binding [--reference <path>]...` | nothing |
 | `migration_prefill` | `artifact-migration-validate <module> --prefill` | the current checkpoint's authored draft (absent fields only) |
 | `migration_capture` | `artifact-migration-validate <module> --capture <request.json>` | one legacy-runtime frame or format-20 LEGACY claim capture (new files only) |
-| `migration_app_runtime` | `artifact-migration-validate <module> --app-runtime check\|prepare\|ensure\|stop` | `check` writes nothing. `prepare` creates a missing template and local ignore file at the consumer root without probing or starting applications. `ensure` retains the same fallback when called directly. `ensure` and `stop` manage processes and their records under `.artifact-migration-tools/app-runtime/` beside the configuration |
+| `migration_app_runtime` | `artifact-migration-validate <module> --app-runtime check\|configure\|prepare\|ensure\|stop` | `configure` verifies and saves project-declared endpoints without starting processes. `check` writes nothing. `prepare` creates a missing template without probing or starting applications. `ensure` retains the same fallback when called directly. `ensure` and `stop` manage processes and their records under `.artifact-migration-tools/app-runtime/`. |
 | `migration_pending_decisions` | `artifact-migration-decision <module> --pending` | nothing |
 | `migration_run` | `artifact-migration-run <module> [options] --json` | at most one advance |
 | `migration_relay_decision` | `artifact-migration-decision <module> --relay <reference> --decision APPROVE\|REJECT` | one relayed operator decision |

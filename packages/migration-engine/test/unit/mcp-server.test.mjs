@@ -211,7 +211,7 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
   // The runtime's one extra argument is a closed action: no tool argument can carry a command.
   const appRuntime = tools.find((tool) => tool.name === "migration_app_runtime");
   assert.deepEqual(Object.keys(appRuntime.inputSchema.properties).sort(), ["action", "cwd", "module", "registry", "slice", "target"]);
-  assert.deepEqual(appRuntime.inputSchema.properties.action.enum, ["check", "prepare", "ensure", "stop"]);
+  assert.deepEqual(appRuntime.inputSchema.properties.action.enum, ["check", "configure", "prepare", "ensure", "stop"]);
   const readOnlyTools = tools.filter((tool) => tool !== run && tool !== prefill && tool !== capture && tool !== appRuntime && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
   for (const tool of readOnlyTools) {
     assert.equal(typeof tool.description, "string");

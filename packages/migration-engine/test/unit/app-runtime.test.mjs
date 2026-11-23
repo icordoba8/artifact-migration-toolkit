@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -90,7 +91,7 @@ const writeProject = async (directory, port, { routes = SIGN_IN_REDIRECT, marker
 };
 
 const launch = async (directory, port) => {
-  const child = spawn(process.execPath, ["server.mjs", `--session=${CANARY}`], { cwd: directory, stdio: "ignore", detached: true, env: { PATH: process.env.PATH } });
+  const child = spawn(process.execPath, [path.join(directory, "server.mjs"), `--session=${CANARY}`], { cwd: directory, stdio: "ignore", detached: true, env: { PATH: process.env.PATH } });
   child.unref();
   running.add(child.pid);
   await until(async () => !(await refused(port)), "the fixture server");
@@ -801,6 +802,127 @@ const installed = async () => {
 };
 
 const ownedAt = (base, role) => path.join(base, ".artifact-migration-tools/app-runtime", `${role}.json`);
+
+test("configure verifies all project endpoints before publishing and preserves operator settings with rollback", async () => {
+  const space = await installed();
+  const backendPort = await freePort();
+  const backend = await writeProject(path.join(space.root, "backend"), backendPort);
+  const registry = JSON.parse(await readFile(space.registryPath, "utf8"));
+  registry.projects.legacy.root = path.relative(path.dirname(space.registryPath), space.legacy);
+  await writeFile(space.registryPath, JSON.stringify(registry));
+  const declare = async (project, port, extra = {}) => {
+    const file = path.join(project, "package.json");
+    const manifest = JSON.parse(await readFile(file, "utf8"));
+    manifest.config = { startMigration: { runtime: {
+      port, identity: { route: "/public", includes: "fixture-app" }, ...extra,
+    } } };
+    await writeFile(file, JSON.stringify(manifest));
+  };
+  await declare(space.legacy, space.port);
+  await declare(space.targetRoot, space.sibling, { backendProject: "../backend" });
+  await declare(backend, backendPort);
+  await launch(space.legacy, space.port);
+  await launch(space.targetRoot, space.sibling);
+  const down = await space.runAppRuntime("configure");
+  assert.equal(down.state, "RUNTIME_DOWN", JSON.stringify(down));
+  await assert.rejects(lstat(space.home), { code: "ENOENT" });
+  assert.equal(await starts(backend), 0);
+
+  await launch(backend, backendPort);
+  const created = await space.runAppRuntime("configure");
+  assert.equal(created.state, "CONFIGURED", JSON.stringify(created));
+  assert.equal(created.changed, true);
+  assert.deepEqual(created.applications.map(({ role, state }) => [role, state]), [
+    ["BACKEND", "READY"], ["LEGACY", "READY"], ["TARGET", "READY"],
+  ]);
+  const configuration = JSON.parse(await readFile(space.home, "utf8"));
+  assert.equal(configuration.trust, "operator-isolated");
+  assert.ok(Object.values(configuration.applications).every((app) => !Object.hasOwn(app, "start")));
+  assert.equal((await space.runAppRuntime("configure")).changed, false);
+
+  configuration.trust = "operator-local";
+  configuration.applications.LEGACY.start = NPM_START;
+  configuration.applications.LEGACY.signInPath = "/login";
+  configuration.applications.LEGACY.origin = `http://127.0.0.1:${space.port}`;
+  const incomplete = structuredClone(configuration);
+  incomplete.applications.LEGACY.project = "REPLACE_WITH_LEGACY_PROJECT";
+  await space.writeHome(incomplete);
+  const incompleteBytes = await readFile(space.home, "utf8");
+  const unbound = await space.runAppRuntime("configure");
+  assert.equal(unbound.state, "CONFIGURATION_MISSING");
+  assert.match(unbound.reason, /Resolve the project binding/);
+  assert.equal(await readFile(space.home, "utf8"), incompleteBytes);
+  configuration.applications.BACKEND.identity.includes = "obsolete marker";
+  await space.writeHome(configuration);
+  const prior = Buffer.from((await readFile(space.home, "utf8")).replace("obsolete marker", "obsolete\xffmarker"), "latin1");
+  await writeFile(space.home, prior);
+  const updated = await space.runAppRuntime("configure");
+  assert.equal(updated.state, "CONFIGURED", JSON.stringify(updated));
+  assert.equal(updated.changed, true);
+  assert.deepEqual(await readFile(updated.rollbackPath), prior);
+  const updatedBytes = await readFile(space.home, "utf8");
+  const { trust, applications } = JSON.parse(updatedBytes);
+  assert.equal(trust, "operator-local");
+  assert.deepEqual(applications.LEGACY.start, NPM_START);
+  assert.equal(applications.LEGACY.signInPath, "/login");
+  assert.equal(applications.LEGACY.origin, configuration.applications.LEGACY.origin);
+  assert.equal(applications.BACKEND.identity.includes, "fixture-app");
+
+  await declare(backend, space.port);
+  const foreign = await space.runAppRuntime("configure");
+  assert.equal(row(foreign, "BACKEND").state, "WRONG_APP");
+  assert.equal(await readFile(space.home, "utf8"), updatedBytes);
+  assert.deepEqual(await readFile(updated.rollbackPath), prior);
+
+  const ownedFile = ownedAt(space.root, "BACKEND");
+  const ownership = JSON.stringify({ role: "BACKEND", namespace: OWN_NAMESPACE, pid: 42, processStart: "still live", origin: applications.BACKEND.origin });
+  await writeFile(ownedFile, ownership);
+  const held = await space.runAppRuntime("configure", { system: {
+    processStart: async () => "still live",
+    lookup: async () => assert.fail("an origin change with a live owned process must be refused before probing"),
+  } });
+  assert.equal(held.state, "CONFIGURATION_MISSING");
+  assert.match(held.reason, /Stop the toolkit-owned BACKEND process/);
+  assert.equal(await readFile(ownedFile, "utf8"), ownership);
+  assert.equal(await readFile(space.home, "utf8"), updatedBytes);
+  await rm(ownedFile);
+
+  await declare(backend, 80);
+  const defaultPort = await space.runAppRuntime("configure", { system: {
+    lookup: async () => assert.fail("an unsupported default port must be refused before probing"),
+  } });
+  assert.equal(defaultPort.state, "CONFIGURATION_MISSING");
+  assert.match(defaultPort.reason, /other than HTTP default port 80/);
+  assert.equal(await readFile(space.home, "utf8"), updatedBytes);
+
+  await declare(backend, backendPort);
+  const stale = JSON.parse(updatedBytes);
+  stale.trust = "operator-isolated";
+  stale.applications.BACKEND.identity.includes = "stale while ensure waits";
+  await space.writeHome(stale);
+  const probing = Promise.withResolvers();
+  const ensureRead = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const configure = space.runAppRuntime("configure", { system: {
+    lookup: async (...args) => {
+      probing.resolve();
+      await release.promise;
+      return lookup(...args);
+    },
+  } });
+  await probing.promise;
+  const ensure = space.runAppRuntime("ensure", { system: {
+    configAuthority: async () => {
+      ensureRead.resolve();
+      return null;
+    },
+  } });
+  await ensureRead.promise;
+  release.resolve();
+  assert.equal((await configure).state, "CONFIGURED");
+  assert.equal((await ensure).state, "READY", "ensure must read the new configuration under the runtime lock");
+  assert.deepEqual(await readFile(updated.rollbackPath), prior);
+});
 
 test("an installed consumer keeps its configuration and its started applications in the consumer root", async () => {
   const space = await installed();

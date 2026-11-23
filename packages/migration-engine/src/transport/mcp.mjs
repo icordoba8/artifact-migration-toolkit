@@ -534,12 +534,12 @@ const TOOLS = [
   {
     name: "migration_app_runtime",
     description:
-      "Classify the LEGACY, BACKEND and TARGET applications from the operator's local configuration (the consumer root's .artifact-migration-tools/runtime-apps.json) as READY, AUTH_REQUIRED, RUNTIME_DOWN, WRONG_APP, IDENTITY_UNPROVEN, WRONG_NAMESPACE, CONFIGURATION_MISSING or NOT_REQUIRED. `prepare` generates a missing template or returns CONFIGURED without probing or starting apps; `check` writes nothing; `ensure` starts an authorized stopped application or reuses a proven running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
+      "Manage the LEGACY, BACKEND and TARGET runtime. `configure` verifies project-declared endpoints and saves their facts in the local runtime-apps.json without starting apps. `prepare` generates a missing template without probing; `check` writes nothing; `ensure` starts an authorized stopped application or reuses a proven running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
     inputSchema: {
       ...INPUT_SCHEMA,
       properties: {
         ...INPUT_SCHEMA.properties,
-        action: { type: "string", enum: [...APP_RUNTIME_ACTIONS], description: "check (default), prepare, ensure or stop." },
+        action: { type: "string", enum: [...APP_RUNTIME_ACTIONS], description: "check (default), configure, prepare, ensure or stop." },
       },
     },
     call: async (arguments_) => runAppRuntime({ ...(await registryFor(arguments_)), action: arguments_.action }),
