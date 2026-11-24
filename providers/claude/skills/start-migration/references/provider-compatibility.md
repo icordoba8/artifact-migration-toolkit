@@ -1,5 +1,8 @@
 # Provider Compatibility
 
+The [provider setup guide](https://github.com/icordoba8/artifact-migration-toolkit/blob/main/docs/provider-setup.md) covers pinned installation,
+project and user locations, rendered MCP examples, and first use.
+
 The canonical source is `skills/`. Run `pnpm providers:sync` after changes and
 `pnpm providers:check` to prove the committed trees still match.
 
@@ -15,11 +18,12 @@ canonical documents. `skills/` is the source the generator reads; it is not a
 skill path any provider is configured with. Each adapter installs its generated
 tree into the root its own host supports.
 
-Module default/supported = 19; Artifact default/supported = 14, including
-delegated children. All four providers use the same engine-owned `STANDARD_LOCAL`
+New modules use format 21, the supported ceiling. Existing format 19
+and 20 records retain their saved semantics. Artifact default and ceiling
+are 14, including delegated children. All four providers use the same engine-owned `STANDARD_LOCAL`
 policy, candidate-bound review and relay, exactly as `SKILL.md` *Operator
 decisions* states: elicitation through `migration_run` / `artifact_run` when the
-host renders it; otherwise, for a module-19 `OPERATOR_DECISION`, the user's
+host renders it; otherwise, for a direct-ledger `OPERATOR_DECISION`, the user's
 next explicit answer relayed through `migration_relay_decision` or, without that
 tool, `artifact-migration-decision <module> --relay <reference> --decision APPROVE|REJECT`,
 which calls the same engine function. No provider adds, removes or reinterprets
@@ -49,9 +53,10 @@ it (`INSTALL_REGISTRATION_CONFLICT`, file `.mcp.json`).
 Copilot CLI loads workspace MCP only in a trusted folder. Trusting the consumer
 root is a user step done **once, before the first migration session**, in one
 of the documented ways: accept the trust prompt on a first `copilot` launch in
-the consumer root and exit; add the root to `trustedFolders` in
-`$COPILOT_HOME/config.json`; or, for one prompt-mode session,
-`copilot --trust-folder -p …`. The payload never writes trust. The MCP server
+the consumer root, or add the root to `trustedFolders` in
+`$COPILOT_HOME/config.json`. Supported CLI versions also offer
+`--trust-folder` for one new prompt-mode session. Then launch the migration
+session. The payload never writes trust. The MCP server
 needs no `--add-dir`; pass `--add-dir <consumer root>` only when Copilot starts
 outside the consumer, and never for the release store (Copilot also loads that
 directory's `.github/skills` and `.github/agents` as trusted configuration).
@@ -87,8 +92,8 @@ because their skill formats do not define them.
 ## Install scopes
 
 `providers/<provider>/adapter.json` records the scopes each host documents.
-`null` means the provider documents no such scope, and an installer must refuse
-it rather than pick somewhere plausible.
+Claude's native paths are host-assigned plugin paths. The Copilot
+adapter supports project scope only.
 
 | Provider       | User-scope skill root         | Project-scope skill root | MCP config (user / project)                                 |
 | -------------- | ----------------------------- | ------------------------ | ----------------------------------------------------------- |
@@ -97,11 +102,12 @@ it rather than pick somewhere plausible.
 | OpenCode       | `~/.config/opencode/skills`   | `.opencode/skills`       | `~/.config/opencode/opencode.json` / `opencode.json`         |
 | GitHub Copilot | — (none documented)           | `.github/skills`         | — / `.vscode/mcp.json` and `.github/mcp.json`                |
 
-Three of these are consumer-owned files that carry unrelated entries — Codex's
-project `config.toml`, OpenCode's `opencode.json`, Copilot's `.vscode/mcp.json`
-and `.github/mcp.json`.
-An adapter **merges** its one `start-migration` entry into them and preserves
-everything else. Overwriting a host's configuration is not installation.
+The table shows the explicit bundle adapter. With Agent Skills CLI
+installation, the first-use preflight registers workspace MCP for all four
+providers, including when the skills were installed at user scope. For
+Claude Code this is the consumer's root `.mcp.json`. The adapter merges its
+`start-migration` entry into the existing configuration and preserves unrelated
+registrations.
 
 One installation is authoritative per consumer, and its CLI and its MCP server
 must resolve to the same toolkit. User and project scope may coexist on a

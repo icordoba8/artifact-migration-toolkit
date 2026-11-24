@@ -2,15 +2,16 @@
 
 Run these skills from the repository being migrated. Use `migrate-artifact` for one bounded artifact; use `start-migration` for a complete feature, module, or app that needs requirements and multiple slices. Both resume from saved progress.
 
-The examples use Claude Code slash commands. [Provider invocation](#provider-invocation) shows equivalent syntax in other hosts.
+The examples use Claude Code slash commands. [Provider invocation](#provider-invocation) shows the equivalent syntax. Installation, real MCP examples and the first-run walkthrough are in the [provider setup guide](provider-setup.md).
 
-New modules use format **19** (supported: 19); standalone and delegated artifacts
+New modules use format **21** (supported ceiling: 21). Standalone and delegated artifacts
 use **14** (supported: 14). Standard decisions use built-in `STANDARD_LOCAL`:
 review the current candidate and explicitly choose `APPROVE` or `REJECT`, relayed
 as `AGENT_RELAYED` into the direct ledger. No signer, protected policy, activation
 manifest, external service or authenticator is needed. Cancellation records
 nothing. Auto mode never supplies a judgment decision on the operator's behalf.
-Existing Module 18 and Artifact 13 records retain their explicit upgrade paths.
+Existing Module 19 and 20 records retain their saved semantics and remain
+resumable. Module 18 and Artifact 13 retain their explicit upgrade paths.
 An optional protected high-assurance policy requires the retained WebAuthn
 `HUMAN_ATTESTED` signer and fails closed without it, with no silent downgrade.
 
@@ -75,11 +76,11 @@ An optional protected high-assurance policy requires the retained WebAuthn
 - **Multiple `--legacy` modules:** Each flag adds one legacy module to the same target migration. Use them when several old modules converge on one new module. The positional `<module>` then names the target; the source set is fixed after bootstrap.
 - **`--target` has two meanings:** In `migrate-artifact` it is a target **file path**; in `start-migration` it is a target **module name**. Use the artifact form to relocate one file and the module form to establish an unregistered mapping.
 - **Bootstrap choices:** `--mock`, `--design-source`, `--legacy`, and `--adopt-target` describe the migration being started; an existing record keeps its saved choices. `--registry` establishes a project binding only on first setup. Use these when starting the record, then resume with the module name.
-- **Renamed targets:** Resume with the persisted record name returned by the engine. An unregistered legacy source name also resolves when exactly one persisted record names it. If several do, select the target record explicitly.
+- **Renamed targets:** Resume with the persisted record name returned by the engine. An unregistered legacy name resolves only when it is the sole source of one saved record. A source of a multi-source record, or a legacy name that matches several records, requires the canonical target. Conflicting registry bindings, mappings and aliases are refused.
 
 ## Common examples
 
-These use Claude Code syntax. Replace the paths, module names, and Figma URL with your own. `start-migration` examples assume a configured registry unless `--target` is shown.
+These use Claude Code syntax. Replace the paths, module names, and Figma URL with your own. `start-migration` examples assume a bound registry. Use `--registry <path>` on first setup if unbound, and omit it after the binding is saved. See the [end-to-end migration examples](provider-setup.md#migration-examples).
 
 | Goal | Example |
 | --- | --- |
@@ -138,6 +139,9 @@ absolute path; run every command from the repository being migrated.
 | `artifact_status` | `artifact-migrate <primary-source> --status` | nothing |
 | `artifact_run` | `artifact-migrate <primary-source> [options] --json` | at most one transition |
 
+The [runtime configuration guide](provider-setup.md#runtime-configuration)
+explains the five runtime actions, version 2 configuration and refusal states.
+
 Supply `cwd`, the absolute working directory of the migration, on every MCP
 call. `migration_relay_decision` relays only the operator's explicit
 answer to the review it names; no other tool accepts an approval-shaped
@@ -172,6 +176,12 @@ result carry as `outcome`:
 | `BLOCKED` | 2 | `loop: STOP reason=BLOCKED` |
 | `FORMAT_UPGRADE` | 2 | `loop: STOP reason=FORMAT_UPGRADE` |
 
+In AUTO, actionable `CONTINUE` carries `continuation.module`,
+`continuation.mode` and `continuation.command`. The module is the saved record
+name, keyed by the target for formats 15 and later. Complete any
+requested work and follow it in the current turn. Only `COMPLETE` confirms
+the final gates passed.
+
 `--mode step` prints no directive. A command that exits non-zero without a
 directive has failed. Invalid arguments are refused before anything is written,
 with the reason on stderr. Runtime preflight refusals are typed codes listed in
@@ -186,7 +196,9 @@ The argument contract above is the same in each provider. Only the way you invok
 | --- | --- | --- |
 | Claude Code | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` |
 | Codex | `Use the migrate-artifact skill for src/shared/button.ts` | `Start migration auth using the start-migration skill` |
-| OpenCode | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` |
-| GitHub Copilot | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` in a supported IDE agent chat |
+| OpenCode | `Use the migrate-artifact skill for src/shared/button.ts` | `Use the start-migration skill for auth` |
+| GitHub Copilot (VS Code and CLI) | `Use the migrate-artifact skill for src/shared/button.ts` | `Use the start-migration skill for auth` |
 
-Append the arguments from the tables to the slash command. In Codex, state them in the chat instruction, for example: `Use the migrate-artifact skill for src/shared/button.ts with --mode step`.
+Append the arguments to the slash command or state them in the chat
+instruction, for example `Use the migrate-artifact skill for src/shared/button.ts with --mode step`.
+The bundle supplies slash wrappers for OpenCode and supported VS Code agent chat.
