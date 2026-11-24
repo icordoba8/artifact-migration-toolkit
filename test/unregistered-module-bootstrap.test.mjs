@@ -92,8 +92,10 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
   const registry = path.join(target, ".agents/knowledge/migrations/registry.json");
   try {
     await mkdir(path.join(legacy, "partners"), { recursive: true });
+    await mkdir(path.join(legacy, "suppliers"), { recursive: true });
     await mkdir(path.dirname(registry), { recursive: true });
     await writeFile(path.join(legacy, "partners/marker.txt"), "partner fixture\n");
+    await writeFile(path.join(legacy, "suppliers/marker.txt"), "supplier fixture\n");
     await writeFile(path.join(target, "package.json"), '{"name":"legacy-named-consumer","private":true}\n');
     await writeFile(registry, JSON.stringify({ version: 1, projects: {
       legacy: { root: path.relative(path.dirname(registry), legacy) },
@@ -114,8 +116,44 @@ test("a bootstrap named by its legacy module continues on the target-keyed recor
     assert.match(bootstrap.stdout, /^loop: CONTINUE next=\/start-migration partner-registry$/m);
     assert.equal((await getMigrationStatus({ registryPath: registry, moduleName: "partner-registry" })).currentStep,
       "DISCOVER_LEGACY");
-    await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
-      /not registered\. .*recorded as 'partner-registry': use \/start-migration partner-registry/);
+    const status = await getMigrationStatus({ registryPath: registry, moduleName: "partners" });
+    assert.equal(status.target, "partner-registry");
+    assert.equal(status.currentStep, "DISCOVER_LEGACY");
+    const run = spawnSync(process.execPath,
+      [fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+        "partners", "--json"], { cwd: target, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.outcome, "CONTINUE");
+    assert.equal(result.request.step, "DISCOVER_LEGACY");
+    assert.deepEqual(result.continuation, {
+      module: "partner-registry", mode: "auto", command: "/start-migration partner-registry",
+    });
+    assert.match(run.stderr, /^loop: CONTINUE next=\/start-migration partner-registry$/m);
+    await assert.rejects(readFile(path.join(target, ".agents/knowledge/migrations/modules/partners/state.json")), { code: "ENOENT" });
+
+    const supplierSetup = spawnSync(process.execPath, [cli, "suppliers", "--target",
+      "supplier-registry", "--mode", "auto", "--openspec-proposal-stdin"],
+    { cwd: target, input: spec.replaceAll("PARTNERS-", "SUPPLIERREGISTRY-"), encoding: "utf8" });
+    assert.equal(supplierSetup.status, 0, supplierSetup.stderr + supplierSetup.stdout);
+    const registryDocument = JSON.parse(await readFile(registry, "utf8"));
+    registryDocument.modules.suppliers = { target: "supplier-registry", aliases: ["partner-registry"] };
+    await writeFile(registry, JSON.stringify(registryDocument));
+    const supplierRecord = path.join(target, ".agents/knowledge/migrations/modules/supplier-registry/state.json");
+    const supplierBefore = await readFile(supplierRecord, "utf8");
+    const canonicalRun = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+      result.continuation.module, "--json",
+    ], { cwd: target, encoding: "utf8" });
+    assert.equal(canonicalRun.status, 0, canonicalRun.stderr + canonicalRun.stdout);
+    assert.equal(JSON.parse(canonicalRun.stdout).progress.target, "partner-registry");
+    const wrongTarget = spawnSync(process.execPath, [
+      fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)),
+      "partners", "--target", "supplier-registry", "--json",
+    ], { cwd: target, encoding: "utf8" });
+    assert.equal(wrongTarget.status, 1, wrongTarget.stderr + wrongTarget.stdout);
+    assert.match(JSON.parse(wrongTarget.stdout).reason, /no recorded legacy source 'partners'/);
+    assert.equal(await readFile(supplierRecord, "utf8"), supplierBefore);
     // A corrupt record might be this name's: never NOT_STARTED.
     await writeFile(path.join(target, ".agents/knowledge/migrations/modules/partner-registry/state.json"), "{");
     await assert.rejects(getMigrationStatus({ registryPath: registry, moduleName: "partners" }),
@@ -172,5 +210,91 @@ test("an interrupted first bootstrap of an unregistered module is recovered by r
     await assert.rejects(readdir(staged(recordRoot)), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** A committed consumer with the given legacy modules and no registered module. */
+const legacyFixture = async (label, modules) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), `${label} `));
+  const legacy = path.join(root, "legacy");
+  const target = path.join(root, "target");
+  const migrations = path.join(target, ".agents/knowledge/migrations");
+  const registry = path.join(migrations, "registry.json");
+  for (const name of modules) {
+    await mkdir(path.join(legacy, name), { recursive: true });
+    await writeFile(path.join(legacy, name, "marker.txt"), `${name} fixture\n`);
+  }
+  await mkdir(migrations, { recursive: true });
+  await writeFile(path.join(target, "package.json"), `{"name":"${label}","private":true}\n`);
+  await writeFile(registry, JSON.stringify({ version: 1, projects: {
+    legacy: { root: path.relative(migrations, legacy) },
+    target: { root: path.relative(migrations, target) } }, modules: {} }) + "\n");
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  execFileSync("git", ["add", "-A"], { cwd: root });
+  execFileSync("git", ["-c", "user.name=Acceptance Test", "-c",
+    "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+  const bootstrap = (args, prefix) => spawnSync(process.execPath, [cli, ...args, "--mode", "auto",
+    "--openspec-proposal-stdin"], { cwd: target, input: spec.replaceAll("PARTNERS-", prefix), encoding: "utf8" });
+  const run = (name) => spawnSync(process.execPath,
+    [fileURLToPath(new URL("../packages/migration-engine/src/cli/run-migration.mjs", import.meta.url)), name, "--json"],
+    { cwd: target, encoding: "utf8" });
+  // The registry, which records exist, and every record's bytes.
+  const snapshot = async () => {
+    const records = (await readdir(path.join(migrations, "modules"))).sort();
+    return { registry: await readFile(registry, "utf8"), records,
+      states: await Promise.all(records.map((name) => readFile(path.join(migrations, "modules", name, "state.json"), "utf8"))) };
+  };
+  return { root, registry, bootstrap, run, snapshot };
+};
+
+test("one legacy source of a multi-source record is refused with the recorded target, never resolved as its alias", async () => {
+  const fixture = await legacyFixture("multi-source legacy name", ["partners", "suppliers"]);
+  try {
+    const setup = fixture.bootstrap(["partner-registry", "--registry", fixture.registry, "--target", "partner-registry",
+      "--legacy", "partners", "--legacy", "suppliers"], "PARTNERREGISTRY-");
+    assert.equal(setup.status, 0, setup.stderr + setup.stdout);
+    const before = await fixture.snapshot();
+    assert.deepEqual(before.records, ["partner-registry"]);
+    assert.deepEqual(JSON.parse(before.states[0]).legacySources, ["partners", "suppliers"]);
+
+    await assert.rejects(getMigrationStatus({ registryPath: fixture.registry, moduleName: "partners" }),
+      /Its migration is recorded as 'partner-registry': use \/start-migration partner-registry\./);
+    const run = fixture.run("partners");
+    assert.equal(run.status, 1, run.stderr + run.stdout);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.outcome, "FAILED");
+    assert.equal(result.continuation, null);
+    assert.equal(result.progress, null);
+    assert.match(result.reason, /recorded as 'partner-registry': use \/start-migration partner-registry\./);
+    assert.match(run.stderr, /^loop: STOP reason=FAILED$/m);
+    assert.deepEqual(await fixture.snapshot(), before);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a legacy name shared by two records is refused as ambiguous, selecting neither", async () => {
+  const fixture = await legacyFixture("ambiguous legacy name", ["partners"]);
+  try {
+    const first = fixture.bootstrap(["partners", "--registry", fixture.registry, "--target", "partner-registry"], "PARTNERREGISTRY-");
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    const second = fixture.bootstrap(["partners", "--target", "partner-archive"], "PARTNERARCHIVE-");
+    assert.equal(second.status, 0, second.stderr + second.stdout);
+    const before = await fixture.snapshot();
+    assert.deepEqual(before.records, ["partner-archive", "partner-registry"]);
+    assert.deepEqual(before.states.map((state) => JSON.parse(state).legacySources), [["partners"], ["partners"]]);
+
+    const ambiguous = /Legacy module 'partners' matches multiple migration records: partner-archive, partner-registry\./;
+    await assert.rejects(getMigrationStatus({ registryPath: fixture.registry, moduleName: "partners" }), ambiguous);
+    const run = fixture.run("partners");
+    assert.equal(run.status, 1, run.stderr + run.stdout);
+    const result = JSON.parse(run.stdout);
+    assert.equal(result.outcome, "FAILED");
+    assert.match(result.reason, ambiguous);
+    assert.equal(result.continuation, null);
+    assert.equal(result.progress, null);
+    assert.deepEqual(await fixture.snapshot(), before);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });

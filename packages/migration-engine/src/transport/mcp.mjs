@@ -422,6 +422,7 @@ const runTool = async (arguments_, session) => {
     reason: result.reason ?? null,
     ...refusalOf(result),
     request: result.request ?? null,
+    continuation: result.continuation ?? null,
     progress: result.progress ?? null,
     progressChecklist: result.progressChecklist ?? null,
     // Legacy wire field, empty on the direct-ledger path: a format-19 record
@@ -533,12 +534,12 @@ const TOOLS = [
   {
     name: "migration_app_runtime",
     description:
-      "Classify the LEGACY, BACKEND and TARGET applications from the operator's local configuration (the consumer root's .artifact-migration-tools/runtime-apps.json) as READY, AUTH_REQUIRED, RUNTIME_DOWN, WRONG_APP, IDENTITY_UNPROVEN, WRONG_NAMESPACE, CONFIGURATION_MISSING or NOT_REQUIRED. `prepare` generates a missing template or returns CONFIGURED without probing or starting apps; `check` writes nothing; `ensure` starts an authorized stopped application or reuses a proven running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
+      "Manage the LEGACY, BACKEND and TARGET runtime. `configure` verifies project-declared endpoints and saves their facts in the local runtime-apps.json without starting apps. `prepare` generates a missing template without probing; `check` writes nothing; `ensure` starts an authorized stopped application or reuses a proven running one; `stop` ends only what `ensure` started. Never touches the migration record, and takes no command.",
     inputSchema: {
       ...INPUT_SCHEMA,
       properties: {
         ...INPUT_SCHEMA.properties,
-        action: { type: "string", enum: [...APP_RUNTIME_ACTIONS], description: "check (default), prepare, ensure or stop." },
+        action: { type: "string", enum: [...APP_RUNTIME_ACTIONS], description: "check (default), configure, prepare, ensure or stop." },
       },
     },
     call: async (arguments_) => runAppRuntime({ ...(await registryFor(arguments_)), action: arguments_.action }),
@@ -553,10 +554,11 @@ const TOOLS = [
   {
     name: "migration_run",
     description:
-      "Perform one migration iteration: preflight, validate, and at most one advance. Every write happens in the core, under its existing lock and journal.",
+      "Perform one migration iteration. When continuation is present, complete any requested work and call migration_run again with continuation.module and continuation.mode in the same turn and cwd.",
     inputSchema: RUN_INPUT_SCHEMA,
     call: runTool,
-    loop: ({ module, mode }, { outcome }) => renderLoopDirective({ moduleName: module, mode, outcome }),
+    loop: ({ module, mode }, { outcome, continuation }) =>
+      renderLoopDirective({ moduleName: module, mode, outcome, next: continuation?.command }),
     /** The one tool whose body may need the connection's human channel. */
     sessionAware: true,
   },

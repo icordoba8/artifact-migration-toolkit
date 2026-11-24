@@ -32,7 +32,7 @@ export const parseValidateArguments = (arguments_) => {
     (values.reference && !values["evidence-binding"])
   ) {
     throw new Error(
-      "Usage: validate-migration.mjs [<module>] [--registry <path>] [--step <step> [--slice <id>] | --complete | --evidence-binding [--reference <path>]... | --prefill | --capture <request.json> | --app-runtime check|prepare|ensure|stop]",
+      "Usage: validate-migration.mjs [<module>] [--registry <path>] [--step <step> [--slice <id>] | --complete | --evidence-binding [--reference <path>]... | --prefill | --capture <request.json> | --app-runtime check|configure|prepare|ensure|stop]",
     );
   }
   assertOptionCombination("validate", { positionals, values });

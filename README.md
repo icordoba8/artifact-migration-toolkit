@@ -158,14 +158,19 @@ are left to that provider's installer.
 
 ### Local applications for UI migration
 
-When a mutating start-migration preflight establishes that runtime evidence
-is needed, `--app-runtime prepare` creates
-`<consumer-root>/.artifact-migration-tools/runtime-apps.json` if absent.
-Fill in the placeholders, omit any unused `start` object, and keep the file outside Git.
-Version 2 requires `LEGACY` and `TARGET`. Add `BACKEND` when needed. Use
-verified local origins, project directories, response markers, and, if needed,
-startup scripts from the projects' manifests. The skill shows the expected
-path and unresolved fields. Validate changes with
+When a mutating migration needs runtime evidence, `--app-runtime configure`
+discovers the legacy and target projects from the registry and reads their
+`package.json` declarations under `config.startMigration.runtime`. Each
+project declares its TCP `port` (excluding HTTP default port 80) and the
+public `identity` route and marker.
+The target can declare a `backendProject` relative to its project directory.
+The engine checks the HTTP response and the local process before creating or
+updating `<consumer-root>/.artifact-migration-tools/runtime-apps.json`. It
+preserves operator settings and reports the rollback file on update.
+
+When projects do not declare endpoints, `--app-runtime prepare` provides
+the local template. Keep that file outside Git and omit unused `start`
+objects. Validate operator changes with
 `artifact-migration-validate <module> --app-runtime check`, then resume from
 the saved checkpoint. See the [operator configuration template](skills/start-migration/SKILL.md#operator-configuration).
 

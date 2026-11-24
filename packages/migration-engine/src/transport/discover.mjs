@@ -171,8 +171,7 @@ const renderSliceAmendment = (amendment) =>
     : "";
 
 // `next` is the record's own nextCommand when one exists: a bootstrap named by
-// its legacy module persists a target-keyed record, and the legacy name is a
-// dead end for the next invocation.
+// its legacy module persists a target-keyed record. Address it directly.
 const directive = (options, outcome, emit, next) =>
   emit
     ? renderLoopDirective({
@@ -320,7 +319,7 @@ export const runDiscoverCli = async (
     renderToolkitAdoption(
       await autoAdoptToolkitIdentity({
         registryPath: options.registryPath,
-        moduleName: options.moduleName,
+        moduleName: preview.migration,
         mode: options.mode,
         started: preview.state !== "NOT_STARTED",
       }),
@@ -335,7 +334,7 @@ export const runDiscoverCli = async (
   if (preview.formatUpgrade?.active === true) {
     const result = await commitFormatUpgrade({
       registryPath: options.registryPath,
-      moduleName: options.moduleName,
+      moduleName: preview.migration,
       confirmationDigest: preview.formatUpgrade.confirmationDigest,
     });
     const { outcome } = nextOutcome({ preview, result });

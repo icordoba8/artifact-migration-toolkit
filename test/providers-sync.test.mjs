@@ -1383,8 +1383,9 @@ test("start-migration gives operators a complete runtime template and a read-onl
   assert.match(workflow, /status-only invocation ends with status/);
   assert.match(workflow, /Skip this\s+preflight during an unconfirmed `--mode step` preview/);
   const preflight = skill.split("#### Application configuration preflight\n")[1].split("Use exactly")[0];
-  assert.match(preflight, /action: "prepare"[\s\S]*before asking for the\s+browser or authoring runtime evidence/);
-  assert.match(preflight, /When runtime is unnecessary, skip this action/);
+  assert.match(preflight, /action: "configure"[\s\S]*before using\s+the browser or authoring runtime evidence/);
+  assert.match(preflight, /If discovery is unavailable[\s\S]*action: "prepare"/);
+  assert.match(preflight, /When runtime is unnecessary, skip application preflight/);
   assert.match(section, /Delete any `start` object/);
   assert.match(section, /action: "check"[\s\S]*resume the\s+persisted checkpoint/);
 });

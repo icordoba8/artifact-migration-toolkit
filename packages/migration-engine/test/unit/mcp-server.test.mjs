@@ -211,7 +211,7 @@ test("tools/list exposes module and artifact iteration/read tools, never approva
   // The runtime's one extra argument is a closed action: no tool argument can carry a command.
   const appRuntime = tools.find((tool) => tool.name === "migration_app_runtime");
   assert.deepEqual(Object.keys(appRuntime.inputSchema.properties).sort(), ["action", "cwd", "module", "registry", "slice", "target"]);
-  assert.deepEqual(appRuntime.inputSchema.properties.action.enum, ["check", "prepare", "ensure", "stop"]);
+  assert.deepEqual(appRuntime.inputSchema.properties.action.enum, ["check", "configure", "prepare", "ensure", "stop"]);
   const readOnlyTools = tools.filter((tool) => tool !== run && tool !== prefill && tool !== capture && tool !== appRuntime && tool.name.startsWith("migration_") && tool.name !== "migration_relay_decision");
   for (const tool of readOnlyTools) {
     assert.equal(typeof tool.description, "string");
@@ -1431,6 +1431,8 @@ test("progress tools put the status block first, the unchanged JSON last, and se
       await only(fixture, call(2, "migration_run", { module: "auth" })),
       "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | CONTINUE");
     assert.equal(payload.outcome, "CONTINUE");
+    assert.equal(payload.request, null);
+    assert.deepEqual(payload.continuation, { module: "auth", mode: "auto", command: "/start-migration auth" });
     assert.match(block, /^🔄 IN PROGRESS 3\. Check discovery completeness +DISCOVERY_COMPLETENESS$/m);
     assert.ok(block.endsWith("loop: CONTINUE next=/start-migration auth\n"));
     // Every other tool is unchanged.
@@ -1450,6 +1452,7 @@ test("an OPERATOR_DECISION stop and the resume after the relay both show the blo
       const stop = progressReply(await only(fixture, call(1, "migration_run", { module: "auth" })),
         "auth -> auth | 3/9 DISCOVERY_COMPLETENESS | OPERATOR_DECISION");
       assert.ok(stop.block.endsWith("loop: STOP reason=OPERATOR_DECISION\n"));
+      assert.equal(stop.payload.continuation, null);
       const relay = await only(fixture, call(2, "migration_relay_decision", {
         module: "auth", reference: stop.payload.operatorApproval.reference, decision: "APPROVE" }));
       assert.equal(JSON.parse(relay.result.content.at(-1).text).outcome, "CONTINUE");

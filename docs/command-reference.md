@@ -36,7 +36,7 @@ An optional protected high-assurance policy requires the retained WebAuthn
 
 | Argument | What it does | When to use it | Default / requirement |
 | --- | --- | --- | --- |
-| `<module>` | Identifies the migration. With `--legacy`, it names the **target** module; without it, it names the single legacy module. | Always; for example, `auth`. | **Required.** |
+| `<module>` | Identifies the migration. At bootstrap it names the legacy module, or the target when `--legacy` is supplied. On resume it can name the saved record directly. | Always; for example, `auth`. | **Required.** |
 | `--registry <path>` | Selects the target project's migration registry. | First setup when the project has no saved registry binding. Do not use it to override an existing binding. | Optional when already configured; accepted only before a binding or migration state exists. |
 | `--target <target-module>` | Maps the migration to its target feature/module name. | First setup of an unregistered mapping, especially when the names differ. | Required for an unregistered single-legacy mapping. With `--legacy`, `<module>` supplies the target; an existing mapping supplies its saved target. Conflicts are rejected. |
 | `--legacy <module>` | Adds a legacy source module; repeat to merge several sources into one target. | Several legacy modules converge on one target. Do not use it to change the source set after bootstrap. | Optional; without it, `<module>` is the sole legacy source. |
@@ -75,6 +75,7 @@ An optional protected high-assurance policy requires the retained WebAuthn
 - **Multiple `--legacy` modules:** Each flag adds one legacy module to the same target migration. Use them when several old modules converge on one new module. The positional `<module>` then names the target; the source set is fixed after bootstrap.
 - **`--target` has two meanings:** In `migrate-artifact` it is a target **file path**; in `start-migration` it is a target **module name**. Use the artifact form to relocate one file and the module form to establish an unregistered mapping.
 - **Bootstrap choices:** `--mock`, `--design-source`, `--legacy`, and `--adopt-target` describe the migration being started; an existing record keeps its saved choices. `--registry` establishes a project binding only on first setup. Use these when starting the record, then resume with the module name.
+- **Renamed targets:** Resume with the persisted record name returned by the engine. An unregistered legacy source name also resolves when exactly one persisted record names it. If several do, select the target record explicitly.
 
 ## Common examples
 
@@ -130,7 +131,7 @@ absolute path; run every command from the repository being migrated.
 | `migration_evidence_binding` | `artifact-migration-validate <module> --evidence-binding [--reference <path>]...` | nothing |
 | `migration_prefill` | `artifact-migration-validate <module> --prefill` | the current checkpoint's authored draft (absent fields only) |
 | `migration_capture` | `artifact-migration-validate <module> --capture <request.json>` | one legacy-runtime frame or format-20 LEGACY claim capture (new files only) |
-| `migration_app_runtime` | `artifact-migration-validate <module> --app-runtime check\|prepare\|ensure\|stop` | `check` writes nothing. `prepare` creates a missing template and local ignore file at the consumer root without probing or starting applications. `ensure` retains the same fallback when called directly. `ensure` and `stop` manage processes and their records under `.artifact-migration-tools/app-runtime/` beside the configuration |
+| `migration_app_runtime` | `artifact-migration-validate <module> --app-runtime check\|configure\|prepare\|ensure\|stop` | `configure` verifies and saves project-declared endpoints without starting processes. `check` writes nothing. `prepare` creates a missing template without probing or starting applications. `ensure` retains the same fallback when called directly. `ensure` and `stop` manage processes and their records under `.artifact-migration-tools/app-runtime/`. |
 | `migration_pending_decisions` | `artifact-migration-decision <module> --pending` | nothing |
 | `migration_run` | `artifact-migration-run <module> [options] --json` | at most one advance |
 | `migration_relay_decision` | `artifact-migration-decision <module> --relay <reference> --decision APPROVE\|REJECT` | one relayed operator decision |
