@@ -150,5 +150,9 @@
   {
     "version": "1.8.5",
     "contentHash": "sha256:35dce1b4d887f155e7f1bb1aca936d3972cac55b2e2502dcf496421554ecca10"
+  },
+  {
+    "version": "1.9.0",
+    "contentHash": "sha256:ac6c076027ebae97b004d05b0d0d336c22f179f70de615372ff23bebe29a0951"
   }
 ]
