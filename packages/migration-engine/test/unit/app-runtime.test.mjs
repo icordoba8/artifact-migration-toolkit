@@ -1285,3 +1285,28 @@ test("an unused IPv4 address does not block a proven IPv6-only wildcard", async 
   assert.equal(row(report, "LEGACY").state, "READY");
   assert.equal(row(report, "LEGACY").reused, true);
 });
+
+test("an origin that resolves outside loopback is WRONG_APP: nothing is probed, started or written", async (t) => {
+  const space = await twoApps({});
+  await space.write({ version: 1, namespace: OWN_NAMESPACE, applications: {
+    LEGACY: { ...application("../legacy-app", space.port, { start: NPM_START }), origin: `http://localhost:${space.port}` },
+    TARGET: application("../target-app", space.sibling),
+  } });
+  const runtimeFiles = path.join(space.targetRoot, ".artifact-migration-tools");
+  const before = await treeDigest(runtimeFiles);
+  const get = t.mock.method(http, "get");
+  const report = await space.runAppRuntime("ensure", { system: {
+    lookup: async (host) => host === "localhost" ? [{ address: "10.0.0.5", family: 4 }] : [{ address: host, family: 4 }],
+    listeners: async (port) => port === space.port ? assert.fail("an external address must not be inspected") : [],
+    createDetached: async () => assert.fail("an external address must not be started"),
+  } });
+  const legacy = row(report, "LEGACY");
+  assert.equal(report.state, "WRONG_APP");
+  assert.equal(legacy.state, "WRONG_APP");
+  assert.match(legacy.reason, /^localhost resolves outside loopback\.$/);
+  assert.equal(legacy.startAuthorized, true);
+  assert.equal(legacy.started, false);
+  assert.deepEqual(get.mock.calls.filter(({ arguments: [options] }) => Number(options.port) === space.port), []);
+  assert.equal(await starts(space.legacy), 0);
+  assert.equal(await treeDigest(runtimeFiles), before);
+});
