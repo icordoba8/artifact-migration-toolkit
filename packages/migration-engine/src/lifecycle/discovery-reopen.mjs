@@ -9,7 +9,7 @@ import { now, portablePath, sha256Hex as hashContent } from "../shared/index.mjs
 import {
   assertHistoryAppendable,
   atomicWrite,
-  contentIdentityMatchesSource,
+  fileContentIdentityMatches,
   fileExists,
   readOptionalJson,
   removeDurably,
@@ -134,37 +134,43 @@ export const reopenDiscoveryUnderLock = async ({
 };
 
 /**
- * The unverified active slice's engine-written LEGACY captures: its result.json
- * and every proof and screenshot a LEGACY row cites, unchanged. Anything else
- * under ui/legacy, or a row whose file moved or changed, is ambiguous: refused.
+ * The unverified active slice's engine-written claim captures, both origins:
+ * its result.json and every proof and screenshot a LEGACY or TARGET row cites,
+ * unchanged. Anything else under ui/legacy or ui/target, or a row whose file
+ * moved or changed, is ambiguous: refused.
  */
 const abandonedCaptures = async (root, targetRoot, slice) => {
   if (!slice) return [];
   const resultFile = `evidence/${slice}/result.json`;
-  const directory = `evidence/${slice}/ui/legacy`;
-  const onDisk = (await readdir(path.join(root, directory)).catch((error) => {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  })).map((name) => `${directory}/${name}`);
   const result = await readOptionalJson(path.join(root, resultFile), `Evidence for ${slice}`);
-  const rows = (Array.isArray(result?.uiEvidence) ? result.uiEvidence : []).filter((row) => row?.origin === "LEGACY");
-  const ambiguous = (detail) => {
-    throw new Error(`--reopen-discovery cannot clear the LEGACY captures of slice '${slice}': ${detail}. Only an unchanged engine capture is cleared. Nothing was changed.`);
-  };
+  const rows = Array.isArray(result?.uiEvidence) ? result.uiEvidence : [];
   const cited = [];
-  for (const row of rows) {
-    for (const [file, suffix] of [[row, "proof.json"], [row.screenshot ?? {}, "png"]]) {
-      const expected = `${directory}/${row.appearanceClaimId}.${suffix}`;
-      if (file.reference !== portablePath(path.relative(targetRoot, path.join(root, expected))) ||
-          !(await contentIdentityMatchesSource(file.hash, targetRoot, file.reference))) {
-        ambiguous(`the LEGACY row of claim '${row.appearanceClaimId}' does not cite an unchanged ${expected}`);
+  for (const origin of ["LEGACY", "TARGET"]) {
+    const directory = `evidence/${slice}/ui/${origin.toLowerCase()}`;
+    const onDisk = (await readdir(path.join(root, directory)).catch((error) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    })).map((name) => `${directory}/${name}`);
+    const ambiguous = (detail) => {
+      throw new Error(`--reopen-discovery cannot clear the ${origin} captures of slice '${slice}': ${detail}. Only an unchanged engine capture is cleared. Nothing was changed.`);
+    };
+    // A row without origin is TARGET, as the capture reads it.
+    for (const row of rows.filter((item) => (item?.origin ?? "TARGET") === origin)) {
+      if (typeof row?.appearanceClaimId !== "string") ambiguous(`a ${origin} row has no appearanceClaimId`);
+      for (const [file, suffix] of [[row, "proof.json"], [row.screenshot ?? {}, "png"]]) {
+        const expected = `${directory}/${row.appearanceClaimId}.${suffix}`;
+        if (!onDisk.includes(expected) ||
+            file.reference !== portablePath(path.relative(targetRoot, path.join(root, expected))) ||
+            !(await fileContentIdentityMatches(file.hash, targetRoot, file.reference).catch(() => false))) {
+          ambiguous(`the ${origin} row of claim '${row.appearanceClaimId}' does not cite an unchanged ${expected}`);
+        }
+        cited.push(expected);
       }
-      cited.push(expected);
     }
+    const uncited = onDisk.filter((relative) => !cited.includes(relative));
+    if (uncited.length > 0) ambiguous(`'${uncited[0]}' is not cited by a ${origin} row of ${resultFile}`);
   }
-  const uncited = onDisk.filter((relative) => !cited.includes(relative));
-  if (uncited.length > 0) ambiguous(`'${uncited[0]}' is not cited by a LEGACY row of ${resultFile}`);
-  return rows.length > 0 ? [resultFile, ...cited] : [];
+  return cited.length > 0 ? [resultFile, ...cited] : [];
 };
 
 const reopenDiscoveryLate = async ({ registryData, resolved, root, statePath, state }) => {
@@ -241,7 +247,9 @@ const reopenDiscoveryLate = async ({ registryData, resolved, root, statePath, st
   // originals; a crash right here leaves them in place (preserved copy pinned)
   // and the recapture still meets CAPTURE_EXISTS. Fold into recovery if seen.
   for (const relative of cleared) await removeDurably(registryData.targetRoot, path.join(root, relative));
-  if (cleared.length > 0) await removeEmptyParents(path.join(root, path.dirname(cleared.at(-1))), root);
+  for (const directory of new Set(cleared.slice(1).map((relative) => path.dirname(relative)))) {
+    await removeEmptyParents(path.join(root, directory), root);
+  }
   await removeJournal(journalFile);
   return { changed: true, reopened: true, statePath, migrationRoot: root, state: reopened, nextArtifact: activeArtifact(reopened), resolved };
 };

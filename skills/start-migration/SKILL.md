@@ -1070,6 +1070,12 @@ Full JSON schemas for every artifact below live in
    becomes owned merely to make evidence resolve. Full coverage categories:
    `references/discovery-checklist.md`. Complete
    `steps/02-discover-legacy.md` and `inventories/legacy.json`.
+   Before closing, when the legacy app is running, check every
+   `requiredAppearance` claim in one `migration_capture` call with
+   `{mode: "discovery", claims: [...]}` (see **Legacy captures are the
+   engine's**). Correct every reported failure in one edit of
+   `inventories/legacy.json`, then check again until `failed` and `unchecked`
+   are both empty. A claim that fails here fails at `VERIFY_SLICES`.
 3. **`DISCOVERY_COMPLETENESS`** — prove the inventory is complete, not just
    internally consistent. Recompute the canonical boundary with the explicitly
    recorded scanner version and revalidate every legacy evidence citation;
@@ -1297,9 +1303,10 @@ current checkpoint is missing.
   is behaviorally meaningful. Record the exact configuration
   (`showToolbar: false`, `showPagination: false`, `compactMode: true`), not
   "a table exists". Observe the running legacy app through the registered
-  Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only), never
-  `migration_capture`: that operation is legal only at `ASSESS_TARGET`
-  (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuses here.
+  Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only). The only
+  `migration_capture` call here is the write-free `mode: "discovery"` claim
+  check before closing; its writing modes are legal only at `ASSESS_TARGET`
+  (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuse here.
   Preflight configuration as soon as bounded source evidence identifies visible
   behavior, before authoring runtime observations or requesting the browser.
   Then prepare the applications (see **Applications** below); open the browser
@@ -1600,6 +1607,19 @@ Playwright MCP browser holding a session would let `browser_evaluate` read it.
   target defect to fix, never a contract to edit. `controls` adds the
   interaction's trigger when no claim pins it. `result` and the interaction's
   `actual`/`outcome` stay yours.
+- Discovery check at any checkpoint, required before closing `DISCOVER_LEGACY`:
+  `{mode: "discovery", origin, route, viewport, ..., claims:
+  [{appearanceClaimId, route?, setup?, interaction?}]}`. Top-level fields are
+  shared; each item is one LEGACY claim request without `role`. It captures
+  each claim as `VERIFY_SLICES` will, holds it to its state's scroll contract,
+  writes nothing, and returns `passed`, `failed` (each with `code` and
+  `message`) and `unchecked`. List every pinned claim and fix all failures in
+  one edit. Prefer `getByRole('<role>', { name: '<name>', exact: true })`
+  locators. Current behavior: the claim's `name` is matched against the
+  accessible name computed with hidden content included, so a column header
+  shown as "Zona" that holds hidden "Sort" icon labels is pinned as
+  `name: "Zona Sort"` with locator
+  `getByRole('columnheader', { name: 'Zona', exact: true })`.
 
 When `migration_app_runtime` reports a `sessions` word of `PRESENT` for a role,
 pass `"session": true` instead of `storageState`: the capture then runs in the

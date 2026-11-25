@@ -130,7 +130,7 @@ absolute path; run every command from the repository being migrated.
 | `migration_scan` | `artifact-migration-discover <module> --scan` | nothing |
 | `migration_evidence_binding` | `artifact-migration-validate <module> --evidence-binding [--reference <path>]...` | nothing |
 | `migration_prefill` | `artifact-migration-validate <module> --prefill` | the current checkpoint's authored draft (absent fields only) |
-| `migration_capture` | `artifact-migration-validate <module> --capture <request.json>` | one legacy-runtime frame or format-20 LEGACY claim capture (new files only) |
+| `migration_capture` | `artifact-migration-validate <module> --capture <request.json>` | one legacy-runtime frame or format-20 LEGACY claim capture (new files only); `{mode: "discovery", claims: [...]}` checks every listed pinned claim as `VERIFY_SLICES` will and writes nothing (required before closing `DISCOVER_LEGACY`) |
 | `migration_app_runtime` | `artifact-migration-validate <module> --app-runtime check\|configure\|prepare\|ensure\|stop` | `configure` verifies and saves project-declared endpoints without starting processes. `check` writes nothing. `prepare` creates a missing template without probing or starting applications. `ensure` retains the same fallback when called directly. `ensure` and `stop` manage processes and their records under `.artifact-migration-tools/app-runtime/`. |
 | `migration_pending_decisions` | `artifact-migration-decision <module> --pending` | nothing |
 | `migration_run` | `artifact-migration-run <module> [options] --json` | at most one advance |
