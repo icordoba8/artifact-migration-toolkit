@@ -24444,7 +24444,7 @@ browserTest("MC2: a sign-in redirect is AUTH_REQUIRED, an unusable session is re
   }
 });
 
-test("MC2: the discovery instruction is legal at DISCOVER_LEGACY: no engine capture there, a BLOCKED runtime item is the supported gap", async () => {
+test("MC2: the discovery instruction is legal at DISCOVER_LEGACY: no writing engine capture there, a BLOCKED runtime item is the supported gap", async () => {
   const unobserved = {
     ...LEGACY_INVENTORY,
     behaviors: LEGACY_INVENTORY.behaviors.map((behavior) => ({
@@ -24474,11 +24474,11 @@ test("MC2: the discovery instruction is legal at DISCOVER_LEGACY: no engine capt
   } finally {
     await gapped.cleanup();
   }
-  // The skill's discovery instruction matches that contract: it names no capture here and records the gap as BLOCKED.
+  // The skill's discovery instruction matches that contract: only the write-free discovery check runs here, and the gap is BLOCKED.
   const skill = await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8");
   const discovery = skill.slice(skill.indexOf("- `DISCOVER_LEGACY` —"), skill.indexOf("- `VERIFY_SLICES` — drive the target runtime"));
   assert.ok(discovery.length > 500);
-  assert.match(discovery, /never\s+`migration_capture`/);
+  assert.match(discovery, /only\s+`migration_capture` call here is the write-free `mode: "discovery"`/);
   assert.match(discovery, /`RUNTIME_OBSERVATION` evidence\s+item gets `status: "BLOCKED"`/);
   assert.doesNotMatch(discovery, /uiEvidenceLimitations|NOT_AVAILABLE/);
 });
