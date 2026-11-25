@@ -1181,8 +1181,9 @@ test("version 2 onboarding checks missing, malformed and valid configuration bef
     assert.deepEqual(app.start, { manager: "pnpm", script: `REPLACE_WITH_${role}_PACKAGE_SCRIPT` });
   }
   assert.deepEqual(template, JSON.parse(
-    (await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8"))
-      .split("#### Operator configuration\n")[1].match(/```json\n([\s\S]+?)\n```/)[1],
+    (await readFile(new URL("../../../../docs/provider-setup.md", import.meta.url), "utf8"))
+      .split("### Generate a template when discovery cannot configure the apps\n")[1]
+      .match(/```json\n([\s\S]+?)\n```/)[1],
   ), "the guide shows the exact generated file");
   for (const report of reports) {
     assert.equal(report.state, "CONFIGURATION_MISSING");

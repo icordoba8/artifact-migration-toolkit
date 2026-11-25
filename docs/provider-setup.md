@@ -16,7 +16,7 @@ running applications. Figma MCP is needed only when you select Figma as the
 design source. For runtime identity checks, make `lsof` and `ps` available
 on Linux, WSL and macOS, or Windows `netstat` and PowerShell/CIM on Windows.
 
-The install commands select the published [v1.9.0 tag](https://github.com/icordoba8/artifact-migration-toolkit/releases/tag/v1.9.0)
+The install commands select the published [v1.10.0 tag](https://github.com/icordoba8/artifact-migration-toolkit/releases/tag/v1.10.0)
 and install both skills. To update, select a newer **published** tag and repeat
 the same command for both skills in the existing scope. The Agent Skills CLI
 defaults to project scope. Add `--global` for a personal skill install where
@@ -75,7 +75,7 @@ server when Claude asks. Use `claude mcp list` or `/mcp` to verify it.
 Invoke `/start-migration auth` or `/migrate-artifact src/shared/money.ts`.
 
 ```bash
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.9.0/skills --agent claude-code --skill start-migration migrate-artifact --copy --yes
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.10.0/skills --agent claude-code --skill start-migration migrate-artifact --copy --yes
 ```
 
 ```json
@@ -83,7 +83,7 @@ pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree
   "mcpServers": {
     "start-migration": {
       "command": "/usr/bin/node",
-      "args": ["/home/dev/.local/share/artifact-migration-tools/1.9.0-11381459ae26c59122034a884eb4ead494356e39ba14fa50fd24e3ed7e24decc/packages/migration-engine/src/mcp-server.mjs"]
+      "args": ["/home/dev/.local/share/artifact-migration-tools/1.10.0-ff4717284382082bb36d478d163bad2db3d406b9f42fa663a9d9b03950d1db36/packages/migration-engine/src/mcp-server.mjs"]
     }
   }
 }
@@ -104,14 +104,14 @@ skills. Ask `Use the start-migration skill for auth` or
 `Use the migrate-artifact skill for src/shared/money.ts`.
 
 ```bash
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.9.0/skills --agent codex --skill start-migration migrate-artifact --copy --yes
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.10.0/skills --agent codex --skill start-migration migrate-artifact --copy --yes
 ```
 
 ```toml
 # BEGIN artifact-migration-tools
 [mcp_servers.start-migration]
 command = "/usr/bin/node"
-args = ["/home/dev/.local/share/artifact-migration-tools/1.9.0-11381459ae26c59122034a884eb4ead494356e39ba14fa50fd24e3ed7e24decc/packages/migration-engine/src/mcp-server.mjs", "--without-relay"]
+args = ["/home/dev/.local/share/artifact-migration-tools/1.10.0-ff4717284382082bb36d478d163bad2db3d406b9f42fa663a9d9b03950d1db36/packages/migration-engine/src/mcp-server.mjs", "--without-relay"]
 enabled_tools = ["artifact_status", "artifact_run", "migration_status", "migration_scan", "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_app_runtime", "migration_pending_decisions", "migration_run"]
 # END artifact-migration-tools
 ```
@@ -135,7 +135,7 @@ agent to load each skill by name. With this install, ask
 also installs `/start-migration` and `/migrate-artifact` command wrappers.
 
 ```bash
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.9.0/skills --agent opencode --skill start-migration migrate-artifact --copy --yes
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.10.0/skills --agent opencode --skill start-migration migrate-artifact --copy --yes
 ```
 
 ```json
@@ -144,7 +144,7 @@ pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree
     "servers": {
       "start-migration": {
         "type": "local",
-        "command": ["/usr/bin/node", "/home/dev/.local/share/artifact-migration-tools/1.9.0-11381459ae26c59122034a884eb4ead494356e39ba14fa50fd24e3ed7e24decc/packages/migration-engine/src/mcp-server.mjs"],
+        "command": ["/usr/bin/node", "/home/dev/.local/share/artifact-migration-tools/1.10.0-ff4717284382082bb36d478d163bad2db3d406b9f42fa663a9d9b03950d1db36/packages/migration-engine/src/mcp-server.mjs"],
         "codemode": false
       }
     }
@@ -166,7 +166,7 @@ personal skills (the Agent Skills CLI uses `~/.copilot/skills/`), while the
 toolkit's Copilot adapter only supports project runtime registration.
 
 ```bash
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.9.0/skills --agent github-copilot --skill start-migration migrate-artifact --copy --yes
+pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit/tree/v1.10.0/skills --agent github-copilot --skill start-migration migrate-artifact --copy --yes
 ```
 
 Ask either client `Use the start-migration skill for auth` or
@@ -185,7 +185,7 @@ The installer writes `.vscode/mcp.json` for VS Code.
     "start-migration": {
       "type": "stdio",
       "command": "/usr/bin/node",
-      "args": ["/home/dev/.local/share/artifact-migration-tools/1.9.0-11381459ae26c59122034a884eb4ead494356e39ba14fa50fd24e3ed7e24decc/packages/migration-engine/src/mcp-server.mjs", "--without-relay"]
+      "args": ["/home/dev/.local/share/artifact-migration-tools/1.10.0-ff4717284382082bb36d478d163bad2db3d406b9f42fa663a9d9b03950d1db36/packages/migration-engine/src/mcp-server.mjs", "--without-relay"]
     }
   }
 }
@@ -199,7 +199,7 @@ The installer writes `.github/mcp.json` for Copilot CLI.
     "start-migration": {
       "type": "stdio",
       "command": "/usr/bin/node",
-      "args": ["/home/dev/.local/share/artifact-migration-tools/1.9.0-11381459ae26c59122034a884eb4ead494356e39ba14fa50fd24e3ed7e24decc/packages/migration-engine/src/mcp-server.mjs", "--without-relay"],
+      "args": ["/home/dev/.local/share/artifact-migration-tools/1.10.0-ff4717284382082bb36d478d163bad2db3d406b9f42fa663a9d9b03950d1db36/packages/migration-engine/src/mcp-server.mjs", "--without-relay"],
       "tools": ["artifact_status", "artifact_run", "migration_status", "migration_scan", "migration_evidence_binding", "migration_prefill", "migration_capture", "migration_app_runtime", "migration_pending_decisions", "migration_run"],
       "env": { "pnpm_config_pm_on_fail": "error" }
     }
@@ -225,13 +225,13 @@ For a verified local release bundle, run the provider installer **from the
 extracted bundle**. The path below assumes the current directory is that
 bundle. Replace paths with the selected root, external store and bundle, and
 use the independently verified SHA-256 of `release-manifest.json` as the pin.
-The example shows the v1.9.0 pin. Select the matching provider directory for
+The example shows the v1.10.0 pin. Select the matching provider directory for
 your host and use its scope and root from the table.
 Use the same scope, root and store for `doctor`. To update a bundle-owned
 installation, call `update` with the new verified bundle and pin.
 
 ```bash
-node providers/codex/install.mjs install --scope project --root "/path/to/consumer" --store "/path/to/engine-store" --bundle "/path/to/verified-bundle" --pin "sha256:11381459ae26c59122034a884eb4ead494356e39ba14fa50fd24e3ed7e24decc"
+node providers/codex/install.mjs install --scope project --root "/path/to/consumer" --store "/path/to/engine-store" --bundle "/path/to/verified-bundle" --pin "sha256:ff4717284382082bb36d478d163bad2db3d406b9f42fa663a9d9b03950d1db36"
 node providers/codex/install.mjs doctor --scope project --root "/path/to/consumer" --store "/path/to/engine-store"
 ```
 
@@ -660,6 +660,11 @@ the intended registry and target.
 
 New modules use format 21. Existing format 19 records stay on their saved
 appearance and direct-ledger decision rules. Format 20 also remains resumable.
+For UI migrations, before closing `DISCOVER_LEGACY`, check every pinned
+appearance claim with the read-only `migration_capture` discovery mode.
+Correct any failures and rerun the check until both `failed` and
+`unchecked` are empty.
+
 Standalone artifacts use format 14. See
 [format and recovery commands](command-reference.md#advanced-recovery-operations).
 

@@ -131,7 +131,7 @@ absolute path; run every command from the repository being migrated.
 | `migration_scan` | `artifact-migration-discover <module> --scan` | nothing |
 | `migration_evidence_binding` | `artifact-migration-validate <module> --evidence-binding [--reference <path>]...` | nothing |
 | `migration_prefill` | `artifact-migration-validate <module> --prefill` | the current checkpoint's authored draft (absent fields only) |
-| `migration_capture` | `artifact-migration-validate <module> --capture <request.json>` | one legacy-runtime frame or format-20 LEGACY claim capture (new files only) |
+| `migration_capture` | `artifact-migration-validate <module> --capture <request.json>` | one legacy-runtime frame or format-20 LEGACY claim capture (new files only); `{mode: "discovery", claims: [...]}` checks every listed pinned claim as `VERIFY_SLICES` will and writes nothing (required before closing `DISCOVER_LEGACY`) |
 | `migration_app_runtime` | `artifact-migration-validate <module> --app-runtime check\|configure\|prepare\|ensure\|stop` | `configure` verifies and saves project-declared endpoints without starting processes. `check` writes nothing. `prepare` creates a missing template without probing or starting applications. `ensure` retains the same fallback when called directly. `ensure` and `stop` manage processes and their records under `.artifact-migration-tools/app-runtime/`. |
 | `migration_pending_decisions` | `artifact-migration-decision <module> --pending` | nothing |
 | `migration_run` | `artifact-migration-run <module> [options] --json` | at most one advance |
@@ -197,8 +197,9 @@ The argument contract above is the same in each provider. Only the way you invok
 | Claude Code | `/migrate-artifact src/shared/button.ts` | `/start-migration auth` |
 | Codex | `Use the migrate-artifact skill for src/shared/button.ts` | `Start migration auth using the start-migration skill` |
 | OpenCode | `Use the migrate-artifact skill for src/shared/button.ts` | `Use the start-migration skill for auth` |
-| GitHub Copilot (VS Code and CLI) | `Use the migrate-artifact skill for src/shared/button.ts` | `Use the start-migration skill for auth` |
+| GitHub Copilot | `Use the migrate-artifact skill for src/shared/button.ts` | `Use the start-migration skill for auth` |
 
-Append the arguments to the slash command or state them in the chat
-instruction, for example `Use the migrate-artifact skill for src/shared/button.ts with --mode step`.
+Append the arguments from the tables to the slash command. In Codex, state them in the chat instruction.
+Use the same chat syntax in OpenCode and GitHub Copilot (VS Code and CLI), for example
+`Use the migrate-artifact skill for src/shared/button.ts with --mode step`.
 The bundle supplies slash wrappers for OpenCode and supported VS Code agent chat.
