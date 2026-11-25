@@ -892,6 +892,53 @@ Inspect and follow the target project's existing data-source conventions;
 introduce no shared resolver or configuration abstraction the target
 architecture doesn't already require.
 
+## Test data
+
+Prepare the data a slice's tests and runtime evidence need yourself. Never ask
+the operator for a routine test value or record identifier you can discover
+or derive; missing test data is not a stop condition. For each slice:
+
+1. **Scenarios.** Derive the data each traced scenario needs from the
+   requirements, the cited legacy responses and the pinned discovery evidence,
+   validated against the target's own schemas, types and validators. Never
+   invent a business rule or expected outcome to fit the data you have.
+2. **Discover, read-only.** Look for existing data that already satisfies each
+   scenario: the target's checked-in fixtures, factories, seeds and test
+   helpers, the legacy tests, and records a read-only observation shows. Take
+   identifiers from what you observed. Change nothing you found.
+3. **Gaps.** List the scenarios nothing found covers.
+4. **Fill gaps only with authority that already exists:**
+   - `dataSourceMode: mock`: the mock data source is target code the slice
+     owns. Add the missing records there, in the target's mock conventions.
+     They are slice source, reviewed with the slice, and reach no backend.
+   - Automated tests, either mode: reuse the target's own factories,
+     fixtures, seed scripts or test helpers through its own test command,
+     against the store that harness already creates and disposes of. Write no
+     parallel seeding tool.
+   - `dataSourceMode: standard` against a running application or backend:
+     create, update or delete nothing to prepare data. Localhost, `--mode
+     auto`, a running app and a broker's `allowWrites` each prove nothing about
+     whether that environment is disposable, and this skill grants no write
+     authority. A mutation that is itself the behavior under test stays under
+     "Runtime UI evidence" below.
+5. **Ownership.** Name every record you add after this migration and slice
+   (for example a `<target-module>-<slice-id>` prefix wherever the schema
+   allows free text). Never change, reuse as yours or delete a fixture another
+   migration owns.
+6. **Verify.** A scenario is covered only when its test's own arrange step,
+   or a read-only observation, shows the data precondition holds.
+7. **Continue** the iteration with no operator prompt.
+8. **Clean up** only what this migration created and only where it is not
+   slice source: the harness disposes of its own data, and mock records stay as
+   the slice's data source. Never delete anything without this migration's
+   name on it.
+
+A scenario still uncovered after step 4 is not yours to fill: record it
+through the ordinary blocker contract (for runtime evidence, a
+`uiEvidenceLimitations` entry with `availability: "NOT_AVAILABLE"`), naming
+the scenario and the data it needs. Asking the operator for a disposable
+environment or record there is a genuine decision, not a routine value.
+
 ## Stop conditions
 
 A stop condition is the only reason a loop ends; advancing a checkpoint,

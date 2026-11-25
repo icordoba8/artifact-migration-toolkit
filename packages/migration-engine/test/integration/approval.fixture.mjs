@@ -133,13 +133,14 @@ const resolutionFor = async (fixture) => {
 };
 
 /** MCP never bootstraps (D6-3), so fixtures reach their first checkpoint here. */
-const initialize = async (fixture, { ponytail, currentFormat = false } = {}) => {
+const initialize = async (fixture, { ponytail, mock, currentFormat = false } = {}) => {
   const resolution = await resolutionFor(fixture);
   const preview = await previewMigrationExecution({
     ...resolution,
     moduleName: "auth",
     openSpecProposal: SPEC,
     ponytail,
+    mock,
   });
   assertExecutionConfirmation(preview, preview.confirmationId);
   const result = await bootstrapMigration({
@@ -147,6 +148,7 @@ const initialize = async (fixture, { ponytail, currentFormat = false } = {}) => 
     moduleName: "auth",
     openSpecProposal: preview.openSpecProposal,
     ponytail,
+    mock,
     registryBinding: preview.registryBinding,
     boundInputs: preview.boundInputs,
   });
