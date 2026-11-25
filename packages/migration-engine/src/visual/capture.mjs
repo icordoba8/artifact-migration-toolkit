@@ -68,6 +68,7 @@ export const assertSessionUsable = (document, origin) => {
 
 const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "session", "timeoutMs"];
 const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction", "role"] };
+const DISCOVERY_CLAIM_KEYS = new Set(["appearanceClaimId", "route", "setup", "interaction"]);
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
 const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -85,7 +86,7 @@ const text = (value, label, max = 500) => {
   if (typeof value !== "string" || !value.trim() || value.length > max) invalid(`${label} must be a non-empty string of at most ${max} characters.`);
   return value;
 };
-const id = (value, label) => SAFE_ID.test(value ?? "") ? value : invalid(`${label} must match ${SAFE_ID}.`);
+const id = (value, label) => typeof value === "string" && SAFE_ID.test(value) ? value : invalid(`${label} must match ${SAFE_ID}.`);
 const list = (value, label, max) => {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > max) invalid(`${label} must be an array of at most ${max} entries.`);
@@ -117,13 +118,26 @@ export const parseCaptureRequest = (request) => {
   if (request.mode === "discovery") {
     // Each item is one LEGACY claim request; the top level holds what they share.
     const { mode: _mode, claims, ...shared } = request;
+    const unknown = Object.keys(shared).filter((key) => !COMMON_KEYS.includes(key));
+    if (unknown.length > 0) invalid(`Unsupported discovery request key(s): ${unknown.join(", ")}.`);
     const items = list(claims, "claims", 500);
     if (items.length === 0) invalid("claims must list {appearanceClaimId, route?, setup?, interaction?} items.");
-    const parsed = items.map((item, index) => {
-      if (!isPlainObject(item) || "role" in item) invalid(`claims[${index}] must be a LEGACY claim request object without role.`);
-      return parseCaptureRequest({ ...shared, ...item });
+    const seen = new Set();
+    const parsed = Array.from(items, (item, index) => {
+      const label = `claims[${index}]`;
+      if (!isPlainObject(item)) invalid(`${label} must be a LEGACY claim request object.`);
+      const unknown = Object.keys(item).filter((key) => !DISCOVERY_CLAIM_KEYS.has(key));
+      if (unknown.length > 0) invalid(`Unsupported ${label} key(s): ${unknown.join(", ")}.`);
+      if (!Object.hasOwn(item, "appearanceClaimId") || item.appearanceClaimId === undefined) {
+        invalid(`${label}.appearanceClaimId is required.`);
+      }
+      const claim = parseCaptureRequest({ ...shared, ...item });
+      if (seen.has(claim.appearanceClaimId)) invalid(`Duplicate appearanceClaimId '${claim.appearanceClaimId}' in claims.`);
+      seen.add(claim.appearanceClaimId);
+      return claim;
     });
-    return { ...parsed[0], mode: "discovery", claims: parsed };
+    const { origin, storageState, session } = parsed[0];
+    return { mode: "discovery", origin, storageState, session, claims: parsed };
   }
   const mode = request.appearanceClaimId !== undefined ? "claim" : "frame";
   const allowed = new Set([...COMMON_KEYS, ...MODE_KEYS[mode]]);
@@ -380,12 +394,11 @@ export const captureInBrowser = async (plan) => {
     page.setDefaultTimeout(plan.timeoutMs);
     const blocked = [];
     let leftSignIn = false;
-    // A brokered capture acts as a real account: it stays on the operator's
-    // routes and, unless the operator allowed writes, sends no request that could
-    // change data. Navigation and every fetch count, whoever started them.
+    // Discovery and brokered captures use the same HTTP write guard. The
+    // broker also restricts navigation to routes the operator opened.
     const { guard } = plan;
     // A sign-in page is let through so a lost session is reported as one, not as a wrong route.
-    const allowed = (url) => url.origin === plan.origin && (!guard || AUTH_PATH.test(url.pathname) ||
+    const allowed = (url) => url.origin === plan.origin && (!guard?.routes || AUTH_PATH.test(url.pathname) ||
       guard.routes.some((prefix) => url.pathname === prefix || url.pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)));
     // Every top-level navigation off the origin is aborted, popups included;
     // one on the observed page refuses the capture.
@@ -412,7 +425,7 @@ export const captureInBrowser = async (plan) => {
       // A sign-in page that moves on by itself (to an identity provider, say) means the session is gone.
       if (leftSignIn) authRefusal(plan, `${label} reached a sign-in page`);
       if (blocked.length > 0 || !allowed(at)) {
-        refuseCapture("CAPTURE_ORIGIN_VIOLATION", `${label} navigated to '${blocked[0] ?? (at.origin === plan.origin ? at.pathname : at.origin)}', outside the authorized ${guard ? "routes" : "origin"} of ${plan.origin}.`);
+        refuseCapture("CAPTURE_ORIGIN_VIOLATION", `${label} navigated to '${blocked[0] ?? (at.origin === plan.origin ? at.pathname : at.origin)}', outside the authorized ${guard?.routes ? "routes" : "origin"} of ${plan.origin}.`);
       }
     };
     const settle = async () => {
@@ -577,7 +590,9 @@ export const captureInBrowser = async (plan) => {
     };
   } catch (error) {
     if (error.validationCode && operations.blockedWrites > 0) {
-      error.message += ` The broker blocked ${operations.blockedWrites} write request(s): this application's writes are off unless the operator sets allowWrites.`;
+      error.message += plan.guard.routes
+        ? ` The broker blocked ${operations.blockedWrites} write request(s): this application's writes are off unless the operator sets allowWrites.`
+        : ` Discovery blocked ${operations.blockedWrites} write request(s).`;
     }
     throw error;
   } finally {

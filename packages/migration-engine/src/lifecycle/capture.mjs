@@ -203,8 +203,13 @@ const prepare = async ({ targetRoot, moduleName, request, roots }) => {
 
 /* Any checkpoint: each listed claim of the current legacy inventory, planned as VERIFY_SLICES plans its LEGACY half. */
 const discoveryPlan = async ({ legacy, request }) => {
-  const pinned = new Map((legacy.uiBehaviors ?? []).flatMap((owner) =>
-    (owner?.requiredAppearance ?? []).map((claim) => [claim?.id, { owner, claim }])));
+  const pinned = new Map();
+  for (const owner of legacy.uiBehaviors ?? []) {
+    for (const claim of owner?.requiredAppearance ?? []) {
+      if (pinned.has(claim?.id)) refused(`Appearance claim '${claim?.id}' is repeated in ${initialArtifacts.legacyInventory}.`);
+      pinned.set(claim?.id, { owner, claim });
+    }
+  }
   const listed = new Set(request.claims.map((item) => item.appearanceClaimId));
   return {
     checks: request.claims.map((item) => {
@@ -233,13 +238,14 @@ const RUN_REFUSALS = new Set(["CAPTURE_BROWSER_UNAVAILABLE", "CAPTURE_AUTH_REQUI
 const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
   const failed = [];
   const passed = [];
+  let broker;
   // ponytail: one browser per claim, serially; reuse one browser if a large inventory makes this slow.
   for (const { item, claim, owner, plan, refusal } of prepared.checks) {
     try {
       if (refusal) refuseCapture(...refusal);
-      const captured = await (item.session
-        ? captureThroughBroker(await sessionBrokerOf(targetRoot), plan, "LEGACY")
-        : captureInBrowser(plan));
+      const captured = await (parsed.session
+        ? captureThroughBroker(broker ??= await sessionBrokerOf(targetRoot), plan, "LEGACY")
+        : captureInBrowser({ ...plan, guard: { allowWrites: false } }));
       const { snapshot } = captured;
       const observed = claim.afterInteractionId ? { ...snapshot, observation: snapshot.interactions[0].postAction } : snapshot;
       const contract = (owner.scrollContracts ?? []).find((row) => row?.state === claim.state);

@@ -24630,8 +24630,9 @@ browserTest("late --reopen-discovery preserves and clears a valid claim captured
 // The productreceptions defect: a reopen left TARGET captures behind, and each
 // wrong claim surfaced one VERIFY capture at a time. The reopen clears both
 // origins; discovery mode then reports every wrong claim in one write-free run.
-browserTest("late --reopen-discovery clears LEGACY and TARGET captures; discovery mode reports every wrong claim at once", async () => {
-  const server = await startCaptureServer();
+browserTest("discovery capture CLI rejects overrides and writes, reports every wrong claim and preserves LEGACY and TARGET reopen", async () => {
+  const requests = [];
+  const server = await startCaptureServer({ onRequest: (method, route) => requests.push(`${method} ${route}`) });
   const fixture = await createFixture();
   try {
     const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
@@ -24645,10 +24646,24 @@ browserTest("late --reopen-discovery clears LEGACY and TARGET captures; discover
     const captured = ["evidence/slice-a/result.json", ...["legacy", "target"].flatMap((origin) =>
       [`evidence/slice-a/ui/${origin}/APP-1.proof.json`, `evidence/slice-a/ui/${origin}/APP-1.png`])];
 
-    const resolution = await resolutionFor(fixture);
-    const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", reopenDiscovery: true });
-    await bootstrapMigration({ ...resolution, moduleName: "auth", reopenDiscovery: true,
-      boundInputs: preview.boundInputs, registryBinding: preview.registryBinding });
+    const reopen = async () => {
+      const resolution = await resolutionFor(fixture);
+      const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", reopenDiscovery: true });
+      return bootstrapMigration({ ...resolution, moduleName: "auth", reopenDiscovery: true,
+        boundInputs: preview.boundInputs, registryBinding: preview.registryBinding });
+    };
+    if (process.platform !== "win32") {
+      const proof = path.join(root, "evidence/slice-a/ui/target/APP-1.proof.json");
+      const moved = path.join(fixture.root, "target-proof.json");
+      await rename(proof, moved);
+      await symlink(moved, proof);
+      const beforeReopen = await snapshot(root);
+      await assert.rejects(reopen(), /cannot clear the TARGET captures.*APP-1.*Nothing was changed/);
+      assert.deepEqual(await snapshot(root), beforeReopen);
+      await rm(proof);
+      await rename(moved, proof);
+    }
+    await reopen();
     assert.deepEqual((await historyEvents(fixture)).at(-1).cleared, captured);
     for (const relative of captured) assert.equal(await entryExists(path.join(root, relative)), false, relative);
     assert.equal(await entryExists(path.join(root, "evidence/slice-a/ui")), false);
@@ -24663,15 +24678,66 @@ browserTest("late --reopen-discovery clears LEGACY and TARGET captures; discover
       { id: "APP-5", state: "DEFAULT", role: "button", name: "Recortado", locator: "getByRole('button', { name: 'Recortado' })" },
       // A non-exact getByRole name is a substring: it also matches "Zona destino".
       { id: "APP-6", state: "DEFAULT", role: "columnheader", name: "Zona", locator: "getByRole('columnheader', { name: 'Zona' })" },
+      { id: "APP-7", state: "DEFAULT", role: "button", name: "More", locator: "#more" },
     ] }] });
     const before = await snapshot(root);
-    const report = await capture({ mode: "discovery", route: "/discovery", claims: [
-      { appearanceClaimId: "APP-1" },
-      { appearanceClaimId: "APP-2", interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" } },
+    const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+    const requestFile = path.join(fixture.root, "capture.json");
+    const runCapture = async (request) => {
+      await writeJson(requestFile, request);
+      const { stdout } = await execFileAsync(process.execPath, [cli, "auth", "--capture", requestFile], { cwd: fixture.root });
+      return JSON.parse(stdout);
+    };
+    const shared = { mode: "discovery", origin: server.origin, route: "/discovery", viewport: CAPTURE_VIEWPORT };
+    const first = { appearanceClaimId: "APP-1" };
+    requests.length = 0;
+    for (const [key, value] of Object.entries({
+      origin: server.origin, storageState: path.join(root, "inventories/legacy.json"), session: true,
+      viewport: CAPTURE_VIEWPORT, role: "TARGET", mode: "discovery", claims: [first],
+      uiBehaviorId: "UIB-1", undocumented: true,
+    })) {
+      const second = { appearanceClaimId: "APP-2", [key]: value };
+      await assert.rejects(runCapture({ ...shared, claims: [first, second] }),
+        { stderr: new RegExp(`CAPTURE_REQUEST_INVALID: Unsupported claims\\[1\\] key\\(s\\): ${key}\\.`) });
+    }
+    for (const [request, stderr] of [
+      [{ ...shared, role: "TARGET", claims: [first] }, /CAPTURE_REQUEST_INVALID: Unsupported discovery request key.*role/],
+      [{ ...shared, ...first, claims: [{}] }, /CAPTURE_REQUEST_INVALID: Unsupported discovery request key.*appearanceClaimId/],
+      [{ ...shared, claims: [first, {}] }, /CAPTURE_REQUEST_INVALID: claims\[1\]\.appearanceClaimId is required/],
+      [{ ...shared, claims: [first, { appearanceClaimId: ["APP-2"] }] }, /CAPTURE_REQUEST_INVALID: appearanceClaimId must match/],
+      [{ ...shared, claims: [first, first] }, /CAPTURE_REQUEST_INVALID: Duplicate appearanceClaimId 'APP-1'/],
+      [{ ...shared, storageState: path.join(root, "inventories/legacy.json"), claims: [first] }, /CAPTURE_REFUSED: storageState lives inside the migration record/],
+    ]) {
+      await assert.rejects(runCapture(request), { stderr });
+    }
+    const inventoryPath = path.join(root, "inventories/legacy.json");
+    const inventory = await readJson(inventoryPath);
+    inventory.uiBehaviors[0].requiredAppearance.push(uiBehavior.requiredAppearance[0]);
+    await writeJson(inventoryPath, inventory);
+    const withDuplicate = await snapshot(root);
+    await assert.rejects(runCapture({ ...shared, claims: [first] }),
+      { stderr: /CAPTURE_REFUSED: Appearance claim 'APP-1' is repeated/ });
+    assert.deepEqual(await snapshot(root), withDuplicate);
+    inventory.uiBehaviors[0].requiredAppearance.pop();
+    await writeJson(inventoryPath, inventory);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(await snapshot(root), before);
+
+    const report = await runCapture({ ...shared, claims: [
+      first,
+      {
+        appearanceClaimId: "APP-2",
+        route: "/discovery-action",
+        setup: [{ type: "click", target: "#attempt-write" }, { type: "hover", target: "#write-finished" }],
+        interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" },
+      },
       ...["APP-3", "APP-4", "APP-5", "APP-6"].map((appearanceClaimId) => ({ appearanceClaimId })),
     ] });
+    assert.ok(requests.includes("GET /discovery"));
+    assert.ok(requests.includes("GET /discovery-action"));
+    assert.ok(requests.every((request) => !request.startsWith("POST ")));
     assert.deepEqual(await snapshot(root), before);
-    assert.deepEqual([report.mode, report.passed, report.unchecked, report.written], ["discovery", ["APP-1", "APP-2"], [], []]);
+    assert.deepEqual([report.mode, report.passed, report.unchecked, report.written], ["discovery", ["APP-1", "APP-2"], ["APP-7"], []]);
     assert.deepEqual(report.failed.map((item) => [item.appearanceClaimId, item.code]), [
       ["APP-3", "CAPTURE_ELEMENT_MISSING"],
       ["APP-4", "CAPTURE_OBSERVATION_FAILED"],

@@ -54,6 +54,9 @@ const PAGES = {
   "/discovery": page({ extra: '<input aria-label="Buscar" name="search"><ul role="menu" aria-label="Acciones"><li role="menuitem">Ver</li></ul>' +
     '<div style="overflow:hidden"><button type="button">Recortado</button></div>' +
     "<table><tr><th>Zona</th><th>Zona destino</th></tr><tr><td>A</td><td>B</td></tr></table>" }),
+  "/discovery-action": page({ extra: `<button id="attempt-write" onclick="fetch('/capture-write', {method: 'POST'})
+    .catch(() => {}).finally(() => { document.getElementById('write-finished').hidden = false; })">Attempt write</button>
+    <span id="write-finished" hidden>Request finished</span>` }),
   // A navigation whose source page has its own `h1`: the claimed heading exists only after the click.
   "/work-orders/new": '<!doctype html><title>New</title><h1>New work order</h1><a href="/work-orders/list">Cancel</a>',
   "/work-orders/list": "<!doctype html><title>List</title><h1>Work orders</h1>",
@@ -62,9 +65,10 @@ const PAGES = {
 /** The session the private page needs, as a Playwright storageState names it. */
 export const CAPTURE_SESSION = { cookie: "SECRET-COOKIE-VALUE", local: "SECRET-LOCAL-VALUE" };
 
-export const startCaptureServer = async () => {
+export const startCaptureServer = async ({ onRequest } = {}) => {
   const server = http.createServer((request, response) => {
     const { pathname } = new URL(request.url, "http://127.0.0.1");
+    onRequest?.(request.method, pathname);
     if (pathname === "/logo.svg") {
       response.writeHead(200, { "content-type": "image/svg+xml" });
       return response.end('<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="#0b5fff"/></svg>');

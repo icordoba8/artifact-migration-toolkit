@@ -9,7 +9,7 @@ import { now, portablePath, sha256Hex as hashContent } from "../shared/index.mjs
 import {
   assertHistoryAppendable,
   atomicWrite,
-  contentIdentityMatchesSource,
+  fileContentIdentityMatches,
   fileExists,
   readOptionalJson,
   removeDurably,
@@ -156,10 +156,12 @@ const abandonedCaptures = async (root, targetRoot, slice) => {
     };
     // A row without origin is TARGET, as the capture reads it.
     for (const row of rows.filter((item) => (item?.origin ?? "TARGET") === origin)) {
+      if (typeof row?.appearanceClaimId !== "string") ambiguous(`a ${origin} row has no appearanceClaimId`);
       for (const [file, suffix] of [[row, "proof.json"], [row.screenshot ?? {}, "png"]]) {
         const expected = `${directory}/${row.appearanceClaimId}.${suffix}`;
-        if (file.reference !== portablePath(path.relative(targetRoot, path.join(root, expected))) ||
-            !(await contentIdentityMatchesSource(file.hash, targetRoot, file.reference))) {
+        if (!onDisk.includes(expected) ||
+            file.reference !== portablePath(path.relative(targetRoot, path.join(root, expected))) ||
+            !(await fileContentIdentityMatches(file.hash, targetRoot, file.reference).catch(() => false))) {
           ambiguous(`the ${origin} row of claim '${row.appearanceClaimId}' does not cite an unchanged ${expected}`);
         }
         cited.push(expected);
@@ -168,7 +170,7 @@ const abandonedCaptures = async (root, targetRoot, slice) => {
     const uncited = onDisk.filter((relative) => !cited.includes(relative));
     if (uncited.length > 0) ambiguous(`'${uncited[0]}' is not cited by a ${origin} row of ${resultFile}`);
   }
-  return rows.length > 0 ? [resultFile, ...cited] : [];
+  return cited.length > 0 ? [resultFile, ...cited] : [];
 };
 
 const reopenDiscoveryLate = async ({ registryData, resolved, root, statePath, state }) => {
