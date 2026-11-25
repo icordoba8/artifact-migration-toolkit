@@ -114,6 +114,17 @@ const action = (step, label) => {
  */
 export const parseCaptureRequest = (request) => {
   if (!isPlainObject(request)) invalid("The request must be a JSON object.");
+  if (request.mode === "discovery") {
+    // Each item is one LEGACY claim request; the top level holds what they share.
+    const { mode: _mode, claims, ...shared } = request;
+    const items = list(claims, "claims", 500);
+    if (items.length === 0) invalid("claims must list {appearanceClaimId, route?, setup?, interaction?} items.");
+    const parsed = items.map((item, index) => {
+      if (!isPlainObject(item) || "role" in item) invalid(`claims[${index}] must be a LEGACY claim request object without role.`);
+      return parseCaptureRequest({ ...shared, ...item });
+    });
+    return { ...parsed[0], mode: "discovery", claims: parsed };
+  }
   const mode = request.appearanceClaimId !== undefined ? "claim" : "frame";
   const allowed = new Set([...COMMON_KEYS, ...MODE_KEYS[mode]]);
   const unknown = Object.keys(request).filter((key) => !allowed.has(key));

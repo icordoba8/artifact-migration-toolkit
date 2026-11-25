@@ -24627,6 +24627,65 @@ browserTest("late --reopen-discovery preserves and clears a valid claim captured
   }
 });
 
+// The productreceptions defect: a reopen left TARGET captures behind, and each
+// wrong claim surfaced one VERIFY capture at a time. The reopen clears both
+// origins; discovery mode then reports every wrong claim in one write-free run.
+browserTest("late --reopen-discovery clears LEGACY and TARGET captures; discovery mode reports every wrong claim at once", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
+      classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] } });
+    await authorSlice(fixture, "slice-a");
+    await advance(fixture, { slice: "slice-a" });
+    const root = fixture.migrationRoot;
+    const capture = (request) => captureFrame(fixture, { origin: server.origin, viewport: CAPTURE_VIEWPORT, ...request });
+    for (const role of ["LEGACY", "TARGET"]) await capture({ route: "/auth/sign-in", appearanceClaimId: "APP-1", role });
+    const captured = ["evidence/slice-a/result.json", ...["legacy", "target"].flatMap((origin) =>
+      [`evidence/slice-a/ui/${origin}/APP-1.proof.json`, `evidence/slice-a/ui/${origin}/APP-1.png`])];
+
+    const resolution = await resolutionFor(fixture);
+    const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", reopenDiscovery: true });
+    await bootstrapMigration({ ...resolution, moduleName: "auth", reopenDiscovery: true,
+      boundInputs: preview.boundInputs, registryBinding: preview.registryBinding });
+    assert.deepEqual((await historyEvents(fixture)).at(-1).cleared, captured);
+    for (const relative of captured) assert.equal(await entryExists(path.join(root, relative)), false, relative);
+    assert.equal(await entryExists(path.join(root, "evidence/slice-a/ui")), false);
+    assert.equal((await state(fixture)).currentStep, "DISCOVER_LEGACY");
+
+    // Back at DISCOVER_LEGACY the inventory is the agent's to correct; four claims are wrong.
+    const [uiBehavior] = FORMAT20_LEGACY.uiBehaviors;
+    await writeJson(path.join(root, "inventories/legacy.json"), { ...FORMAT20_LEGACY, uiBehaviors: [{ ...uiBehavior, requiredAppearance: [
+      ...uiBehavior.requiredAppearance,
+      { id: "APP-3", state: "DEFAULT", role: "textbox", name: "search", locator: 'role=textbox[name="search"]' },
+      { id: "APP-4", state: "DEFAULT", role: "button", name: "Ver", locator: 'role=menuitem[name="Ver"]' },
+      { id: "APP-5", state: "DEFAULT", role: "button", name: "Recortado", locator: "getByRole('button', { name: 'Recortado' })" },
+      // A non-exact getByRole name is a substring: it also matches "Zona destino".
+      { id: "APP-6", state: "DEFAULT", role: "columnheader", name: "Zona", locator: "getByRole('columnheader', { name: 'Zona' })" },
+    ] }] });
+    const before = await snapshot(root);
+    const report = await capture({ mode: "discovery", route: "/discovery", claims: [
+      { appearanceClaimId: "APP-1" },
+      { appearanceClaimId: "APP-2", interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" } },
+      ...["APP-3", "APP-4", "APP-5", "APP-6"].map((appearanceClaimId) => ({ appearanceClaimId })),
+    ] });
+    assert.deepEqual(await snapshot(root), before);
+    assert.deepEqual([report.mode, report.passed, report.unchecked, report.written], ["discovery", ["APP-1", "APP-2"], [], []]);
+    assert.deepEqual(report.failed.map((item) => [item.appearanceClaimId, item.code]), [
+      ["APP-3", "CAPTURE_ELEMENT_MISSING"],
+      ["APP-4", "CAPTURE_OBSERVATION_FAILED"],
+      ["APP-5", "SCROLL_DIVERGENCE"],
+      ["APP-6", "CAPTURE_LOCATOR_AMBIGUOUS"],
+    ]);
+    assert.match(report.failed[1].message, /does not expose role 'button' with accessible name 'Ver'/);
+    assert.match(report.failed[2].message, /ancestorClipped expected false, LEGACY true/);
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
 browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
   const server = await startCaptureServer();
   const fixture = await createFixture();

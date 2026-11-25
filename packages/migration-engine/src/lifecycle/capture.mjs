@@ -41,6 +41,7 @@ import {
   captureInBrowser,
   captureThroughBroker,
   claimCapturePlan,
+  compareScrollContract,
   HARDENED_VISUAL_VERSION,
   LEGACY_RUNTIME_EVIDENCE_ROOT,
   legacyAppearanceRow,
@@ -196,8 +197,72 @@ const prepare = async ({ targetRoot, moduleName, request, roots }) => {
   // The validator's own view: an adopted UI remediation replaces the UI rows.
   const legacy = await withUiRemediation(root, state,
     assertPlainObject(await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory"), "Legacy inventory"), "uiBehaviors");
-  const planned = await (request.mode === "frame" ? framePlan : claimPlan)({ state, root, legacy, request, roots });
+  const planned = await ({ frame: framePlan, claim: claimPlan, discovery: discoveryPlan })[request.mode]({ state, root, legacy, request, roots });
   return { ...planned, state, root, legacy };
+};
+
+/* Any checkpoint: each listed claim of the current legacy inventory, planned as VERIFY_SLICES plans its LEGACY half. */
+const discoveryPlan = async ({ legacy, request }) => {
+  const pinned = new Map((legacy.uiBehaviors ?? []).flatMap((owner) =>
+    (owner?.requiredAppearance ?? []).map((claim) => [claim?.id, { owner, claim }])));
+  const listed = new Set(request.claims.map((item) => item.appearanceClaimId));
+  return {
+    checks: request.claims.map((item) => {
+      const { owner, claim } = pinned.get(item.appearanceClaimId) ?? {};
+      if (!claim) return { item, refusal: ["CAPTURE_REFUSED", `Appearance claim '${item.appearanceClaimId}' is not in ${initialArtifacts.legacyInventory}.`] };
+      if (Boolean(claim.afterInteractionId) !== Boolean(item.interaction)) {
+        return { item, refusal: ["CAPTURE_REQUEST_INVALID", claim.afterInteractionId
+          ? `Claim '${claim.id}' is observed after interaction '${claim.afterInteractionId}'; supply "interaction".`
+          : `Claim '${claim.id}' is an initial-state claim; "interaction" is not allowed.`] };
+      }
+      return { item, claim, owner, plan: claimCapturePlan(item, owner, claim) };
+    }),
+    unchecked: [...pinned.keys()].filter((id) => !listed.has(id)),
+  };
+};
+
+// A refusal that says nothing about the claim stops the run instead of failing every claim the same way.
+const RUN_REFUSALS = new Set(["CAPTURE_BROWSER_UNAVAILABLE", "CAPTURE_AUTH_REQUIRED", "CAPTURE_SESSION_EXPIRED",
+  "CAPTURE_SESSION_HOST", "CAPTURE_BROKER_UNAVAILABLE", "CAPTURE_BROKER_NOT_ISOLATED", "CAPTURE_BROKER_FAILED"]);
+
+/**
+ * mode "discovery": capture each claim exactly as VERIFY_SLICES captures its
+ * LEGACY half, hold it to its state's scroll contract as VERIFY compares it,
+ * and report every failing claim in one run. Writes nothing.
+ */
+const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
+  const failed = [];
+  const passed = [];
+  // ponytail: one browser per claim, serially; reuse one browser if a large inventory makes this slow.
+  for (const { item, claim, owner, plan, refusal } of prepared.checks) {
+    try {
+      if (refusal) refuseCapture(...refusal);
+      const captured = await (item.session
+        ? captureThroughBroker(await sessionBrokerOf(targetRoot), plan, "LEGACY")
+        : captureInBrowser(plan));
+      const { snapshot } = captured;
+      const observed = claim.afterInteractionId ? { ...snapshot, observation: snapshot.interactions[0].postAction } : snapshot;
+      const contract = (owner.scrollContracts ?? []).find((row) => row?.state === claim.state);
+      if (!contract) refused(`'${owner.id}' has no scrollContracts row for state '${claim.state}'.`);
+      compareScrollContract(observed, observed, contract, false);
+      passed.push(claim.id);
+    } catch (error) {
+      if (RUN_REFUSALS.has(error.validationCode)) throw error;
+      failed.push({ appearanceClaimId: item.appearanceClaimId, code: error.validationCode ?? error.message.match(/^[A-Z_]+(?=:)/)?.[0] ?? "CAPTURE_FAILED", message: error.message });
+    }
+  }
+  return {
+    module: resolved.canonical,
+    step: prepared.state.currentStep,
+    mode: parsed.mode,
+    passed,
+    failed,
+    unchecked: prepared.unchecked,
+    written: [],
+    next: failed.length > 0
+      ? `Correct every failed claim in ${initialArtifacts.legacyInventory}, then check again.`
+      : prepared.unchecked.length > 0 ? "Check the unchecked claims too." : "Every pinned claim resolves as VERIFY_SLICES will capture it.",
+  };
 };
 
 /** Write files as new, newest last; on any failure remove exactly what this call wrote. */
@@ -330,6 +395,7 @@ export const captureLegacyRuntimeEvidence = async ({ registryPath, moduleName, r
   const { targetRoot } = registryData;
   const input = { targetRoot, moduleName: resolved.canonical, request: parsed, roots: { legacyRoot: registryData.legacyRoot, targetRoot } };
   const before = await prepare(input);
+  if (parsed.mode === "discovery") return checkClaims({ targetRoot, prepared: before, parsed, resolved });
   const captured = await (parsed.session
     ? captureThroughBroker(await sessionBrokerOf(targetRoot), before.plan, parsed.role ?? "LEGACY")
     : captureInBrowser(before.plan));

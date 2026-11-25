@@ -50,6 +50,10 @@ const PAGES = {
   "/landing": page({ extra: '<a id="done" href="/auth/sign-in">Done</a>' }),
   // Visible text whose <p> has no accessible name: role=paragraph[name=...] never matches it.
   "/work-orders": page({ extra: "<p>6 work orders</p>" }),
+  // Four claims discovery can get wrong: a name, a role, a clipping ancestor, a prefix-matching header.
+  "/discovery": page({ extra: '<input aria-label="Buscar" name="search"><ul role="menu" aria-label="Acciones"><li role="menuitem">Ver</li></ul>' +
+    '<div style="overflow:hidden"><button type="button">Recortado</button></div>' +
+    "<table><tr><th>Zona</th><th>Zona destino</th></tr><tr><td>A</td><td>B</td></tr></table>" }),
   // A navigation whose source page has its own `h1`: the claimed heading exists only after the click.
   "/work-orders/new": '<!doctype html><title>New</title><h1>New work order</h1><a href="/work-orders/list">Cancel</a>',
   "/work-orders/list": "<!doctype html><title>List</title><h1>Work orders</h1>",
