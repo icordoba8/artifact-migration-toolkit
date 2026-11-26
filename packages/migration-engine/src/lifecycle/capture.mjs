@@ -18,7 +18,7 @@
  * from the target's own capture, and only when it meets every predicate the
  * pinned contract names; legacy evidence never stands in for it.
  */
-import { realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   initialArtifacts,
@@ -26,7 +26,7 @@ import {
   usesUiCoverage,
 } from "../formats/index.mjs";
 import { withUiRemediation } from "../census/index.mjs";
-import { assertPlainObject, isPlainObject, jsonBytes, portablePath } from "../shared/index.mjs";
+import { assertPlainObject, contentIdentity, isPlainObject, jsonBytes, portablePath } from "../shared/index.mjs";
 import { implementationDigests } from "../slices/index.mjs";
 import {
   atomicWrite,
@@ -54,11 +54,11 @@ import {
   validateLegacyRuntimeContext,
   visualAuthorityOf,
 } from "../visual/index.mjs";
-import { sessionBrokerOf } from "./app-runtime.mjs";
+import { legacyRuntimeOriginOf, sessionBrokerOf } from "./app-runtime.mjs";
 import { readContext } from "./context.mjs";
 import { withModuleLock } from "./lock.mjs";
 import { assertCurrentOpenSpecAuthority } from "./openspec.mjs";
-import { readState } from "./record.mjs";
+import { DISCOVERY_CLAIMS_FILE, readState } from "./record.mjs";
 
 const refused = (message) => refuseCapture("CAPTURE_REFUSED", message);
 
@@ -150,17 +150,7 @@ const claimPlan = async ({ state, root, legacy, request, roots }) => {
   const plan = claimCapturePlan(request, owner, claim);
   let bound = {};
   if (role === "TARGET") {
-    // Every predicate the contract checks in this proof needs its control observed;
-    // a format-20 claim pins each expected-true one, so the claims are the controls.
-    const unpinned = (owner.requiredObservations ?? []).find((item) => item.state === claim.state && item.predicate !== "url" && item.expected === false);
-    if (unpinned) refuseCapture("CAPTURE_REQUEST_INVALID", `Required observation '${unpinned.id}' expects an absent control, which no pinned claim locates; the engine capture cannot observe it.`);
-    // shortcut: expected-false observations are refused above; give them a locator in the contract when a consumer needs one.
-    const pinned = (after) => owner.requiredAppearance
-      .filter((item) => item.state === claim.state && (item.afterInteractionId ?? null) === after)
-      .map(({ role: controlRole, name, locator }) => ({ role: controlRole, name, locator }));
-    const extra = (controls) => [...controls, ...request.controls.filter((control) => !controls.some((item) => item.locator === control.locator))];
-    plan.controls = extra(pinned(claim.afterInteractionId ?? null));
-    if (claim.afterInteractionId) plan.beforeControls = extra(pinned(null));
+    Object.assign(plan, stateControls(owner, claim, request));
     const implementation = await readObject(path.join(root, `slices/${slice}.json`), `Slice ${slice}`, {});
     bound = {
       implementationDigest: (await implementationDigests({ changedFiles: implementation.changedFiles ?? [] }, roots)).current,
@@ -180,6 +170,53 @@ const claimPlan = async ({ state, root, legacy, request, roots }) => {
   };
 };
 
+/**
+ * The controls VERIFY_SLICES observes for a claim's TARGET half: every pinned
+ * claim of its state shown after its interaction, and every initial claim of
+ * that state shown before it. Discovery plans and judges a claim the same way,
+ * so a state whose claims cannot all hold together is refused there, not at TARGET.
+ */
+const stateControls = (owner, claim, request) => {
+  // Every predicate the contract checks in this proof needs its control observed;
+  // a format-20 claim pins each expected-true one, so the claims are the controls.
+  const unpinned = (owner.requiredObservations ?? []).find((item) => item.state === claim.state && item.predicate !== "url" && item.expected === false);
+  if (unpinned) refuseCapture("CAPTURE_REQUEST_INVALID", `Required observation '${unpinned.id}' expects an absent control, which no pinned claim locates; the engine capture cannot observe it.`);
+  // shortcut: expected-false observations are refused above; give them a locator in the contract when a consumer needs one.
+  const pinned = (after) => owner.requiredAppearance
+    .filter((item) => item.state === claim.state && (item.afterInteractionId ?? null) === after)
+    .map(({ role: controlRole, name, locator }) => ({ role: controlRole, name, locator }));
+  const extra = (controls) => [...controls, ...(request.controls ?? []).filter((control) => !controls.some((item) => item.locator === control.locator))];
+  return {
+    controls: extra(pinned(claim.afterInteractionId ?? null)),
+    ...(claim.afterInteractionId ? { beforeControls: extra(pinned(null)) } : {}),
+  };
+};
+
+/**
+ * One LEGACY observation of a claim, judged as VERIFY_SLICES will judge its
+ * TARGET half: every pinned control of the state shown before and after the
+ * interaction, the contract's required observations, then the scroll contract.
+ * The discovery run and the DISCOVER_LEGACY gate both call it, so the gate
+ * re-derives each verdict from the persisted snapshot.
+ */
+const judgeClaim = (owner, claim, snapshot) => {
+  const { controls, beforeControls } = stateControls(owner, claim, {});
+  const after = claim.afterInteractionId ? snapshot?.interactions?.[0]?.postAction : snapshot?.observation;
+  const shows = (observation, wanted, label) => {
+    const unseen = wanted.filter((want) => !(observation?.controls ?? []).some((control) => control?.role === want.role &&
+      control.name === want.name && control.locator === want.locator && control.present === true && control.visible === true));
+    if (unseen.length > 0) {
+      refuseCapture("CAPTURE_STATE_NOT_REACHED", `${label} does not show ${unseen.map((item) => `${item.role} '${item.name}' at '${item.locator}'`).join(", ")}, which ${initialArtifacts.legacyInventory} pins for state '${claim.state}'; VERIFY_SLICES observes them together, so this contract cannot be met.`);
+    }
+  };
+  shows(after, controls, claim.afterInteractionId ? `After interaction '${claim.afterInteractionId}', the page` : `State '${claim.state}'`);
+  if (beforeControls) shows(snapshot.observation, beforeControls, `Before interaction '${claim.afterInteractionId}', the page`);
+  targetProof({ snapshot, sliceId: null, traceId: null, uiBehavior: owner });
+  const contract = (owner.scrollContracts ?? []).find((row) => row?.state === claim.state);
+  if (!contract) refused(`'${owner.id}' has no scrollContracts row for state '${claim.state}'.`);
+  compareScrollContract({ observation: after }, { observation: after }, contract, false);
+};
+
 const prepare = async ({ targetRoot, moduleName, request, roots }) => {
   const { state, root, pendingWrite } = await readState(targetRoot, moduleName);
   if (pendingWrite) refused("An advance is in flight; recover the record before capturing.");
@@ -195,14 +232,22 @@ const prepare = async ({ targetRoot, moduleName, request, roots }) => {
     assertSessionUsable(await readJson(session, "storageState").catch(() => refused("storageState is not valid JSON.")), request.origin);
   }
   // The validator's own view: an adopted UI remediation replaces the UI rows.
-  const legacy = await withUiRemediation(root, state,
-    assertPlainObject(await readJson(path.join(root, initialArtifacts.legacyInventory), "Legacy inventory"), "Legacy inventory"), "uiBehaviors");
-  const planned = await ({ frame: framePlan, claim: claimPlan, discovery: discoveryPlan })[request.mode]({ state, root, legacy, request, roots });
+  // One read: the plans and the identity a discovery check is bound to come from the same bytes.
+  const inventoryFile = path.join(root, initialArtifacts.legacyInventory);
+  const inventoryBytes = await readFile(inventoryFile).catch((error) => {
+    throw error.code === "ENOENT" ? new Error(`Legacy inventory does not exist: ${inventoryFile}`) : error;
+  });
+  let authored;
+  try { authored = JSON.parse(inventoryBytes.toString("utf8")); } catch (error) { throw new Error(`Legacy inventory is invalid JSON: ${error.message}`); }
+  const legacy = await withUiRemediation(root, state, assertPlainObject(authored, "Legacy inventory"), "uiBehaviors");
+  const inventory = contentIdentity(inventoryFile, inventoryBytes);
+  const planned = await ({ frame: framePlan, claim: claimPlan, discovery: discoveryPlan })[request.mode]({ state, root, legacy, request, roots, inventory });
   return { ...planned, state, root, legacy };
 };
 
 /* Any checkpoint: each listed claim of the current legacy inventory, planned as VERIFY_SLICES plans its LEGACY half. */
-const discoveryPlan = async ({ state, root, legacy, request }) => {
+const discoveryPlan = async ({ state, root, legacy, request, roots, inventory }) => {
+  const runtime = await discoveryAuthority(roots.targetRoot, request);
   const pinned = new Map();
   for (const owner of legacy.uiBehaviors ?? []) {
     for (const claim of owner?.requiredAppearance ?? []) {
@@ -220,11 +265,39 @@ const discoveryPlan = async ({ state, root, legacy, request }) => {
           ? `Claim '${claim.id}' is observed after interaction '${claim.afterInteractionId}'; supply "interaction".`
           : `Claim '${claim.id}' is an initial-state claim; "interaction" is not allowed.`] };
       }
-      return { item, claim, owner, plan: claimCapturePlan(item, owner, claim) };
+      try {
+        return { item, claim, owner, plan: { ...claimCapturePlan(item, owner, claim), ...stateControls(owner, claim, item) } };
+      } catch (error) {
+        return { item, refusal: [error.validationCode ?? "CAPTURE_REFUSED", error.message.replace(/^[A-Z_]+: /, "")] };
+      }
     }),
     unchecked: [...pinned.keys()].filter((id) => !listed.has(id)),
-    binding: await discoveryBinding(root, state),
+    binding: discoveryBinding(state, inventory),
+    runtime,
+    record: await recordIdentity(root),
   };
+};
+
+/**
+ * The capture authority a discovery check runs under, validated rather than
+ * recorded: a configured runtime contract names the one LEGACY origin a check
+ * may observe, and a session check needs that contract. Only the origin is
+ * kept; the session itself never leaves the broker or the storageState file.
+ */
+const discoveryAuthority = async (targetRoot, request) => {
+  const origin = await legacyRuntimeOriginOf(targetRoot);
+  if (origin === null && request.session) {
+    refuseCapture("CAPTURE_AUTHORITY_MISMATCH", "A session check observes the LEGACY application the runtime contract declares, and none is configured; run migration_app_runtime configure first.");
+  }
+  if (origin !== null && origin !== request.origin) {
+    refuseCapture("CAPTURE_AUTHORITY_MISMATCH", `origin '${request.origin}' is not the LEGACY origin '${origin}' the runtime contract declares; a discovery check observes only that application.`);
+  }
+  return origin;
+};
+
+const recordIdentity = async (root) => {
+  const file = path.join(root, DISCOVERY_CLAIMS_FILE);
+  return (await entryExists(file)) ? fileIdentity(file, { bytes: true }) : null;
 };
 
 // A refusal that says nothing about the claim stops the run instead of failing every claim the same way.
@@ -233,14 +306,16 @@ const RUN_REFUSALS = new Set(["CAPTURE_BROWSER_UNAVAILABLE", "CAPTURE_AUTH_REQUI
 
 /**
  * mode "discovery": capture each claim exactly as VERIFY_SLICES captures its
- * LEGACY half, hold it to its state's scroll contract as VERIFY compares it,
- * and report every failing claim in one run. Writes nothing.
+ * LEGACY half, judge it as VERIFY judges its TARGET half (judgeClaim), and
+ * report every failing claim in one run. At DISCOVER_LEGACY a complete pass is
+ * recorded and a failure recorded as a contradiction; nothing else is written.
  */
 const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
   const failed = [];
   const passed = [];
   const observations = [];
   let broker;
+  let stopped;
   // ponytail: one browser per claim, serially; reuse one browser if a large inventory makes this slow.
   for (const { item, claim, owner, plan, refusal } of prepared.checks) {
     try {
@@ -248,24 +323,24 @@ const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
       const captured = await (parsed.session
         ? captureThroughBroker(broker ??= await sessionBrokerOf(targetRoot), plan, "LEGACY", { readOnly: true })
         : captureInBrowser({ ...plan, guard: { allowWrites: false } }));
-      const { snapshot } = captured;
-      const observed = claim.afterInteractionId ? { ...snapshot, observation: snapshot.interactions[0].postAction } : snapshot;
-      const contract = (owner.scrollContracts ?? []).find((row) => row?.state === claim.state);
-      if (!contract) refused(`'${owner.id}' has no scrollContracts row for state '${claim.state}'.`);
-      compareScrollContract(observed, observed, contract, false);
+      const { state, observation, interactions } = captured.snapshot;
+      const snapshot = { state, observation, interactions: interactions.map(({ id, postAction }) => ({ id, postAction })) };
+      judgeClaim(owner, claim, snapshot);
       passed.push(claim.id);
-      observations.push({ appearanceClaimId: claim.id, plan, observation: observed.observation });
+      observations.push({ appearanceClaimId: claim.id, plan, snapshot });
     } catch (error) {
-      if (RUN_REFUSALS.has(error.validationCode)) throw error;
+      if (RUN_REFUSALS.has(error.validationCode)) { stopped = error; break; }
       failed.push({ appearanceClaimId: item.appearanceClaimId, code: error.validationCode ?? error.message.match(/^[A-Z_]+(?=:)/)?.[0] ?? "CAPTURE_FAILED", message: error.message });
     }
   }
-  const complete = failed.length === 0 && prepared.unchecked.length === 0;
-  const written = await recordDiscoveryCheck({ targetRoot, prepared, parsed, resolved, observations: complete ? observations : null, contradicted: failed.length > 0 });
+  // A run the runtime stopped proves nothing new, except the failures it already saw.
+  const complete = !stopped && failed.length === 0 && prepared.unchecked.length === 0;
+  const written = await recordDiscoveryCheck({ targetRoot, prepared, parsed, resolved, observations: complete ? observations : null, failed });
+  if (stopped) throw stopped;
   return {
     module: resolved.canonical,
     step: prepared.state.currentStep,
-    mode: parsed.mode,
+    mode: "discovery",
     passed,
     failed,
     unchecked: prepared.unchecked,
@@ -277,47 +352,65 @@ const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
   };
 };
 
-/** The engine's record of one complete discovery check; DISCOVER_LEGACY closes only against it. */
-export const DISCOVERY_CLAIMS_FILE = "inventories/legacy-claims.json";
-
 /** What a discovery check is valid for: this checkpoint revision, these inventory bytes, this legacy authority. */
-const discoveryBinding = async (root, state) => ({
+const discoveryBinding = (state, legacyInventory) => ({
   revision: state.revision,
-  legacyInventory: await fileIdentity(path.join(root, initialArtifacts.legacyInventory)),
+  legacyInventory,
   legacyRevision: state.legacyRevision?.revision ?? null,
   requirementsAuthority: state.requirementsAuthority ?? null,
 });
 
+const currentBinding = async (root, state) =>
+  discoveryBinding(state, await fileIdentity(path.join(root, initialArtifacts.legacyInventory)));
+
 /**
- * Only a DISCOVER_LEGACY run that checked every pinned claim with none failing
- * is recorded; a run with a failed claim removes any earlier record, so a pass
- * the runtime has since contradicted cannot close discovery. Re-checked under
- * the lock; nothing is written when the record moved.
+ * Publish, under the module lock, what one DISCOVER_LEGACY run proved. The
+ * checkpoint, the inventory bytes the plans came from, the runtime authority
+ * and the record this run started from are all re-checked first; any move
+ * refuses with nothing written. A complete pass replaces the record; a run
+ * with a failed claim (or one the runtime stopped after a failure) replaces it
+ * with a contradiction, so neither an earlier pass nor a concurrent one that
+ * did not see the failure can close discovery. A pass that finds the record or
+ * the runtime contract changed since it started is refused and checks again.
  */
-const recordDiscoveryCheck = async ({ targetRoot, prepared, parsed, resolved, observations, contradicted }) => {
-  if (prepared.state.currentStep !== "DISCOVER_LEGACY" || (!observations && !contradicted)) return [];
+const recordDiscoveryCheck = async ({ targetRoot, prepared, parsed, resolved, observations, failed }) => {
+  if (prepared.state.currentStep !== "DISCOVER_LEGACY" || (!observations && failed.length === 0)) return [];
   return withModuleLock(targetRoot, resolved.canonical, async () => {
     const { state, root } = await readState(targetRoot, resolved.canonical);
-    const binding = await discoveryBinding(root, state);
+    const binding = await currentBinding(root, state);
     if (JSON.stringify(binding) !== JSON.stringify(prepared.binding)) {
       refuseCapture("CAPTURE_CONFLICT", "The record or its legacy inventory moved while the browser was checking; check again against the current inventory.");
     }
-    const file = path.join(root, DISCOVERY_CLAIMS_FILE);
-    if (!observations) {
-      if (await entryExists(file)) await removeDurably(targetRoot, file);
-      return [];
+    // A contradiction can only block closure, so only a pass is held to the authority and the record it started from.
+    if (observations) {
+      const runtime = await discoveryAuthority(targetRoot, parsed).catch(() => undefined); // refused now: never equal to a validated origin or null
+      if (runtime !== prepared.runtime) {
+        refuseCapture("CAPTURE_CONFLICT", "The runtime contract changed while the browser was checking; check again.");
+      }
+      if (await recordIdentity(root) !== prepared.record) {
+        refuseCapture("CAPTURE_CONFLICT", `Another discovery check published ${DISCOVERY_CLAIMS_FILE} while this one ran; check again.`);
+      }
     }
-    await replaceDocument(targetRoot, file, {
+    await replaceDocument(targetRoot, path.join(root, DISCOVERY_CLAIMS_FILE), {
       version: 1,
       producer: "artifact-migration-capture",
       checkedAt: new Date().toISOString(),
       binding,
       capture: { origin: parsed.origin, session: parsed.session === true, storageState: parsed.storageState !== undefined },
-      claims: observations.map(({ appearanceClaimId, plan, observation }) => ({
-        appearanceClaimId, route: plan.route, viewport: plan.viewport, colorScheme: plan.colorScheme, observation })),
+      ...(observations
+        ? { claims: observations.map(({ appearanceClaimId, plan, snapshot }) => ({
+          appearanceClaimId, route: plan.route, viewport: plan.viewport, colorScheme: plan.colorScheme, snapshot })) }
+        : { claims: [], contradicted: failed.map(({ appearanceClaimId, code }) => ({ appearanceClaimId, code })) }),
     });
     return [DISCOVERY_CLAIMS_FILE];
   });
+};
+
+/** Whether the record holds a complete pass bound to this checkpoint and inventory: the one DISCOVER_LEGACY pins when it closes. */
+export const discoveryCheckCurrent = async (root, state) => {
+  const record = await readJson(path.join(root, DISCOVERY_CLAIMS_FILE), DISCOVERY_CLAIMS_FILE).catch(() => null);
+  return isPlainObject(record) && record.version === 1 && record.contradicted === undefined &&
+    JSON.stringify(record.binding) === JSON.stringify(await currentBinding(root, state));
 };
 
 const unverified = (code, message, details) => {
@@ -328,8 +421,8 @@ const unverified = (code, message, details) => {
 /**
  * The DISCOVER_LEGACY closure gate for a format-20 record that pins appearance
  * claims. The pass is never read from the record: each claim's verdict is
- * re-derived from the observation the engine captured, against the claim and
- * scroll contract in the inventory being closed.
+ * re-derived by judgeClaim from the snapshot the engine captured, against the
+ * claims, required observations and scroll contract of the inventory being closed.
  */
 export const assertDiscoveryClaimsVerified = async (root, state, legacy) => {
   if (!usesUiCoverage(state) || state.currentStep !== "DISCOVER_LEGACY") return;
@@ -351,10 +444,14 @@ export const assertDiscoveryClaimsVerified = async (root, state, legacy) => {
   if (!isPlainObject(record) || record.version !== 1 || !isPlainObject(record.binding) || !Array.isArray(record.claims)) {
     unverified("DISCOVERY_CLAIMS_INVALID", `${DISCOVERY_CLAIMS_FILE} is not an engine discovery check.`, {});
   }
-  const binding = await discoveryBinding(root, state);
+  const binding = await currentBinding(root, state);
   const moved = Object.keys(binding).filter((key) => JSON.stringify(record.binding[key] ?? null) !== JSON.stringify(binding[key]));
   if (moved.length > 0) {
     unverified("DISCOVERY_CLAIMS_STALE", `${DISCOVERY_CLAIMS_FILE} was checked against a different ${moved.join(", ")} than the one being closed.`, { stale: moved });
+  }
+  if (record.contradicted !== undefined) {
+    const ids = Array.isArray(record.contradicted) ? record.contradicted.map((item) => item?.appearanceClaimId) : [];
+    unverified("DISCOVERY_CLAIMS_UNVERIFIED", `The latest discovery check failed claim(s) ${ids.join(", ") || "(unreadable)"}.`, { contradicted: ids });
   }
   const seen = new Set();
   const failed = [];
@@ -365,12 +462,7 @@ export const assertDiscoveryClaimsVerified = async (root, state, legacy) => {
     const { owner, claim } = expected.get(id) ?? {};
     if (!claim) unverified("DISCOVERY_CLAIMS_STALE", `${DISCOVERY_CLAIMS_FILE} checked claim '${id}', which ${initialArtifacts.legacyInventory} does not pin.`, { unknown: [id] });
     try {
-      const shown = (row.observation?.controls ?? []).some((control) => control?.role === claim.role && control.name === claim.name &&
-        control.locator === claim.locator && control.present === true && control.visible === true);
-      if (!shown) throw new Error(`the check did not observe ${claim.role} '${claim.name}' at '${claim.locator}'`);
-      const contract = (owner.scrollContracts ?? []).find((item) => item?.state === claim.state);
-      if (!contract) throw new Error(`'${owner.id}' has no scrollContracts row for state '${claim.state}'`);
-      compareScrollContract({ observation: row.observation }, { observation: row.observation }, contract, false);
+      judgeClaim(owner, claim, row.snapshot);
     } catch (error) {
       failed.push({ appearanceClaimId: id, message: error.message });
     }

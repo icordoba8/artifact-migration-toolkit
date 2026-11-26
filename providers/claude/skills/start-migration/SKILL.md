@@ -1564,11 +1564,16 @@ Playwright MCP browser holding a session would let `browser_evaluate` read it.
   `{mode: "discovery", origin, route, viewport, ..., claims:
   [{appearanceClaimId, route?, setup?, interaction?}]}`. Top-level fields are
   shared; each item is one LEGACY claim request without `role`. It captures
-  each claim as `VERIFY_SLICES` will, holds it to its state's scroll contract,
+  each claim as `VERIFY_SLICES` will, judges it as `VERIFY_SLICES` judges the
+  TARGET half (every pinned claim of the same state shown together, before and
+  after its interaction, plus its required observations and scroll contract),
   and returns `passed`, `failed` (each with `code` and `message`) and
-  `unchecked`. At `DISCOVER_LEGACY` a run with every pinned claim passed
-  records `inventories/legacy-claims.json`, bound to this checkpoint and these
-  inventory bytes; any failure removes it. Never write or edit that file. List every pinned claim and fix all failures in
+  `unchecked`. Claims that cannot be shown at once (opening a menu hides an
+  initial button) belong in separate states. At `DISCOVER_LEGACY` a run with
+  every pinned claim passed records `inventories/legacy-claims.json`, bound to
+  this checkpoint and these inventory bytes, and closing pins it; any failure
+  replaces it with a contradiction. `origin` must be the runtime contract's
+  LEGACY origin when one is configured. Never write or edit that file. List every pinned claim and fix all failures in
   one edit. Prefer `getByRole('<role>', { name: '<name>', exact: true })`
   locators. Current behavior: the claim's `name` is matched against the
   accessible name computed with hidden content included, so a column header
