@@ -24864,6 +24864,14 @@ browserTest("DISCOVER_LEGACY closes only after a complete, current engine discov
     await writeFile(inventoryPath, `${corrected.toString().trimEnd()}\n\n`);
     await refuses(/DISCOVERY_CLAIMS_STALE: .*legacyInventory/);
     await writeFile(inventoryPath, corrected);
+    // F2: the runtime authority is re-read at closure. A LEGACY origin other than the one now
+    // configured makes the check stale, and a contract changed after capture so it no longer
+    // authorizes refuses closure.
+    await tampered((document) => { document.binding.legacyOrigin = server.origin; }, /DISCOVERY_CLAIMS_STALE: .*legacyOrigin/);
+    await mkdir(path.dirname(runtimeFile), { recursive: true });
+    await writeFile(runtimeFile, "{not json");
+    await refuses(/CAPTURE_AUTHORITY_MISMATCH: The runtime contract cannot authorize this capture/);
+    await rm(path.dirname(runtimeFile), { recursive: true });
 
     // 6. The complete, current check closes discovery without reaching implementation.
     await advance(fixture);

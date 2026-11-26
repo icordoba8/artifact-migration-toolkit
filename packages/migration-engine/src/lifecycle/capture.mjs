@@ -272,7 +272,7 @@ const discoveryPlan = async ({ state, root, legacy, request, roots, inventory })
       }
     }),
     unchecked: [...pinned.keys()].filter((id) => !listed.has(id)),
-    binding: discoveryBinding(state, inventory),
+    binding: discoveryBinding(state, inventory, runtime),
     runtime,
     record: await recordIdentity(root),
   };
@@ -352,16 +352,18 @@ const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
   };
 };
 
-/** What a discovery check is valid for: this checkpoint revision, these inventory bytes, this legacy authority. */
-const discoveryBinding = (state, legacyInventory) => ({
+/** What a discovery check is valid for: this checkpoint revision, these inventory bytes, this legacy authority and runtime origin. */
+const discoveryBinding = (state, legacyInventory, legacyOrigin) => ({
   revision: state.revision,
   legacyInventory,
+  legacyOrigin,
   legacyRevision: state.legacyRevision?.revision ?? null,
   requirementsAuthority: state.requirementsAuthority ?? null,
 });
 
-const currentBinding = async (root, state) =>
-  discoveryBinding(state, await fileIdentity(path.join(root, initialArtifacts.legacyInventory)));
+// The origin is re-read, never trusted from the record: a contract that changed or broke after the check makes it stale or refuses.
+const currentBinding = async (targetRoot, root, state) =>
+  discoveryBinding(state, await fileIdentity(path.join(root, initialArtifacts.legacyInventory)), await legacyRuntimeOriginOf(targetRoot));
 
 /**
  * Publish, under the module lock, what one DISCOVER_LEGACY run proved. The
@@ -377,7 +379,7 @@ const recordDiscoveryCheck = async ({ targetRoot, prepared, parsed, resolved, ob
   if (prepared.state.currentStep !== "DISCOVER_LEGACY" || (!observations && failed.length === 0)) return [];
   return withModuleLock(targetRoot, resolved.canonical, async () => {
     const { state, root } = await readState(targetRoot, resolved.canonical);
-    const binding = await currentBinding(root, state);
+    const binding = await currentBinding(targetRoot, root, state);
     if (JSON.stringify(binding) !== JSON.stringify(prepared.binding)) {
       refuseCapture("CAPTURE_CONFLICT", "The record or its legacy inventory moved while the browser was checking; check again against the current inventory.");
     }
@@ -407,10 +409,10 @@ const recordDiscoveryCheck = async ({ targetRoot, prepared, parsed, resolved, ob
 };
 
 /** Whether the record holds a complete pass bound to this checkpoint and inventory: the one DISCOVER_LEGACY pins when it closes. */
-export const discoveryCheckCurrent = async (root, state) => {
+export const discoveryCheckCurrent = async (targetRoot, root, state) => {
   const record = await readJson(path.join(root, DISCOVERY_CLAIMS_FILE), DISCOVERY_CLAIMS_FILE).catch(() => null);
   return isPlainObject(record) && record.version === 1 && record.contradicted === undefined &&
-    JSON.stringify(record.binding) === JSON.stringify(await currentBinding(root, state));
+    JSON.stringify(record.binding) === JSON.stringify(await currentBinding(targetRoot, root, state));
 };
 
 const unverified = (code, message, details) => {
@@ -424,7 +426,7 @@ const unverified = (code, message, details) => {
  * re-derived by judgeClaim from the snapshot the engine captured, against the
  * claims, required observations and scroll contract of the inventory being closed.
  */
-export const assertDiscoveryClaimsVerified = async (root, state, legacy) => {
+export const assertDiscoveryClaimsVerified = async (targetRoot, root, state, legacy) => {
   if (!usesUiCoverage(state) || state.currentStep !== "DISCOVER_LEGACY") return;
   const expected = new Map();
   for (const owner of legacy?.uiBehaviors ?? []) {
@@ -444,7 +446,7 @@ export const assertDiscoveryClaimsVerified = async (root, state, legacy) => {
   if (!isPlainObject(record) || record.version !== 1 || !isPlainObject(record.binding) || !Array.isArray(record.claims)) {
     unverified("DISCOVERY_CLAIMS_INVALID", `${DISCOVERY_CLAIMS_FILE} is not an engine discovery check.`, {});
   }
-  const binding = await currentBinding(root, state);
+  const binding = await currentBinding(targetRoot, root, state);
   const moved = Object.keys(binding).filter((key) => JSON.stringify(record.binding[key] ?? null) !== JSON.stringify(binding[key]));
   if (moved.length > 0) {
     unverified("DISCOVERY_CLAIMS_STALE", `${DISCOVERY_CLAIMS_FILE} was checked against a different ${moved.join(", ")} than the one being closed.`, { stale: moved });

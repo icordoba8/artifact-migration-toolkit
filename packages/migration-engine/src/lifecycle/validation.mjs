@@ -1157,7 +1157,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
       roots,
       state?.requirementsAuthority,
     );
-    await assertDiscoveryClaimsVerified(root, state, inventory);
+    await assertDiscoveryClaimsVerified(roots.targetRoot, root, state, inventory);
     if (usesDiscoveryCompleteness(state)) {
       const boundary = await readCanonicalModuleBoundary(root, state, roots);
       await assertLegacyEvidenceWithinBoundary(inventory, boundary.scan, roots);

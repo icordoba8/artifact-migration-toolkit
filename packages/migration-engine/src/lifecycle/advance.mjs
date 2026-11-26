@@ -343,7 +343,7 @@ const advanceUnderLock = async ({
     )),
   };
   // The discovery check DISCOVER_LEGACY closed against is pinned with it (F3).
-  if (currentStep === "DISCOVER_LEGACY" && (await discoveryCheckCurrent(context.root, state))) {
+  if (currentStep === "DISCOVER_LEGACY" && (await discoveryCheckCurrent(registryData.targetRoot, context.root, state))) {
     artifactHashes[DISCOVERY_CLAIMS_FILE] = await hashPinnedArtifact(context.root, DISCOVERY_CLAIMS_FILE);
   }
   // Format-8 upgrade: BUILD_BASELINE closed under an older format pinned no
