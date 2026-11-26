@@ -4,6 +4,7 @@
  * `resumable-migration.mjs` (Track A8).
  */
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { assertLegacySourcesUnchanged, brownfieldTargetBlocker } from "../census/index.mjs";
 import {
@@ -27,6 +28,7 @@ import {
   assertSafeName,
   dirtyManifest,
   gitRevision,
+  isLexicallyWithin as isWithin,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";
 import {
@@ -81,7 +83,6 @@ import {
 import { DEFAULT_MODE, isAutoAuthority } from "./policy.mjs";
 import { migrationProgress, previewProgress, renderProgress } from "./progress.mjs";
 import {
-  briefDigestFor,
   IMMUTABLE_STEP_ARTIFACTS,
   readState,
   validateCompletedHashes,
@@ -91,6 +92,17 @@ import { reopenDiscoveryBlocker } from "./discovery-reopen.mjs";
 import { reopenAttemptsOf, reopenCompletePlan, reopenUiNotApplicable } from "./reopen.mjs";
 import { stateMappingMismatch } from "./templates.mjs";
 import { assertBriefUnchanged, sliceAmendmentFor } from "./validation.mjs";
+
+/** The exact brief bytes the preview authorizes, not just its path. */
+export const briefDigestFor = async (targetRoot, brief) => {
+  const absolute = path.resolve(targetRoot, brief);
+  if (!isWithin(targetRoot, absolute)) return "OUTSIDE_TARGET";
+  try {
+    return `sha256:${hashContent(await readFile(absolute, "utf8"))}`;
+  } catch {
+    return "MISSING";
+  }
+};
 
 export const previewMigrationExecution = async ({
   registryPath,

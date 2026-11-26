@@ -612,6 +612,19 @@ export const sessionBrokerOf = async (targetRoot) => {
   return { url: sessionBroker.url, token };
 };
 
+/**
+ * The LEGACY origin the runtime contract declares, or null when no contract
+ * exists. A contract that exists but cannot be read is refused: it can neither
+ * authorize nor be ignored by a capture.
+ */
+export const legacyRuntimeOriginOf = async (targetRoot) => {
+  const { problem, file, applications } = await readConfiguration(targetRoot);
+  if (!problem) return applications.find((app) => app.role === "LEGACY").origin;
+  // ponytail: no locatable file (no Git work tree, or none written) means no contract; a session check still needs one.
+  if (!file || !(await lstat(file).then(() => true, () => false))) return null;
+  return refuseCapture("CAPTURE_AUTHORITY_MISMATCH", `The runtime contract cannot authorize this capture: ${problem}`);
+};
+
 /** Each role's session word, so an AUTH_REQUIRED row says whether a capture can continue. */
 const sessionStates = async (targetRoot) => {
   const broker = await sessionBrokerOf(targetRoot).catch(() => null);

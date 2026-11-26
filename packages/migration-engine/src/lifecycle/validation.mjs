@@ -112,6 +112,7 @@ import {
 import { artifactArgumentsFor, artifactCommandFor } from "./artifact-record.mjs";
 import { getArtifactStatus, validateArtifactComplete } from "./artifact-status.mjs";
 import { validateGates } from "./gates.mjs";
+import { assertDiscoveryClaimsVerified } from "./capture.mjs";
 import { assertStepDocumentComplete } from "./record.mjs";
 import { validateExternalUiCapabilities } from "./ui-coverage.mjs";
 export const validateLegacyInventory = (root, roots, state) =>
@@ -1156,6 +1157,7 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
       roots,
       state?.requirementsAuthority,
     );
+    await assertDiscoveryClaimsVerified(roots.targetRoot, root, state, inventory);
     if (usesDiscoveryCompleteness(state)) {
       const boundary = await readCanonicalModuleBoundary(root, state, roots);
       await assertLegacyEvidenceWithinBoundary(inventory, boundary.scan, roots);

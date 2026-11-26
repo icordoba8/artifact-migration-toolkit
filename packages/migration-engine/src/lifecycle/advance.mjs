@@ -36,6 +36,7 @@ import {
   rawDecisionLedgerDigest,
 } from "../decisions/index.mjs";
 import { inspectSliceArtifacts, verifiedFileIdentities } from "../slices/index.mjs";
+import { discoveryCheckCurrent } from "./capture.mjs";
 import { activeArtifact, confirmationIdFor, expectedNextCheckpoint } from "./checkpoints.mjs";
 import { readContext } from "./context.mjs";
 import { assertCurrentOpenSpecAuthority } from "./openspec.mjs";
@@ -46,6 +47,7 @@ import {
   appendHistoryOnce,
   BASELINE_ROWS_PIN,
   completedArtifactHashes,
+  DISCOVERY_CLAIMS_FILE,
   hashPinnedArtifact,
   readState,
   recoverPendingAdvance,
@@ -340,6 +342,10 @@ const advanceUnderLock = async ({
       activeSlice,
     )),
   };
+  // The discovery check DISCOVER_LEGACY closed against is pinned with it (F3).
+  if (currentStep === "DISCOVER_LEGACY" && (await discoveryCheckCurrent(registryData.targetRoot, context.root, state))) {
+    artifactHashes[DISCOVERY_CLAIMS_FILE] = await hashPinnedArtifact(context.root, DISCOVERY_CLAIMS_FILE);
+  }
   // Format-8 upgrade: BUILD_BASELINE closed under an older format pinned no
   // rows, so this transaction computes the pin from the matrix as it stands
   // and stamps format 8 with it. Nothing before this point could have been
@@ -515,6 +521,9 @@ const advanceUnderLock = async ({
     event: "STEP_COMPLETED",
     step: currentStep,
     slice: activeSlice ?? null,
+    ...(currentStep === "DISCOVER_LEGACY" && artifactHashes[DISCOVERY_CLAIMS_FILE]
+      ? { discoveryCheck: artifactHashes[DISCOVERY_CLAIMS_FILE] }
+      : {}),
     ...(currentStep === "VERIFY_SLICES" && validated?.visualComparison?.length
       ? { visualComparison: validated.visualComparison }
       : {}),
