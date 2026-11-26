@@ -38,7 +38,6 @@ import {
   assertNonEmpty,
   assertPlainObject,
   contentIdentityMatches,
-  isLexicallyWithin as isWithin,
   isPlainObject,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";
@@ -461,17 +460,6 @@ export const resolveStepPins = (state) =>
   IMMUTABLE_STEP_ARTIFACTS.RESOLVE.filter(
     (relative) => relative !== TARGET_BASELINE_FILE || isBrownfield(state),
   );
-
-/** The exact brief bytes the preview authorizes, not just its path. */
-export const briefDigestFor = async (targetRoot, brief) => {
-  const absolute = path.resolve(targetRoot, brief);
-  if (!isWithin(targetRoot, absolute)) return "OUTSIDE_TARGET";
-  try {
-    return `sha256:${hashContent(await readFile(absolute, "utf8"))}`;
-  } catch {
-    return "MISSING";
-  }
-};
 
 // The journal that makes one checkpoint transition recoverable across the gap
 // between the state write and the history append. It is the only journal in the
