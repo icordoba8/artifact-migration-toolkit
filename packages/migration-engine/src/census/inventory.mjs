@@ -251,10 +251,10 @@ export const validateLegacyInventory = async (
   root,
   roots,
   state,
-  { assertRequiredObservations, assertRequiredAppearance },
+  { assertRequiredObservations, assertRequiredAppearance, authored },
 ) => {
   const persisted = assertPlainObject(
-    await readJson(
+    authored ?? await readJson(
       path.join(root, initialArtifacts.legacyInventory),
       "Legacy inventory",
     ),

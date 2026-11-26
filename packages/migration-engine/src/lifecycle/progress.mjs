@@ -53,6 +53,7 @@ export const migrationProgress = (
     outcome = null,
     reason = null,
     uiEvidence = null,
+    discoveryClaims = null,
     nextWorkKind = null,
     artifactMigration = null,
     // The §4 projection or null. Passed in by the caller that read it; this
@@ -128,6 +129,7 @@ export const migrationProgress = (
     // function performs no I/O and computes no availability of its own, so a
     // caller without it (`migration_run`) reports null rather than a guess.
     uiEvidence,
+    ...(discoveryClaims ? { discoveryClaims } : {}),
     // Reported above the checkpoints by `renderProgress`; only an active
     // increment freezes the checklist below it.
     formatUpgrade,
@@ -281,6 +283,10 @@ export const renderProgress = (progress, labels = MODULE_STEP_LABELS) => {
     lines.push(
       `${marker(checkpoint.state)} ${titles[position].padEnd(titleWidth)}  ${checkpoint.name}`,
     );
+    if (checkpoint.name === "DISCOVER_LEGACY" && progress.discoveryClaims) {
+      const { state, completed, total, passed, failed, remaining } = progress.discoveryClaims;
+      lines.push(`  claims: ${state}  completed=${completed}/${total}  passed=${passed}  failed=${failed}  remaining=${remaining}`);
+    }
     if (checkpoint.name !== sliceAnchor || progress.slices.items.length === 0) return;
     lines.push(
       `  slices: ${progress.slices.completed}/${progress.slices.total} done`,

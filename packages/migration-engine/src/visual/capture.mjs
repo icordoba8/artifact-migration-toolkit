@@ -66,8 +66,9 @@ export const assertSessionUsable = (document, origin) => {
   }
 };
 
-const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "session", "timeoutMs"];
+const COMMON_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "browser", "storageState", "session", "timeoutMs", "navigationTimeoutMs"];
 const MODE_KEYS = { frame: ["uiBehaviorId", "state", "rootLocator", "counts"], claim: ["appearanceClaimId", "interaction", "role"] };
+export const DISCOVERY_ROOT_LIMIT = 8;
 const DISCOVERY_CLAIM_KEYS = new Set(["appearanceClaimId", "route", "setup", "interaction"]);
 const ACTIONS = new Set(["click", "fill", "press", "hover", "check", "uncheck", "select"]);
 const VALUE_ACTIONS = new Set(["fill", "press", "select"]);
@@ -117,7 +118,9 @@ export const parseCaptureRequest = (request) => {
   if (!isPlainObject(request)) invalid("The request must be a JSON object.");
   if (request.mode === "discovery") {
     // Each item is one LEGACY claim request; the top level holds what they share.
-    const { mode: _mode, claims, ...shared } = request;
+    const { mode: _mode, claims, batchSize = 8, refresh = false, ...shared } = request;
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 16) invalid("batchSize must be an integer from 1 to 16.");
+    if (typeof refresh !== "boolean") invalid("refresh must be a boolean.");
     const unknown = Object.keys(shared).filter((key) => !COMMON_KEYS.includes(key));
     if (unknown.length > 0) invalid(`Unsupported discovery request key(s): ${unknown.join(", ")}.`);
     const items = list(claims, "claims", 500);
@@ -137,7 +140,7 @@ export const parseCaptureRequest = (request) => {
       return claim;
     });
     const { origin, storageState, session } = parsed[0];
-    return { mode: "discovery", origin, storageState, session, claims: parsed };
+    return { mode: "discovery", origin, storageState, session, claims: parsed, batchSize, refresh };
   }
   const mode = request.appearanceClaimId !== undefined ? "claim" : "frame";
   const allowed = new Set([...COMMON_KEYS, ...MODE_KEYS[mode]]);
@@ -172,10 +175,14 @@ export const parseCaptureRequest = (request) => {
   }
   const timeoutMs = request.timeoutMs ?? 15000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) invalid("timeoutMs must be an integer from 1000 to 120000.");
+  const navigationTimeoutMs = request.navigationTimeoutMs ?? timeoutMs;
+  if (!Number.isInteger(navigationTimeoutMs) || navigationTimeoutMs < 1000 || navigationTimeoutMs > 120000) {
+    invalid("navigationTimeoutMs must be an integer from 1000 to 120000.");
+  }
   const common = {
     mode, origin: origin.origin, url: url.href, route, viewport: { width: viewport.width, height: viewport.height },
     controls, setup: list(request.setup, "setup", 20).map((step, index) => action(step, `setup[${index}]`)),
-    colorScheme, matte: matte.toLowerCase(), browser: request.browser, storageState: request.storageState, session: request.session, timeoutMs,
+    colorScheme, matte: matte.toLowerCase(), browser: request.browser, storageState: request.storageState, session: request.session, timeoutMs, navigationTimeoutMs,
   };
   if (mode === "claim") {
     const role = request.role ?? "LEGACY";
@@ -378,12 +385,19 @@ const launch = async (chromium, channel) => {
  * aborted and refuses the capture. Every refusal names what was not reached;
  * a browser command that merely did not throw proves nothing on its own.
  */
-export const captureInBrowser = async (plan) => {
+export const captureInBrowser = async (plan, { discoveryRoots, onObservation, signal } = {}) => {
+  if (discoveryRoots && (plan.guard?.allowWrites !== false || typeof onObservation !== "function")) {
+    invalid("Discovery observations require a read-only browser and an observation consumer.");
+  }
+  signal?.throwIfAborted();
   const started = Date.now();
   const { chromium } = requireDriver("playwright-core");
   const { browser, channel } = await launch(chromium, plan.browser);
+  const closeOnAbort = () => { void browser.close().catch(() => undefined); };
+  signal?.addEventListener("abort", closeOnAbort, { once: true });
   const operations = { navigations: 0, actions: 0, locatorQueries: 0, probes: 0, screenshots: 0, ...(plan.guard ? { blockedWrites: 0 } : {}) };
   try {
+    signal?.throwIfAborted();
     const context = await browser.newContext({
       viewport: plan.viewport, deviceScaleFactor: 1, colorScheme: plan.colorScheme, reducedMotion: "reduce",
       serviceWorkers: "block", acceptDownloads: false, ...(plan.storageState ? { storageState: plan.storageState } : {}),
@@ -440,9 +454,12 @@ export const captureInBrowser = async (plan) => {
     });
     try {
       operations.navigations += 1;
-      await page.goto(plan.url, { waitUntil: "load" });
+      await page.goto(plan.url, { waitUntil: "load", timeout: plan.navigationTimeoutMs ?? plan.timeoutMs });
     } catch (error) {
       if (blocked.length > 0) onOrigin(`'${plan.url}'`);
+      if (!(status >= 400) && discoveryRoots && error.name === "TimeoutError") {
+        refuseCapture("CAPTURE_NAVIGATION_TIMEOUT", `'${plan.route}' did not finish loading within the navigation timeout: ${firstLine(error)}.`);
+      }
       if (!(status >= 400)) refuseCapture("CAPTURE_UNREACHABLE", `'${plan.url}' could not be loaded: ${firstLine(error)}. Start the legacy application at the authorized origin first.`);
     }
     if (status === 401 || status === 403) authRefusal(plan, `'${plan.route}' answered HTTP ${status}`);
@@ -477,7 +494,7 @@ export const captureInBrowser = async (plan) => {
     // a control the action reveals may be absent there, or its locator may match
     // the source page's own element (a navigation's `h1`). Only the post-action
     // observation must show the claimed identity.
-    const observe = async (root, strict = true, observed = plan.controls) => {
+    const observe = async (root, strict = true, observed = plan.controls, rootLocator = plan.rootLocator) => {
       const controls = [];
       const issues = [];
       for (const control of observed) {
@@ -510,7 +527,7 @@ export const captureInBrowser = async (plan) => {
       let limitations = [];
       if (root) {
         operations.probes += 1;
-        ({ scroll, limitations } = await root.evaluate(SCROLL_PROBE, plan.rootLocator));
+        ({ scroll, limitations } = await root.evaluate(SCROLL_PROBE, rootLocator));
       }
       return { observation: { url: page.url(), controls, ...(scroll ? { scroll } : {}) }, issues, limitations };
     };
@@ -521,30 +538,66 @@ export const captureInBrowser = async (plan) => {
       issues.push(...before.issues);
       await act(plan.interaction.action, `interaction '${plan.interaction.id}'`);
     }
-    const root = locate(page, plan.rootLocator);
-    operations.locatorQueries += 1;
-    try {
-      await root.waitFor({ state: "visible" });
-    } catch (error) {
-      const count = await root.count().catch(() => 0);
-      refuseCapture(count > 1 ? "CAPTURE_LOCATOR_AMBIGUOUS" : "CAPTURE_ELEMENT_MISSING",
-        `${plan.mode === "claim" ? "Claim" : "Root"} locator '${plan.rootLocator}' ${count > 1 ? `matches ${count} elements` : "is not visible"} in state '${plan.state}'${plan.interaction ? ` after interaction '${plan.interaction.id}'` : ""}: ${firstLine(error)}.`);
+    const rootReadiness = (rootLocator) => {
+      const root = locate(page, rootLocator);
+      operations.locatorQueries += 1;
+      return root.waitFor({ state: "visible" }).then(() => ({ root }), (error) => ({ root, error }));
+    };
+    const observeRoot = async (rootLocator, readiness = rootReadiness(rootLocator)) => {
+      const { root, error } = await readiness;
+      if (error) {
+        const count = await root.count().catch(() => 0);
+        refuseCapture(count > 1 ? "CAPTURE_LOCATOR_AMBIGUOUS" : "CAPTURE_ELEMENT_MISSING",
+          `${plan.mode === "claim" ? "Claim" : "Root"} locator '${rootLocator}' ${count > 1 ? `matches ${count} elements` : "is not visible"} in state '${plan.state}'${plan.interaction ? ` after interaction '${plan.interaction.id}'` : ""}: ${firstLine(error)}.`);
+      }
+      const main = await observe(root, true, plan.controls, rootLocator);
+      const problems = [...issues, ...main.issues];
+      if (problems.length > 0) refuseCapture("CAPTURE_OBSERVATION_FAILED", `${problems.join("; ")}.`);
+      const unseen = main.observation.controls.filter((control) => !control.visible);
+      if (unseen.length > 0) {
+        refuseCapture("CAPTURE_STATE_NOT_REACHED", `State '${plan.state}'${plan.interaction ? ` after interaction '${plan.interaction.id}'` : ""} does not show ${unseen.map((control) => `${control.role} '${control.name}' at '${control.locator}' (${control.present ? "hidden" : "absent"})`).join(", ")}.`);
+      }
+      if (plan.mode === "claim" && main.limitations.length > 0) {
+        refuseCapture("CAPTURE_VALUE_UNSUPPORTED", `Claim locator '${rootLocator}': ${main.limitations.join("; ")}. The format-20 scroll contract measures the claim element and its ancestors only; a LEGACY row would omit what was observed, so none is written.`);
+      }
+      onOrigin("the capture");
+      return { root, main };
+    };
+    const snapshotOf = (main) => {
+      const snapshot = {
+        proofFormat: UI_PROOF_FORMAT,
+        uiBehaviorId: plan.uiBehaviorId,
+        state: plan.state,
+        ...(plan.setup.length > 0 ? { setup: plan.setup.map(({ type, target }) => ({ type, target })) } : {}),
+        observation: before ? before.observation : main.observation,
+        interactions: before
+          ? [{ id: plan.interaction.id, action: { type: plan.interaction.action.type, target: plan.interaction.action.target }, postAction: main.observation }]
+          : [],
+      };
+      assertNoUiSecret(snapshot, "Captured snapshot");
+      const secret = [snapshot.observation.url, ...snapshot.interactions.map((item) => item.postAction.url), page.url()]
+        .map((url) => secretParam(new URL(url))).find(Boolean);
+      if (secret) refuseCapture("CAPTURE_SECRET_URL", `A captured page URL carries the credential-like query parameter '${secret}'; capture from a sanitized test session.`);
+      return snapshot;
+    };
+    if (discoveryRoots) {
+      // Compatible roots all wait on the same page, so missing roots share one locator timeout.
+      const readiness = discoveryRoots.map(rootReadiness);
+      for (const [index, rootLocator] of discoveryRoots.entries()) {
+        signal?.throwIfAborted();
+        let observed;
+        try {
+          observed = { rootLocator, snapshot: snapshotOf((await observeRoot(rootLocator, readiness[index])).main) };
+        } catch (error) {
+          if (!error.validationCode || ["CAPTURE_ORIGIN_VIOLATION", "CAPTURE_AUTH_REQUIRED", "CAPTURE_SESSION_EXPIRED"].includes(error.validationCode)) throw error;
+          observed = { rootLocator, code: error.validationCode, message: error.message };
+        }
+        await onObservation(observed);
+      }
+      onOrigin("the capture");
+      return { operations };
     }
-    const main = await observe(root);
-    issues.push(...main.issues);
-    if (issues.length > 0) refuseCapture("CAPTURE_OBSERVATION_FAILED", `${issues.join("; ")}.`);
-    // The controls are what the state shows: one missing or hidden means the
-    // state was not reached, however cleanly every step ran.
-    const unseen = main.observation.controls.filter((control) => !control.visible);
-    if (unseen.length > 0) {
-      refuseCapture("CAPTURE_STATE_NOT_REACHED", `State '${plan.state}'${plan.interaction ? ` after interaction '${plan.interaction.id}'` : ""} does not show ${unseen.map((control) => `${control.role} '${control.name}' at '${control.locator}' (${control.present ? "hidden" : "absent"})`).join(", ")}.`);
-    }
-    // A claim row has no field the validator reads a limitation from, so a
-    // scroll container inside the claim element is refused, never written away.
-    if (plan.mode === "claim" && main.limitations.length > 0) {
-      refuseCapture("CAPTURE_VALUE_UNSUPPORTED", `Claim locator '${plan.rootLocator}': ${main.limitations.join("; ")}. The format-20 scroll contract measures the claim element and its ancestors only; a LEGACY row would omit what was observed, so none is written.`);
-    }
-    onOrigin("the capture");
+    const { root, main } = await observeRoot(plan.rootLocator);
     operations.screenshots += 1;
     const screenshot = await root.screenshot({ animations: "disabled", caret: "hide", scale: "css", type: "png" });
     const { width, height } = decodePng(screenshot);
@@ -563,22 +616,8 @@ export const captureInBrowser = async (plan) => {
         refuseCapture("CAPTURE_VALUE_UNSUPPORTED", `The root element's computed style cannot be expressed in the version-2 taxonomy: ${measured.unsupported.join("; ")}. The validator refuses these values too; no value is guessed. A state the contract cannot pin needs an operator VISUAL_UNBACKED decision.`);
       }
     }
-    const snapshot = {
-      proofFormat: UI_PROOF_FORMAT,
-      uiBehaviorId: plan.uiBehaviorId,
-      state: plan.state,
-      // How the state was reached, values withheld: auditable, never replayable secrets.
-      ...(plan.setup.length > 0 ? { setup: plan.setup.map(({ type, target }) => ({ type, target })) } : {}),
-      observation: before ? before.observation : main.observation,
-      interactions: before
-        ? [{ id: plan.interaction.id, action: { type: plan.interaction.action.type, target: plan.interaction.action.target }, postAction: main.observation }]
-        : [],
-    };
-    assertNoUiSecret(snapshot, "Captured snapshot");
-    // Every URL the snapshot persists, the pre-action page included, and the final one.
-    const secret = [snapshot.observation.url, ...snapshot.interactions.map((item) => item.postAction.url), page.url()]
-      .map((url) => secretParam(new URL(url))).find(Boolean);
-    if (secret) refuseCapture("CAPTURE_SECRET_URL", `A captured page URL carries the credential-like query parameter '${secret}'; capture from a sanitized test session.`);
+    onOrigin("the capture");
+    const snapshot = snapshotOf(main);
     return {
       screenshot, image, snapshot, measured, operations,
       capture: captureBlock(plan, image),
@@ -596,11 +635,12 @@ export const captureInBrowser = async (plan) => {
     }
     throw error;
   } finally {
+    signal?.removeEventListener("abort", closeOnAbort);
     await browser.close();
   }
 };
 
-const BROKERED_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "timeoutMs"];
+const BROKERED_KEYS = ["origin", "route", "viewport", "controls", "setup", "colorScheme", "matte", "timeoutMs", "navigationTimeoutMs"];
 
 /**
  * A plan that crossed the session boundary, rebuilt from what parsing accepts.
@@ -627,19 +667,52 @@ export const parseBrokeredPlan = (plan) => {
  * not a secret from the agent, only from other accounts. A broker that runs as
  * this same account isolates nothing, so its capture is refused, not used.
  */
-export const captureThroughBroker = async ({ url, token }, plan, role = "LEGACY", { readOnly = false } = {}) => {
+const assertBrokerIsolated = (account, url) => {
+  if (typeof account !== "string" || account.toLowerCase() === os.userInfo().username.toLowerCase()) {
+    refuseCapture("CAPTURE_BROKER_NOT_ISOLATED", `The session broker at ${url} runs as '${account}', the account this engine runs as: it holds the session where the agent can read it. The operator runs it as a separate account (docs/session-broker.md).`);
+  }
+};
+
+const receiveObservations = async (response, url, onObservation) => {
+  let pending = "";
+  let connected = false;
+  for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
+    const lines = (pending + chunk).split("\n");
+    pending = lines.pop();
+    for (const line of lines) {
+      const frame = JSON.parse(line);
+      if (!connected) {
+        assertBrokerIsolated(frame.account, url);
+        connected = true;
+      } else if (frame.observation) {
+        await onObservation(frame.observation);
+      } else if (frame.error) {
+        throw Object.assign(new Error(frame.error.message), { validationCode: frame.error.code });
+      } else if (frame.operations) {
+        return frame;
+      }
+    }
+  }
+  return refuseCapture("CAPTURE_BROKER_FAILED", "The broker disconnected before finishing its read-only discovery observations.");
+};
+
+export const captureThroughBroker = async ({ url, token }, plan, role = "LEGACY", { readOnly = false, discoveryRoots, onObservation, signal } = {}) => {
+  if (discoveryRoots && (!readOnly || typeof onObservation !== "function")) {
+    invalid("Discovery observations require the read-only broker route and an observation consumer.");
+  }
   const response = await fetch(new URL(readOnly ? "/capture/read-only" : "/capture", url), {
-    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ role, plan }),
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ role, plan, discoveryRoots }), signal,
   }).catch(() => refuseCapture("CAPTURE_BROKER_UNAVAILABLE", `No session broker answers at ${url}; the operator starts it.`));
+  if (response.ok && discoveryRoots && response.headers.get("content-type") === "application/x-ndjson") {
+    return receiveObservations(response, url, onObservation);
+  }
   const body = await response.json().catch(() => ({}));
   if (readOnly && body.code === "BROKER_ROUTE_UNKNOWN") {
     refuseCapture("CAPTURE_BROKER_INCOMPATIBLE", `The session broker at ${url} has no read-only capture, so a discovery capture through it could send write requests; nothing was captured. The operator upgrades the broker to this release and restarts it (docs/session-broker.md).`);
   }
   if (!response.ok) throw Object.assign(new Error(body.message ?? `The session broker refused the capture (${body.code ?? response.status}).`), { validationCode: body.code ?? "CAPTURE_BROKER_FAILED" });
-  if (typeof body.account !== "string" || body.account.toLowerCase() === os.userInfo().username.toLowerCase()) {
-    refuseCapture("CAPTURE_BROKER_NOT_ISOLATED", `The session broker at ${url} runs as '${body.account}', the account this engine runs as: it holds the session where the agent can read it. The operator runs it as a separate account (docs/session-broker.md).`);
-  }
   const { account, ...captured } = body;
+  assertBrokerIsolated(account, url);
   return { ...captured, screenshot: Buffer.from(captured.screenshot, "base64") };
 };
 

@@ -205,7 +205,7 @@ import {
 import { pendingTargetDriftCandidates as slicesDriftCandidates } from "../../src/slices/index.mjs";
 import { parseRunArguments, runMigration } from "../../src/cli/run-migration.mjs";
 import { parseValidateArguments, runValidateCli } from "../../src/cli/validate-migration.mjs";
-import { createSession, handleMessage } from "../../src/mcp-server.mjs";
+import { createSession, handleMessage, serve } from "../../src/mcp-server.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsRoot = path.resolve(
@@ -24479,7 +24479,7 @@ test("MC2: the discovery instruction is legal at DISCOVER_LEGACY: no writing eng
   const skill = await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8");
   const discovery = skill.slice(skill.indexOf("- `DISCOVER_LEGACY` —"), skill.indexOf("- `VERIFY_SLICES` — drive the target runtime"));
   assert.ok(discovery.length > 500);
-  assert.match(discovery, /only\s+`migration_capture` call here is the write-free `mode: "discovery"`/);
+  assert.match(discovery, /only\s+`migration_capture` call here is the read-only browser `mode: "discovery"`/);
   assert.match(discovery, /`RUNTIME_OBSERVATION` evidence\s+item gets `status: "BLOCKED"`/);
   assert.doesNotMatch(discovery, /uiEvidenceLimitations|NOT_AVAILABLE/);
 });
@@ -24817,10 +24817,10 @@ browserTest("DISCOVER_LEGACY closes only after a complete, current engine discov
     assert.deepEqual(wrong.written, ["inventories/legacy-claims.json"]);
     await refuses(/DISCOVERY_CLAIMS_UNVERIFIED: The latest discovery check failed claim\(s\) APP-1, APP-2, APP-9/);
 
-    // Corrected inventory. 2. Partial coverage records nothing and leaves the contradiction in place.
+    // Corrected inventory. Partial coverage is durable and cannot close the checkpoint.
     await writeJson(inventoryPath, withHeader("Documento Sort"));
     const partial = await check(claims.slice(0, 2));
-    assert.deepEqual([partial.passed, partial.unchecked, partial.written], [["APP-1", "APP-2"], ["APP-9"], []]);
+    assert.deepEqual([partial.passed, partial.unchecked, partial.written], [["APP-1", "APP-2"], ["APP-9"], ["inventories/legacy-claims.json"]]);
     await refuses(/DISCOVERY_CLAIMS_(STALE|UNVERIFIED)/);
     // F2: the inventory changing while the browser checks refuses the publish; nothing is written.
     const racing = await readFile(inventoryPath);
@@ -24843,6 +24843,8 @@ browserTest("DISCOVER_LEGACY closes only after a complete, current engine discov
 
     const good = await check();
     assert.deepEqual([good.passed, good.failed, good.unchecked, good.written], [["APP-1", "APP-2", "APP-9"], [], [], ["inventories/legacy-claims.json"]]);
+    assert.deepEqual(good.reused, ["APP-1", "APP-2"]);
+    assert.equal(good.browserCaptures, 1);
     const recorded = await readFile(checkPath);
     const tampered = async (edit, pattern) => {
       const document = JSON.parse(recorded);
@@ -24872,6 +24874,31 @@ browserTest("DISCOVER_LEGACY closes only after a complete, current engine discov
     await writeFile(runtimeFile, "{not json");
     await refuses(/CAPTURE_AUTHORITY_MISMATCH: The runtime contract cannot authorize this capture/);
     await rm(path.dirname(runtimeFile), { recursive: true });
+
+    const versionOne = JSON.parse(recorded);
+    versionOne.version = 1;
+    versionOne.binding.legacyInventory = await fileIdentity(inventoryPath);
+    delete versionOne.binding.runtimeAuthority;
+    delete versionOne.binding.remediation;
+    await writeJson(checkPath, versionOne);
+    await validateResumableMigration({ ...(await resolutionFor(fixture)), moduleName: "auth", step: "DISCOVER_LEGACY" });
+    const refresh = await captureFrame(fixture, { mode: "discovery", refresh: true, origin: server.origin,
+      route: "/remissions", viewport: CAPTURE_VIEWPORT, claims: [claims[2]] });
+    assert.deepEqual(refresh.unchecked, ["APP-1", "APP-2"]);
+    await refuses(/DISCOVERY_CLAIMS_UNVERIFIED: Unchecked claim\(s\)/);
+    await writeFile(checkPath, recorded);
+
+    const requirements = await readFile(fixture.specPath);
+    await writeFile(fixture.specPath, Buffer.concat([requirements, Buffer.from("\nRequired text changed.\n")]));
+    await refuses(/OpenSpec authority changed/);
+    await writeFile(fixture.specPath, requirements);
+
+    const sourceRevision = (await gitRevision(fixture.legacyRoot)).revision;
+    await writeFile(path.join(fixture.legacyRoot, "auth/marker.txt"), "a new committed legacy revision\n");
+    await execFileAsync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.test",
+      "commit", "-qm", "move the legacy source", "--", "legacy/auth/marker.txt"], { cwd: fixture.root });
+    await refuses(/DISCOVERY_CLAIMS_STALE: The legacy source revision changed/);
+    await execFileAsync("git", ["reset", "--keep", sourceRevision], { cwd: fixture.root });
 
     // 6. The complete, current check closes discovery without reaching implementation.
     await advance(fixture);
@@ -24905,6 +24932,216 @@ browserTest("DISCOVER_LEGACY closes only after a complete, current engine discov
     assert.deepEqual((await closings()).map((event) => event.discoveryCheck), [pin, again.artifactHashes["inventories/legacy-claims.json"]]);
     assert.notEqual(pin, again.artifactHashes["inventories/legacy-claims.json"]);
   } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
+const prepareDiscoveryFixture = async (fixture, legacy = FORMAT20_LEGACY) => {
+  const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+  const classification = { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] };
+  await driveTo(fixture, "NONE", advance, { bootstrap: { currentFormat: true } });
+  await completeStepDoc(fixture, "DISCOVER_LEGACY");
+  await writeJson(path.join(fixture.migrationRoot, "inventories/module-classification.json"), classification);
+  await writeJson(path.join(fixture.migrationRoot, "inventories/legacy.json"), legacy);
+};
+
+browserTest("discovery saves completed browser observations before a CLI capture is killed", async () => {
+  let reached;
+  const holding = new Promise((resolve) => { reached = resolve; });
+  const server = await startCaptureServer({ onRequest: (_method, route) => {
+    if (route !== "/hold") return;
+    reached();
+    return true;
+  } });
+  const fixture = await createFixture();
+  let child;
+  let exit;
+  try {
+    await prepareDiscoveryFixture(fixture);
+    const request = { mode: "discovery", origin: server.origin, route: "/auth/sign-in", viewport: CAPTURE_VIEWPORT,
+      navigationTimeoutMs: 120000, claims: [
+      { appearanceClaimId: "APP-1" },
+      { appearanceClaimId: "APP-2", route: "/hold", interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" } },
+    ] };
+    const requestFile = path.join(fixture.root, "capture.json");
+    await writeJson(requestFile, request);
+    const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+    child = spawn(process.execPath, [cli, "auth", "--capture", requestFile], { cwd: fixture.root, stdio: ["ignore", "ignore", "inherit"] });
+    exit = new Promise((resolve) => child.once("exit", resolve));
+    await Promise.race([holding, exit.then(() => { throw new Error("Capture exited before its second navigation."); })]);
+    const status = () => getMigrationStatus({ ...fixture, moduleName: "auth" });
+    const active = await status();
+    assert.deepEqual(active.progress.discoveryClaims, { state: "RUNNING", completed: 1, total: 2, passed: 1, failed: 0, remaining: 1 });
+    assert.match(active.progressChecklist, /claims: RUNNING  completed=1\/2  passed=1  failed=0  remaining=1/);
+    await assert.rejects(captureFrame(fixture, request), /CAPTURE_CONFLICT: .*holds the lock/);
+    await assert.rejects(advance(fixture), /DISCOVERY_CAPTURE_ACTIVE/);
+    child.kill("SIGKILL");
+    await exit;
+    assert.equal((await status()).progress.discoveryClaims.state, "PENDING");
+    await assert.rejects(advance(fixture), /DISCOVERY_CLAIMS_UNVERIFIED: Unchecked claim\(s\): APP-2/);
+    const timedOut = await captureFrame(fixture, { ...request, claims: [request.claims[1]], navigationTimeoutMs: 1000 });
+    assert.deepEqual(timedOut.failed.map(({ code }) => code), ["CAPTURE_NAVIGATION_TIMEOUT"]);
+    assert.equal((await status()).progress.discoveryClaims.state, "BLOCKED");
+    request.claims[1].route = "/auth/sign-in";
+    const resumed = await captureFrame(fixture, request);
+    assert.deepEqual(resumed.reused, ["APP-1"]);
+    assert.equal(resumed.browserCaptures, 1);
+    assert.equal(resumed.discoveryClaims.remaining, 0);
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exit;
+    await server.close();
+    await fixture.cleanup();
+  }
+});
+
+const volumeInventory = () => ({
+  ...FORMAT20_LEGACY,
+  uiBehaviors: Array.from({ length: 9 }, (_, group) => {
+    const owner = FORMAT20_LEGACY.uiBehaviors[0];
+    const claims = Array.from({ length: 10 }, (_, index) => {
+      const id = group * 10 + index;
+      return { id: `VOL-${id}`, state: "DEFAULT", role: "button", name: `Item ${id}`, locator: `#volume-${id}` };
+    });
+    return {
+      ...owner, id: `VUI-${group}`, kind: "PRESENTATION", interactions: [],
+      requiredAppearance: claims,
+      requiredObservations: [{ id: `VOBS-${group}`, state: "DEFAULT", role: "button", name: claims[0].name,
+        predicate: "visibility", expected: true }],
+    };
+  }),
+});
+
+browserTest("discovery refresh resumes 20 passing claims in batches of eight after interruption", async () => {
+  let hold = false;
+  let reached;
+  const holding = new Promise((resolve) => { reached = resolve; });
+  const server = await startCaptureServer({ onRequest: (_method, route) => {
+    if (!hold || route !== "/discovery-volume-missing") return;
+    reached();
+    return true;
+  } });
+  const fixture = await createFixture();
+  let child;
+  let exit;
+  try {
+    const legacy = volumeInventory();
+    legacy.uiBehaviors = legacy.uiBehaviors.slice(0, 2);
+    await prepareDiscoveryFixture(fixture, legacy);
+    const ids = legacy.uiBehaviors.flatMap((owner) => owner.requiredAppearance.map(({ id }) => id));
+    const request = { mode: "discovery", origin: server.origin, route: "/discovery-volume", viewport: CAPTURE_VIEWPORT,
+      navigationTimeoutMs: 120000, batchSize: 8, claims: ids.map((appearanceClaimId, index) => ({
+        appearanceClaimId, ...(index >= 2 ? { route: "/discovery-volume-missing" } : {}),
+      })) };
+    for (const passed of [8, 16, 20]) {
+      assert.equal((await captureFrame(fixture, request)).discoveryClaims.passed, passed);
+    }
+
+    request.refresh = true;
+    hold = true;
+    const requestFile = path.join(fixture.root, "refresh.json");
+    await writeJson(requestFile, request);
+    const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+    child = spawn(process.execPath, [cli, "auth", "--capture", requestFile], { cwd: fixture.root, stdio: ["ignore", "ignore", "inherit"] });
+    exit = new Promise((resolve) => child.once("exit", resolve));
+    await Promise.race([holding, exit.then(() => { throw new Error("Refresh exited before its second navigation."); })]);
+    await assert.rejects(advance(fixture), /DISCOVERY_CAPTURE_ACTIVE/);
+    child.kill("SIGKILL");
+    await exit;
+    hold = false;
+
+    const status = await getMigrationStatus({ ...fixture, moduleName: "auth" });
+    assert.deepEqual(status.progress.discoveryClaims, { state: "PENDING", completed: 2, total: 20, passed: 2, failed: 0, remaining: 18 });
+    await assert.rejects(advance(fixture), /DISCOVERY_CLAIMS_UNVERIFIED/);
+    const resumed = [];
+    for (let batch = 0; batch < 3; batch += 1) resumed.push(await captureFrame(fixture, request));
+    assert.deepEqual(resumed.map((result) => result.discoveryClaims.passed), [10, 18, 20]);
+    for (const [index, [reused, passed]] of [[2, 10], [10, 18], [18, 20]].entries()) {
+      const result = resumed[index];
+      assert.deepEqual([result.reused, result.deferred, result.failed], [ids.slice(0, reused), ids.slice(passed), []]);
+    }
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exit;
+    await server.close();
+    await fixture.cleanup();
+  }
+});
+
+browserTest("90 discovery claims complete through bounded MCP and CLI calls with failed-claim recovery", async () => {
+  let navigations = 0;
+  const server = await startCaptureServer({ onRequest: (_method, route) => {
+    if (route.startsWith("/discovery-volume")) navigations += 1;
+  } });
+  const fixture = await createFixture();
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const serving = serve({ input, output });
+  try {
+    const legacy = volumeInventory();
+    await prepareDiscoveryFixture(fixture, legacy);
+    const all = legacy.uiBehaviors.flatMap((owner) => owner.requiredAppearance).map(({ id }, index) => ({
+      appearanceClaimId: id, ...(index >= 70 ? { route: "/discovery-volume-missing" } : {}),
+    }));
+    const request = { mode: "discovery", origin: server.origin, route: "/discovery-volume", viewport: CAPTURE_VIEWPORT,
+      timeoutMs: 1000, navigationTimeoutMs: 15000, batchSize: 16, claims: all };
+    const frames = output[Symbol.asyncIterator]();
+    let id = 0;
+    const mcpCapture = async (request) => {
+      input.write(`${JSON.stringify({ jsonrpc: "2.0", id: ++id, method: "tools/call",
+        params: { name: "migration_capture", arguments: { cwd: fixture.root, module: "auth", request } } })}\n`);
+      const { result } = JSON.parse((await frames.next()).value);
+      assert.equal(result.isError, undefined, JSON.stringify(result));
+      return result.structuredContent;
+    };
+    const initial = await mcpCapture(request);
+    assert.deepEqual(initial.discoveryClaims, { state: "PENDING", completed: 16, total: 90, passed: 16, failed: 0, remaining: 74 });
+    assert.equal(initial.deferred.length, 74);
+    assert.ok(initial.browserCaptures < initial.passed.length);
+    await assert.rejects(advance(fixture), /DISCOVERY_CLAIMS_UNVERIFIED/);
+    let first = initial;
+    for (let i = 0; first.discoveryClaims.completed < 90 && i < 6; i += 1) first = await mcpCapture(request);
+    assert.deepEqual(first.discoveryClaims, { state: "BLOCKED", completed: 90, total: 90, passed: 70, failed: 20, remaining: 20 });
+    await assert.rejects(advance(fixture), /DISCOVERY_CLAIMS_UNVERIFIED: The latest discovery check failed/);
+    const retryIds = new Set();
+    for (let i = 0; i < 2; i += 1) {
+      const retried = await mcpCapture(request);
+      assert.equal(retried.reused.length, 70);
+      for (const { appearanceClaimId } of retried.failed) retryIds.add(appearanceClaimId);
+    }
+    assert.equal(retryIds.size, 20, "failed claims beyond the first batch also get retried");
+
+    // Changing only a non-UI behavior and the failing capture routes keeps unrelated observations.
+    legacy.behaviors.push({ ...legacy.behaviors[0], id: "LB-OTHER" });
+    await writeJson(path.join(fixture.migrationRoot, "inventories/legacy.json"), legacy);
+    await assert.rejects(advance(fixture), /DISCOVERY_CLAIMS_STALE/);
+    const capturesBeforeRetry = navigations;
+    request.claims = all.map(({ appearanceClaimId }) => ({ appearanceClaimId }));
+    const requestFile = path.join(fixture.root, "capture.json");
+    await writeJson(requestFile, request);
+    const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+    const cliCapture = async () => JSON.parse((await execFileAsync(process.execPath, [cli, "auth", "--capture", requestFile], { cwd: fixture.root })).stdout);
+    const retry = await cliCapture();
+    assert.equal(retry.reused.length, 70);
+    assert.equal(retry.deferred.length, 4);
+    const complete = await mcpCapture(request);
+    assert.equal(complete.reused.length, 86);
+    assert.equal(complete.discoveryClaims.remaining, 0);
+    assert.ok(navigations - capturesBeforeRetry <= 5);
+    const noOp = await cliCapture();
+    assert.equal(noOp.reused.length, 90);
+    assert.deepEqual(noOp.written, []);
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    input.end();
+    await serving;
+    output.end();
     await fixture.cleanup();
     await server.close();
   }

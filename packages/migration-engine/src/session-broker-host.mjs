@@ -26,7 +26,7 @@ import path from "node:path";
 
 import { assertPlainObject, execFileAsync, isPlainObject } from "./shared/index.mjs";
 import { atomicWrite, readJson, readOptionalJson } from "./store/index.mjs";
-import { assertSessionUsable, AUTH_PATH, captureInBrowser, parseBrokeredPlan, refuseCapture } from "./visual/index.mjs";
+import { assertSessionUsable, AUTH_PATH, captureInBrowser, DISCOVERY_ROOT_LIMIT, parseBrokeredPlan, refuseCapture } from "./visual/index.mjs";
 
 const ROLES = ["LEGACY", "TARGET"];
 const BODY_LIMIT = 1_048_576;
@@ -55,7 +55,7 @@ const sessionStatus = async (config, role) => {
 
 const within = (pathname, routes) => routes.some((prefix) => pathname === prefix || pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
 
-const capture = async (config, { role, plan }, writes = true) => {
+const capture = async (config, { role, plan, discoveryRoots }, writes = true, options) => {
   const application = applicationOf(config, role);
   const checked = parseBrokeredPlan(plan);
   if (checked.origin !== application.origin) refuseCapture("CAPTURE_ORIGIN_VIOLATION", `Role ${role} is served at ${application.origin}, not ${checked.origin}.`);
@@ -63,10 +63,19 @@ const capture = async (config, { role, plan }, writes = true) => {
   const { state } = await sessionStatus(config, role);
   if (state === "NONE") refuseCapture("CAPTURE_AUTH_REQUIRED", `No session is stored for ${role}; the operator signs in through the broker once.`);
   if (state === "EXPIRED") refuseCapture("CAPTURE_SESSION_EXPIRED", `The stored ${role} session has expired; the operator signs in through the broker again.`);
+  if (discoveryRoots !== undefined &&
+      (writes || role !== "LEGACY" || checked.mode !== "claim" || !Array.isArray(discoveryRoots) ||
+        discoveryRoots.length === 0 || discoveryRoots.length > DISCOVERY_ROOT_LIMIT ||
+        discoveryRoots[0] !== checked.rootLocator ||
+        (discoveryRoots.length > 1 && (checked.setup.length > 0 || checked.interaction)) ||
+        !discoveryRoots.every((locator) => checked.controls.some((control) => control.locator === locator)))) {
+    refuseCapture("BROKER_REQUEST_INVALID", "Read-only discovery roots must be listed controls on one LEGACY claim state, with no actions when sharing a page.");
+  }
   const { screenshot, image, ...report } = await captureInBrowser({
     ...checked, role, storageState: sessionFile(config, role), browser: config.browser,
     guard: { routes: application.routes, allowWrites: writes && application.allowWrites === true },
-  });
+  }, discoveryRoots ? { discoveryRoots, ...options } : undefined);
+  if (discoveryRoots) return { ...report, account: os.userInfo().username };
   return { ...report, account: os.userInfo().username, image: { width: image.width, height: image.height }, screenshot: screenshot.toString("base64") };
 };
 
@@ -102,7 +111,7 @@ const status = async (config) => Object.fromEntries(await Promise.all(
 ));
 
 // A separate route, not a request field: an older broker 404s it before any browser starts.
-const ROUTES = { "/status": status, "/capture": capture, "/capture/read-only": (config, body) => capture(config, body, false), "/sign-in": signIn };
+const ROUTES = { "/status": status, "/capture": (config, body) => capture(config, body), "/capture/read-only": (config, body, options) => capture(config, body, false, options), "/sign-in": signIn };
 
 const readBody = (request) => new Promise((resolve, reject) => {
   const chunks = [];
@@ -131,15 +140,35 @@ const serveBroker = async (config) => {
     if (!timingSafeEqual(offered, config.clientToken)) return send(401, { code: "BROKER_CLIENT_UNAUTHORIZED" });
     const route = request.method === "POST" ? ROUTES[request.url] : undefined;
     if (!route) return send(404, { code: "BROKER_ROUTE_UNKNOWN" });
+    const frame = (value) => response.write(`${JSON.stringify(value)}\n`);
     try {
       const body = JSON.parse((await readBody(request)) || "{}");
       if (!isPlainObject(body)) refuseCapture("BROKER_REQUEST_INVALID", "The request must be a JSON object.");
-      return send(200, await route(config, body));
+      const abort = new AbortController();
+      response.once("close", () => abort.abort());
+      const result = await route(config, body, {
+        signal: abort.signal,
+        onObservation: (observation) => {
+          abort.signal.throwIfAborted();
+          if (!response.headersSent) {
+            response.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
+            frame({ account: os.userInfo().username });
+          }
+          frame({ observation });
+        },
+      });
+      if (response.destroyed) return;
+      if (!response.headersSent) return send(200, result);
+      frame({ operations: result.operations });
+      response.end();
     } catch (error) {
-      if (error.validationCode) return send(422, { code: error.validationCode, message: error.message });
-      // An unexpected fault stays here: its text may quote anything the browser saw.
-      process.stderr.write(`session broker: ${error.stack ?? error}\n`);
-      return send(500, { code: "BROKER_FAILED" });
+      if (response.destroyed) return;
+      const fault = error.validationCode ? { code: error.validationCode, message: error.message }
+        : { code: "BROKER_FAILED", message: "The session broker could not finish the capture." };
+      if (!error.validationCode) process.stderr.write(`session broker: ${error.stack ?? error}\n`);
+      if (!response.headersSent) return send(error.validationCode ? 422 : 500, fault);
+      frame({ error: fault });
+      response.end();
     }
   });
   await new Promise((resolve, reject) => {

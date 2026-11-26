@@ -265,6 +265,23 @@ const reclaimIfGone = async (lock) => {
   return null;
 };
 
+/** A read-only projection for status and gates. An unprovable owner is held. */
+export const moduleLockHeld = async (targetRoot, name) => {
+  const lock = lockPathFor(targetRoot, name);
+  const entries = await readdir(lock).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    if (error.code === "ENOTDIR") return null;
+    throw error;
+  });
+  if (entries === null) return true;
+  const entry = entries.find((item) => OWNER_ENTRY.test(item));
+  if (!entry) return entries.length > 1 || entries.some((item) => !TOKEN_ENTRY.test(item));
+  const uuid = entry.slice(0, -5);
+  if (!entries.every((item) => item === entry || item === `${uuid}.fifo`)) return true;
+  const owner = await readOwner(path.join(lock, entry), uuid);
+  return (await verdictFor(lock, owner)) !== "GONE";
+};
+
 /**
  * The refusal names why: LOCK_HELD (a live owner, or a lock that keeps being
  * re-taken), LOCK_OWNER_UNKNOWN (its token or entry proves nothing),

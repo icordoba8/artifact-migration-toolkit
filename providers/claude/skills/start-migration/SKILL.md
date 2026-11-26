@@ -1126,14 +1126,13 @@ Full JSON schemas for every artifact below live in
    `references/discovery-checklist.md`. Complete
    `steps/02-discover-legacy.md` and `inventories/legacy.json`.
    Before closing, when the legacy app is running, check every
-   `requiredAppearance` claim in one `migration_capture` call with
+   `requiredAppearance` claim with `migration_capture` using
    `{mode: "discovery", claims: [...]}` (see **Legacy captures are the
-   engine's**). Correct every reported failure in one edit of
-   `inventories/legacy.json`, then check again until `failed` and `unchecked`
-   are both empty. A claim that fails here fails at `VERIFY_SLICES`. The
-   engine refuses to close `DISCOVER_LEGACY` with `DISCOVERY_CLAIMS_UNVERIFIED`
-   or `DISCOVERY_CLAIMS_STALE` until one complete run against the current
-   inventory passes; an unreachable runtime never satisfies it.
+   engine's**). Repeat the request for deferred claims or submit smaller
+   subsets. Correct reported failures in `inventories/legacy.json` and check
+   again. Use `discoveryClaims.remaining` to track pending work. The engine
+   refuses to close `DISCOVER_LEGACY` until every claim has valid evidence
+   bound to the current inventory and authority.
 3. **`DISCOVERY_COMPLETENESS`** — prove the inventory is complete, not just
    internally consistent. Recompute the canonical boundary with the explicitly
    recorded scanner version and revalidate every legacy evidence citation;
@@ -1362,7 +1361,7 @@ current checkpoint is missing.
   (`showToolbar: false`, `showPagination: false`, `compactMode: true`), not
   "a table exists". Observe the running legacy app through the registered
   Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only). The only
-  `migration_capture` call here is the write-free `mode: "discovery"` claim
+  `migration_capture` call here is the read-only browser `mode: "discovery"` claim
   check before closing (it writes only the engine's own
   `inventories/legacy-claims.json` record, never the app); its writing modes are legal only at `ASSESS_TARGET`
   (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuse here.
@@ -1561,20 +1560,24 @@ Playwright MCP browser holding a session would let `browser_evaluate` read it.
   interaction's trigger when no claim pins it. `result` and the interaction's
   `actual`/`outcome` stay yours.
 - Discovery check at any checkpoint, required before closing `DISCOVER_LEGACY`:
-  `{mode: "discovery", origin, route, viewport, ..., claims:
+  `{mode: "discovery", origin, route, viewport, batchSize?, refresh?, claims:
   [{appearanceClaimId, route?, setup?, interaction?}]}`. Top-level fields are
-  shared; each item is one LEGACY claim request without `role`. It captures
-  each claim as `VERIFY_SLICES` will, judges it as `VERIFY_SLICES` judges the
-  TARGET half (every pinned claim of the same state shown together, before and
-  after its interaction, plus its required observations and scroll contract),
-  and returns `passed`, `failed` (each with `code` and `message`) and
-  `unchecked`. Claims that cannot be shown at once (opening a menu hides an
-  initial button) belong in separate states. At `DISCOVER_LEGACY` a run with
-  every pinned claim passed records `inventories/legacy-claims.json`, bound to
-  this checkpoint and these inventory bytes, and closing pins it; any failure
-  replaces it with a contradiction. `origin` must be the runtime contract's
-  LEGACY origin when one is configured. Never write or edit that file. List every pinned claim and fix all failures in
-  one edit. Prefer `getByRole('<role>', { name: '<name>', exact: true })`
+  shared. Each item is a LEGACY claim request. The engine judges the pinned
+  controls, interactions and scroll contract as `VERIFY_SLICES` will.
+  At `DISCOVER_LEGACY` observations are persisted in
+  `inventories/legacy-claims.json` as each claim finishes. Calls check up to
+  eight pending claims by default (`batchSize` accepts 1–16). Repeat the
+  request to resume or pass an explicit subset. `reused` lists claims already
+  proven under the same plan and authority, `failed` gives claim codes and
+  messages, and `deferred` lists requested work left after this batch. Use
+  `refresh: true` on an explicit subset to reobserve after a known runtime
+  change. `navigationTimeoutMs` sets the navigation timeout separately from
+  `timeoutMs`, which controls locators and actions. `migration_status` reports
+  durable progress. Closure validates and pins full coverage under the current
+  inventory and authority. Use the runtime contract's LEGACY origin and let the
+  engine manage the evidence file.
+  Claims that cannot be shown together belong in separate states.
+  Prefer `getByRole('<role>', { name: '<name>', exact: true })`
   locators. Current behavior: the claim's `name` is matched against the
   accessible name computed with hidden content included, so a column header
   shown as "Zona" that holds hidden "Sort" icon labels is pinned as

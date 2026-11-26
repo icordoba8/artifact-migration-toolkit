@@ -78,6 +78,7 @@ export {
   assertSessionUsable,
   AUTH_PATH,
   captureThroughBroker,
+  DISCOVERY_ROOT_LIMIT,
   parseBrokeredPlan,
   refuseCapture,
   targetAppearanceRow,
