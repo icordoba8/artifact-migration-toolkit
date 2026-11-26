@@ -202,7 +202,7 @@ const prepare = async ({ targetRoot, moduleName, request, roots }) => {
 };
 
 /* Any checkpoint: each listed claim of the current legacy inventory, planned as VERIFY_SLICES plans its LEGACY half. */
-const discoveryPlan = async ({ legacy, request }) => {
+const discoveryPlan = async ({ state, root, legacy, request }) => {
   const pinned = new Map();
   for (const owner of legacy.uiBehaviors ?? []) {
     for (const claim of owner?.requiredAppearance ?? []) {
@@ -223,6 +223,7 @@ const discoveryPlan = async ({ legacy, request }) => {
       return { item, claim, owner, plan: claimCapturePlan(item, owner, claim) };
     }),
     unchecked: [...pinned.keys()].filter((id) => !listed.has(id)),
+    binding: await discoveryBinding(root, state),
   };
 };
 
@@ -238,6 +239,7 @@ const RUN_REFUSALS = new Set(["CAPTURE_BROWSER_UNAVAILABLE", "CAPTURE_AUTH_REQUI
 const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
   const failed = [];
   const passed = [];
+  const observations = [];
   let broker;
   // ponytail: one browser per claim, serially; reuse one browser if a large inventory makes this slow.
   for (const { item, claim, owner, plan, refusal } of prepared.checks) {
@@ -252,11 +254,14 @@ const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
       if (!contract) refused(`'${owner.id}' has no scrollContracts row for state '${claim.state}'.`);
       compareScrollContract(observed, observed, contract, false);
       passed.push(claim.id);
+      observations.push({ appearanceClaimId: claim.id, plan, observation: observed.observation });
     } catch (error) {
       if (RUN_REFUSALS.has(error.validationCode)) throw error;
       failed.push({ appearanceClaimId: item.appearanceClaimId, code: error.validationCode ?? error.message.match(/^[A-Z_]+(?=:)/)?.[0] ?? "CAPTURE_FAILED", message: error.message });
     }
   }
+  const complete = failed.length === 0 && prepared.unchecked.length === 0;
+  const written = await recordDiscoveryCheck({ targetRoot, prepared, parsed, resolved, observations: complete ? observations : null, contradicted: failed.length > 0 });
   return {
     module: resolved.canonical,
     step: prepared.state.currentStep,
@@ -264,11 +269,119 @@ const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
     passed,
     failed,
     unchecked: prepared.unchecked,
-    written: [],
+    written,
     next: failed.length > 0
       ? `Correct every failed claim in ${initialArtifacts.legacyInventory}, then check again.`
-      : prepared.unchecked.length > 0 ? "Check the unchecked claims too." : "Every pinned claim resolves as VERIFY_SLICES will capture it.",
+      : prepared.unchecked.length > 0 ? "Check the unchecked claims too; DISCOVER_LEGACY closes only after one run checks every pinned claim."
+        : `Every pinned claim resolves as VERIFY_SLICES will capture it; ${DISCOVERY_CLAIMS_FILE} binds this run to the current inventory.`,
   };
+};
+
+/** The engine's record of one complete discovery check; DISCOVER_LEGACY closes only against it. */
+export const DISCOVERY_CLAIMS_FILE = "inventories/legacy-claims.json";
+
+/** What a discovery check is valid for: this checkpoint revision, these inventory bytes, this legacy authority. */
+const discoveryBinding = async (root, state) => ({
+  revision: state.revision,
+  legacyInventory: await fileIdentity(path.join(root, initialArtifacts.legacyInventory)),
+  legacyRevision: state.legacyRevision?.revision ?? null,
+  requirementsAuthority: state.requirementsAuthority ?? null,
+});
+
+/**
+ * Only a DISCOVER_LEGACY run that checked every pinned claim with none failing
+ * is recorded; a run with a failed claim removes any earlier record, so a pass
+ * the runtime has since contradicted cannot close discovery. Re-checked under
+ * the lock; nothing is written when the record moved.
+ */
+const recordDiscoveryCheck = async ({ targetRoot, prepared, parsed, resolved, observations, contradicted }) => {
+  if (prepared.state.currentStep !== "DISCOVER_LEGACY" || (!observations && !contradicted)) return [];
+  return withModuleLock(targetRoot, resolved.canonical, async () => {
+    const { state, root } = await readState(targetRoot, resolved.canonical);
+    const binding = await discoveryBinding(root, state);
+    if (JSON.stringify(binding) !== JSON.stringify(prepared.binding)) {
+      refuseCapture("CAPTURE_CONFLICT", "The record or its legacy inventory moved while the browser was checking; check again against the current inventory.");
+    }
+    const file = path.join(root, DISCOVERY_CLAIMS_FILE);
+    if (!observations) {
+      if (await entryExists(file)) await removeDurably(targetRoot, file);
+      return [];
+    }
+    await replaceDocument(targetRoot, file, {
+      version: 1,
+      producer: "artifact-migration-capture",
+      checkedAt: new Date().toISOString(),
+      binding,
+      capture: { origin: parsed.origin, session: parsed.session === true, storageState: parsed.storageState !== undefined },
+      claims: observations.map(({ appearanceClaimId, plan, observation }) => ({
+        appearanceClaimId, route: plan.route, viewport: plan.viewport, colorScheme: plan.colorScheme, observation })),
+    });
+    return [DISCOVERY_CLAIMS_FILE];
+  });
+};
+
+const unverified = (code, message, details) => {
+  throw Object.assign(new Error(`${code}: ${message} Run migration_capture with mode "discovery" listing every pinned claim, correct each failed claim in ${initialArtifacts.legacyInventory}, then close DISCOVER_LEGACY again. Nothing was written.`),
+    { validationCode: code, discoveryClaims: details });
+};
+
+/**
+ * The DISCOVER_LEGACY closure gate for a format-20 record that pins appearance
+ * claims. The pass is never read from the record: each claim's verdict is
+ * re-derived from the observation the engine captured, against the claim and
+ * scroll contract in the inventory being closed.
+ */
+export const assertDiscoveryClaimsVerified = async (root, state, legacy) => {
+  if (!usesUiCoverage(state) || state.currentStep !== "DISCOVER_LEGACY") return;
+  const expected = new Map();
+  for (const owner of legacy?.uiBehaviors ?? []) {
+    for (const claim of owner?.requiredAppearance ?? []) {
+      if (expected.has(claim?.id)) unverified("DISCOVERY_CLAIMS_INVALID", `Appearance claim '${claim?.id}' is repeated in ${initialArtifacts.legacyInventory}.`, { duplicate: [claim?.id] });
+      expected.set(claim?.id, { owner, claim });
+    }
+  }
+  // A non-UI module pins no claim and closes exactly as before.
+  if (expected.size === 0) return;
+  const all = [...expected.keys()];
+  const file = path.join(root, DISCOVERY_CLAIMS_FILE);
+  if (!(await fileExists(file))) {
+    unverified("DISCOVERY_CLAIMS_UNVERIFIED", `${all.length} pinned appearance claim(s) have no successful discovery check (${DISCOVERY_CLAIMS_FILE} is absent).`, { missing: all });
+  }
+  const record = await readJson(file, DISCOVERY_CLAIMS_FILE).catch(() => null);
+  if (!isPlainObject(record) || record.version !== 1 || !isPlainObject(record.binding) || !Array.isArray(record.claims)) {
+    unverified("DISCOVERY_CLAIMS_INVALID", `${DISCOVERY_CLAIMS_FILE} is not an engine discovery check.`, {});
+  }
+  const binding = await discoveryBinding(root, state);
+  const moved = Object.keys(binding).filter((key) => JSON.stringify(record.binding[key] ?? null) !== JSON.stringify(binding[key]));
+  if (moved.length > 0) {
+    unverified("DISCOVERY_CLAIMS_STALE", `${DISCOVERY_CLAIMS_FILE} was checked against a different ${moved.join(", ")} than the one being closed.`, { stale: moved });
+  }
+  const seen = new Set();
+  const failed = [];
+  for (const row of record.claims) {
+    const id = row?.appearanceClaimId;
+    if (seen.has(id)) unverified("DISCOVERY_CLAIMS_INVALID", `${DISCOVERY_CLAIMS_FILE} lists claim '${id}' more than once.`, { duplicate: [id] });
+    seen.add(id);
+    const { owner, claim } = expected.get(id) ?? {};
+    if (!claim) unverified("DISCOVERY_CLAIMS_STALE", `${DISCOVERY_CLAIMS_FILE} checked claim '${id}', which ${initialArtifacts.legacyInventory} does not pin.`, { unknown: [id] });
+    try {
+      const shown = (row.observation?.controls ?? []).some((control) => control?.role === claim.role && control.name === claim.name &&
+        control.locator === claim.locator && control.present === true && control.visible === true);
+      if (!shown) throw new Error(`the check did not observe ${claim.role} '${claim.name}' at '${claim.locator}'`);
+      const contract = (owner.scrollContracts ?? []).find((item) => item?.state === claim.state);
+      if (!contract) throw new Error(`'${owner.id}' has no scrollContracts row for state '${claim.state}'`);
+      compareScrollContract({ observation: row.observation }, { observation: row.observation }, contract, false);
+    } catch (error) {
+      failed.push({ appearanceClaimId: id, message: error.message });
+    }
+  }
+  const missing = all.filter((id) => !seen.has(id));
+  if (missing.length > 0 || failed.length > 0) {
+    unverified("DISCOVERY_CLAIMS_UNVERIFIED", [
+      missing.length > 0 && `Unchecked claim(s): ${missing.join(", ")}.`,
+      failed.length > 0 && `Failed claim(s): ${failed.map((item) => `${item.appearanceClaimId} (${item.message})`).join("; ")}.`,
+    ].filter(Boolean).join(" "), { missing, failed });
+  }
 };
 
 /** Write files as new, newest last; on any failure remove exactly what this call wrote. */

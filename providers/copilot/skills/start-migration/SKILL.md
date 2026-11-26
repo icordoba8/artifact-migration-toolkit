@@ -1129,7 +1129,10 @@ Full JSON schemas for every artifact below live in
    `{mode: "discovery", claims: [...]}` (see **Legacy captures are the
    engine's**). Correct every reported failure in one edit of
    `inventories/legacy.json`, then check again until `failed` and `unchecked`
-   are both empty. A claim that fails here fails at `VERIFY_SLICES`.
+   are both empty. A claim that fails here fails at `VERIFY_SLICES`. The
+   engine refuses to close `DISCOVER_LEGACY` with `DISCOVERY_CLAIMS_UNVERIFIED`
+   or `DISCOVERY_CLAIMS_STALE` until one complete run against the current
+   inventory passes; an unreachable runtime never satisfies it.
 3. **`DISCOVERY_COMPLETENESS`** — prove the inventory is complete, not just
    internally consistent. Recompute the canonical boundary with the explicitly
    recorded scanner version and revalidate every legacy evidence citation;
@@ -1359,7 +1362,8 @@ current checkpoint is missing.
   "a table exists". Observe the running legacy app through the registered
   Playwright MCP (`browser_navigate`, `browser_snapshot`; read-only). The only
   `migration_capture` call here is the write-free `mode: "discovery"` claim
-  check before closing; its writing modes are legal only at `ASSESS_TARGET`
+  check before closing (it writes only the engine's own
+  `inventories/legacy-claims.json` record, never the app); its writing modes are legal only at `ASSESS_TARGET`
   (`legacy-runtime`) and `VERIFY_SLICES` (format 20+ claims) and refuse here.
   Preflight configuration as soon as bounded source evidence identifies visible
   behavior, before authoring runtime observations or requesting the browser.
@@ -1560,8 +1564,10 @@ Playwright MCP browser holding a session would let `browser_evaluate` read it.
   [{appearanceClaimId, route?, setup?, interaction?}]}`. Top-level fields are
   shared; each item is one LEGACY claim request without `role`. It captures
   each claim as `VERIFY_SLICES` will, holds it to its state's scroll contract,
-  writes nothing, and returns `passed`, `failed` (each with `code` and
-  `message`) and `unchecked`. List every pinned claim and fix all failures in
+  and returns `passed`, `failed` (each with `code` and `message`) and
+  `unchecked`. At `DISCOVER_LEGACY` a run with every pinned claim passed
+  records `inventories/legacy-claims.json`, bound to this checkpoint and these
+  inventory bytes; any failure removes it. Never write or edit that file. List every pinned claim and fix all failures in
   one edit. Prefer `getByRole('<role>', { name: '<name>', exact: true })`
   locators. Current behavior: the claim's `name` is matched against the
   accessible name computed with hidden content included, so a column header

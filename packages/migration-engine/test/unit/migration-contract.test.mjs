@@ -1117,6 +1117,7 @@ const driveTo = async (fixture, stopAfter, step = advance, overrides = {}) => {
       ),
       overrides.classification ?? MODULE_CLASSIFICATION,
     );
+    await overrides.discover?.(fixture);
     await step(fixture);
   }
   if (wanted >= 1) {
@@ -24496,8 +24497,18 @@ const FORMAT20_LEGACY = {
   })),
 };
 
-// The observed defect: discovery pinned a claim locator the legacy runtime never
-// shows, and the capture refuses it only at VERIFY_SLICES. Before any slice is
+// The engine's own discovery check of every claim the written inventory pins, as an agent runs it before closing DISCOVER_LEGACY.
+const discoverAt = (server, route = "/discovery") => async (fixture) => {
+  const legacy = await readJson(path.join(fixture.migrationRoot, "inventories/legacy.json"));
+  const claims = legacy.uiBehaviors.flatMap((item) => item.requiredAppearance ?? []).map((claim) => ({ appearanceClaimId: claim.id,
+    ...(claim.afterInteractionId ? { interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" } } : {}) }));
+  const report = await captureFrame(fixture, { mode: "discovery", origin: server.origin, route, viewport: CAPTURE_VIEWPORT, claims });
+  assert.deepEqual([report.failed, report.unchecked, report.written], [[], [], ["inventories/legacy-claims.json"]]);
+  return report;
+};
+
+// The observed defect, now only through runtime drift: a claim discovery checked
+// stops resolving, and the capture refuses it only at VERIFY_SLICES. Before any slice is
 // verified the agent reopens discovery itself; the bad claim is preserved, not erased.
 browserTest("late --reopen-discovery corrects an unresolvable pinned claim locator found at VERIFY_SLICES", async () => {
   const server = await startCaptureServer();
@@ -24507,10 +24518,10 @@ browserTest("late --reopen-discovery corrects an unresolvable pinned claim locat
     const classification = { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] };
     const broken = { ...FORMAT20_LEGACY, uiBehaviors: FORMAT20_LEGACY.uiBehaviors.map((uiBehavior) => ({ ...uiBehavior,
       requiredAppearance: [...uiBehavior.requiredAppearance,
-        { id: "APP-3", state: "DEFAULT", role: "paragraph", name: "6 work orders", locator: 'role=paragraph[name="6 work orders"]' }] })) };
+        { id: "APP-3", state: "DEFAULT", role: "menuitem", name: "Ver", locator: 'role=menuitem[name="Ver"]' }] })) };
     // The second pass resumes the existing record, so it proposes no OpenSpec.
     const toVerify = async (legacy, bootstrap = { currentFormat: true }) => {
-      await driveTo(fixture, "PLAN", advance, { bootstrap, legacy, classification });
+      await driveTo(fixture, "PLAN", advance, { bootstrap, legacy, classification, discover: discoverAt(server) });
       await authorSlice(fixture, "slice-a");
       await advance(fixture, { slice: "slice-a" });
     };
@@ -24518,7 +24529,7 @@ browserTest("late --reopen-discovery corrects an unresolvable pinned claim locat
     const root = fixture.migrationRoot;
     const claim = (appearanceClaimId) => captureFrame(fixture, { origin: server.origin, route: "/work-orders", viewport: CAPTURE_VIEWPORT, appearanceClaimId });
     const atFailure = await snapshot(root);
-    await assert.rejects(claim("APP-3"), /CAPTURE_ELEMENT_MISSING: Claim locator 'role=paragraph\[name="6 work orders"\]' is not visible in state 'DEFAULT'/);
+    await assert.rejects(claim("APP-3"), /CAPTURE_ELEMENT_MISSING: Claim locator 'role=menuitem\[name="Ver"\]' is not visible in state 'DEFAULT'/);
     assert.deepEqual(await snapshot(root), atFailure);
 
     const before = await state(fixture);
@@ -24576,9 +24587,9 @@ browserTest("late --reopen-discovery preserves and clears a valid claim captured
     const classification = { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] };
     const broken = { ...FORMAT20_LEGACY, uiBehaviors: FORMAT20_LEGACY.uiBehaviors.map((uiBehavior) => ({ ...uiBehavior,
       requiredAppearance: [...uiBehavior.requiredAppearance,
-        { id: "APP-3", state: "DEFAULT", role: "paragraph", name: "6 work orders", locator: 'role=paragraph[name="6 work orders"]' }] })) };
+        { id: "APP-3", state: "DEFAULT", role: "menuitem", name: "Ver", locator: 'role=menuitem[name="Ver"]' }] })) };
     const toVerify = async (legacy, bootstrap = { currentFormat: true }) => {
-      await driveTo(fixture, "PLAN", advance, { bootstrap, legacy, classification });
+      await driveTo(fixture, "PLAN", advance, { bootstrap, legacy, classification, discover: discoverAt(server) });
       await authorSlice(fixture, "slice-a");
       await advance(fixture, { slice: "slice-a" });
     };
@@ -24636,7 +24647,7 @@ browserTest("discovery capture CLI rejects overrides and writes, reports every w
   const fixture = await createFixture();
   try {
     const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
-    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
+    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY, discover: discoverAt(server),
       classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] } });
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
@@ -24736,7 +24747,10 @@ browserTest("discovery capture CLI rejects overrides and writes, reports every w
     assert.ok(requests.includes("GET /discovery"));
     assert.ok(requests.includes("GET /discovery-action"));
     assert.ok(requests.every((request) => !request.startsWith("POST ")));
-    assert.deepEqual(await snapshot(root), before);
+    // A failed claim contradicts the earlier passing check: only that record is removed.
+    const { "inventories/legacy-claims.json": stale, ...unchanged } = before;
+    assert.ok(stale);
+    assert.deepEqual(await snapshot(root), unchanged);
     assert.deepEqual([report.mode, report.passed, report.unchecked, report.written], ["discovery", ["APP-1", "APP-2"], ["APP-7"], []]);
     assert.deepEqual(report.failed.map((item) => [item.appearanceClaimId, item.code]), [
       ["APP-3", "CAPTURE_ELEMENT_MISSING"],
@@ -24752,12 +24766,107 @@ browserTest("discovery capture CLI rejects overrides and writes, reports every w
   }
 });
 
+// The WMS remissions defect: an inventory pinned "Documento" for a sortable
+// header the runtime names "Documento Sort", and nothing caught it before
+// VERIFY_SLICES. DISCOVER_LEGACY now closes only against the engine's own
+// complete, current discovery check, re-derived from what the browser observed.
+browserTest("DISCOVER_LEGACY closes only after a complete, current engine discovery check of every pinned claim", async () => {
+  const server = await startCaptureServer();
+  const fixture = await createFixture();
+  try {
+    const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
+    const classification = { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] };
+    await driveTo(fixture, "NONE", advance, { bootstrap: { currentFormat: true } });
+    const root = fixture.migrationRoot;
+    const inventoryPath = path.join(root, "inventories/legacy.json");
+    const checkPath = path.join(root, "inventories/legacy-claims.json");
+    const withHeader = (name) => ({ ...FORMAT20_LEGACY, uiBehaviors: FORMAT20_LEGACY.uiBehaviors.map((uiBehavior) => ({ ...uiBehavior,
+      requiredAppearance: [...uiBehavior.requiredAppearance, { id: "APP-9", state: "DEFAULT", role: "columnheader", name, locator: "#doc-header" }] })) });
+    await completeStepDoc(fixture, "DISCOVER_LEGACY");
+    await writeJson(path.join(root, "inventories/module-classification.json"), classification);
+    await writeJson(inventoryPath, withHeader("Documento"));
+    const claims = [{ appearanceClaimId: "APP-1" },
+      { appearanceClaimId: "APP-2", interaction: { type: "click", target: "getByRole('button', { name: 'Sign in' })" } },
+      { appearanceClaimId: "APP-9" }];
+    const check = (items = claims) => captureFrame(fixture, { mode: "discovery", origin: server.origin, route: "/remissions", viewport: CAPTURE_VIEWPORT, claims: items });
+    const refuses = async (pattern) => {
+      await assert.rejects(advance(fixture), pattern);
+      assert.equal((await state(fixture)).currentStep, "DISCOVER_LEGACY");
+    };
+
+    // 1. No check at all.
+    await refuses(/DISCOVERY_CLAIMS_UNVERIFIED: 3 pinned appearance claim\(s\) have no successful discovery check/);
+    // 10. CLI and MCP route through the same gate and refuse alike.
+    const cli = JSON.parse((await runCli(fixture, () => runMigration(["auth", "--mode", "auto", "--json"]))).stdout);
+    const mcp = JSON.parse((await rpc(fixture, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "migration_run", arguments: { module: "auth" } } }))
+      .result.content.at(-1).text);
+    assert.match(JSON.stringify(cli), /DISCOVERY_CLAIMS_UNVERIFIED/);
+    assert.deepEqual([mcp.outcome, mcp.reason], [cli.outcome, cli.reason]);
+    assert.equal((await state(fixture)).currentStep, "DISCOVER_LEGACY");
+    // 2. Partial coverage records nothing.
+    const partial = await check(claims.slice(0, 2));
+    assert.deepEqual([partial.passed, partial.unchecked, partial.written], [["APP-1", "APP-2"], ["APP-9"], []]);
+    await refuses(/DISCOVERY_CLAIMS_UNVERIFIED/);
+    // 3. The wrong accessible name fails in the real browser and blocks closure.
+    const wrong = await check();
+    assert.deepEqual(wrong.failed.map((item) => [item.appearanceClaimId, item.code]), [["APP-9", "CAPTURE_OBSERVATION_FAILED"]]);
+    assert.match(wrong.failed[0].message, /does not expose role 'columnheader' with accessible name 'Documento'/);
+    assert.equal(await entryExists(checkPath), false);
+    await refuses(/DISCOVERY_CLAIMS_UNVERIFIED/);
+
+    // Corrected inventory: one complete run records the check.
+    await writeJson(inventoryPath, withHeader("Documento Sort"));
+    const good = await check();
+    assert.deepEqual([good.passed, good.failed, good.unchecked, good.written], [["APP-1", "APP-2", "APP-9"], [], [], ["inventories/legacy-claims.json"]]);
+    const recorded = await readFile(checkPath);
+    const tampered = async (edit, pattern) => {
+      const document = JSON.parse(recorded);
+      edit(document);
+      await writeJson(checkPath, document);
+      await refuses(pattern);
+      await writeFile(checkPath, recorded);
+    };
+    // 4. A duplicate row never stands in for coverage.
+    await tampered((document) => { document.claims[2] = document.claims[0]; }, /DISCOVERY_CLAIMS_INVALID: .*lists claim 'APP-1' more than once/);
+    await tampered((document) => { document.claims.pop(); }, /DISCOVERY_CLAIMS_UNVERIFIED: Unchecked claim\(s\): APP-9/);
+    // The verdict is re-derived from the observation; an authored pass is not read.
+    await tampered((document) => { document.claims[2].observation.controls[0].name = "Documento"; }, /Failed claim\(s\): APP-9 \(the check did not observe columnheader 'Documento Sort'/);
+    await tampered((document) => { delete document.claims[2].observation.scroll; }, /Failed claim\(s\): APP-9 \(LEGACY scroll\.observation\.scroll/);
+    // 5. Any inventory change after the check makes it stale.
+    const corrected = await readFile(inventoryPath);
+    await writeFile(inventoryPath, `${corrected.toString().trimEnd()}\n\n`);
+    await refuses(/DISCOVERY_CLAIMS_STALE: .*legacyInventory/);
+    await writeFile(inventoryPath, corrected);
+
+    // 6. The complete, current check closes discovery without reaching implementation.
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+    // 9. Past DISCOVER_LEGACY the gate never re-judges a closed checkpoint.
+    await rm(checkPath);
+    await runCli(fixture, () => runValidateCli(["auth", "--step", "DISCOVER_LEGACY"]));
+    await writeFile(checkPath, recorded);
+
+    // 8. Reopening discovery makes the earlier check obsolete, even over unchanged bytes.
+    const resolution = await resolutionFor(fixture);
+    const preview = await previewMigrationExecution({ ...resolution, moduleName: "auth", reopenDiscovery: true });
+    await bootstrapMigration({ ...resolution, moduleName: "auth", reopenDiscovery: true,
+      boundInputs: preview.boundInputs, registryBinding: preview.registryBinding });
+    await refuses(/DISCOVERY_CLAIMS_STALE: .*revision/);
+    await check();
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    await fixture.cleanup();
+    await server.close();
+  }
+});
+
 browserTest("MC2: a format-21 claim capture writes the LEGACY proof, PNG and row the slice validator binds; result stays authored", async () => {
   const server = await startCaptureServer();
   const fixture = await createFixture();
   try {
     const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
-    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
+    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY, discover: discoverAt(server),
       classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] } });
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });
@@ -24863,7 +24972,7 @@ browserTest("G3: a TARGET claim capture writes the proof, PNG and row the slice 
   const fixture = await createFixture();
   try {
     const { decisionId: _id, ...moduleRoot } = MODULE_CLASSIFICATION.moduleRoots[0];
-    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY,
+    await driveTo(fixture, "PLAN", advance, { bootstrap: { currentFormat: true }, legacy: FORMAT20_LEGACY, discover: discoverAt(server),
       classification: { ...MODULE_CLASSIFICATION, version: 2, algorithmVersion: 5, moduleRoots: [moduleRoot] } });
     await authorSlice(fixture, "slice-a");
     await advance(fixture, { slice: "slice-a" });

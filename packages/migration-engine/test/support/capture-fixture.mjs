@@ -54,6 +54,9 @@ const PAGES = {
   "/discovery": page({ extra: '<input aria-label="Buscar" name="search"><ul role="menu" aria-label="Acciones"><li role="menuitem">Ver</li></ul>' +
     '<div style="overflow:hidden"><button type="button">Recortado</button></div>' +
     "<table><tr><th>Zona</th><th>Zona destino</th></tr><tr><td>A</td><td>B</td></tr></table>" }),
+  // A sortable column header: its accessible name includes the sort button, "Documento Sort", not the visible "Documento".
+  "/remissions": page({ extra: '<table><thead><tr><th id="doc-header" aria-sort="none">Documento <button type="button">Sort</button></th></tr></thead>' +
+    "<tbody><tr><td>R-1</td></tr></tbody></table>" }),
   "/discovery-action": page({ extra: `<button id="attempt-write" onclick="fetch('/capture-write', {method: 'POST'})
     .catch(() => {}).finally(() => { document.getElementById('write-finished').hidden = false; })">Attempt write</button>
     <span id="write-finished" hidden>Request finished</span>` }),
