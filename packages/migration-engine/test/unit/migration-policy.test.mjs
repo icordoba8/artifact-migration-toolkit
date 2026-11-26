@@ -24,6 +24,8 @@ import {
   renderLoopDirective,
   assertOptionCombination,
 } from "../../src/core.mjs";
+import { previewMigrationExecution } from "../../src/lifecycle/index.mjs";
+import { createFixture, initialize, resolutionFor } from "../integration/approval.fixture.mjs";
 
 const parsed = (values = {}, positionals = ["auth"]) => ({ positionals, values });
 
@@ -546,6 +548,67 @@ test("the skill's safe context boundaries are exactly the outcomes the loop cont
   }
   for (const outcome of unsafeOutcomes) {
     assert.match(renderLoopDirective({ moduleName: "auth", outcome }), /^loop: STOP /, outcome);
+  }
+});
+
+// Test data: the agent prepares routine data itself, but only with authority
+// that already exists. Pins each safety clause so an edit cannot quietly widen it.
+test("the skill's test-data rules reuse existing authority and keep standard and mock distinct", async () => {
+  const skill = await readFile(new URL("../../../../skills/start-migration/SKILL.md", import.meta.url), "utf8");
+  const start = skill.indexOf("\n## Test data\n");
+  assert.notEqual(start, -1, "SKILL.md lost its Test data section");
+  const section = skill.slice(start, skill.indexOf("\n## ", start + 1)).replace(/\s+/g, " ");
+  const steps = [...section.matchAll(/ (\d)\. \*\*(\w+)/g)].map(([, n, word]) => `${n}.${word}`);
+  assert.deepEqual(steps, ["1.Scenarios", "2.Discover", "3.Gaps", "4.Fill", "5.Ownership", "6.Verify", "7.Continue", "8.Clean"]);
+  for (const clause of [
+    // no routine prompts, and missing data never ends the loop
+    "Never ask the operator for a routine test value or record identifier you can discover or derive",
+    "missing test data is not a stop condition",
+    "Continue** the iteration with no operator prompt",
+    // authoritative behavior only
+    "validated against the target's own schemas, types and validators",
+    "Never invent a business rule or expected outcome",
+    // discovery stays read-only
+    "Change nothing you found",
+    // mock: fixtures are slice source; standard: harness-owned stores only
+    "`dataSourceMode: mock`: the mock data source is target code the slice owns",
+    "reach no backend",
+    "against the store that harness already creates and disposes of",
+    "`dataSourceMode: standard` against a running application or backend: create, update or delete nothing to prepare data",
+    "Localhost, `--mode auto`, a running app and a broker's `allowWrites` each prove nothing about whether that environment is disposable",
+    "this skill grants no write authority",
+    // ownership and cleanup, per migration
+    "`<target-module>-<slice-id>`",
+    "Never change, reuse as yours or delete a fixture another migration owns",
+    "Never delete anything without this migration's name on it",
+    // uncovered scenarios are reported, and the genuine decision stays the operator's
+    "record it through the ordinary blocker contract",
+    '`availability: "NOT_AVAILABLE"`',
+    "is a genuine decision, not a routine value",
+  ]) {
+    assert.ok(section.includes(clause), `Test data section lost: ${clause}`);
+  }
+  // The section adds no decision path: approvals stay with the Operator decisions contract.
+  assert.doesNotMatch(section, /APPROVE|REJECT|relay|auto-decisions|--test-data/);
+  assert.match(skill.replace(/\s+/g, " "), /Never approve or reject on your own, never in the same turn you asked/);
+});
+
+// The test-data rules branch on dataSourceMode, so the engine must keep the two
+// modes fixed for the migration's lifetime: standard never becomes mock, and an
+// omitted --mock never reverts a mock migration to standard.
+test("standard and mock data-source modes stay fixed for the migration's lifetime", async () => {
+  for (const mock of [false, true]) {
+    const fixture = await createFixture();
+    try {
+      const { state } = await initialize(fixture, { mock, currentFormat: true });
+      assert.equal(state.dataSourceMode, mock ? "mock" : "standard");
+      const resume = { ...(await resolutionFor(fixture)), moduleName: "auth" };
+      if (mock) await previewMigrationExecution(resume); // omitting --mock on resume is accepted, not a reversion
+      else await assert.rejects(previewMigrationExecution({ ...resume, mock: true }), /Mock data-source mode was not enabled when this migration was created/);
+      assert.equal(JSON.parse(await readFile(`${fixture.migrationRoot}/state.json`, "utf8")).dataSourceMode, mock ? "mock" : "standard");
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });
 
