@@ -2,8 +2,7 @@
  * Lifecycle: module checkpoint validation -- the step validators, capability
  * ownership and artifact delegation rows, baseline, plan, slice and gate
  * validation, and the census/slices fact seams (`sliceDriftFacts`). Each one
- * composes the lower domains' rules; none is redefined here. Moved verbatim
- * from `resumable-migration.mjs` (Track A8).
+ * composes the lower domains' rules.
  */
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -112,11 +111,11 @@ import {
 import { artifactArgumentsFor, artifactCommandFor } from "./artifact-record.mjs";
 import { getArtifactStatus, validateArtifactComplete } from "./artifact-status.mjs";
 import { validateGates } from "./gates.mjs";
-import { assertDiscoveryClaimsVerified } from "./capture.mjs";
+import { assertDiscoveryClaimsVerified, readDiscoveryInventory } from "./capture.mjs";
 import { assertStepDocumentComplete } from "./record.mjs";
 import { validateExternalUiCapabilities } from "./ui-coverage.mjs";
-export const validateLegacyInventory = (root, roots, state) =>
-  validateLegacyInventoryRules(root, roots, state, { assertRequiredObservations, assertRequiredAppearance });
+export const validateLegacyInventory = (root, roots, state, authored) =>
+  validateLegacyInventoryRules(root, roots, state, { assertRequiredObservations, assertRequiredAppearance, authored });
 /**
  * The one policy-aware module resolver for format 19, and the only thing that
  * turns a ledger line into authority there.
@@ -1151,22 +1150,23 @@ export const validateStep = async (root, state, step, sliceId, roots) => {
   await assertPinnedVisualApplicability(root, roots, undefined, state);
   await assertStepDocumentComplete(root, step, state, sliceId);
   if (step === "DISCOVER_LEGACY") {
-    const inventory = await validateLegacyInventory(root, roots, state);
+    const authored = await readDiscoveryInventory(root);
+    const inventory = await validateLegacyInventory(root, roots, state, authored.inventory);
     await assertLegacyDiscoveryChecklist(
       root,
       roots,
       state?.requirementsAuthority,
     );
-    await assertDiscoveryClaimsVerified(roots.targetRoot, root, state, inventory);
+    const discoveryCheck = await assertDiscoveryClaimsVerified(roots, root, state, inventory, authored);
     if (usesDiscoveryCompleteness(state)) {
       const boundary = await readCanonicalModuleBoundary(root, state, roots);
       await assertLegacyEvidenceWithinBoundary(inventory, boundary.scan, roots);
-      return boundary;
+      return { ...boundary, discoveryCheck };
     }
+    return { discoveryCheck };
   }
   if (step === "DISCOVERY_COMPLETENESS") {
-    // Returned so advanceUnderLock writes the same scan it validated instead
-    // of running it a second time and pinning a different one.
+    // Advance pins the same scan it validated.
     return validateDiscoveryCompleteness(root, state, roots);
   }
   if (step === "ASSESS_TARGET") {

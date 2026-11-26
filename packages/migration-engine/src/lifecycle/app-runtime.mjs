@@ -613,15 +613,18 @@ export const sessionBrokerOf = async (targetRoot) => {
 };
 
 /**
- * The LEGACY origin the runtime contract declares, or null when no contract
+ * The effective LEGACY runtime authority, or null fields when no contract
  * exists. A contract that exists but cannot be read is refused: it can neither
  * authorize nor be ignored by a capture.
  */
-export const legacyRuntimeOriginOf = async (targetRoot) => {
-  const { problem, file, applications } = await readConfiguration(targetRoot);
-  if (!problem) return applications.find((app) => app.role === "LEGACY").origin;
-  // ponytail: no locatable file (no Git work tree, or none written) means no contract; a session check still needs one.
-  if (!file || !(await lstat(file).then(() => true, () => false))) return null;
+export const legacyRuntimeAuthorityOf = async (targetRoot) => {
+  const { problem, file, namespace, applications, sessionBroker } = await readConfiguration(targetRoot);
+  if (!problem) {
+    const legacy = applications.find((app) => app.role === "LEGACY");
+    return { origin: legacy.origin, digest: sha256Hex(JSON.stringify({ namespace, legacy, sessionBroker })) };
+  }
+  // No locatable contract authorizes only an unbrokered check.
+  if (!file || !(await lstat(file).then(() => true, () => false))) return { origin: null, digest: null };
   return refuseCapture("CAPTURE_AUTHORITY_MISMATCH", `The runtime contract cannot authorize this capture: ${problem}`);
 };
 

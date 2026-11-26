@@ -42,10 +42,11 @@ with `authorization: Bearer <token>`:
   returns what the capture already sanitizes, plus the broker's account name.
   A plan's `storageState` or `browser` is dropped.
 - `/capture/read-only` is `/capture` with every write request blocked, whatever
-  `allowWrites` says. Discovery (`mode: "discovery"`) uses only this route. An
-  older broker answers it with `BROKER_ROUTE_UNKNOWN` before starting a
-  browser; the engine reports `CAPTURE_BROKER_INCOMPATIBLE`, and the operator
-  upgrades the broker to the same release as the engine and restarts it.
+  `allowWrites` says. Discovery (`mode: "discovery"`) uses only this route.
+  The broker streams sanitized observations for compatible claim roots on one
+  page. A v1.10.2 broker supports read-only captures one claim at a time. If
+  the broker lacks the read-only route, the engine reports
+  `CAPTURE_BROKER_INCOMPATIBLE` before any browser starts.
 - `/sign-in` opens a browser at the configured sign-in route on the operator's
   desktop. It can reach that origin and the configured `identityProviders`,
   nothing else.

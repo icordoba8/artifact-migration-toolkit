@@ -42,7 +42,12 @@ ${ROWS}${extra}
 </main></div><a id="away" href="http://capture-elsewhere.invalid/">Elsewhere</a>
 <label>Password <input id="pw" type="password"></label></body></html>`;
 
+const volume = (missing = 0) => `<!doctype html><title>Discovery volume</title><main style="height:160px;overflow:auto">${Array.from({ length: 90 - missing }, (_, index) =>
+  `<div><button id="volume-${index}">Item ${index}</button></div>`).join("")}</main>`;
+
 const PAGES = {
+  "/discovery-volume": volume(),
+  "/discovery-volume-missing": volume(20),
   "/auth/sign-in": page(),
   "/degraded": page({ extra: '<svg width="8" height="8" aria-hidden="true"><circle cx="4" cy="4" r="4"/></svg>' }),
   "/line-height": page({ mainStyle: "line-height:normal" }),
@@ -75,7 +80,7 @@ export const CAPTURE_SESSION = { cookie: "SECRET-COOKIE-VALUE", local: "SECRET-L
 export const startCaptureServer = async ({ onRequest } = {}) => {
   const server = http.createServer((request, response) => {
     const { pathname } = new URL(request.url, "http://127.0.0.1");
-    onRequest?.(request.method, pathname);
+    if (onRequest?.(request.method, pathname, response) === true) return;
     if (pathname === "/logo.svg") {
       response.writeHead(200, { "content-type": "image/svg+xml" });
       return response.end('<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="#0b5fff"/></svg>');
@@ -122,7 +127,10 @@ export const startCaptureServer = async ({ onRequest } = {}) => {
       cookies: [{ name: "session", value: CAPTURE_SESSION.cookie, domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Lax" }],
       origins: [{ origin, localStorage: [{ name: "token", value: CAPTURE_SESSION.local }] }],
     }),
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () => new Promise((resolve) => {
+      server.close(resolve);
+      server.closeAllConnections();
+    }),
   };
 };
 

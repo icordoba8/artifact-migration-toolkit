@@ -516,7 +516,7 @@ const TOOLS = [
   {
     name: "migration_capture",
     description:
-      "Capture one legacy-runtime state in a real browser and persist the evidence: an ASSESS_TARGET authority frame (legacy-runtime records) or, with appearanceClaimId, the format-20 LEGACY capture of one appearance claim at VERIFY_SLICES. Returns a compact summary; never overwrites, pins, approves, advances or marks PASS.",
+      "Capture an authority frame or a VERIFY_SLICES appearance claim in a real browser. At DISCOVER_LEGACY, run a bounded read-only browser check and persist claim observations as work completes. The tool never advances the checkpoint.",
     inputSchema: {
       ...INPUT_SCHEMA,
       properties: {
@@ -524,7 +524,7 @@ const TOOLS = [
         request: {
           type: "object",
           description:
-            "{origin, route, viewport {width,height}, controls? [{role,name,locator}], setup? [{type,target,value?}], colorScheme?, matte?, browser?, storageState?, session?, timeoutMs?} plus either {uiBehaviorId, state, rootLocator, counts {name: locator}} for a frame or {appearanceClaimId, interaction?, role?: LEGACY|TARGET} for a claim, or {mode: \"discovery\", claims: [{appearanceClaimId, route?, setup?, interaction?}]} to check every listed pinned claim as VERIFY_SLICES will, writing nothing.",
+            "{origin, route, viewport {width,height}, controls? [{role,name,locator}], setup? [{type,target,value?}], colorScheme?, matte?, browser?, storageState?, session?, timeoutMs?, navigationTimeoutMs?} plus either {uiBehaviorId, state, rootLocator, counts {name: locator}} for a frame or {appearanceClaimId, interaction?, role?: LEGACY|TARGET} for a claim, or {mode: \"discovery\", batchSize?, refresh?, claims: [{appearanceClaimId, route?, setup?, interaction?}]} to check a bounded batch of pinned claims as VERIFY_SLICES will. Repeat to resume. Use migration_status to see persisted progress.",
         },
       },
     },

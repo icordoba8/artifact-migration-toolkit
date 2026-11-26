@@ -19,6 +19,7 @@ import { gitRevision } from "../shared/index.mjs";
 import { fileExists, migrationRoot, readOptionalJson, readRegistry, statePathFor } from "../store/index.mjs";
 import { visualAuthorityOf } from "../visual/index.mjs";
 import { initJournalFor } from "./initialization.mjs";
+import { discoveryClaimProgress } from "./capture.mjs";
 import { activeToolkitIdentity } from "../toolkit-identity.mjs";
 import { activeArtifact, resumeGuidance } from "./checkpoints.mjs";
 import { readContext } from "./context.mjs";
@@ -93,11 +94,13 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
     state: "NOT_APPLICABLE",
     runtime: "NOT_APPLICABLE",
   };
+  let discoveryClaims;
   if (usesUiVerification(context.state)) {
     const legacy = await readOptionalJson(
       path.join(context.root, initialArtifacts.legacyInventory),
       "Legacy inventory",
     );
+    discoveryClaims = await discoveryClaimProgress(registryData.targetRoot, context.root, context.state, legacy, currentLegacyRevision.revision);
     const remediation = await readOptionalJson(
       path.join(context.root, UI_REMEDIATION_FILE),
       "UI remediation",
@@ -185,6 +188,7 @@ export const getMigrationStatus = async ({ registryPath, moduleName }) => {
   const progress = migrationProgress(context.state, {
     mode: null,
     uiEvidence,
+    discoveryClaims,
     formatUpgrade,
     // Reported either way, but only an *active* increment stops the lifecycle:
     // an INACTIVE one leaves the checklist live, because the checkpoint it names

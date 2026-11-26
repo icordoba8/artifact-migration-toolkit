@@ -36,7 +36,7 @@ import {
   rawDecisionLedgerDigest,
 } from "../decisions/index.mjs";
 import { inspectSliceArtifacts, verifiedFileIdentities } from "../slices/index.mjs";
-import { discoveryCheckCurrent } from "./capture.mjs";
+import { assertDiscoveryCheckUnchanged } from "./capture.mjs";
 import { activeArtifact, confirmationIdFor, expectedNextCheckpoint } from "./checkpoints.mjs";
 import { readContext } from "./context.mjs";
 import { assertCurrentOpenSpecAuthority } from "./openspec.mjs";
@@ -343,7 +343,7 @@ const advanceUnderLock = async ({
     )),
   };
   // The discovery check DISCOVER_LEGACY closed against is pinned with it (F3).
-  if (currentStep === "DISCOVER_LEGACY" && (await discoveryCheckCurrent(registryData.targetRoot, context.root, state))) {
+  if (currentStep === "DISCOVER_LEGACY" && validated.discoveryCheck) {
     artifactHashes[DISCOVERY_CLAIMS_FILE] = await hashPinnedArtifact(context.root, DISCOVERY_CLAIMS_FILE);
   }
   // Format-8 upgrade: BUILD_BASELINE closed under an older format pinned no
@@ -566,6 +566,9 @@ const advanceUnderLock = async ({
   // consequence code in the engine, and "kill it and hope you hit the window"
   // is not a test. Absent in every real invocation, so the production path is
   // byte-identical.
+  if (currentStep === "DISCOVER_LEGACY" && validated.discoveryCheck) {
+    await assertDiscoveryCheckUnchanged(registryData, context.root, state, validated.discoveryCheck);
+  }
   await writeJournalAtomic(journalFile, {
     fromRevision: state.revision,
     toRevision: nextState.revision,

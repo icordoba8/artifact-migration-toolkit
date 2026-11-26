@@ -13,6 +13,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
+import { CAPTURE_BROWSER_SKIP } from "../support/capture-fixture.mjs";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -176,6 +177,81 @@ test("a broker without the read-only route is refused before it captures anythin
 
 test("without a broker a capture is refused by name, not sent elsewhere", async () => {
   await assert.rejects(captureThroughBroker({ url: `http://127.0.0.1:${await freePort()}`, token: TOKEN }, {}), { validationCode: "CAPTURE_BROKER_UNAVAILABLE" });
+});
+
+test("a real read-only broker streams grouped claim observations and blocks writes", { skip: CAPTURE_BROWSER_SKIP ?? false, timeout: 60_000 }, async () => {
+  const app = await application();
+  const directory = await mkdtemp(path.join(os.tmpdir(), "amt-discovery-broker-"));
+  const port = await freePort();
+  const url = `http://127.0.0.1:${port}`;
+  const config = path.join(directory, "config.json");
+  await writeFile(config, JSON.stringify({
+    port, store: directory, clientTokenSha256: TOKEN_SHA256, headless: true,
+    applications: { LEGACY: { origin: app.origin, signInRoute: "/login", routes: ROUTES, allowWrites: true } },
+  }));
+  await writeFile(path.join(directory, "LEGACY.json"), JSON.stringify({ cookies: [{
+    name: "sid", value: CANARY, domain: "127.0.0.1", path: "/", expires: Date.now() / 1000 + 300,
+    httpOnly: true, secure: false, sameSite: "Lax",
+  }], origins: [] }));
+  const child = spawn(process.execPath, [path.join(engineRoot, "src/session-broker.mjs"), config], { stdio: ["ignore", "pipe", "inherit"] });
+  const exit = new Promise((resolve) => child.once("exit", resolve));
+  try {
+    await Promise.race([
+      new Promise((resolve) => child.stdout.once("data", resolve)),
+      exit.then(() => { throw new Error("The fixture broker exited before listening."); }),
+    ]);
+    const controls = [{ role: "heading", name: "Records", locator: "h1" }, { role: "button", name: "Delete all", locator: "button" }];
+    const claim = claimCapturePlan(parseCaptureRequest({ origin: app.origin, route: "/records", appearanceClaimId: "one",
+      viewport: { width: 640, height: 360 }, controls }), { id: "records" }, { id: "one", state: "DEFAULT", ...controls[0] });
+    const ask = async (capturePlan, discoveryRoots, endpoint = "/capture/read-only") => fetch(`${url}${endpoint}`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ role: "LEGACY", plan: capturePlan, discoveryRoots }),
+    });
+    const streamed = await ask(claim, ["h1", "button"]);
+    assert.equal(streamed.headers.get("content-type"), "application/x-ndjson");
+    const body = await streamed.text();
+    const frames = body.trim().split("\n").map(JSON.parse);
+    assert.equal(frames[0].account, os.userInfo().username);
+    assert.deepEqual(frames.slice(1, -1).map(({ observation }) => observation.rootLocator), ["h1", "button"]);
+    assert.equal(frames.at(-1).operations.navigations, 1);
+    assert.equal(frames.at(-1).operations.screenshots, 0);
+    assert.ok(!body.includes(CANARY));
+    await assert.rejects(captureThroughBroker({ url, token: TOKEN }, claim, "LEGACY", {
+      readOnly: true, discoveryRoots: ["h1"], onObservation: () => assert.fail("An unisolated broker cannot supply evidence."),
+    }), { validationCode: "CAPTURE_BROKER_NOT_ISOLATED" });
+    const action = { ...claim, setup: [{ type: "click", target: "button" }] };
+    const blocked = (await (await ask(action, ["h1"])).text()).trim().split("\n").map(JSON.parse);
+    assert.equal(blocked.at(-1).operations.blockedWrites, 1);
+    assert.equal(app.controls.writes, 0);
+    assert.equal((await (await ask(action, ["h1", "button"])).json()).code, "BROKER_REQUEST_INVALID");
+    assert.equal((await (await ask(action, ["h1"], "/capture")).json()).code, "BROKER_REQUEST_INVALID");
+  } finally {
+    child.kill();
+    await exit;
+    app.server.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the broker client delivers a streamed observation before the remaining HTTP response is lost", async () => {
+  const controller = new AbortController();
+  const peer = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/x-ndjson" });
+    response.write('{"account":"amt-stream-test-peer"}\n{"observation":{"rootLocator":"h1"}}\n');
+  });
+  await new Promise((resolve) => peer.listen(0, "127.0.0.1", resolve));
+  const received = [];
+  try {
+    const url = `http://127.0.0.1:${peer.address().port}`;
+    await assert.rejects(captureThroughBroker({ url, token: TOKEN }, {}, "LEGACY", {
+      readOnly: true, signal: controller.signal, discoveryRoots: ["h1", "button"],
+      onObservation: (observation) => { received.push(observation); controller.abort(); },
+    }), { name: "AbortError" });
+    assert.deepEqual(received, [{ rootLocator: "h1" }]);
+  } finally {
+    peer.close();
+    peer.closeAllConnections();
+  }
 });
 
 let root;
