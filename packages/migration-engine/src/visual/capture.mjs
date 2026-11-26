@@ -627,11 +627,14 @@ export const parseBrokeredPlan = (plan) => {
  * not a secret from the agent, only from other accounts. A broker that runs as
  * this same account isolates nothing, so its capture is refused, not used.
  */
-export const captureThroughBroker = async ({ url, token }, plan, role = "LEGACY") => {
-  const response = await fetch(new URL("/capture", url), {
+export const captureThroughBroker = async ({ url, token }, plan, role = "LEGACY", { readOnly = false } = {}) => {
+  const response = await fetch(new URL(readOnly ? "/capture/read-only" : "/capture", url), {
     method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ role, plan }),
   }).catch(() => refuseCapture("CAPTURE_BROKER_UNAVAILABLE", `No session broker answers at ${url}; the operator starts it.`));
   const body = await response.json().catch(() => ({}));
+  if (readOnly && body.code === "BROKER_ROUTE_UNKNOWN") {
+    refuseCapture("CAPTURE_BROKER_INCOMPATIBLE", `The session broker at ${url} has no read-only capture, so a discovery capture through it could send write requests; nothing was captured. The operator upgrades the broker to this release and restarts it (docs/session-broker.md).`);
+  }
   if (!response.ok) throw Object.assign(new Error(body.message ?? `The session broker refused the capture (${body.code ?? response.status}).`), { validationCode: body.code ?? "CAPTURE_BROKER_FAILED" });
   if (typeof body.account !== "string" || body.account.toLowerCase() === os.userInfo().username.toLowerCase()) {
     refuseCapture("CAPTURE_BROKER_NOT_ISOLATED", `The session broker at ${url} runs as '${body.account}', the account this engine runs as: it holds the session where the agent can read it. The operator runs it as a separate account (docs/session-broker.md).`);

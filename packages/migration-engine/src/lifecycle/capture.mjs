@@ -228,7 +228,7 @@ const discoveryPlan = async ({ legacy, request }) => {
 
 // A refusal that says nothing about the claim stops the run instead of failing every claim the same way.
 const RUN_REFUSALS = new Set(["CAPTURE_BROWSER_UNAVAILABLE", "CAPTURE_AUTH_REQUIRED", "CAPTURE_SESSION_EXPIRED",
-  "CAPTURE_SESSION_HOST", "CAPTURE_BROKER_UNAVAILABLE", "CAPTURE_BROKER_NOT_ISOLATED", "CAPTURE_BROKER_FAILED"]);
+  "CAPTURE_SESSION_HOST", "CAPTURE_BROKER_UNAVAILABLE", "CAPTURE_BROKER_NOT_ISOLATED", "CAPTURE_BROKER_FAILED", "CAPTURE_BROKER_INCOMPATIBLE"]);
 
 /**
  * mode "discovery": capture each claim exactly as VERIFY_SLICES captures its
@@ -244,7 +244,7 @@ const checkClaims = async ({ targetRoot, prepared, parsed, resolved }) => {
     try {
       if (refusal) refuseCapture(...refusal);
       const captured = await (parsed.session
-        ? captureThroughBroker(broker ??= await sessionBrokerOf(targetRoot), plan, "LEGACY")
+        ? captureThroughBroker(broker ??= await sessionBrokerOf(targetRoot), plan, "LEGACY", { readOnly: true })
         : captureInBrowser({ ...plan, guard: { allowWrites: false } }));
       const { snapshot } = captured;
       const observed = claim.afterInteractionId ? { ...snapshot, observation: snapshot.interactions[0].postAction } : snapshot;
