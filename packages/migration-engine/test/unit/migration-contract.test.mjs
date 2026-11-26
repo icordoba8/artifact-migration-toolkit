@@ -25015,6 +25015,64 @@ const volumeInventory = () => ({
   }),
 });
 
+browserTest("discovery refresh resumes 20 passing claims in batches of eight after interruption", async () => {
+  let hold = false;
+  let reached;
+  const holding = new Promise((resolve) => { reached = resolve; });
+  const server = await startCaptureServer({ onRequest: (_method, route) => {
+    if (!hold || route !== "/discovery-volume-missing") return;
+    reached();
+    return true;
+  } });
+  const fixture = await createFixture();
+  let child;
+  let exit;
+  try {
+    const legacy = volumeInventory();
+    legacy.uiBehaviors = legacy.uiBehaviors.slice(0, 2);
+    await prepareDiscoveryFixture(fixture, legacy);
+    const ids = legacy.uiBehaviors.flatMap((owner) => owner.requiredAppearance.map(({ id }) => id));
+    const request = { mode: "discovery", origin: server.origin, route: "/discovery-volume", viewport: CAPTURE_VIEWPORT,
+      navigationTimeoutMs: 120000, batchSize: 8, claims: ids.map((appearanceClaimId, index) => ({
+        appearanceClaimId, ...(index >= 2 ? { route: "/discovery-volume-missing" } : {}),
+      })) };
+    for (const passed of [8, 16, 20]) {
+      assert.equal((await captureFrame(fixture, request)).discoveryClaims.passed, passed);
+    }
+
+    request.refresh = true;
+    hold = true;
+    const requestFile = path.join(fixture.root, "refresh.json");
+    await writeJson(requestFile, request);
+    const cli = fileURLToPath(new URL("../../src/cli/validate-migration.mjs", import.meta.url));
+    child = spawn(process.execPath, [cli, "auth", "--capture", requestFile], { cwd: fixture.root, stdio: ["ignore", "ignore", "inherit"] });
+    exit = new Promise((resolve) => child.once("exit", resolve));
+    await Promise.race([holding, exit.then(() => { throw new Error("Refresh exited before its second navigation."); })]);
+    await assert.rejects(advance(fixture), /DISCOVERY_CAPTURE_ACTIVE/);
+    child.kill("SIGKILL");
+    await exit;
+    hold = false;
+
+    const status = await getMigrationStatus({ ...fixture, moduleName: "auth" });
+    assert.deepEqual(status.progress.discoveryClaims, { state: "PENDING", completed: 2, total: 20, passed: 2, failed: 0, remaining: 18 });
+    await assert.rejects(advance(fixture), /DISCOVERY_CLAIMS_UNVERIFIED/);
+    const resumed = [];
+    for (let batch = 0; batch < 3; batch += 1) resumed.push(await captureFrame(fixture, request));
+    assert.deepEqual(resumed.map((result) => result.discoveryClaims.passed), [10, 18, 20]);
+    for (const [index, [reused, passed]] of [[2, 10], [10, 18], [18, 20]].entries()) {
+      const result = resumed[index];
+      assert.deepEqual([result.reused, result.deferred, result.failed], [ids.slice(0, reused), ids.slice(passed), []]);
+    }
+    await advance(fixture);
+    assert.equal((await state(fixture)).currentStep, "DISCOVERY_COMPLETENESS");
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exit;
+    await server.close();
+    await fixture.cleanup();
+  }
+});
+
 browserTest("90 discovery claims complete through bounded MCP and CLI calls with failed-claim recovery", async () => {
   let navigations = 0;
   const server = await startCaptureServer({ onRequest: (_method, route) => {

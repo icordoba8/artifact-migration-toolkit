@@ -478,7 +478,7 @@ export const discoveryClaimProgress = async (targetRoot, root, state, inventory,
 };
 
 /** Publish one completed browser state. The module lock is held only for the write. */
-const recordDiscoveryCheck = async ({ roots, prepared, resolved, expectedRecord, rows, failures }) => {
+const recordDiscoveryCheck = async ({ roots, prepared, resolved, expectedRecord, rows, failures, refreshRequest }) => {
   const { targetRoot, legacyRoot } = roots;
   return withModuleLock(targetRoot, resolved.canonical, async () => {
     const { state, root, pendingWrite } = await readState(targetRoot, resolved.canonical);
@@ -497,6 +497,7 @@ const recordDiscoveryCheck = async ({ roots, prepared, resolved, expectedRecord,
       checkedAt: new Date().toISOString(),
       binding,
       capture: prepared.capture,
+      ...(refreshRequest ? { refreshRequest } : {}),
       claims: [...prepared.pinned.keys()].filter((id) => rows.has(id)).map((id) => rows.get(id)),
       ...(failures.size ? { contradicted: [...prepared.pinned.keys()].filter((id) => failures.has(id)).map((id) => failures.get(id)) } : {}),
     };
@@ -511,6 +512,11 @@ const checkClaims = async ({ roots, prepared, parsed, resolved }) => {
   const durable = prepared.state.currentStep === "DISCOVER_LEGACY";
   const { checks, pinned, binding, capture, record } = prepared;
   const { rows, failures } = cachedDiscovery(durable ? record.document : null, binding, capture, pinned);
+  // Invalidate once per refresh, then resume only while the request and authority match.
+  const refreshRequest = durable && parsed.refresh
+    ? digest([binding, capture, checks.map(({ id, planDigest }) => [id, planDigest])]) : null;
+  const startsRefresh = parsed.refresh && (!refreshRequest || record.document?.refreshRequest !== refreshRequest);
+  const needsCheck = ({ id, planDigest }) => !planDigest || rows.get(id)?.planDigest !== planDigest;
   const passed = new Set();
   const reused = new Set();
   const failed = new Map();
@@ -518,12 +524,14 @@ const checkClaims = async ({ roots, prepared, parsed, resolved }) => {
   let stopped;
   const signal = AbortSignal.timeout(DISCOVERY_CALL_MS);
   const publish = async () => {
-    if (durable) expectedRecord = await recordDiscoveryCheck({ roots, prepared, resolved, expectedRecord, rows, failures });
+    if (!durable) return;
+    expectedRecord = await recordDiscoveryCheck({ roots, prepared, resolved, expectedRecord, rows, failures,
+      refreshRequest: refreshRequest && checks.some(needsCheck) ? refreshRequest : null });
   };
-  const work = checks.filter(({ id, planDigest }) => {
-    if (parsed.refresh || !planDigest || rows.get(id)?.planDigest !== planDigest) return true;
-    reused.add(id);
-    passed.add(id);
+  const work = checks.filter((check) => {
+    if (startsRefresh || needsCheck(check)) return true;
+    reused.add(check.id);
+    passed.add(check.id);
     return false;
   });
   // Finish unseen or changed work first. Retry the oldest failures first when they fill several batches.
