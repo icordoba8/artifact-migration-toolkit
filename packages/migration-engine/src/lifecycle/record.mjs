@@ -38,7 +38,6 @@ import {
   assertNonEmpty,
   assertPlainObject,
   contentIdentityMatches,
-  isLexicallyWithin as isWithin,
   isPlainObject,
   sha256Hex as hashContent,
 } from "../shared/index.mjs";
@@ -104,11 +103,19 @@ const IMMUTABLE_BEHAVIOR_ROW_FIELDS = [
  */
 export const DISCOVERY_PIN = `${DISCOVERY_SCAN_FILE}#discovery`;
 
+/**
+ * The engine's discovery claim check (lifecycle/capture.mjs). Pinned with
+ * DISCOVER_LEGACY only when a current complete pass exists at closure; the
+ * STEP_COMPLETED event then carries its identity as `discoveryCheck`, so a
+ * record closed before this pin existed replays exactly as it did.
+ */
+export const DISCOVERY_CLAIMS_FILE = "inventories/legacy-claims.json";
+
 export const IMMUTABLE_STEP_ARTIFACTS = {
   // The target baseline is pinned only for a brownfield record; filtered out
   // otherwise in `completedArtifactHashes`, exactly like the Figma context.
   RESOLVE: ["steps/01-resolve.md", TARGET_BASELINE_FILE],
-  DISCOVER_LEGACY: ["steps/02-discover-legacy.md", "inventories/legacy.json"],
+  DISCOVER_LEGACY: ["steps/02-discover-legacy.md", "inventories/legacy.json", DISCOVERY_CLAIMS_FILE],
   DISCOVERY_COMPLETENESS: [
     "steps/02a-discovery-completeness.md",
     MODULE_CLASSIFICATION_FILE,
@@ -453,17 +460,6 @@ export const resolveStepPins = (state) =>
   IMMUTABLE_STEP_ARTIFACTS.RESOLVE.filter(
     (relative) => relative !== TARGET_BASELINE_FILE || isBrownfield(state),
   );
-
-/** The exact brief bytes the preview authorizes, not just its path. */
-export const briefDigestFor = async (targetRoot, brief) => {
-  const absolute = path.resolve(targetRoot, brief);
-  if (!isWithin(targetRoot, absolute)) return "OUTSIDE_TARGET";
-  try {
-    return `sha256:${hashContent(await readFile(absolute, "utf8"))}`;
-  } catch {
-    return "MISSING";
-  }
-};
 
 // The journal that makes one checkpoint transition recoverable across the gap
 // between the state write and the history append. It is the only journal in the
@@ -823,6 +819,7 @@ const assertStateGraph = async (root, state, pendingJournal) => {
         if (!pinsAuthorityContext(state, relative)) continue;
         if (relative === VISUAL_ACCEPTANCE_FILE && !usesVisualContract(state))
           continue;
+        if (relative === DISCOVERY_CLAIMS_FILE && !event.discoveryCheck) continue;
         requiredHashes.add(relative);
       }
     }
@@ -992,7 +989,9 @@ export const completedArtifactHashes = async (root, state, step, sliceId) => {
         usesCapabilityOwnership(state)) &&
       pinsAuthorityContext(state, relative) &&
       (relative !== VISUAL_ACCEPTANCE_FILE || usesVisualContract(state)) &&
-      (relative !== TARGET_BASELINE_FILE || isBrownfield(state)),
+      (relative !== TARGET_BASELINE_FILE || isBrownfield(state)) &&
+      // Pinned by the advance itself, and only for a current complete pass.
+      relative !== DISCOVERY_CLAIMS_FILE,
   );
   if (step === "IMPLEMENT_SLICES" && sliceId) {
     relativePaths.push(`slices/${sliceId}.json`);

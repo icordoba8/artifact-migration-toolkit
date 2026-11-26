@@ -78,11 +78,10 @@ import {
   validateOpenSpecProposal,
 } from "./openspec.mjs";
 import { isAutoAuthority } from "./policy.mjs";
-import { assertExecutionConfirmation, previewMigrationExecution } from "./preview.mjs";
+import { assertExecutionConfirmation, briefDigestFor, previewMigrationExecution } from "./preview.mjs";
 import {
   ADVANCE_JOURNAL,
   appendHistoryOnce,
-  briefDigestFor,
   readState,
   recoverPendingAdvance,
   renderIntegrityNow,
