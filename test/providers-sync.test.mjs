@@ -1293,6 +1293,7 @@ test("a committed skill identity that disagrees with the root manifest blocks th
 const CURRENT_GUIDANCE = [
   "README.md",
   "docs/command-reference.md",
+  "docs/provider-setup.md",
   "docs/release.md",
   "docs/architecture/a9-instructions.md",
   "docs/architecture/a10-tests.md",
@@ -1363,7 +1364,9 @@ test("every provider discovery checklist requires tracing API responses onto the
 test("start-migration gives operators a complete runtime template and a read-only recovery path", async () => {
   const skill = await readText(repositoryRoot, "skills/start-migration/SKILL.md");
   const section = skill.split("#### Operator configuration\n")[1].split("Capture protocol")[0];
-  const example = JSON.parse(section.match(/```json\n([\s\S]+?)\n```/)[1]);
+  const guide = await readText(repositoryRoot, "docs/provider-setup.md");
+  const template = guide.split("### Generate a template when discovery cannot configure the apps\n")[1].split("### Ready-to-adapt runtime examples")[0];
+  const example = JSON.parse(template.match(/```json\n([\s\S]+?)\n```/)[1]);
   assert.equal(example.version, 2);
   assert.deepEqual(Object.keys(example.applications), ["LEGACY", "BACKEND", "TARGET"]);
   for (const configuration of Object.values(example.applications)) {
@@ -1372,10 +1375,8 @@ test("start-migration gives operators a complete runtime template and a read-onl
     assert.equal(configuration.start.manager, "pnpm");
     assert.match(configuration.start.script, /^REPLACE_WITH_[A-Z]+_PACKAGE_SCRIPT$/);
   }
-  assert.match(section, /illustrative and unverified/);
+  assert.match(section, /provider-setup\.md#configuration-templates/);
   assert.match(section, /exact absolute `configPath`/);
-  assert.match(section, /"manager":"pnpm","script":"dev"/);
-  assert.match(section, /"command":\["pnpm\.cmd"/);
   assert.match(section, /stop until the operator\s+reports the file is ready/);
   assert.match(section, /Never create, edit,\s+overwrite, or commit the file yourself/);
   const workflow = skill.slice(skill.indexOf("### 3. Obtain"), skill.indexOf("### 4. Read"));
@@ -1386,6 +1387,6 @@ test("start-migration gives operators a complete runtime template and a read-onl
   assert.match(preflight, /action: "configure"[\s\S]*before using\s+the browser or authoring runtime evidence/);
   assert.match(preflight, /If discovery is unavailable[\s\S]*action: "prepare"/);
   assert.match(preflight, /When runtime is unnecessary, skip application preflight/);
-  assert.match(section, /Delete any `start` object/);
-  assert.match(section, /action: "check"[\s\S]*resume the\s+persisted checkpoint/);
+  assert.match(template, /Delete any `start` object/);
+  assert.match(section, /action: "check"[\s\S]*Resume the\s+persisted checkpoint/);
 });

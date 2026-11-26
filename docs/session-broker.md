@@ -15,6 +15,7 @@ writes the TARGET row).
 | Passwords and OTPs never reach the agent or the record | The operator types them into the broker's own browser window; no tool accepts one |
 | LEGACY and TARGET sessions stay separate | Always: one file per role, each bound to its configured origin |
 | A capture stays inside what the operator opened | Always: the role's origin and `routes`, and no write request (anything but GET, HEAD, OPTIONS) unless `allowWrites` is true |
+| Discovery never writes | Always: discovery asks for `/capture/read-only`, which blocks every write request even when `allowWrites` is true. A broker without that route is refused before it captures (`CAPTURE_BROKER_INCOMPATIBLE`) |
 | Only a client holding the token may ask | Always: loopback is every local account, so the bearer token is the authorization |
 | An expired or revoked session is typed, not a false pass | Always: `EXPIRED` from the file, `CAPTURE_SESSION_EXPIRED` from the real browser |
 
@@ -33,13 +34,18 @@ that token and the administrator role.
 
 ## What the agent gets
 
-`POST /status`, `POST /capture` and `POST /sign-in`, on `127.0.0.1` only, each
+`POST /status`, `POST /capture`, `POST /capture/read-only` and `POST /sign-in`, on `127.0.0.1` only, each
 with `authorization: Bearer <token>`:
 
 - `/status` answers `NONE`, `PRESENT` or `EXPIRED` for each role.
 - `/capture` re-validates the plan, forces the role's origin and routes, and
   returns what the capture already sanitizes, plus the broker's account name.
   A plan's `storageState` or `browser` is dropped.
+- `/capture/read-only` is `/capture` with every write request blocked, whatever
+  `allowWrites` says. Discovery (`mode: "discovery"`) uses only this route. An
+  older broker answers it with `BROKER_ROUTE_UNKNOWN` before starting a
+  browser; the engine reports `CAPTURE_BROKER_INCOMPATIBLE`, and the operator
+  upgrades the broker to the same release as the engine and restarts it.
 - `/sign-in` opens a browser at the configured sign-in route on the operator's
   desktop. It can reach that origin and the configured `identityProviders`,
   nothing else.

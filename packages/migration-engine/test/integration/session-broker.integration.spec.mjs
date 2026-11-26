@@ -155,6 +155,25 @@ test("a plan crosses the boundary whole, and only what parsing accepts survives"
   assert.throws(() => parseBrokeredPlan({ ...claim, mode: "other" }), /capture plan/);
 });
 
+test("a broker without the read-only route is refused before it captures anything", async () => {
+  // The released broker's dispatch: an unknown route is a 404 before any body is read or browser started.
+  const captures = [];
+  const server = http.createServer((request, response) => {
+    const known = request.url === "/capture";
+    if (known) captures.push(request.url);
+    response.writeHead(known ? 200 : 404, { "content-type": "application/json" });
+    response.end(JSON.stringify(known ? { account: "amt-broker", screenshot: "" } : { code: "BROKER_ROUTE_UNKNOWN" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await assert.rejects(captureThroughBroker({ url: `http://127.0.0.1:${server.address().port}`, token: TOKEN }, {}, "LEGACY", { readOnly: true }),
+      { validationCode: "CAPTURE_BROKER_INCOMPATIBLE", message: /upgrades the broker/ });
+    assert.deepEqual(captures, [], "no capture ran on the broker that could have written");
+  } finally {
+    server.close();
+  }
+});
+
 test("without a broker a capture is refused by name, not sent elsewhere", async () => {
   await assert.rejects(captureThroughBroker({ url: `http://127.0.0.1:${await freePort()}`, token: TOKEN }, {}), { validationCode: "CAPTURE_BROKER_UNAVAILABLE" });
 });
@@ -195,7 +214,7 @@ before(async () => {
   const config = path.join(root, "config.json");
   await writeFile(config, JSON.stringify({
     port, store, browser: "chrome", headless: true, clientTokenSha256: TOKEN_SHA256,
-    applications: { LEGACY: { origin: legacy.origin, signInRoute: "/login", routes: ROUTES }, TARGET: { origin: target.origin, signInRoute: "/login", routes: ROUTES } },
+    applications: { LEGACY: { origin: legacy.origin, signInRoute: "/login", routes: ROUTES, allowWrites: true }, TARGET: { origin: target.origin, signInRoute: "/login", routes: ROUTES } },
   }));
   await chmod(path.join(root, "node"), 0o755);
   await sudo("chmod", "-R", "a+rX", path.join(root, "engine"), config);
@@ -263,12 +282,25 @@ test("the agent account gets the capability and never the session", { skip: SKIP
   const agentAsks = await asAgent("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", "-H", "content-type: application/json", "--data", "{}", `${brokerUrl}/status`);
   assert.equal(agentAsks.stdout, "401");
 
-  // The test account's authority stays inside the operator's routes and writes nothing unless allowed.
+  // The test account's authority stays inside the operator's routes. LEGACY allows writes, so an ordinary capture sends one.
+  const deleteAll = { setup: [{ type: "click", target: "getByRole('button', { name: 'Delete all' })" }] };
   assert.equal((await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, { route: "/admin" }) })).body.code, "CAPTURE_ORIGIN_VIOLATION");
-  const destructive = await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, { setup: [{ type: "click", target: "getByRole('button', { name: 'Delete all' })" }] }) });
-  assert.equal(destructive.status, 200, destructive.text);
-  assert.equal(destructive.body.operations.blockedWrites, 1);
-  assert.equal(legacy.controls.writes, 0, "the application never received the write");
+  const allowed = await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, deleteAll) });
+  assert.equal(allowed.status, 200, allowed.text);
+  assert.equal(allowed.body.operations.blockedWrites, 0);
+  assert.equal(legacy.controls.writes, 1, "the operator's allowWrites still holds for an ordinary capture");
+
+  // Discovery asks for the read-only route: no write, whatever allowWrites says, and the same origin and routes.
+  const discovery = await post("/capture/read-only", { role: "LEGACY", plan: plan(legacy.origin, deleteAll) });
+  assert.equal(discovery.status, 200, discovery.text);
+  assert.equal(discovery.body.operations.blockedWrites, 1);
+  const discovered = await captureThroughBroker({ url: brokerUrl, token: TOKEN }, plan(legacy.origin, deleteAll), "LEGACY", { readOnly: true });
+  assert.equal(discovered.operations.blockedWrites, 1);
+  assert.equal(legacy.controls.writes, 1, "discovery never reached the application with a write");
+  assert.equal((await post("/capture/read-only", { role: "LEGACY", plan: plan(legacy.origin, { route: "/admin" }) })).body.code, "CAPTURE_ORIGIN_VIOLATION");
+  assert.equal((await post("/capture/read-only", { role: "LEGACY", plan: plan(target.origin) })).body.code, "CAPTURE_ORIGIN_VIOLATION");
+  assert.equal((await post("/capture/read-only", { role: "TARGET", plan: plan(target.origin) })).body.code, "CAPTURE_AUTH_REQUIRED", "LEGACY's session is not TARGET's");
+  assert.equal((await post("/capture/read-only", { role: "LEGACY", plan: plan(legacy.origin) }, { authorization: "Bearer wrong" })).status, 401);
   const wandered = await post("/capture", { role: "LEGACY", plan: plan(legacy.origin, { setup: [{ type: "click", target: "getByRole('link', { name: 'Admin' })" }] }) });
   assert.equal(wandered.body.code, "CAPTURE_ORIGIN_VIOLATION", wandered.text);
 
@@ -276,6 +308,10 @@ test("the agent account gets the capability and never the session", { skip: SKIP
   assert.deepEqual((await post("/sign-in", { role: "TARGET" })).body, { state: "PRESENT" });
   const targetCapture = await captureThroughBroker({ url: brokerUrl, token: TOKEN }, plan(target.origin), "TARGET");
   assert.equal(targetCapture.capture.role, "TARGET_VERIFICATION");
+  // TARGET leaves allowWrites unset: an ordinary capture writes nothing either.
+  const targetWrite = await post("/capture", { role: "TARGET", plan: plan(target.origin, deleteAll) });
+  assert.equal(targetWrite.body.operations.blockedWrites, 1, targetWrite.text);
+  assert.equal(target.controls.writes, 0, "the application never received the write");
   assert.equal((await post("/capture", { role: "TARGET", plan: plan(legacy.origin) })).body.code, "CAPTURE_ORIGIN_VIOLATION");
 
   // Everything a client might try instead.

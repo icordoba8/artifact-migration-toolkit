@@ -170,7 +170,8 @@ every command from the repository being migrated, and never point a command or
 an MCP registration at a path inside that repository.
 
 MCP is registered against the installed engine's own entry point, which the
-provider adapter resolves at install time. See `provider-compatibility.md`.
+provider adapter resolves at install time. See the [provider setup guide](https://github.com/icordoba8/artifact-migration-toolkit/blob/main/docs/provider-setup.md)
+and the bundled [provider compatibility reference](references/provider-compatibility.md).
 
 ## Execution protocol
 
@@ -258,8 +259,10 @@ approval. Those are still yours to author, or the operator's.
 ### 5. Obey the typed outcome literally
 
 - `CONTINUE` — do any work in `request`, then use `continuation` to execute
-  the next iteration in the same turn.
-- `STOP` — relay the typed stop and do not improvise progression.
+  the next iteration in the same turn. `continuation.module` is the canonical
+  record name, keyed by the target for formats 15 and later.
+- `COMPLETE` — report the completed migration and stop.
+- `loop: STOP` — relay the reported outcome and stop progression.
 - `FORMAT_UPGRADE` — the record owes a format increment and the whole migration
   lifecycle is frozen behind it. Stop. Supply only the input the engine's
   `formatUpgrade` result names, or relay its blockers (see Format upgrades).
@@ -342,7 +345,7 @@ from conversation memory — every iteration re-reads `state.json` through its
 own preflight.
 
 There are two front ends: use connected MCP when available, otherwise the
-installed CLI. Neither front end can attest a module-19 decision.
+installed CLI. Neither front end can attest a direct-ledger decision.
 
 1. **MCP — preferred whenever the `start-migration` MCP server is connected.**
    Call its `migration_run` tool with the invocation's supplied `module`,
@@ -389,13 +392,13 @@ through the same front end.
 ### Operator decisions
 
 **Whenever an iteration ends at `OPERATOR_DECISION`**, follow the typed result.
-For module format 19, status, pending decisions and run use the same fresh,
+For module formats 19–21, status, pending decisions and run use the same fresh,
 read-only decision projection. Its full candidate-bound review is for
 presentation, not an instruction to transcribe IDs, digests or a challenge. The
 engine-owned `STANDARD_LOCAL` policy requires `AGENT_RELAYED`: the operator
 explicitly selects `APPROVE` or `REJECT` for this review, through native
 elicitation when the host renders it, otherwise in this conversation. For
-module 19, when `operatorApproval.blocked` is null:
+these formats, when `operatorApproval.blocked` is null:
 
 1. Show the user the engine review (`operatorApproval.review`, or the review in
    `log`), ask them to answer `APPROVE` or `REJECT`, and **end your turn**.
@@ -437,7 +440,7 @@ already holds, records every such decision in its own
 `decisions/auto-decisions.ndjson` ledger under its own hash chain, and may never
 write, forge or impersonate a line in the human `decisions/operator-decisions.ndjson`.
 A judgment needing a person is not AUTO's to make: legacy records stop for
-the historical operator act, while module 19 requires an explicit operator
+the historical operator act, while formats 19–21 require an explicit operator
 decision even in auto mode. Standard decisions need no signer.
 A reported remainder stays unapproved; `--mode step` does not supply attestation.
 
@@ -448,7 +451,7 @@ commands and the exact `cwd` in which to run them; the ordinary next iteration
 returns citation fields for the historical artifacts. `reason` names any
 recorded line and `decisionReferences` carries its citation; further pending
 decisions remain unapproved. Cite only fields the existing artifact schema
-accepts (`recordedDecisionId` in its pending rows). For module 19,
+accepts (`recordedDecisionId` in its pending rows). For module formats 19–21,
 `operatorApproval` instead carries the engine-owned review and typed blocked
 state; no terminal challenge or receipt-copying fallback grants
 `HUMAN_ATTESTED`. Never inspect or edit raw state/ledger JSON to authorize a
@@ -676,7 +679,7 @@ back.
 
 | Engine | Floor | Registry |
 | --- | --- | --- |
-| module | `FORMAT_UPGRADE_FLOOR = 17` | active/default and supported 19; historical upgrade cursor stops at 18, with 18→19 only by explicit eligible adoption |
+| module | `FORMAT_UPGRADE_FLOOR = 17` | active/default and supported ceiling 21; historical upgrade cursor stops at 18, with 18→19 only by explicit eligible adoption |
 | artifact | `ARTIFACT_FORMAT_UPGRADE_FLOOR = 13` | active/default and supported 14; explicit pristine 13→14 upgrader; existing 13 records stay historical |
 
 Below the module floor nothing here applies: formats 4–16 keep their existing
@@ -870,10 +873,13 @@ iteration runs.
 ## Resume after interruption
 
 Persisted state is the source of truth across conversations, models, and
-providers. On any new session, a bare `/start-migration <module>` continues
-from the saved artifact — never add `--refresh`, recreate a slice, overwrite
-authored evidence, or restart discovery merely because the previous session
-used another model or stopped unexpectedly.
+providers. A bare `/start-migration <module>` continues from the saved artifact. Use
+the canonical target returned by the engine. An unregistered legacy name
+resolves only when it is the sole source of one saved record. For a multi-source
+refusal, use its named target. For an ambiguous legacy name, choose the target
+from the listed candidates. Resolve any conflicting registry binding first.
+Resume without `--refresh` or changes to completed work even when the
+previous session used another model or stopped unexpectedly.
 
 An interrupted `--mode auto` loop is an interruption like any other. Having
 been driven autonomously is never a reason for `--refresh`, for recreating an
@@ -891,6 +897,53 @@ environment-variable name, framework, repository factory, or fallback.
 Inspect and follow the target project's existing data-source conventions;
 introduce no shared resolver or configuration abstraction the target
 architecture doesn't already require.
+
+## Test data
+
+Prepare the data a slice's tests and runtime evidence need yourself. Never ask
+the operator for a routine test value or record identifier you can discover
+or derive; missing test data is not a stop condition. For each slice:
+
+1. **Scenarios.** Derive the data each traced scenario needs from the
+   requirements, the cited legacy responses and the pinned discovery evidence,
+   validated against the target's own schemas, types and validators. Never
+   invent a business rule or expected outcome to fit the data you have.
+2. **Discover, read-only.** Look for existing data that already satisfies each
+   scenario: the target's checked-in fixtures, factories, seeds and test
+   helpers, the legacy tests, and records a read-only observation shows. Take
+   identifiers from what you observed. Change nothing you found.
+3. **Gaps.** List the scenarios nothing found covers.
+4. **Fill gaps only with authority that already exists:**
+   - `dataSourceMode: mock`: the mock data source is target code the slice
+     owns. Add the missing records there, in the target's mock conventions.
+     They are slice source, reviewed with the slice, and reach no backend.
+   - Automated tests, either mode: reuse the target's own factories,
+     fixtures, seed scripts or test helpers through its own test command,
+     against the store that harness already creates and disposes of. Write no
+     parallel seeding tool.
+   - `dataSourceMode: standard` against a running application or backend:
+     create, update or delete nothing to prepare data. Localhost, `--mode
+     auto`, a running app and a broker's `allowWrites` each prove nothing about
+     whether that environment is disposable, and this skill grants no write
+     authority. A mutation that is itself the behavior under test stays under
+     "Runtime UI evidence" below.
+5. **Ownership.** Name every record you add after this migration and slice
+   (for example a `<target-module>-<slice-id>` prefix wherever the schema
+   allows free text). Never change, reuse as yours or delete a fixture another
+   migration owns.
+6. **Verify.** A scenario is covered only when its test's own arrange step,
+   or a read-only observation, shows the data precondition holds.
+7. **Continue** the iteration with no operator prompt.
+8. **Clean up** only what this migration created and only where it is not
+   slice source: the harness disposes of its own data, and mock records stay as
+   the slice's data source. Never delete anything without this migration's
+   name on it.
+
+A scenario still uncovered after step 4 is not yours to fill: record it
+through the ordinary blocker contract (for runtime evidence, a
+`uiEvidenceLimitations` entry with `availability: "NOT_AVAILABLE"`), naming
+the scenario and the data it needs. Asking the operator for a disposable
+environment or record there is a genuine decision, not a routine value.
 
 ## Stop conditions
 
@@ -979,7 +1032,7 @@ any general instruction to open a task list before multi-step work.
 A progress row is a display, never a control. No task item, checkbox or todo
 may approve a candidate, close a checkpoint or advance a slice. Operator
 approval follows Operator decisions above: historical formats use their
-elicitation/terminal challenge, module 19 its trusted policy and verified
+elicitation/terminal challenge, formats 19–21 their trusted policy and verified
 ledger; authorization is never through a model-callable affordance. After a decision is
 persisted, re-read `migration_status` and re-render; do not edit the rendered
 progress in place.
@@ -1089,8 +1142,8 @@ Full JSON schemas for every artifact below live in
    production-reachable component, style, image, SVG, or other visual asset is
    never dismissed on agent-authored rationale: it is `BEHAVIOR_BACKED` or
    `EXCLUDED_APPROVED` with a decision authorized under the record's policy (see
-   Operator decisions). That happens one decision per iteration. Module 19
-   validates a policy-bound decision directly against the verified ledger; no
+   Operator decisions). That happens one decision per iteration. Formats 19–21
+   validate a policy-bound decision directly against the verified ledger; no
    challenge or receipt fields are authored in classification version 2.
    Historical module formats ≤18 instead retain the terminal/elicitation
    challenge and require the cited `decisionId` and `decisionDigest` in the
@@ -1394,6 +1447,7 @@ this engine in the same namespace.
 | `WRONG_APP` | Something else answers: the marker is absent, or a process outside the project holds an address; `reason` then names its PID (and its pm2 app, when pm2 runs it) and the operator's command to free the port. | Report it with that command for the operator. Never reuse it, stop it, run that command or capture from it. |
 | `IDENTITY_UNPROVEN` | It answers, but no inspectable local process holds it, such as a forwarded port. | Report it; treat it as `WRONG_APP`. |
 | `WRONG_NAMESPACE` | The engine runs in a different namespace from the applications. Nothing was probed. | Run the engine where the configuration says. |
+| `DISCOVERY_UNAVAILABLE` | Neither frontend manifest declares a runtime endpoint. | Call `prepare` and follow **Operator configuration**. |
 | `CONFIGURATION_MISSING` | No usable local configuration; `reason` says why. | Follow **Operator configuration** and stop before runtime-dependent work. |
 | `NOT_REQUIRED` | COMPLETE record, or closed discovery found no visible UI. | No application and no browser. |
 
@@ -1433,133 +1487,26 @@ the toolkit's.
 
 #### Operator configuration
 
-The authority is `.artifact-migration-tools/runtime-apps.json` in the consumer
-root, the folder holding the installer receipts (the nearest one at or above
-the target, inside its Git work tree; the target itself when none is),
-kept out of Git (a tracked copy is refused). Endpoint declarations in each
-project's `package.json` belong under `config.startMigration.runtime` and
-contain a non-default HTTP `port` (1 to 65535, excluding 80) and
-`identity: { route, includes }`. The target can also name
-its `backendProject`, relative to the target and inside the consumer. The
-registry identifies the legacy and target projects. A declared endpoint is
-saved only when its public response and the process holding its port prove
-that identity. The operator controls all other configuration.
-A `start` is honored only when that file is owned by another account and this
-engine's account cannot write it: a file you could have written grants nothing.
-Never change its ownership or permissions; that is the operator's step.
-`"trust": "operator-local"`, the operator's choice for a machine that is theirs
-alone, waives only that ownership check: the Git, namespace and identity checks
-stay, and `stop` still ends only what `ensure` started. It also allows
-`"onSignIn": "wait-for-operator"` and an argv `start`. The toolkit can
-create the incomplete template or synchronize verified project endpoints.
-It retains the previous bytes at the reported `rollbackPath` when an update
-changes an existing file. The operator can restore that file and run
-`check` again. Never create, edit, overwrite, or commit the file yourself.
+The authority is version 2 `.artifact-migration-tools/runtime-apps.json` at
+the consumer root. Keep it out of Git. The [runtime setup guide](https://github.com/icordoba8/artifact-migration-toolkit/blob/main/docs/provider-setup.md#runtime-configuration)
+explains manifest discovery, the [generated template](https://github.com/icordoba8/artifact-migration-toolkit/blob/main/docs/provider-setup.md#configuration-templates),
+trust, authentication, rollback, and historical version 1 compatibility.
 
-On `CONFIGURATION_MISSING`, show the exact absolute `configPath` and
-the engine's reason, including any `unresolved` field paths. If `templateCreated`
-is true, say that the engine generated the template. Ask the operator to fill
-in the required values in that file and remove the entire `BACKEND` entry
-if unused. Explain the optional settings below and stop until the operator
-reports the file is ready. Keep the current checkpoint pending. Existing
-files, including the deprecated target-root copy, are preserved. The engine
-creates a local ignore file when absent. Keep this configuration out of Git
-if your existing ignore rules do not already cover it.
+On `CONFIGURATION_MISSING`, show the exact absolute `configPath` when present,
+the engine's reason, and any `unresolved` field paths. If `templateCreated`
+is true, say the engine generated the template. Ask the operator to fill in
+the required values, remove `BACKEND` if unused, and delete any `start` object
+for an app the toolkit should not start. Keep the checkpoint pending and
+stop until the operator reports the file is ready. Never create, edit,
+overwrite, or commit the file yourself. The operator owns choices about
+startup, sign-in, file permissions, and any move from the target root.
 
-When the operator reports the file is ready, read migration status first and run
+When the operator reports the file is ready, read status first and run
 `migration_app_runtime { module, cwd, action: "check" }` or
-`artifact-migration-validate <module> --app-runtime check`. The check never
-starts a process or writes files. If the check still reports
-`CONFIGURATION_MISSING` or `WRONG_NAMESPACE`, relay the reason and stop again. Once the check accepts the configuration, resume the
-persisted checkpoint and use the normal `ensure` flow when runtime work needs
-it. An application can be stopped at the time of a valid check.
-
-The generated file uses `operator-isolated`. Each optional `start` object
-shows the package-script format with an unresolved script name. Replace every
-remaining `REPLACE_WITH_...` value before the toolkit can probe or start an
-application. Delete any `start` object if the application is started separately.
-
-```json
-{
-  "version": 2,
-  "namespace": "REPLACE_WITH_NAMESPACE",
-  "trust": "operator-isolated",
-  "applications": {
-    "LEGACY": {
-      "origin": "REPLACE_WITH_LEGACY_HTTP_ORIGIN",
-      "project": "REPLACE_WITH_LEGACY_PROJECT",
-      "identity": {
-        "route": "REPLACE_WITH_LEGACY_PUBLIC_ROUTE",
-        "includes": "REPLACE_WITH_LEGACY_RESPONSE_MARKER"
-      },
-      "start": { "manager": "pnpm", "script": "REPLACE_WITH_LEGACY_PACKAGE_SCRIPT" }
-    },
-    "BACKEND": {
-      "origin": "REPLACE_WITH_BACKEND_HTTP_ORIGIN",
-      "project": "REPLACE_WITH_BACKEND_PROJECT",
-      "identity": {
-        "route": "REPLACE_WITH_BACKEND_PUBLIC_ROUTE",
-        "includes": "REPLACE_WITH_BACKEND_RESPONSE_MARKER"
-      },
-      "start": { "manager": "pnpm", "script": "REPLACE_WITH_BACKEND_PACKAGE_SCRIPT" }
-    },
-    "TARGET": {
-      "origin": "REPLACE_WITH_TARGET_HTTP_ORIGIN",
-      "project": "REPLACE_WITH_TARGET_PROJECT",
-      "identity": {
-        "route": "REPLACE_WITH_TARGET_PUBLIC_ROUTE",
-        "includes": "REPLACE_WITH_TARGET_RESPONSE_MARKER"
-      },
-      "start": { "manager": "pnpm", "script": "REPLACE_WITH_TARGET_PACKAGE_SCRIPT" }
-    }
-  }
-}
-```
-
-- Keep `version` at 2. Set `namespace` to where the engine and apps actually run: `win32`, `wsl`,
-  `linux`, or `darwin`. `trust` defaults to `operator-isolated`. Only the
-  operator may choose `operator-local` for their own machine.
-- `LEGACY` and `TARGET` are required. Include `BACKEND` only when this
-  runtime needs it. Each role needs an HTTP loopback `origin` with a port,
-  a `project` directory relative to the consumer root, and `identity`.
-  Use the local application settings for the port and project. Choose a public
-  `identity.route` with no query or fragment and verify its successful response
-  contains `identity.includes`, text specific to that application.
-- `start` is optional for each role. Each application may have its own start.
-  Copy the intended script name from that project's `package.json`.
-  For example, LEGACY and TARGET could each use `{"manager":"pnpm","script":"dev"}`
-  if their own manifest defines `dev`. BACKEND could use
-  `{"manager":"pnpm","script":"start:dev"}` if its manifest defines
-  `start:dev`. The manager may be `npm`, `pnpm`, or `yarn`. Under
-  `operator-local` only, argv syntax is
-  `{"command":["pnpm.cmd","exec","next","dev","-p","11090"]}`.
-  All commands, script names and ports above are illustrative and unverified.
-  Both formats run in the configured project directory. Only Windows uses
-  `cmd.exe` for argv so shims resolve. Arguments cannot contain `" & | < > ^ % !`
-  or a line break. `startTimeoutMs` defaults to 60000. For isolated startup,
-  retain the ownership and write restrictions above. Omit `start` to let the
-  engine use an application that the operator starts.
-- `protectedRoute` is an optional path used to probe whether a session is
-  needed. `signInPath` is the application's optional sign-in path.
-  `onSignIn` defaults to `record-gap`. Use `wait-for-operator` only with
-  `operator-local` and a verified `signInPath`.
-- `sessionBroker` is optional and applies only when captures need brokered
-  sessions. It takes a loopback `url` and an absolute `tokenFile` path to the
-  operator-provisioned client token. Keep the token out of this file and out of Git.
-
-The started process inherits a minimal environment, with no ambient
-token, and writes to `.artifact-migration-tools/app-runtime/` beside that file.
-On Windows it is created through WMI, never as the engine's child, so the
-command that ran `ensure` returns as soon as the report is printed.
-A version 2 file serves one target, the one its `TARGET` project lives in.
-
-The target root's own `.artifact-migration-tools/runtime-apps.json` (version 1,
-projects relative to the target) is the deprecated location: it is still read,
-and the report's `reason` names both paths. A copy in both places is refused,
-naming both, and nothing is probed or started. Relay the move to the operator,
-never do it: `stop`; copy the file to the consumer root with `"version": 2` and
-every `project` relative to the consumer root; reapply its ownership; move the
-target copy aside; `check`.
+`artifact-migration-validate <module> --app-runtime check`. It writes nothing
+and starts nothing. On `CONFIGURATION_MISSING` or `WRONG_NAMESPACE`, report
+the reason and stop. A valid file can report a stopped app. Resume the
+persisted checkpoint and call `ensure` when runtime work needs it.
 
 Capture protocol, per required UI behavior:
 
@@ -1757,7 +1704,7 @@ comparison → PASS/FAIL.
   path a new record may choose.
   The row is the only binding of a state to
   Figma; nothing is inferred from frame names or states. A state with no row
-  goes under `unbacked` with its reason. Module 19 resolves `VISUAL_UNBACKED`
+  goes under `unbacked` with its reason. Formats 19–21 resolve `VISUAL_UNBACKED`
   directly from the verified ledger; module formats ≤18 require a cited
   historical decision. A state with a row can never be unbacked. A DEGRADED frame cannot back a row and
   is not absence of design. Pinned.
@@ -1847,7 +1794,7 @@ text can still forge one approval per request — the same ceiling as an
 operator's terminal being able to echo the phrase it was just printed. What it
 does buy is that no default, no enum pick, and no empty auto-accept is ever an
 approval. Do not tell an operator it is stronger than that. This historical
-challenge does not mint `HUMAN_ATTESTED`. Module 19 instead requires a verified
+challenge does not mint `HUMAN_ATTESTED`. Formats 19–21 require a verified
 ledger line bound to the current full candidate and trusted policy, recorded as
 described under Operator decisions; the optional protected signer/WebAuthn
 verifier is retained, and `AGENT_RELAYED` cannot satisfy `HUMAN_ATTESTED`.
