@@ -3,8 +3,9 @@
 The canonical, standalone source for the `start-migration` and `migrate-artifact`
 skills and the one migration engine that implements them.
 
-See the [migration command reference](docs/command-reference.md) for every
-supported client, skill selection, invocation syntax, and Ponytail behavior.
+Start with the [provider setup and first migration guide](docs/provider-setup.md).
+See the [migration command reference](docs/command-reference.md) for arguments,
+typed outcomes, and Ponytail behavior.
 
 ## Available provider adapters
 
@@ -17,7 +18,9 @@ supported client, skill selection, invocation syntax, and Ponytail behavior.
 
 `migrate-artifact` migrates one artifact into an existing target application.
 `start-migration` starts a complete feature/module migration workflow.
-GitHub Copilot slash prompts run in a supported IDE's agent chat.
+OpenCode and GitHub Copilot slash wrappers are supplied by the bundle adapter.
+The Agent Skills CLI path also supports asking by skill name in OpenCode and
+in Copilot for VS Code or CLI.
 Adapter availability is distinct from production certification. Each release
 states the provider, workflow and platform scope that passed independent live
 acceptance on its exact candidate SHA. Other adapters remain available for
@@ -39,8 +42,9 @@ enhancements and must never be required for normal migration creation,
 decision completion, format activation, testing, installation, or release.
 
 New modules default to **format 21** (supported: 21); new standalone and
-delegated artifacts default to **format 14** (supported: 14). Existing Module 18
-and Artifact 13 records retain their historical semantics and explicit upgrades.
+delegated artifacts default to **format 14** (supported: 14). Module 19 and 20
+records retain their saved semantics. Module 18 and Artifact 13 retain their
+historical behavior and explicit upgrade paths.
 
 The built-in, versioned `STANDARD_LOCAL` policy records explicit operator
 `APPROVE` / `REJECT` decisions as **AGENT_RELAYED**, directly in the hash-chained
@@ -138,41 +142,19 @@ resolve.
 
 ## Install
 
-Normal users install either skill with the standard Agent Skills CLI:
+Follow the [provider setup guide](docs/provider-setup.md) for pinned install
+commands, project and user directories, generated MCP registrations, and
+first-use verification. Install both skills from the same published tag.
+The first invocation verifies and installs the exact runtime. To update,
+repeat the same skill installation for both skills against a newer published
+tag. The next preflight converges project copies from a release-verified
+`.agents/skills` copy and reports paths it replaced as `projectionsConverged`.
+Copies owned by a bundle adapter update through that adapter.
 
-```bash
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit \
-  --skill start-migration
-
-pnpm dlx skills add https://github.com/icordoba8/artifact-migration-toolkit \
-  --skill migrate-artifact
-```
-
-To update, run the same two `skills add` commands. The next preflight from any
-host updates every other project copy of the skills (`.claude`, `.github`,
-`.codex`, `.opencode/skills`) from the `.agents/skills` copy `skills add` wrote,
-after verifying it against its release manifest, and lists the replaced paths in
-`projectionsConverged`. Copies that disagree with no verifiable `.agents/skills`
-copy are refused as `SKILL_PROJECTION_SKEW`; copies owned by a provider receipt
-are left to that provider's installer.
-
-### Local applications for UI migration
-
-When a mutating migration needs runtime evidence, `--app-runtime configure`
-discovers the legacy and target projects from the registry and reads their
-`package.json` declarations under `config.startMigration.runtime`. Each
-project declares its TCP `port` (excluding HTTP default port 80) and the
-public `identity` route and marker.
-The target can declare a `backendProject` relative to its project directory.
-The engine checks the HTTP response and the local process before creating or
-updating `<consumer-root>/.artifact-migration-tools/runtime-apps.json`. It
-preserves operator settings and reports the rollback file on update.
-
-When projects do not declare endpoints, `--app-runtime prepare` provides
-the local template. Keep that file outside Git and omit unused `start`
-objects. Validate operator changes with
-`artifact-migration-validate <module> --app-runtime check`, then resume from
-the saved checkpoint. See the [operator configuration template](skills/start-migration/SKILL.md#operator-configuration).
+For UI work, see [runtime configuration](docs/provider-setup.md#runtime-configuration)
+and the [version 2 templates](docs/provider-setup.md#configuration-templates).
+They cover manifest discovery, local authorization, verification and
+status-first recovery.
 
 ### What selects the runtime
 
@@ -199,9 +181,9 @@ bytes. Rule 3 is mandatory in every case, and the only way to select a release
 without it is an explicit `--version`, which is reported as
 `skillIdentity: "unverified"`.
 
-Because `skills add` is the sole owner of skill installation, that one action
-also governs the engine, the MCP registration and every absolute runtime path —
-verifiably, and with no second command to remember.
+On the Agent Skills CLI path, the installed skill identity selects the engine.
+First-use preflight generates the MCP registration and resolves the absolute
+runtime paths. The explicit bundle adapter can install the full provider layout.
 
 ### Local first, offline first
 
@@ -282,7 +264,7 @@ Nothing here depends on Docker, a virtual machine, a privileged service, an
 external signer, a hardware authenticator or always-on network access. A
 verified local runtime that satisfies its skill works offline indefinitely.
 
-### Known limitation (1.6.6): Claude Code and GitHub Copilot in one root
+### Claude Code and GitHub Copilot workspace conflict
 
 **Do not install the Claude Code and GitHub Copilot adapters in the same
 project root.** Claude registers `start-migration` in the root `.mcp.json`.
@@ -370,7 +352,7 @@ wrote it, and every mutation refuses under a different identity until an
 operator reconciles it with `artifact-migration-toolkit adopt|update|rollback`
 (see [Toolkit identity](docs/release.md#toolkit-identity)).
 
-Toolkit version and migration format version are independent. Formats 4–19
+Toolkit version and migration format version are independent. Formats 4–21
 (module) and 13–14 (artifact) are properties of the record; the toolkit version is
 a property of the implementation.
 
@@ -410,10 +392,9 @@ migration transitions, decisions, validation, record mutation, or recovery.**
 GitHub Copilot CLI loads the project MCP server (`.github/mcp.json`) only in a
 trusted folder. Trust the consumer root once, **before** the first migration
 session — accept the trust prompt of a first `copilot` launch there and exit,
-add the root to `trustedFolders` in `$COPILOT_HOME/config.json`, or pass
-`--trust-folder` to a single `copilot -p` run. Use `--add-dir` only for the
-consumer workspace, never for the release store
-(`skills/start-migration/references/provider-compatibility.md`).
+or add the root to `trustedFolders` in `$COPILOT_HOME/config.json`. See the
+[Copilot setup](docs/provider-setup.md#github-copilot-in-vs-code-and-cli) for
+session trust and verification.
 
 ```bash
 pnpm providers:sync    # regenerate all four trees and the ownership manifest
@@ -439,7 +420,7 @@ identity left as `{{TOOLKIT_VERSION}}` / `{{TOOLKIT_COMMIT}}` /
 `{{TOOLKIT_CONTENT_HASH}}` and the MCP entry point as `{{ENGINE_MCP_ENTRY}}`.
 Identity is injected while packaging an already committed tree, so no committed
 file carries it, and `providers:check` compares templates rather than rendered
-artifacts. A scope recorded as `null` is one the provider does not document; an
-installer must refuse it rather than choose somewhere plausible. See
+artifacts. Claude's `null` native paths are host-assigned plugin paths. Copilot's bundle
+adapter accepts project scope only. See
 [`skills/start-migration/references/provider-compatibility.md`](skills/start-migration/references/provider-compatibility.md)
 for the scope table and the merge rules for consumer-owned host configuration.
