@@ -13,8 +13,9 @@
  * headless?, applications: {LEGACY|TARGET: {origin, signInRoute, routes,
  * allowWrites?}}}. A client proves it may ask with the token whose SHA-256 is
  * configured; a capture stays inside `routes` and sends no write request unless
- * `allowWrites` is true. `headless` exists for the automated test; a real
- * sign-in needs a window.
+ * `allowWrites` is true. `/capture/read-only` (discovery) never writes, whatever
+ * `allowWrites` says; a broker without that route is refused by the client.
+ * `headless` exists for the automated test; a real sign-in needs a window.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -54,7 +55,7 @@ const sessionStatus = async (config, role) => {
 
 const within = (pathname, routes) => routes.some((prefix) => pathname === prefix || pathname.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`));
 
-const capture = async (config, { role, plan }) => {
+const capture = async (config, { role, plan }, writes = true) => {
   const application = applicationOf(config, role);
   const checked = parseBrokeredPlan(plan);
   if (checked.origin !== application.origin) refuseCapture("CAPTURE_ORIGIN_VIOLATION", `Role ${role} is served at ${application.origin}, not ${checked.origin}.`);
@@ -64,7 +65,7 @@ const capture = async (config, { role, plan }) => {
   if (state === "EXPIRED") refuseCapture("CAPTURE_SESSION_EXPIRED", `The stored ${role} session has expired; the operator signs in through the broker again.`);
   const { screenshot, image, ...report } = await captureInBrowser({
     ...checked, role, storageState: sessionFile(config, role), browser: config.browser,
-    guard: { routes: application.routes, allowWrites: application.allowWrites === true },
+    guard: { routes: application.routes, allowWrites: writes && application.allowWrites === true },
   });
   return { ...report, account: os.userInfo().username, image: { width: image.width, height: image.height }, screenshot: screenshot.toString("base64") };
 };
@@ -100,7 +101,8 @@ const status = async (config) => Object.fromEntries(await Promise.all(
   ROLES.filter((role) => config.applications[role]).map(async (role) => [role, await sessionStatus(config, role)]),
 ));
 
-const ROUTES = { "/status": status, "/capture": capture, "/sign-in": signIn };
+// A separate route, not a request field: an older broker 404s it before any browser starts.
+const ROUTES = { "/status": status, "/capture": capture, "/capture/read-only": (config, body) => capture(config, body, false), "/sign-in": signIn };
 
 const readBody = (request) => new Promise((resolve, reject) => {
   const chunks = [];
